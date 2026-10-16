@@ -1,0 +1,5 @@
+#!/bin/sh
+# SSH/rsync offload v0 client entrypoint. No sourcing of profiles or tool shims.
+set -eu
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec python3 -B "$SCRIPT_DIR/tasks_offload.py" "$@"

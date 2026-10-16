@@ -1,0 +1,611 @@
+#!/usr/bin/env python3
+"""tasks-offload: run one command on a LAN worker's own task manager (SSH v0).
+
+Usage (from inside a Git checkout; HEAD may be unborn):
+
+  tasks-offload --worker USER@HOST [--ssh-key PATH] --who OWNER
+                [--fetch RELPATH]... [--fetch-dest DIR] [--cargo-fetch]
+                [--remote-run] [--checksum] [--dry-run] -- CMD [ARGS...]
+
+Steps: select the checkout's permitted files (git ls-files -c -o
+--exclude-standard, filtered by worker_source path rules), rsync them to
+~/offload/checkouts/<id>/ on the worker, prune/verify there with a small
+installed helper, then `tasks run --who OWNER@<local-host> -- CMD` on the
+worker. Prints a one-line JSON summary as the last stdout line.
+
+Transport v0 is ssh + rsync only (key-only, BatchMode). The seam is the
+Transport class; iroh replaces it later. See scripts/README-offload.md.
+
+Exit status: the remote job's exit code; 2 usage/source refusal; 255 transport
+failure or UNCERTAIN remote state (summary `remote_state` disambiguates);
+130/143 after cancelling the remote job on SIGINT/SIGTERM; 1 fetch failure.
+"""
+import argparse
+from dataclasses import dataclass
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import signal
+import socket
+import stat
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import worker_source  # noqa: E402  (path rules are shared, not duplicated)
+
+SCRIPTS_DIR = Path(__file__).resolve().parent
+# Installed on the worker as ~/.local/lib/tasks-offload/<name>.
+AGENT_FILES = {'agent.py': SCRIPTS_DIR / 'offload_agent.py',
+               'worker_source.py': SCRIPTS_DIR / 'worker_source.py'}
+REMOTE_LIB = '.local/lib/tasks-offload'
+REMOTE_TASKS = '"$HOME"/.local/bin/tasks'
+SUBMITTED_RE = re.compile(r'^tasks: submitted job (\d+);')
+FINAL_RE = re.compile(r'^job (\d+) ([a-z_]+) \(exit (-?\d+)\) owner=')
+OWNER_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
+WORKER_RE = re.compile(r'^([A-Za-z0-9._-]+@)?[A-Za-z0-9._:-]+$')
+EXIT_USAGE, EXIT_TRANSPORT, EXIT_FETCH = 2, 255, 1
+
+
+class OffloadError(Exception):
+    def __init__(self, message, code=EXIT_USAGE):
+        super().__init__(message)
+        self.code = code
+
+
+def log(message):
+    sys.stderr.write(f'tasks-offload: {message}\n')
+    sys.stderr.flush()
+
+
+@dataclass(frozen=True)
+class Bounds:
+    max_files: int = 50000
+    max_file_bytes: int = 1 << 30
+    max_bytes: int = 4 << 30
+
+
+# --------------------------------------------------------------------------
+# Source set
+# --------------------------------------------------------------------------
+
+def git_toplevel(cwd):
+    try:
+        out = subprocess.run(['git', 'rev-parse', '--show-toplevel'], cwd=cwd,
+                             capture_output=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise OffloadError('not inside a git checkout (git rev-parse --show-toplevel failed)') \
+            from error
+    return os.path.realpath(os.fsdecode(out.rstrip(b'\n')))
+
+
+def git_paths(top):
+    # --recurse-submodules cannot be combined with -o; submodules are unsupported
+    # and their gitlink directories are refused below.
+    try:
+        out = subprocess.run(['git', 'ls-files', '-z', '-c', '-o', '--exclude-standard'],
+                             cwd=top, capture_output=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise OffloadError(f'git ls-files failed: {error}') from None
+    return sorted({os.fsdecode(p) for p in out.split(b'\0') if p})
+
+
+def _hash_file(parent_fd, name, meta, bounds):
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                 dir_fd=parent_fd)
+    digest, size = hashlib.sha256(), 0
+    with os.fdopen(fd, 'rb') as f:
+        for chunk in iter(lambda: f.read(1 << 20), b''):
+            size += len(chunk)
+            if size > bounds.max_file_bytes:
+                raise OffloadError(f'{name}: file exceeds {bounds.max_file_bytes} bytes')
+            digest.update(chunk)
+        after = os.fstat(f.fileno())
+    if size != after.st_size or after.st_mtime_ns != meta.st_mtime_ns:
+        raise OffloadError(f'{name}: changed while hashing; keep the checkout stable and retry')
+    return digest.hexdigest(), size
+
+
+def build_manifest(top, bounds=Bounds()):
+    """Stream-hash the permitted source set; never holds file contents in memory."""
+    files, excluded, deleted, total = [], [], 0, 0
+    root_fd, _ = worker_source.open_root(top)
+    try:
+        for path in git_paths(top):
+            if path.endswith('/'):
+                raise OffloadError(f'{path}: nested git repository or submodule; unsupported')
+            try:
+                path.encode('utf-8')
+            except UnicodeEncodeError:
+                raise OffloadError(f'{path!r}: non-UTF-8 path unsupported') from None
+            try:
+                parts = worker_source.check_path(path)
+                parent = worker_source.open_parent(root_fd, parts)
+            except ValueError as error:
+                if str(error).startswith('excluded'):
+                    excluded.append(path)
+                    continue
+                raise OffloadError(f'{path}: {error}') from None
+            except FileNotFoundError:
+                deleted += 1
+                continue
+            except OSError as error:
+                raise OffloadError(f'{path}: parent is a symlink or not a directory ({error})') \
+                    from None
+            try:
+                try:
+                    meta = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+                except FileNotFoundError:
+                    deleted += 1  # tracked but deleted in the worktree
+                    continue
+                if stat.S_ISLNK(meta.st_mode):
+                    target = os.readlink(parts[-1], dir_fd=parent)
+                    resolved = os.path.normpath(os.path.join(os.path.dirname(path), target))
+                    if os.path.isabs(target) or resolved == '..' or resolved.startswith('../'):
+                        raise OffloadError(f'{path}: symlink escapes the checkout ({target})')
+                    raw = os.fsencode(target)
+                    entry = {'path': path, 'type': 'link', 'size': len(raw), 'mode': 'link',
+                             'executable': False, 'sha256': hashlib.sha256(raw).hexdigest()}
+                elif stat.S_ISREG(meta.st_mode):
+                    if meta.st_size > bounds.max_file_bytes:
+                        raise OffloadError(f'{path}: file exceeds {bounds.max_file_bytes} bytes')
+                    digest, size = _hash_file(parent, parts[-1], meta, bounds)
+                    entry = {'path': path, 'type': 'file', 'size': size,
+                             'mode': oct(meta.st_mode & 0o7777),
+                             'executable': bool(meta.st_mode & 0o111), 'sha256': digest}
+                elif stat.S_ISDIR(meta.st_mode):
+                    raise OffloadError(f'{path}: is a directory (git submodule or nested '
+                                       'repository); submodules are unsupported')
+                else:
+                    raise OffloadError(f'{path}: special file unsupported')
+            finally:
+                os.close(parent)
+            files.append(entry)
+            total += entry['size']
+            if len(files) > bounds.max_files:
+                raise OffloadError(f'source set exceeds {bounds.max_files} files')
+            if total > bounds.max_bytes:
+                raise OffloadError(f'source set exceeds {bounds.max_bytes} bytes')
+    finally:
+        os.close(root_fd)
+    return {'schema': 'tasks-offload-manifest-v0', 'files': files, 'excluded': excluded,
+            'deleted_tracked': deleted, 'bytes': total}
+
+
+def checkout_id(hostname, top):
+    return hashlib.sha256(f'{hostname}\0{top}'.encode('utf-8', 'surrogateescape')).hexdigest()[:16]
+
+
+def safe_relpath(value, what):
+    parts = value.split('/')
+    if (not value or value.startswith('/') or any(p in ('', '.', '..') for p in parts)
+            or any(ord(c) < 32 for c in value)):
+        raise OffloadError(f'{what} must be a normalized relative path: {value!r}')
+    return value
+
+
+def _inside(child, parent):
+    child, parent = os.path.realpath(child), os.path.realpath(parent)
+    return child == parent or child.startswith(parent.rstrip('/') + '/')
+
+
+# --------------------------------------------------------------------------
+# Transport seam (ssh + rsync v0). iroh replaces this class later.
+# --------------------------------------------------------------------------
+
+class Transport:
+    def __init__(self, worker, ssh_program, rsync_program, ssh_key=None):
+        self.worker = worker
+        self.ssh_argv = [ssh_program, '-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15',
+                         '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=4']
+        if ssh_key:
+            self.ssh_argv += ['-i', ssh_key, '-o', 'IdentitiesOnly=yes']
+        self.rsync = rsync_program
+
+    def ssh(self, command):
+        """argv for one remote POSIX-shell command string (caller quotes it)."""
+        return [*self.ssh_argv, '--', self.worker, command]
+
+    def run(self, command, *, input=None, check=True, what='ssh'):
+        result = subprocess.run(self.ssh(command), input=input, capture_output=True)
+        if check and result.returncode != 0:
+            detail = result.stderr.decode(errors='replace').strip()[-400:]
+            raise OffloadError(f'{what} failed (exit {result.returncode}): {detail}',
+                               EXIT_TRANSPORT)
+        return result
+
+    def rsync_argv(self, *extra):
+        return [self.rsync, '-a', '-s', '-e', shlex.join(self.ssh_argv), *extra]
+
+
+def remote_path(rel):
+    return '"$HOME"/' + shlex.quote(rel)
+
+
+def install_agent(transport, remote_python):
+    names = ' '.join(AGENT_FILES)
+    check = transport.run(f'cd "$HOME" && for f in {names}; do '
+                          f'if [ -f {REMOTE_LIB}/$f ]; then sha256sum {REMOTE_LIB}/$f; fi; done',
+                          what='agent hash check')
+    have = {}
+    for line in check.stdout.decode(errors='replace').splitlines():
+        digest, _, path = line.partition('  ')
+        have[os.path.basename(path.strip())] = digest
+    installed = []
+    for name, source in AGENT_FILES.items():
+        data = source.read_bytes()
+        if have.get(name) == hashlib.sha256(data).hexdigest():
+            continue
+        dest = remote_path(f'{REMOTE_LIB}/{name}')
+        tmp = remote_path(f'{REMOTE_LIB}/.{name}.tmp')
+        transport.run(f': install-agent; umask 022 && mkdir -p {remote_path(REMOTE_LIB)} && '
+                      f'cat > {tmp} && mv -f {tmp} {dest}', input=data, what='agent install')
+        installed.append(name)
+    return [remote_python, '-I', '-B', f'{REMOTE_LIB}/agent.py']
+
+
+def agent_call(transport, agent, args, *, input=None):
+    command = 'cd "$HOME" && exec ' + shlex.join([*agent, *args])
+    result = transport.run(command, input=input, check=False)
+    try:
+        reply = json.loads(result.stdout.decode().strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        detail = result.stderr.decode(errors='replace').strip()[-400:]
+        raise OffloadError(f'remote helper failed (exit {result.returncode}; is python3 on the '
+                           f'worker PATH?): {detail}', EXIT_TRANSPORT) from None
+    if result.returncode not in (0, 3):
+        raise OffloadError(f'remote helper refused: {reply.get("error")}', EXIT_TRANSPORT)
+    return reply
+
+
+def rsync_files(transport, top, paths, remote_rel, checksum):
+    with tempfile.NamedTemporaryFile(prefix='tasks-offload-files-') as listing:
+        listing.write(b''.join(os.fsencode(p) + b'\0' for p in paths))
+        listing.flush()
+        argv = transport.rsync_argv('--from0', f'--files-from={listing.name}',
+                                    *(['--checksum'] if checksum else []),
+                                    '--', f'{top}/', f'{transport.worker}:{remote_rel}/')
+        result = subprocess.run(argv, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    if result.returncode != 0:
+        raise OffloadError('rsync to worker failed (exit %d): %s' % (
+            result.returncode, result.stderr.decode(errors='replace').strip()[-400:]),
+            EXIT_TRANSPORT)
+
+
+# --------------------------------------------------------------------------
+# Remote run with live output, cancel and uncertainty reporting
+# --------------------------------------------------------------------------
+
+class RemoteRun:
+    def __init__(self, transport, command):
+        self.transport = transport
+        self.job_id = None
+        self.final = None  # (job, phase, exit)
+        self.submitted = threading.Event()
+        self.cancel_wanted = False
+        self.canceller = None
+        # Own session: terminal/host group signals reach only this client,
+        # which then cancels the remote job instead of silently detaching it.
+        self.proc = subprocess.Popen(transport.ssh(command), stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     start_new_session=True)
+        self.threads = [threading.Thread(target=self._pump, args=(self.proc.stdout, sys.stdout),
+                                         daemon=True),
+                        threading.Thread(target=self._pump, args=(self.proc.stderr, sys.stderr),
+                                         daemon=True)]
+        for t in self.threads:
+            t.start()
+
+    def _pump(self, stream, sink):
+        for line in iter(stream.readline, b''):
+            sink.buffer.write(line)
+            sink.flush()
+            text = line.decode(errors='replace').rstrip('\n')
+            if (m := SUBMITTED_RE.match(text)) and self.job_id is None:
+                self.job_id = int(m.group(1))
+                self.submitted.set()
+                if self.cancel_wanted:
+                    self.start_cancel()
+            elif m := FINAL_RE.match(text):
+                # stdout/stderr threads may interleave; reconciled in wait().
+                self.final = (int(m.group(1)), m.group(2), int(m.group(3)))
+
+    def wait(self, timeout=None):
+        try:
+            self.proc.wait(timeout)
+        except subprocess.TimeoutExpired:
+            return None
+        for t in self.threads:
+            t.join(5)
+        if self.final and self.job_id is None:
+            self.job_id = self.final[0]
+        elif self.final and self.final[0] != self.job_id:
+            self.final = None  # not our job's terminal line
+        return self.proc.returncode
+
+    def kill(self):
+        if self.proc.poll() is None:
+            self.proc.kill()
+        return self.wait()
+
+    def start_cancel(self):
+        """Idempotent; called from the signal handler itself because the host
+        worker escalates SIGTERM to SIGKILL after ~300 ms. The canceller runs in
+        its own session with output in an unlinked temp file, so it completes
+        even if this client is killed. Only our own job id is ever cancelled."""
+        self.cancel_wanted = True
+        if self.canceller is not None or self.job_id is None:
+            return
+        sink = tempfile.TemporaryFile()
+        command = f'exec {REMOTE_TASKS} cancel {int(self.job_id)}'
+        self.canceller = (subprocess.Popen(self.transport.ssh(command),
+                                           stdin=subprocess.DEVNULL, stdout=sink, stderr=sink,
+                                           start_new_session=True), sink)
+
+
+# --------------------------------------------------------------------------
+# Main flow
+# --------------------------------------------------------------------------
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(
+        prog='tasks-offload', description=__doc__.split('\n\n')[0],
+        usage='tasks-offload --worker USER@HOST [--ssh-key PATH] --who OWNER [options] '
+              '-- CMD [ARGS...]')
+    parser.add_argument('--worker', required=True, help='ssh destination USER@HOST')
+    parser.add_argument('--ssh-key', help='identity file (IdentitiesOnly=yes)')
+    parser.add_argument('--who', required=True, help='owner; remote owner is OWNER@<local-host>')
+    parser.add_argument('--fetch', action='append', default=[],
+                        help='path relative to the remote checkout to copy back; repeatable')
+    parser.add_argument('--fetch-dest', help='default ~/build-cache/offload/OWNER/REMOTE_JOB_ID')
+    parser.add_argument('--cargo-fetch', action='store_true',
+                        help='run `cargo fetch --locked` on the worker (online) first')
+    parser.add_argument('--remote-run', action='store_true',
+                        help='submit with `tasks run --run` (run-only slot, must not compile)')
+    parser.add_argument('--checksum', action='store_true', help='rsync --checksum')
+    parser.add_argument('--dry-run', action='store_true',
+                        help='build the manifest and print the plan; contact nothing')
+    parser.add_argument('--ssh-program', default=os.environ.get('TASKS_OFFLOAD_SSH', 'ssh'))
+    parser.add_argument('--rsync-program', default=os.environ.get('TASKS_OFFLOAD_RSYNC', 'rsync'))
+    parser.add_argument('--remote-python', default='python3')
+    parser.add_argument('--max-files', type=int, default=Bounds.max_files)
+    parser.add_argument('--max-bytes', type=int, default=Bounds.max_bytes)
+    parser.add_argument('--cancel-wait', type=float, default=120.0,
+                        help='seconds to wait for the remote job to finish cancelling')
+    if '--' not in argv:
+        parser.error('-- CMD [ARGS...] is required')
+    split = argv.index('--')
+    args = parser.parse_args(argv[:split])
+    args.command = argv[split + 1:]
+    if not args.command:
+        parser.error('empty command')
+    return args
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    started = time.monotonic()
+    args = parse_args(argv)
+    summary = {'worker': args.worker, 'remote_dir': None, 'remote_cwd': None,
+               'remote_job_id': None, 'remote_phase': None, 'remote_state': None,
+               'exit': None, 'synced_files': 0, 'synced_bytes': 0, 'excluded_files': 0,
+               'deleted_tracked': 0, 'pruned': [], 'fetched': [], 'fetch_dest': None,
+               'cancel_requested': False, 'dry_run': args.dry_run, 'durations': {}}
+    durations = summary['durations']
+
+    def finish(code):
+        summary['exit'] = code
+        durations['total_s'] = round(time.monotonic() - started, 3)
+        sys.stdout.flush()
+        print(json.dumps(summary, sort_keys=True), flush=True)
+        return code
+
+    try:
+        if not OWNER_RE.match(args.who):
+            raise OffloadError('--who must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}')
+        if not WORKER_RE.match(args.worker) or args.worker.startswith('-'):
+            raise OffloadError('--worker must be USER@HOST')
+        fetches = [safe_relpath(f, '--fetch') for f in args.fetch]
+        hostname = socket.gethostname()
+        remote_owner = f'{args.who}@{hostname}'
+        top = git_toplevel(os.getcwd())
+        cwd = os.path.realpath(os.getcwd())
+        sub = os.path.relpath(cwd, top)
+        if sub == '.':
+            sub = ''
+        if args.fetch_dest and _inside(args.fetch_dest, top):
+            raise OffloadError('--fetch-dest must be outside the local checkout')
+        default_dest_root = Path.home() / 'build-cache/offload' / args.who
+        if _inside(default_dest_root, top):
+            raise OffloadError('default fetch destination would be inside the checkout')
+
+        t = time.monotonic()
+        bounds = Bounds(max_files=args.max_files, max_bytes=args.max_bytes)
+        manifest = build_manifest(top, bounds)
+        durations['scan_s'] = round(time.monotonic() - t, 3)
+        paths = [f['path'] for f in manifest['files']]
+        summary.update(synced_files=len(paths), synced_bytes=manifest['bytes'],
+                       excluded_files=len(manifest['excluded']),
+                       deleted_tracked=manifest['deleted_tracked'])
+        cid = checkout_id(hostname, top)
+        remote_rel = f'offload/checkouts/{cid}'
+        remote_cwd_rel = f'{remote_rel}/{sub}' if sub else remote_rel
+        summary['remote_dir'] = f'~/{remote_rel}'
+        summary['remote_cwd'] = f'~/{remote_cwd_rel}'
+        resource = '--run ' if args.remote_run else ''
+        run_cmd = (f'mkdir -p {remote_path(remote_cwd_rel)} && '
+                   f'cd {remote_path(remote_cwd_rel)} && exec {REMOTE_TASKS} run --who '
+                   f'{shlex.quote(remote_owner)} {resource}-- {shlex.join(args.command)}')
+        transport = Transport(args.worker, args.ssh_program, args.rsync_program, args.ssh_key)
+
+        if args.dry_run:
+            log(f'dry run: {len(paths)} files / {manifest["bytes"]} bytes would sync to '
+                f'{args.worker}:~/{remote_rel}/ ({len(manifest["excluded"])} excluded)')
+            for p in manifest['excluded'][:20]:
+                log(f'  excluded: {p}')
+            if args.cargo_fetch:
+                log(f'would run: cd ~/{remote_cwd_rel} && cargo fetch --locked')
+            log(f'would run: {shlex.join(transport.ssh(run_cmd))}')
+            summary['remote_state'] = 'dry_run'
+            return finish(0)
+
+        # Sync: install helper, bind dir, rsync, prune + verify.
+        t = time.monotonic()
+        agent = install_agent(transport, args.remote_python)
+        identity = json.dumps({'host': hostname, 'toplevel': top}, sort_keys=True)
+        agent_call(transport, agent, ['prepare', '--dir', remote_rel, '--identity', identity])
+        rsync_files(transport, top, paths, remote_rel, args.checksum)
+        wire = json.dumps({'files': manifest['files']}).encode()
+        applied = agent_call(transport, agent, ['apply', '--dir', remote_rel], input=wire)
+        if applied['mismatched']:
+            log(f'{len(applied["mismatched"])} files differ after sync; retrying them once '
+                'with --checksum')
+            rsync_files(transport, top, applied['mismatched'], remote_rel, True)
+            applied = agent_call(transport, agent, ['apply', '--dir', remote_rel], input=wire)
+            if applied['mismatched']:
+                raise OffloadError('worker copy does not match the manifest (checkout changed '
+                                   'during sync?): ' + ', '.join(applied['mismatched'][:10]))
+        summary['pruned'] = applied['pruned'][:200]
+        summary['pruned_count'] = len(applied['pruned'])
+        durations['sync_s'] = round(time.monotonic() - t, 3)
+
+        if args.cargo_fetch:
+            t = time.monotonic()
+            rc = subprocess.run(transport.ssh(f'cd {remote_path(remote_cwd_rel)} && '
+                                              'exec cargo fetch --locked'),
+                                stdin=subprocess.DEVNULL).returncode
+            durations['cargo_fetch_s'] = round(time.monotonic() - t, 3)
+            if rc != 0:
+                raise OffloadError(f'remote cargo fetch --locked failed (exit {rc})',
+                                   EXIT_TRANSPORT)
+    except OffloadError as error:
+        log(f'error: {error}')
+        summary['remote_state'] = 'not_submitted'
+        return finish(error.code)
+    except KeyboardInterrupt:
+        log('interrupted before remote submission; nothing was submitted')
+        summary['remote_state'] = 'not_submitted'
+        return finish(130)
+
+    # Run.
+    signals = []
+    run = None
+
+    def on_signal(signum, _frame):
+        signals.append(signum)
+        if run is not None:
+            run.start_cancel()
+
+    previous = {s: signal.signal(s, on_signal) for s in (signal.SIGINT, signal.SIGTERM)}
+    t = time.monotonic()
+    run = RemoteRun(transport, run_cmd)
+    if signals:
+        run.start_cancel()
+    rc = None
+    cancel_signal = None
+    while rc is None:
+        rc = run.wait(0.05)
+        if signals and cancel_signal is None:
+            cancel_signal = signals[0]
+            rc = cancel_remote(run, args, summary)
+    for s, handler in previous.items():
+        signal.signal(s, handler)
+    durations['run_s'] = round(time.monotonic() - t, 3)
+    summary['remote_job_id'] = run.job_id
+    if run.final:
+        summary['remote_phase'] = run.final[1]
+        summary['remote_state'] = 'terminal'
+    if cancel_signal is not None:
+        if not run.final:
+            report_uncertain(run, args, summary, rc, cancelled=True)
+        return finish(128 + cancel_signal)
+    if run.final:
+        code = run.final[2]
+    elif run.job_id is not None:
+        report_uncertain(run, args, summary, rc)
+        return finish(EXIT_TRANSPORT)
+    elif rc == 255:
+        log(f'UNCERTAIN: ssh to {args.worker} failed before a job id was seen; a job may '
+            f'still have been submitted. Check `tasks list` on the worker for owner '
+            f'{remote_owner} before retrying. Not resubmitting.')
+        summary['remote_state'] = 'uncertain'
+        return finish(EXIT_TRANSPORT)
+    else:
+        summary['remote_state'] = 'not_submitted'
+        return finish(rc)
+
+    # Fetch (only after a passed job).
+    if fetches and code == 0:
+        t = time.monotonic()
+        dest = Path(args.fetch_dest) if args.fetch_dest else default_dest_root / str(run.job_id)
+        summary['fetch_dest'] = str(dest)
+        try:
+            for rel in fetches:
+                parent = dest / os.path.dirname(rel)
+                parent.mkdir(parents=True, exist_ok=True)
+                result = subprocess.run(transport.rsync_argv(
+                    '--', f'{args.worker}:{remote_rel}/{rel}', f'{parent}/'),
+                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                if result.returncode != 0:
+                    raise OffloadError('fetch %s failed (rsync exit %d): %s' % (
+                        rel, result.returncode,
+                        result.stderr.decode(errors='replace').strip()[-300:]), EXIT_FETCH)
+                summary['fetched'].append(rel)
+        except (OffloadError, OSError) as error:
+            log(f'error: {error}')
+            durations['fetch_s'] = round(time.monotonic() - t, 3)
+            return finish(EXIT_FETCH)
+        durations['fetch_s'] = round(time.monotonic() - t, 3)
+    elif fetches:
+        log(f'remote job exited {code}; skipping --fetch')
+    return finish(code)
+
+
+def cancel_remote(run, args, summary):
+    """Cancel only our own remote job, wait for it, never resubmit."""
+    if run.job_id is None:
+        log('signal received; waiting up to 10s for the remote job id before cancelling')
+        run.submitted.wait(10)
+    if run.job_id is None:
+        log('no remote job id seen; disconnecting without cancel')
+        return run.kill()
+    summary['cancel_requested'] = True
+    log(f'cancelling remote job {run.job_id} on {args.worker}')
+    run.start_cancel()
+    canceller, sink = run.canceller
+    try:
+        canceller.wait(args.cancel_wait)
+    except subprocess.TimeoutExpired:
+        log('remote cancel request did not return in time')
+    if canceller.returncode not in (None, 0):
+        sink.seek(0)
+        log(f'remote cancel exited {canceller.returncode}: '
+            f'{sink.read().decode(errors="replace").strip()[-300:]}')
+    rc = run.wait(args.cancel_wait)
+    if rc is None:
+        log('remote job did not reach a terminal phase in time; disconnecting')
+        rc = run.kill()
+    return rc
+
+
+def report_uncertain(run, args, summary, rc, cancelled=False):
+    summary['remote_state'] = 'uncertain'
+    if run.job_id is None:
+        log(f'UNCERTAIN: no remote job id was seen (ssh exit {rc}); a job may still have been '
+            f'submitted. Check `tasks list` on {args.worker} before retrying. Not resubmitting.')
+        return
+    what = ('cancel was requested but its terminal phase was not observed' if cancelled
+            else f'lost the connection to {args.worker} (ssh exit {rc}) after it was submitted')
+    log(f'UNCERTAIN: remote job {run.job_id}: {what}; it may still be queued or running. '
+        f'Query it on the worker: ssh {args.worker} \'~/.local/bin/tasks logs {run.job_id}\' '
+        '(or tasks list). Not resubmitting.')
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
