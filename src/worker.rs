@@ -1018,7 +1018,7 @@ fn run_command(state: &Path, dir: &Path, job: &crate::Job, stage: &str) -> Resul
             }
         }
         cache::require_state_space(state)?;
-        crate::local_command::place_outputs(Path::new(&job.spec.source))?;
+        let placement = crate::local_command::place_outputs(Path::new(&job.spec.source))?;
         save(
             &dir.join(format!("{stage}-admitted.json")),
             &Admitted {
@@ -1031,7 +1031,8 @@ fn run_command(state: &Path, dir: &Path, job: &crate::Job, stage: &str) -> Resul
         append_log(
             dir,
             format!(
-                "live cwd={} argv={}\n",
+                "{}live cwd={} argv={}\n",
+                placement.detail(),
                 job.spec.source,
                 serde_json::to_string(&argv)?
             )
