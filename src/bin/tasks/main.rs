@@ -1,0 +1,310 @@
+//! One binary for everyone: agents use the subcommands, people open the window. Any
+//! command that needs the queue starts the background daemon if it is not running.
+mod daemon;
+mod log_view;
+mod ui;
+
+use std::fs;
+use std::os::unix::{fs::PermissionsExt, net::UnixStream, process::CommandExt};
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+use tinline_task_manager::{
+    Action, JobSpec, Result, RuntimeSample, request_with_reconnect, state_dir,
+};
+
+const USAGE: &str = "usage: tasks [ui]
+       tasks list | submit SPEC.json | approve JOB_ID | cancel JOB_ID
+       tasks logs JOB_ID [--json]  # plain log text by default; --json preserves v2 response
+       tasks run [--who OWNER] [--run | --device SERIAL] -- COMMAND [ARGS...]
+       tasks enqueue [--who OWNER] [--run | --device SERIAL] -- COMMAND [ARGS...]
+       tasks approve-command JOB_ID  # trusted LIVE cwd/argv, not a source snapshot
+       # local.command cost=cpu_simulation is a legacy label, NOT the resource class
+       tasks approve-android-trial JOB_ID   # EXPERIMENTAL build-only; trusts local source/host config
+       tasks catalog | cache | cache-plan | admission | start-worker | worker
+       tasks android-plan SOURCE REVISION [x86_64|arm64-v8a|x86_64,arm64-v8a]
+       tasks android-capture SOURCE REVISION NEW_DESTINATION
+       tasks android-host SOURCE [x86_64|arm64-v8a|x86_64,arm64-v8a]  # read-only host audit
+       tasks record SUITE CONFIG STAGE SECONDS
+       tasks daemon";
+
+fn main() {
+    if let Err(error) = run() {
+        eprintln!("tasks: {error}");
+        std::process::exit(2);
+    }
+}
+
+fn run() -> Result<()> {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    let run_now = args.first().is_some_and(|s| s == "run");
+    let plain_logs = args.first().is_some_and(|s| s == "logs") && args.len() == 2;
+    let action = match args.first().map(String::as_str) {
+        None | Some("ui") if args.len() <= 1 => return open_ui(),
+        Some("daemon") if args.len() == 1 => return daemon::run(),
+        Some("catalog") if args.len() == 1 => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&tinline_task_manager::catalog::catalog())?
+            );
+            return Ok(());
+        }
+        Some("admission") if args.len() == 1 => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&tinline_task_manager::admission::status()?)?
+            );
+            return Ok(());
+        }
+        Some("cache") if args.len() == 1 => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&tinline_task_manager::cache::report(&state_dir())?)?
+            );
+            return Ok(());
+        }
+        Some("cache-plan") if args.len() == 1 => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&tinline_task_manager::retention::plan()?)?
+            );
+            return Ok(());
+        }
+        Some("android-plan") if matches!(args.len(), 3 | 4) => {
+            let abis = tinline_task_manager::android::Abis::parse(
+                args.get(3).map(String::as_str).unwrap_or("x86_64"),
+            )?;
+            let plan =
+                tinline_task_manager::android::preflight(Path::new(&args[1]), &args[2], abis)?;
+            println!("{}", serde_json::to_string_pretty(&plan)?);
+            return Ok(());
+        }
+        Some("android-host") if matches!(args.len(), 2 | 3) => {
+            let abis = tinline_task_manager::android::Abis::parse(
+                args.get(2).map(String::as_str).unwrap_or("x86_64"),
+            )?;
+            let host =
+                tinline_task_manager::android_build::Host::discover(Path::new(&args[1]), abis)?;
+            host.verify()?;
+            println!("{}", serde_json::to_string_pretty(&host)?);
+            return Ok(());
+        }
+        Some("android-capture") if args.len() == 4 => {
+            let receipt = tinline_task_manager::workspace_snapshot::capture(
+                Path::new(&args[1]),
+                &args[2],
+                Path::new(&args[3]),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&receipt)?);
+            return Ok(());
+        }
+        Some("worker") if args.len() == 1 => return tinline_task_manager::worker::run(),
+        Some("start-worker") if args.len() == 1 => Action::StartWorker,
+        Some("approve") if args.len() == 2 => Action::Approve(args[1].parse()?),
+        Some("approve-command") if args.len() == 2 => Action::ApproveCommand(args[1].parse()?),
+        Some("enqueue" | "run") => {
+            use tinline_task_manager::local_command::{Recipe, Resource};
+            let split = args
+                .iter()
+                .position(|s| s == "--")
+                .ok_or("enqueue requires -- before argv")?;
+            let mut owner = std::env::var("USER").unwrap_or_else(|_| "local-agent".into());
+            let mut resource = None;
+            let mut i = 1;
+            while i < split {
+                match args[i].as_str() {
+                    "--who" if i + 1 < split => {
+                        owner = args[i + 1].clone();
+                        i += 2;
+                    }
+                    "--run" if resource.is_none() => {
+                        resource = Some(Resource::Run);
+                        i += 1;
+                    }
+                    "--device" if resource.is_none() && i + 1 < split => {
+                        resource = Some(Resource::Device(args[i + 1].clone()));
+                        i += 2;
+                    }
+                    _ => return Err("invalid/conflicting enqueue options".into()),
+                }
+            }
+            if owner.trim().is_empty() || owner.len() > 128 {
+                return Err("bounded owner required".into());
+            }
+            let recipe = Recipe {
+                argv: args[split + 1..].to_vec(),
+                resource: resource.unwrap_or(Resource::Compile),
+            };
+            Action::Submit(recipe.spec(owner, std::env::current_dir()?)?)
+        }
+        Some("approve-android-trial") if args.len() == 2 => {
+            Action::ApproveAndroidTrial(args[1].parse()?)
+        }
+        Some("logs") if args.len() == 2 || (args.len() == 3 && args[2] == "--json") => {
+            Action::Logs(args[1].parse()?)
+        }
+        Some("__stage") if args.len() == 5 => {
+            return tinline_task_manager::worker::stage(
+                args[1].parse()?,
+                &args[2],
+                tinline_task_manager::execution::ProcessIdentity {
+                    pid: args[3].parse()?,
+                    start_ticks: args[4].parse()?,
+                },
+            );
+        }
+        Some("__admit") if args.len() == 5 => {
+            return tinline_task_manager::worker::admit(
+                args[1].parse()?,
+                &args[2],
+                tinline_task_manager::execution::ProcessIdentity {
+                    pid: args[3].parse()?,
+                    start_ticks: args[4].parse()?,
+                },
+            );
+        }
+        Some("__command") if args.len() == 5 => {
+            return tinline_task_manager::worker::command(
+                args[1].parse()?,
+                &args[2],
+                tinline_task_manager::execution::ProcessIdentity {
+                    pid: args[3].parse()?,
+                    start_ticks: args[4].parse()?,
+                },
+            );
+        }
+        Some("list") if args.len() == 1 => Action::List,
+        Some("submit") if args.len() == 2 => {
+            let spec: JobSpec = serde_json::from_slice(&fs::read(&args[1])?)?;
+            Action::Submit(spec)
+        }
+        Some("cancel") if args.len() == 2 => Action::Cancel(args[1].parse()?),
+        Some("record") if args.len() == 5 => Action::Record(RuntimeSample {
+            suite: args[1].clone(),
+            configuration: args[2].clone(),
+            stage: args[3].clone(),
+            seconds: args[4].parse()?,
+        }),
+        _ => return Err(USAGE.into()),
+    };
+    let socket = state_dir().join("taskd.sock");
+    let response = request_with_reconnect(&socket, action, || ensure_daemon(&socket))?;
+    if plain_logs {
+        if let Some(error) = &response.error {
+            eprintln!("tasks: {error}");
+        } else if let Some(log) = &response.log {
+            print!("{}", log.text);
+        }
+    } else if !run_now || response.error.is_some() {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    }
+    if response.error.is_some() {
+        std::process::exit(1);
+    }
+    if run_now {
+        let id = response
+            .submitted_id
+            .ok_or("daemon did not return submitted_id; do not resubmit blindly")?;
+        eprintln!("tasks: submitted job {id}; Ctrl-C detaches, tasks cancel {id} cancels");
+        for action in [Action::ApproveCommand(id), Action::StartWorker] {
+            let r = request_with_reconnect(&socket, action, || ensure_daemon(&socket))?;
+            if let Some(e) = r.error {
+                return Err(format!("job {id}: {e}; inspect before retry").into());
+            }
+        }
+        let mut previous = None;
+        loop {
+            let r = request_with_reconnect(&socket, Action::List, || ensure_daemon(&socket))?;
+            if let Some(e) = r.error {
+                return Err(format!("job {id}: {e}").into());
+            }
+            let j = r
+                .jobs
+                .iter()
+                .find(|j| j.id == id)
+                .ok_or("submitted job missing")?;
+            if previous.as_ref() != Some(&j.phase) {
+                eprintln!("tasks: job {id} {:?}", j.phase);
+                previous = Some(j.phase.clone());
+            }
+            if j.phase.terminal() {
+                let logs =
+                    request_with_reconnect(&socket, Action::Logs(id), || ensure_daemon(&socket))?;
+                let text = logs.log.map(|log| log.text).unwrap_or_default();
+                print!("{text}");
+                if let Some(error) = logs.error {
+                    eprintln!("tasks: job {id} log unavailable: {error}");
+                }
+                if !text.is_empty() && !text.ends_with('\n') {
+                    println!();
+                }
+                let code = if j.phase == tinline_task_manager::Phase::Passed {
+                    0
+                } else if j.phase == tinline_task_manager::Phase::Cancelled {
+                    130
+                } else {
+                    j.execution
+                        .as_ref()
+                        .and_then(|e| e.stages.last())
+                        .and_then(|s| s.exit_code)
+                        .filter(|c| *c != 0)
+                        .unwrap_or(1)
+                };
+                let phase = serde_json::to_value(&j.phase)?;
+                println!(
+                    "job {id} {} (exit {code}) owner={}",
+                    phase.as_str().unwrap_or("unknown"),
+                    j.spec.owner
+                );
+                std::process::exit(code);
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+    Ok(())
+}
+
+fn open_ui() -> Result<()> {
+    let socket = state_dir().join("taskd.sock");
+    // The window keeps retrying if this fails, and shows why in its status line.
+    if let Err(error) = ensure_daemon(&socket) {
+        eprintln!("tasks: {error}");
+    }
+    ui::run(socket).map_err(|e| e.to_string().into())
+}
+
+/// Starts `tasks daemon` detached (own process group, so closing a terminal or window
+/// does not stop the queue). Concurrent starters are safe: the loser fails the lock.
+pub(crate) fn ensure_daemon(socket: &Path) -> Result<()> {
+    if UnixStream::connect(socket).is_ok() {
+        return Ok(());
+    }
+    let state = state_dir();
+    fs::create_dir_all(&state)?;
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o700))?;
+    let log = fs::File::options()
+        .create(true)
+        .append(true)
+        .open(state.join("taskd.log"))?;
+    let mut child = Command::new(std::env::current_exe()?)
+        .arg("daemon")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(log)
+        .process_group(0)
+        .spawn()?;
+    // Reap it if it exits while this process (e.g. the window) is still running.
+    std::thread::spawn(move || child.wait());
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if UnixStream::connect(socket).is_ok() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    Err(format!(
+        "daemon did not start; see {}",
+        state.join("taskd.log").display()
+    )
+    .into())
+}
