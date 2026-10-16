@@ -8,6 +8,8 @@ use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt, fs::PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Default reserves. A daemon/worker may raise or lower them within validated
+/// bounds via TASKS_MIN_CACHE_FREE_GIB / TASKS_MIN_STATE_FREE_MIB (see admission).
 pub const MIN_FREE_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 pub const MIN_STATE_FREE_BYTES: u64 = 256 * 1024 * 1024;
 pub const SCCACHE_LIMIT: &str = "30G";
@@ -33,7 +35,17 @@ impl DiskSpace {
 }
 
 /// Inspect the nearest existing ancestor, without creating a directory.
+/// Reserve: this process's effective cache threshold (fails closed if invalid).
 pub fn disk_space(path: &Path) -> Result<DiskSpace> {
+    cache_space_with(path, &crate::admission::thresholds()?)
+}
+pub fn cache_space_with(
+    path: &Path,
+    thresholds: &crate::admission::Thresholds,
+) -> Result<DiskSpace> {
+    measure(path, thresholds.min_cache_free_bytes)
+}
+fn measure(path: &Path, reserve_bytes: u64) -> Result<DiskSpace> {
     if !path.is_absolute() {
         return Err("cache/disk paths must be absolute".into());
     }
@@ -51,14 +63,18 @@ pub fn disk_space(path: &Path) -> Result<DiskSpace> {
         path: path.to_path_buf(),
         available_bytes: ((stat.f_bavail as u128) * (stat.f_frsize as u128)).min(u64::MAX as u128)
             as u64,
-        reserve_bytes: MIN_FREE_BYTES,
+        reserve_bytes,
     })
 }
 
 pub fn state_space(path: &Path) -> Result<DiskSpace> {
-    let mut space = disk_space(path)?;
-    space.reserve_bytes = MIN_STATE_FREE_BYTES;
-    Ok(space)
+    state_space_with(path, &crate::admission::thresholds()?)
+}
+pub fn state_space_with(
+    path: &Path,
+    thresholds: &crate::admission::Thresholds,
+) -> Result<DiskSpace> {
+    measure(path, thresholds.min_state_free_bytes)
 }
 
 pub fn require_state_space(path: &Path) -> Result<()> {
@@ -172,6 +188,7 @@ impl CompileCache {
 
 #[derive(Debug, Serialize)]
 pub struct CacheReport {
+    pub thresholds: crate::admission::ThresholdReport,
     pub compile_cache: CompileCache,
     pub disks: Vec<DiskSpace>,
     pub target: PathBuf,
@@ -183,12 +200,19 @@ pub struct CacheReport {
 pub fn report(state: &Path) -> Result<CacheReport> {
     let compile_cache = CompileCache::discover()?;
     let target = target_path()?;
+    let (thresholds, _) = crate::admission::report_thresholds(
+        state,
+        crate::admission::thresholds(),
+        crate::admission::Thresholds::overridden(|name| std::env::var_os(name)),
+    )?;
+    let t = &thresholds.effective;
     Ok(CacheReport {
         disks: vec![
-            disk_space(&target)?,
-            state_space(state)?,
-            disk_space(&compile_cache.directory)?,
+            cache_space_with(&target, t)?,
+            state_space_with(state, t)?,
+            cache_space_with(&compile_cache.directory, t)?,
         ],
+        thresholds,
         compile_cache,
         target,
         target_lease: "exclusive across build/run/cleanup; cooperating workers only",
@@ -230,6 +254,31 @@ mod tests {
         );
         assert!(!missing.exists());
         assert!(disk_space(Path::new("relative")).is_err());
+        fs::remove_dir(path).unwrap();
+    }
+    #[test]
+    fn configured_reserves_are_applied_and_reported() {
+        let path = temp();
+        let missing = path.join("not-created/target");
+        let custom = crate::admission::Thresholds {
+            min_available_memory_bytes: crate::admission::MIN_MEMORY,
+            min_cache_free_bytes: 3 * 1024 * 1024 * 1024,
+            min_state_free_bytes: 64 * 1024 * 1024,
+        };
+        let cache = cache_space_with(&missing, &custom).unwrap();
+        assert_eq!(cache.reserve_bytes, 3 * 1024 * 1024 * 1024);
+        let state = state_space_with(&missing, &custom).unwrap();
+        assert_eq!(state.reserve_bytes, 64 * 1024 * 1024);
+        assert!(!missing.exists());
+        let blocked = DiskSpace {
+            path: "/fixture".into(),
+            available_bytes: 1024 * 1024 * 1024,
+            reserve_bytes: custom.min_cache_free_bytes,
+        };
+        assert_eq!(
+            blocked.detail(),
+            "/fixture: 1.0 GiB available, 3.0 GiB reserve"
+        );
         fs::remove_dir(path).unwrap();
     }
     // Parallel Git/Python tests may briefly inherit this fd between fork/exec.

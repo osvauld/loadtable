@@ -1,0 +1,44 @@
+# Portable systemd USER unit template for a task-manager worker host.
+# NOT installed by anything in this repository. Review, copy to
+# ~/.config/systemd/user/tasks-daemon.service, then see README.md.
+#
+# The daemon is long-running (it serves taskd.sock and spawns the worker on
+# demand). Without this unit, the first `tasks` client autostarts it with that
+# client's environment, which may lack the TASKS_MIN_* settings below.
+[Unit]
+Description=task-manager daemon (tasks) with native admission
+# No network dependency: clients reach it over SSH + the local Unix socket.
+
+[Service]
+Type=simple
+# Path of the binary built for THIS host (see README). Clients must invoke the
+# same binary, because `tasks` autostarts/spawns helpers via its own path.
+ExecStart=%h/.local/bin/tasks daemon
+WorkingDirectory=%h
+UMask=0077
+# Admitted commands inherit the daemon PATH (client PATH is not forwarded).
+# Entries that do not exist on a host are harmless. NixOS paths included.
+Environment=PATH=%h/.cargo/bin:%h/.local/bin:%h/.nix-profile/bin:/etc/profiles/per-user/%u/bin:/nix/var/nix/profiles/default/bin:/run/current-system/sw/bin:/run/wrappers/bin:/usr/local/bin:/usr/bin:/bin
+# Admission thresholds (validated; invalid values make start-worker fail).
+# Defaults when unset: 8192 MiB memory, 20 GiB cache disk, 256 MiB state disk.
+# Example for a ~7.6 GiB RAM laptop; choose deliberately for your host.
+Environment=TASKS_MIN_AVAILABLE_MEMORY_MIB=3072
+#Environment=TASKS_MIN_CACHE_FREE_GIB=20
+#Environment=TASKS_MIN_STATE_FREE_MIB=256
+# Leave TASK_MANAGER_STATE_DIR unset: the default (~/.local/state/
+# tinline-task-manager-native) is what SSH clients use too.
+#
+# Stopping the unit stops only the daemon. The worker and admitted jobs keep
+# their own process groups and leases, as with today's autostarted daemon.
+# Stopping is NOT cancellation; check `tasks list` first.
+KillMode=process
+# Restart after crashes/signals only. Errors (exit 2), e.g. "another daemon owns
+# this state directory", are not retried in a loop.
+Restart=on-abnormal
+RestartSec=30
+# Deliberately NO PrivateTmp/ProtectHome/ProtectSystem: the admission lock
+# directory /tmp/claude-$UID, the state socket and live checkouts must be the
+# same files that SSH clients see.
+
+[Install]
+WantedBy=default.target

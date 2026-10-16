@@ -366,3 +366,189 @@ fn unsafe_lock_and_pressure_errors_refuse_admission() {
             .starts_with("p2p-wait-")
     }));
 }
+// ---- Configurable thresholds (worker portability) ----
+fn lookup<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<std::ffi::OsString> + 'a {
+    move |name| {
+        pairs
+            .iter()
+            .find(|(k, _)| *k == name)
+            .map(|(_, v)| std::ffi::OsString::from(v))
+    }
+}
+const GIB: u64 = 1024 * 1024 * 1024;
+const MIB: u64 = 1024 * 1024;
+#[test]
+fn thresholds_default_exactly_to_the_previous_constants() {
+    let t = Thresholds::from_lookup(lookup(&[])).unwrap();
+    assert_eq!(t, Thresholds::default());
+    assert_eq!(t.min_available_memory_bytes, 8 * GIB);
+    assert_eq!(t.min_cache_free_bytes, 20 * GIB);
+    assert_eq!(t.min_state_free_bytes, 256 * MIB);
+    assert_eq!(MIN_MEMORY, 8 * GIB);
+    assert_eq!(crate::cache::MIN_FREE_BYTES, 20 * GIB);
+    assert_eq!(crate::cache::MIN_STATE_FREE_BYTES, 256 * MIB);
+    assert!(!Thresholds::overridden(lookup(&[])));
+    assert!(Thresholds::overridden(lookup(&[(MEMORY_ENV, "8192")])));
+    // Default blocker text is unchanged for existing readers.
+    let low = Pressure {
+        available_bytes: 8 * GIB - 1,
+        ..free().unwrap()
+    };
+    assert_eq!(
+        low.blocker_with(&t).as_deref(),
+        Some("available memory below 8 GiB")
+    );
+}
+#[test]
+fn thresholds_accept_explicit_whole_units() {
+    let t = Thresholds::from_lookup(lookup(&[
+        (MEMORY_ENV, "3072"),
+        (CACHE_FREE_ENV, "10"),
+        (STATE_FREE_ENV, "128"),
+    ]))
+    .unwrap();
+    assert_eq!(t.min_available_memory_bytes, 3072 * MIB);
+    assert_eq!(t.min_cache_free_bytes, 10 * GIB);
+    assert_eq!(t.min_state_free_bytes, 128 * MIB);
+    // Floors are inclusive.
+    let floor = Thresholds::from_lookup(lookup(&[
+        (MEMORY_ENV, "1024"),
+        (CACHE_FREE_ENV, "1"),
+        (STATE_FREE_ENV, "64"),
+    ]))
+    .unwrap();
+    assert_eq!(floor.min_available_memory_bytes, GIB);
+    assert_eq!(floor.min_cache_free_bytes, GIB);
+    assert_eq!(floor.min_state_free_bytes, 64 * MIB);
+}
+#[test]
+fn thresholds_reject_garbage_and_values_below_the_floor() {
+    for (name, value) in [
+        (MEMORY_ENV, ""),
+        (MEMORY_ENV, " 4096"),
+        (MEMORY_ENV, "4096 "),
+        (MEMORY_ENV, "4096MiB"),
+        (MEMORY_ENV, "4G"),
+        (MEMORY_ENV, "-4096"),
+        (MEMORY_ENV, "+4096"),
+        (MEMORY_ENV, "4096.0"),
+        (MEMORY_ENV, "0x1000"),
+        (MEMORY_ENV, "1023"),
+        (MEMORY_ENV, "0"),
+        (MEMORY_ENV, "99999999999999999999999"),
+        (MEMORY_ENV, "1048577"),
+        (CACHE_FREE_ENV, "0"),
+        (CACHE_FREE_ENV, "abc"),
+        (CACHE_FREE_ENV, "65537"),
+        (STATE_FREE_ENV, "63"),
+        (STATE_FREE_ENV, "1e3"),
+    ] {
+        let error = Thresholds::from_lookup(lookup(&[(name, value)]))
+            .expect_err(&format!("{name}={value:?} must be rejected"))
+            .to_string();
+        assert!(error.contains(name), "{error}");
+    }
+    use std::os::unix::ffi::OsStringExt;
+    let invalid_utf8 = std::ffi::OsString::from_vec(vec![0xff, b'1']);
+    assert!(Thresholds::from_lookup(|n| (n == MEMORY_ENV).then(|| invalid_utf8.clone())).is_err());
+}
+#[test]
+fn blocker_names_the_effective_memory_threshold() {
+    let t = Thresholds::from_lookup(lookup(&[(MEMORY_ENV, "3072")])).unwrap();
+    let mut p = Pressure {
+        available_bytes: 3072 * MIB,
+        ..free().unwrap()
+    };
+    assert_eq!(p.blocker_with(&t), None);
+    p.available_bytes -= 1;
+    assert_eq!(
+        p.blocker_with(&t).as_deref(),
+        Some("available memory below 3 GiB")
+    );
+    let odd = Thresholds::from_lookup(lookup(&[(MEMORY_ENV, "1536")])).unwrap();
+    p.available_bytes = 1536 * MIB - 1;
+    assert_eq!(
+        p.blocker_with(&odd).as_deref(),
+        Some("available memory below 1536 MiB")
+    );
+    let four = Thresholds::from_lookup(lookup(&[(MEMORY_ENV, "4096")])).unwrap();
+    assert_eq!(
+        p.blocker_with(&four).as_deref(),
+        Some("available memory below 4 GiB")
+    );
+    // A lower memory threshold never relaxes the PSI gates.
+    p.available_bytes = 64 * GIB;
+    p.cpu_some_avg10 = 40.01;
+    assert_eq!(
+        p.blocker_with(&t).as_deref(),
+        Some("CPU PSI some avg10 above 40%")
+    );
+}
+#[test]
+fn worker_record_drives_reported_thresholds_and_flags_mismatches() {
+    let f = Fixture::new();
+    let defaults = Thresholds::default();
+    // No record: this process's own configuration is reported.
+    let (report, warnings) = report_thresholds(&f.0, Ok(defaults), false).unwrap();
+    assert_eq!(report.source, "default");
+    assert_eq!(report.effective, defaults);
+    assert!(warnings.is_empty());
+    let low = Thresholds::from_lookup(lookup(&[(MEMORY_ENV, "3072")])).unwrap();
+    let (report, _) = report_thresholds(&f.0, Ok(low), true).unwrap();
+    assert_eq!(report.source, "environment");
+    // Invalid local configuration without a worker record fails clearly.
+    assert!(report_thresholds(&f.0, Err("bad TASKS value".into()), true).is_err());
+    // The worker's recorded values win, and a differing shell is flagged.
+    record_worker_thresholds(&f.0, &low).unwrap();
+    let mode = fs::metadata(f.0.join(THRESHOLD_RECORD)).unwrap().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+    let (report, warnings) = report_thresholds(&f.0, Ok(defaults), false).unwrap();
+    assert_eq!(report.source, "worker-record");
+    assert_eq!(report.effective, low);
+    assert_eq!(report.recorded_by_pid, Some(std::process::id()));
+    assert!(warnings.is_empty());
+    let (_, warnings) = report_thresholds(&f.0, Ok(defaults), true).unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    let (_, warnings) = report_thresholds(&f.0, Err("bad".into()), true).unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    // A corrupt or symlinked record is a warning, never silently trusted.
+    fs::write(f.0.join(THRESHOLD_RECORD), b"{not json").unwrap();
+    let (report, warnings) = report_thresholds(&f.0, Ok(defaults), false).unwrap();
+    assert_eq!(report.source, "default");
+    assert_eq!(warnings.len(), 1);
+    fs::remove_file(f.0.join(THRESHOLD_RECORD)).unwrap();
+    let elsewhere = f.0.join("elsewhere.json");
+    fs::write(&elsewhere, b"{}").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, f.0.join(THRESHOLD_RECORD)).unwrap();
+    let (report, warnings) = report_thresholds(&f.0, Ok(defaults), false).unwrap();
+    assert_eq!(report.source, "default");
+    assert_eq!(warnings.len(), 1);
+    // A recorded value below the floor (tampered) is rejected too.
+    fs::remove_file(f.0.join(THRESHOLD_RECORD)).unwrap();
+    let mut tampered = low;
+    tampered.min_available_memory_bytes = 1;
+    record_worker_thresholds(&f.0, &tampered).unwrap();
+    let (report, warnings) = report_thresholds(&f.0, Ok(defaults), false).unwrap();
+    assert_eq!(report.source, "default");
+    assert_eq!(warnings.len(), 1);
+}
+#[test]
+fn status_reports_effective_thresholds_and_blocker() {
+    let f = Fixture::new();
+    let low = Thresholds::from_lookup(lookup(&[(MEMORY_ENV, "3072")])).unwrap();
+    let report = ThresholdReport::new("environment", low, None);
+    let pressure = Pressure {
+        available_bytes: 2 * GIB,
+        ..free().unwrap()
+    };
+    let status = status_with(&f.0.join("missing"), pressure, report, vec![]).unwrap();
+    assert_eq!(
+        status.pressure_blocker.as_deref(),
+        Some("available memory below 3 GiB")
+    );
+    let json = serde_json::to_value(&status).unwrap();
+    assert_eq!(json["thresholds"]["min_available_memory_bytes"], 3072 * MIB);
+    assert_eq!(json["thresholds"]["source"], "environment");
+    assert_eq!(json["thresholds"]["cpu_some_avg10_max"], 40.0);
+    assert_eq!(json["thresholds"]["io_full_avg10_max"], 10.0);
+}

@@ -80,6 +80,8 @@ pub fn running(state: &Path) -> bool {
 
 pub fn start_detached() -> Result<()> {
     let state = state()?;
+    // Report invalid TASKS_MIN_* configuration to the requesting client now.
+    admission::thresholds()?;
     let lease = worker_lock(&state)?;
     if lease.try_lock().is_ok() {
         lease.unlock()?;
@@ -206,6 +208,12 @@ pub fn run() -> Result<()> {
     lock.try_lock()
         .map_err(|_| "another worker or its cleanup supervisor is active")?;
     admission::Pressure::read()?;
+    let thresholds = admission::thresholds()?;
+    eprintln!("worker: effective admission thresholds {thresholds:?}");
+    // Diagnostic only: lets `tasks admission` in other shells report these values.
+    if let Err(error) = admission::record_worker_thresholds(&state, &thresholds) {
+        eprintln!("worker: could not record admission thresholds: {error}");
+    }
     let worker = identity(std::process::id())?;
     let mut store = database(&state)?;
     store.reconcile_interrupted()?;

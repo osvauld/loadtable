@@ -3,6 +3,7 @@
 use crate::{Result, execution::now, worker};
 use serde::{Deserialize, Serialize};
 use std::{
+    ffi::OsString,
     fs::{self, File, OpenOptions},
     io::Write,
     os::{
@@ -10,12 +11,256 @@ use std::{
         unix::fs::{MetadataExt, OpenOptionsExt},
     },
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 static NEXT: AtomicU64 = AtomicU64::new(0);
 // Conservative trial headroom, not a reservation or running-process quota.
-const MIN_MEMORY: u64 = 8 * 1024 * 1024 * 1024;
+/// Default MemAvailable reserve; overridable per daemon/worker by MEMORY_ENV.
+pub const MIN_MEMORY: u64 = 8 * 1024 * 1024 * 1024;
+const MIB: u64 = 1024 * 1024;
+const GIB: u64 = 1024 * MIB;
+/// Whole MiB, 1024..=1048576. Default 8192 (8 GiB).
+pub const MEMORY_ENV: &str = "TASKS_MIN_AVAILABLE_MEMORY_MIB";
+/// Whole GiB of free space kept on cache/target disks, 1..=65536. Default 20.
+pub const CACHE_FREE_ENV: &str = "TASKS_MIN_CACHE_FREE_GIB";
+/// Whole MiB of free space kept on the state disk, 64..=1048576. Default 256.
+pub const STATE_FREE_ENV: &str = "TASKS_MIN_STATE_FREE_MIB";
+/// Written by each worker at start so `tasks admission` in another shell reports
+/// what the worker actually applies, not that shell's own environment.
+pub const THRESHOLD_RECORD: &str = "admission-thresholds.json";
+// PSI gates are fixed policy; only reported, never configurable here.
+const CPU_SOME_MAX: f64 = 40.0;
+const MEMORY_SOME_MAX: f64 = 1.0;
+const MEMORY_FULL_MAX: f64 = 0.5;
+const IO_SOME_MAX: f64 = 20.0;
+const IO_FULL_MAX: f64 = 10.0;
+
+struct Limit {
+    env: &'static str,
+    unit: u64,
+    unit_name: &'static str,
+    floor: u64,
+    max: u64,
+}
+const MEMORY_LIMIT: Limit = Limit {
+    env: MEMORY_ENV,
+    unit: MIB,
+    unit_name: "MiB",
+    floor: 1024,
+    max: 1024 * 1024,
+};
+const CACHE_LIMIT: Limit = Limit {
+    env: CACHE_FREE_ENV,
+    unit: GIB,
+    unit_name: "GiB",
+    floor: 1,
+    max: 64 * 1024,
+};
+const STATE_LIMIT: Limit = Limit {
+    env: STATE_FREE_ENV,
+    unit: MIB,
+    unit_name: "MiB",
+    floor: 64,
+    max: 1024 * 1024,
+};
+impl Limit {
+    fn parse(&self, raw: Option<OsString>, default: u64) -> Result<u64> {
+        let Some(raw) = raw else {
+            return Ok(default);
+        };
+        let error = || -> Box<dyn std::error::Error + Send + Sync> {
+            let shown: String = raw.to_string_lossy().chars().take(32).collect();
+            format!(
+                "{} must be a whole number of {} from {} to {} (no sign, spaces or suffix); got {shown:?}",
+                self.env, self.unit_name, self.floor, self.max
+            )
+            .into()
+        };
+        let text = raw.to_str().ok_or_else(error)?;
+        if text.is_empty() || text.len() > 10 || !text.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(error());
+        }
+        let value: u64 = text.parse().map_err(|_| error())?;
+        if !(self.floor..=self.max).contains(&value) {
+            return Err(error());
+        }
+        Ok(value * self.unit)
+    }
+    fn admits(&self, bytes: u64) -> bool {
+        bytes.is_multiple_of(self.unit) && (self.floor..=self.max).contains(&(bytes / self.unit))
+    }
+}
+/// Effective admission reserves for this daemon/worker process. Defaults are the
+/// historical constants; explicit environment overrides are validated, never clamped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Thresholds {
+    pub min_available_memory_bytes: u64,
+    pub min_cache_free_bytes: u64,
+    pub min_state_free_bytes: u64,
+}
+impl Default for Thresholds {
+    fn default() -> Self {
+        Self {
+            min_available_memory_bytes: MIN_MEMORY,
+            min_cache_free_bytes: crate::cache::MIN_FREE_BYTES,
+            min_state_free_bytes: crate::cache::MIN_STATE_FREE_BYTES,
+        }
+    }
+}
+impl Thresholds {
+    pub fn from_lookup(get: impl Fn(&str) -> Option<OsString>) -> Result<Self> {
+        let d = Self::default();
+        Ok(Self {
+            min_available_memory_bytes: MEMORY_LIMIT
+                .parse(get(MEMORY_ENV), d.min_available_memory_bytes)?,
+            min_cache_free_bytes: CACHE_LIMIT.parse(get(CACHE_FREE_ENV), d.min_cache_free_bytes)?,
+            min_state_free_bytes: STATE_LIMIT.parse(get(STATE_FREE_ENV), d.min_state_free_bytes)?,
+        })
+    }
+    pub fn from_env() -> Result<Self> {
+        Self::from_lookup(|name| std::env::var_os(name))
+    }
+    pub fn overridden(get: impl Fn(&str) -> Option<OsString>) -> bool {
+        [MEMORY_ENV, CACHE_FREE_ENV, STATE_FREE_ENV]
+            .iter()
+            .any(|name| get(name).is_some())
+    }
+    /// Same bounds as the environment, so a tampered record cannot lower a floor.
+    fn valid(&self) -> bool {
+        MEMORY_LIMIT.admits(self.min_available_memory_bytes)
+            && CACHE_LIMIT.admits(self.min_cache_free_bytes)
+            && STATE_LIMIT.admits(self.min_state_free_bytes)
+    }
+}
+static ACTIVE: OnceLock<std::result::Result<Thresholds, String>> = OnceLock::new();
+/// Resolved once per process from its own environment. Invalid values fail closed.
+pub fn thresholds() -> Result<Thresholds> {
+    ACTIVE
+        .get_or_init(|| Thresholds::from_env().map_err(|e| e.to_string()))
+        .clone()
+        .map_err(Into::into)
+}
+fn memory_text(bytes: u64) -> String {
+    if bytes.is_multiple_of(GIB) {
+        format!("{} GiB", bytes / GIB)
+    } else {
+        format!("{} MiB", bytes / MIB)
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ThresholdReport {
+    /// "worker-record", "environment" or "default".
+    pub source: String,
+    #[serde(flatten)]
+    pub effective: Thresholds,
+    pub cpu_some_avg10_max: f64,
+    pub memory_some_avg10_max: f64,
+    pub memory_full_avg10_max: f64,
+    pub io_some_avg10_max: f64,
+    pub io_full_avg10_max: f64,
+    pub recorded_by_pid: Option<u32>,
+    pub recorded_at: Option<i64>,
+}
+impl ThresholdReport {
+    pub fn new(source: &str, effective: Thresholds, record: Option<&Record>) -> Self {
+        Self {
+            source: source.into(),
+            effective,
+            cpu_some_avg10_max: CPU_SOME_MAX,
+            memory_some_avg10_max: MEMORY_SOME_MAX,
+            memory_full_avg10_max: MEMORY_FULL_MAX,
+            io_some_avg10_max: IO_SOME_MAX,
+            io_full_avg10_max: IO_FULL_MAX,
+            recorded_by_pid: record.map(|r| r.pid),
+            recorded_at: record.map(|r| r.recorded_at),
+        }
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Record {
+    pub schema: u32,
+    pub pid: u32,
+    pub recorded_at: i64,
+    pub thresholds: Thresholds,
+}
+/// Atomic, user-only diagnostic record. Not authority: each process still
+/// applies its own environment; this only makes reports match the worker.
+pub fn record_worker_thresholds(state: &Path, thresholds: &Thresholds) -> Result<()> {
+    let record = Record {
+        schema: 1,
+        pid: std::process::id(),
+        recorded_at: now(),
+        thresholds: *thresholds,
+    };
+    let temp = state.join(format!(
+        ".{THRESHOLD_RECORD}.{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut out = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&temp)?;
+    out.write_all(&serde_json::to_vec_pretty(&record)?)?;
+    out.sync_all()?;
+    fs::rename(&temp, state.join(THRESHOLD_RECORD))?;
+    Ok(())
+}
+fn read_record(state: &Path) -> Result<Option<Record>> {
+    let path = state.join(THRESHOLD_RECORD);
+    let m = match fs::symlink_metadata(&path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    if !m.is_file() || m.uid() != unsafe { libc::geteuid() } || m.len() > 4096 {
+        return Err("unsafe/oversized worker threshold record".into());
+    }
+    let record: Record = serde_json::from_slice(&fs::read(&path)?)?;
+    if record.schema != 1 || !record.thresholds.valid() {
+        return Err("worker threshold record outside accepted bounds".into());
+    }
+    Ok(Some(record))
+}
+/// Thresholds to REPORT from a client shell: the last worker's record if valid,
+/// else this process's own configuration. Mismatches become warnings.
+pub fn report_thresholds(
+    state: &Path,
+    own: Result<Thresholds>,
+    own_overridden: bool,
+) -> Result<(ThresholdReport, Vec<String>)> {
+    let mut warnings = vec![];
+    match read_record(state) {
+        Ok(Some(record)) => {
+            match &own {
+                Ok(t) if own_overridden && *t != record.thresholds => warnings.push(
+                    "this shell's TASKS_MIN_* settings differ from the worker's recorded thresholds; the worker applies its own environment".into(),
+                ),
+                Err(e) => warnings.push(format!("this shell's threshold environment is invalid: {e}")),
+                _ => (),
+            }
+            return Ok((
+                ThresholdReport::new("worker-record", record.thresholds, Some(&record)),
+                warnings,
+            ));
+        }
+        Ok(None) => (),
+        Err(e) => warnings.push(format!("{}: {e}", state.join(THRESHOLD_RECORD).display())),
+    }
+    let own = own?;
+    let source = if own_overridden {
+        "environment"
+    } else {
+        "default"
+    };
+    Ok((ThresholdReport::new(source, own, None), warnings))
+}
 #[derive(Clone, Debug)]
 pub enum Kind {
     Compile,
@@ -100,7 +345,14 @@ impl Pressure {
     fn permits(&self) -> bool {
         self.blocker().is_none()
     }
-    fn blocker(&self) -> Option<&'static str> {
+    fn blocker(&self) -> Option<String> {
+        match thresholds() {
+            Ok(t) => self.blocker_with(&t),
+            Err(e) => Some(format!("invalid admission threshold configuration: {e}")),
+        }
+    }
+    /// Names the effective memory threshold; PSI gates are unchanged policy.
+    pub fn blocker_with(&self, thresholds: &Thresholds) -> Option<String> {
         if [
             self.cpu_some_avg10,
             self.memory_some_avg10,
@@ -111,19 +363,22 @@ impl Pressure {
         .iter()
         .any(|value| !value.is_finite() || !(0.0..=100.0).contains(value))
         {
-            Some("invalid pressure metric")
-        } else if self.available_bytes < MIN_MEMORY {
-            Some("available memory below 8 GiB")
-        } else if self.cpu_some_avg10 > 40.0 {
-            Some("CPU PSI some avg10 above 40%")
-        } else if self.memory_some_avg10 > 1.0 {
-            Some("memory PSI some avg10 above 1%")
-        } else if self.memory_full_avg10 > 0.5 {
-            Some("memory PSI full avg10 above 0.5%")
-        } else if self.io_some_avg10 > 20.0 {
-            Some("I/O PSI some avg10 above 20%")
-        } else if self.io_full_avg10 > 10.0 {
-            Some("I/O PSI full avg10 above 10%")
+            Some("invalid pressure metric".into())
+        } else if self.available_bytes < thresholds.min_available_memory_bytes {
+            Some(format!(
+                "available memory below {}",
+                memory_text(thresholds.min_available_memory_bytes)
+            ))
+        } else if self.cpu_some_avg10 > CPU_SOME_MAX {
+            Some("CPU PSI some avg10 above 40%".into())
+        } else if self.memory_some_avg10 > MEMORY_SOME_MAX {
+            Some("memory PSI some avg10 above 1%".into())
+        } else if self.memory_full_avg10 > MEMORY_FULL_MAX {
+            Some("memory PSI full avg10 above 0.5%".into())
+        } else if self.io_some_avg10 > IO_SOME_MAX {
+            Some("I/O PSI some avg10 above 20%".into())
+        } else if self.io_full_avg10 > IO_FULL_MAX {
+            Some("I/O PSI full avg10 above 10%".into())
         } else {
             None
         }
@@ -157,7 +412,8 @@ pub struct ResourceStatus {
 pub struct Status {
     pub backend: &'static str,
     pub pressure: Pressure,
-    pub pressure_blocker: Option<&'static str>,
+    pub pressure_blocker: Option<String>,
+    pub thresholds: ThresholdReport,
     pub resources: Vec<ResourceStatus>,
     pub waiting: Vec<Note>,
     pub warnings: Vec<String>,
@@ -332,13 +588,14 @@ fn acquire_at(
         let ready = if gated {
             let p = pressure()?;
             let blocker = p.blocker();
+            let permits = blocker.is_none();
             if blocker != previous_blocker {
-                if let Some(reason) = blocker {
+                if let Some(reason) = &blocker {
                     eprintln!("Native admission waiting: {reason}; inspect tasks admission");
                 }
                 previous_blocker = blocker;
             }
-            p.permits()
+            permits
         } else {
             true
         };
@@ -376,16 +633,36 @@ fn acquire_at(
     }
 }
 pub fn status() -> Result<Status> {
-    status_at(&root(), Pressure::read()?)
+    let (report, warnings) = report_thresholds(
+        &crate::state_dir(),
+        thresholds(),
+        Thresholds::overridden(|name| std::env::var_os(name)),
+    )?;
+    status_with(&root(), Pressure::read()?, report, warnings)
 }
+#[cfg(test)]
 fn status_at(root: &Path, pressure: Pressure) -> Result<Status> {
+    status_with(
+        root,
+        pressure,
+        ThresholdReport::new("default", Thresholds::default(), None),
+        vec![],
+    )
+}
+fn status_with(
+    root: &Path,
+    pressure: Pressure,
+    thresholds: ThresholdReport,
+    warnings: Vec<String>,
+) -> Result<Status> {
     let mut status = Status {
         backend: "rust-flock-v1",
-        pressure_blocker: pressure.blocker(),
+        pressure_blocker: pressure.blocker_with(&thresholds.effective),
         pressure,
+        thresholds,
         resources: vec![],
         waiting: vec![],
-        warnings: vec![],
+        warnings,
     };
     if !root.try_exists()? {
         return Ok(status);
