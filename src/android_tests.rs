@@ -15,6 +15,12 @@ fn typed_abi_policy_rejects_arbitrary_commands_and_duplicates() {
     assert_eq!(Abis::parse("x86_64").unwrap(), Abis::X86);
     assert_eq!(Abis::parse("arm64-v8a").unwrap(), Abis::Arm64);
     assert_eq!(Abis::parse("x86_64,arm64-v8a").unwrap(), Abis::Both);
+    assert_eq!(Abis::parse("emulator").unwrap(), Abis::X86);
+    assert_eq!(Abis::parse("phone").unwrap(), Abis::Arm64);
+    assert_eq!(
+        Abis::parse("phone").unwrap().configuration(),
+        "debug/arm64-v8a/rust-debug/offline"
+    );
 }
 #[test]
 fn plan_is_read_only_gated_and_defaults_to_single_abi_debug_build_only() {

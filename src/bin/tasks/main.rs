@@ -22,9 +22,13 @@ const USAGE: &str = "usage: tasks [ui]
        # local.command cost=cpu_simulation is a legacy label, NOT the resource class
        tasks approve-android-trial JOB_ID   # EXPERIMENTAL build-only; trusts local source/host config
        tasks catalog | cache | cache-plan | admission | start-worker | worker
-       tasks android-plan SOURCE REVISION [x86_64|arm64-v8a|x86_64,arm64-v8a]
+       tasks android-submit [--who OWNER] SOURCE REVISION phone|emulator|x86_64,arm64-v8a
+       tasks android-plan SOURCE REVISION [emulator|phone|x86_64,arm64-v8a]  # default emulator
        tasks android-capture SOURCE REVISION NEW_DESTINATION
-       tasks android-host SOURCE [x86_64|arm64-v8a|x86_64,arm64-v8a]  # read-only host audit
+       tasks android-host SOURCE [emulator|phone|x86_64,arm64-v8a]  # read-only host audit
+       # phone = arm64-v8a only, emulator = x86_64 only; SPEC.json config may use either
+       tasks devices [--json]  # read-only: connected phones/emulators, ABI, ready, lock free/busy
+       tasks phone-test [--who OWNER] SOURCE [--device SERIAL]  # build phone APK, install -r, launch
        tasks record SUITE CONFIG STAGE SECONDS
        tasks daemon";
 
@@ -89,6 +93,19 @@ fn run() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&host)?);
             return Ok(());
         }
+        Some("devices") if args.len() == 1 || (args.len() == 2 && args[1] == "--json") => {
+            let devices = tinline_task_manager::device::list()?;
+            if args.len() == 2 {
+                println!("{}", serde_json::to_string_pretty(&devices)?);
+            } else {
+                print_devices(&devices);
+            }
+            return Ok(());
+        }
+        Some("phone-test") => return phone_test(&args[1..]),
+        Some("__phone-install") if args.len() == 3 => {
+            return tinline_task_manager::device::install_and_launch(&args[1], Path::new(&args[2]));
+        }
         Some("android-capture") if args.len() == 4 => {
             let receipt = tinline_task_manager::workspace_snapshot::capture(
                 Path::new(&args[1]),
@@ -122,7 +139,9 @@ fn run() -> Result<()> {
                         i += 1;
                     }
                     "--device" if resource.is_none() && i + 1 < split => {
-                        resource = Some(Resource::Device(args[i + 1].clone()));
+                        resource = Some(Resource::Device(
+                            tinline_task_manager::device::lock_serial(&args[i + 1])?,
+                        ));
                         i += 2;
                     }
                     _ => return Err("invalid/conflicting enqueue options".into()),
@@ -136,6 +155,30 @@ fn run() -> Result<()> {
                 resource: resource.unwrap_or(Resource::Compile),
             };
             Action::Submit(recipe.spec(owner, std::env::current_dir()?)?)
+        }
+        Some("android-submit") => {
+            // Submission only; approve-android-trial and start-worker stay separate.
+            let (owner, rest) = match &args[1..] {
+                [flag, owner, rest @ ..] if flag == "--who" => (owner.clone(), rest),
+                rest => (
+                    std::env::var("USER").unwrap_or_else(|_| "local-agent".into()),
+                    rest,
+                ),
+            };
+            let [source, revision, target] = rest else {
+                return Err(USAGE.into());
+            };
+            if owner.trim().is_empty() || owner.len() > 128 {
+                return Err("bounded owner required".into());
+            }
+            Action::Submit(JobSpec {
+                suite: tinline_task_manager::catalog::ANDROID_SUITE.into(),
+                configuration: tinline_task_manager::catalog::android_configuration(target)?,
+                cost: tinline_task_manager::Cost::CpuSimulation,
+                source: source.clone(),
+                revision: revision.clone(),
+                owner,
+            })
         }
         Some("approve-android-trial") if args.len() == 2 => {
             Action::ApproveAndroidTrial(args[1].parse()?)
@@ -175,7 +218,11 @@ fn run() -> Result<()> {
         }
         Some("list") if args.len() == 1 => Action::List,
         Some("submit") if args.len() == 2 => {
-            let spec: JobSpec = serde_json::from_slice(&fs::read(&args[1])?)?;
+            let mut spec: JobSpec = serde_json::from_slice(&fs::read(&args[1])?)?;
+            if spec.suite == tinline_task_manager::catalog::ANDROID_SUITE {
+                spec.configuration =
+                    tinline_task_manager::catalog::android_configuration(&spec.configuration)?;
+            }
             Action::Submit(spec)
         }
         Some("cancel") if args.len() == 2 => Action::Cancel(args[1].parse()?),
@@ -206,62 +253,200 @@ fn run() -> Result<()> {
             .submitted_id
             .ok_or("daemon did not return submitted_id; do not resubmit blindly")?;
         eprintln!("tasks: submitted job {id}; Ctrl-C detaches, tasks cancel {id} cancels");
-        for action in [Action::ApproveCommand(id), Action::StartWorker] {
-            let r = request_with_reconnect(&socket, action, || ensure_daemon(&socket))?;
-            if let Some(e) = r.error {
-                return Err(format!("job {id}: {e}; inspect before retry").into());
-            }
-        }
-        let mut previous = None;
-        loop {
-            let r = request_with_reconnect(&socket, Action::List, || ensure_daemon(&socket))?;
-            if let Some(e) = r.error {
-                return Err(format!("job {id}: {e}").into());
-            }
-            let j = r
-                .jobs
-                .iter()
-                .find(|j| j.id == id)
-                .ok_or("submitted job missing")?;
-            if previous.as_ref() != Some(&j.phase) {
-                eprintln!("tasks: job {id} {:?}", j.phase);
-                previous = Some(j.phase.clone());
-            }
-            if j.phase.terminal() {
-                let logs =
-                    request_with_reconnect(&socket, Action::Logs(id), || ensure_daemon(&socket))?;
-                let text = logs.log.map(|log| log.text).unwrap_or_default();
-                print!("{text}");
-                if let Some(error) = logs.error {
-                    eprintln!("tasks: job {id} log unavailable: {error}");
-                }
-                if !text.is_empty() && !text.ends_with('\n') {
-                    println!();
-                }
-                let code = if j.phase == tinline_task_manager::Phase::Passed {
-                    0
-                } else if j.phase == tinline_task_manager::Phase::Cancelled {
-                    130
-                } else {
-                    j.execution
-                        .as_ref()
-                        .and_then(|e| e.stages.last())
-                        .and_then(|s| s.exit_code)
-                        .filter(|c| *c != 0)
-                        .unwrap_or(1)
-                };
-                let phase = serde_json::to_value(&j.phase)?;
-                println!(
-                    "job {id} {} (exit {code}) owner={}",
-                    phase.as_str().unwrap_or("unknown"),
-                    j.spec.owner
-                );
-                std::process::exit(code);
-            }
-            std::thread::sleep(Duration::from_millis(250));
+        approve_and_start(&socket, Action::ApproveCommand(id), id)?;
+        std::process::exit(wait_job(&socket, id)?.1);
+    }
+    Ok(())
+}
+
+fn call(socket: &Path, action: Action) -> Result<tinline_task_manager::Response> {
+    request_with_reconnect(socket, action, || ensure_daemon(socket))
+}
+
+fn approve_and_start(socket: &Path, approve: Action, id: i64) -> Result<()> {
+    for action in [approve, Action::StartWorker] {
+        if let Some(e) = call(socket, action)?.error {
+            return Err(format!("job {id}: {e}; inspect before retry").into());
         }
     }
     Ok(())
+}
+
+/// Follows one job to a terminal phase, prints its log and summary, returns the job
+/// and the exit code `tasks run` uses (0 passed, 130 cancelled, else the stage code).
+fn wait_job(socket: &Path, id: i64) -> Result<(tinline_task_manager::Job, i32)> {
+    let mut previous = None;
+    loop {
+        let r = call(socket, Action::List)?;
+        if let Some(e) = r.error {
+            return Err(format!("job {id}: {e}").into());
+        }
+        let j = r
+            .jobs
+            .into_iter()
+            .find(|j| j.id == id)
+            .ok_or("submitted job missing")?;
+        if previous.as_ref() != Some(&j.phase) {
+            eprintln!("tasks: job {id} {:?}", j.phase);
+            previous = Some(j.phase.clone());
+        }
+        if j.phase.terminal() {
+            let logs = call(socket, Action::Logs(id))?;
+            let text = logs.log.map(|log| log.text).unwrap_or_default();
+            print!("{text}");
+            if let Some(error) = logs.error {
+                eprintln!("tasks: job {id} log unavailable: {error}");
+            }
+            if !text.is_empty() && !text.ends_with('\n') {
+                println!();
+            }
+            let code = if j.phase == tinline_task_manager::Phase::Passed {
+                0
+            } else if j.phase == tinline_task_manager::Phase::Cancelled {
+                130
+            } else {
+                j.execution
+                    .as_ref()
+                    .and_then(|e| e.stages.last())
+                    .and_then(|s| s.exit_code)
+                    .filter(|c| *c != 0)
+                    .unwrap_or(1)
+            };
+            let phase = serde_json::to_value(&j.phase)?;
+            println!(
+                "job {id} {} (exit {code}) owner={}",
+                phase.as_str().unwrap_or("unknown"),
+                j.spec.owner
+            );
+            return Ok((j, code));
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+fn print_devices(devices: &[tinline_task_manager::device::Device]) {
+    if devices.is_empty() {
+        println!("no devices connected (adb devices is empty)");
+        return;
+    }
+    println!(
+        "{:<22} {:<9} {:<13} {:<12} {:<18} AVAILABILITY",
+        "SERIAL", "KIND", "STATE", "ABI", "MODEL"
+    );
+    for d in devices {
+        let availability = match (&d.holder, d.busy) {
+            (Some(who), _) => format!("busy: {who}"),
+            (None, true) => "busy".into(),
+            (None, false) => "free".into(),
+        };
+        let state = if d.ready() { "ready" } else { d.state.as_str() };
+        println!(
+            "{:<22} {:<9} {:<13} {:<12} {:<18} {availability}",
+            d.serial,
+            d.kind,
+            state,
+            d.abis.first().map(String::as_str).unwrap_or("-"),
+            d.model.as_deref().unwrap_or("-"),
+        );
+    }
+}
+
+/// Phone build (arm64-v8a only) through the typed Android trial, then install + launch
+/// in a separate job that holds only the device lock. Invoking this command is the
+/// explicit per-job trial approval; nothing else is approved or replayed.
+fn phone_test(args: &[String]) -> Result<()> {
+    use tinline_task_manager::local_command::{Recipe, Resource};
+    use tinline_task_manager::{catalog, device};
+    let mut owner = std::env::var("USER").unwrap_or_else(|_| "local-agent".into());
+    let (mut source, mut serial) = (None, None);
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--who" => owner = rest.next().ok_or(USAGE)?.clone(),
+            "--device" if serial.is_none() => serial = Some(rest.next().ok_or(USAGE)?.clone()),
+            s if source.is_none() && !s.starts_with('-') => source = Some(s.to_owned()),
+            _ => return Err(USAGE.into()),
+        }
+    }
+    if owner.trim().is_empty() || owner.len() > 128 {
+        return Err("bounded owner required".into());
+    }
+    let source = fs::canonicalize(source.ok_or(USAGE)?)?;
+    // Fail before compiling if the phone is missing, unauthorized or not arm64.
+    let phone = device::select_phone(&device::list()?, serial.as_deref())?;
+    if phone.busy {
+        eprintln!(
+            "tasks: {} is busy ({}); install will wait for it",
+            phone.serial,
+            phone.holder.as_deref().unwrap_or("unknown holder")
+        );
+    }
+    let head = Command::new("git")
+        .arg("-C")
+        .arg(&source)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    let revision = String::from_utf8_lossy(&head.stdout).trim().to_owned();
+    if !head.status.success() {
+        return Err("SOURCE must be a Git checkout with a HEAD commit".into());
+    }
+    let socket = state_dir().join("taskd.sock");
+    let submitted = call(
+        &socket,
+        Action::Submit(JobSpec {
+            suite: catalog::ANDROID_SUITE.into(),
+            configuration: catalog::android_configuration("phone")?,
+            cost: tinline_task_manager::Cost::CpuSimulation,
+            source: source.to_str().ok_or("UTF-8 source path required")?.into(),
+            revision,
+            owner: owner.clone(),
+        }),
+    )?;
+    if let Some(e) = submitted.error {
+        return Err(e.into());
+    }
+    let build = submitted
+        .submitted_id
+        .ok_or("daemon did not return submitted_id; do not resubmit blindly")?;
+    eprintln!(
+        "tasks: phone build job {build} for {}; Ctrl-C detaches",
+        phone.serial
+    );
+    approve_and_start(&socket, Action::ApproveAndroidTrial(build), build)?;
+    let (job, code) = wait_job(&socket, build)?;
+    if code != 0 {
+        std::process::exit(code);
+    }
+    let artifact = job
+        .execution
+        .and_then(|e| e.build_artifact)
+        .ok_or("build passed without an APK receipt; not installing")?;
+    let apk = fs::canonicalize(state_dir())?
+        .join("jobs")
+        .join(build.to_string())
+        .join(&artifact.path);
+    let recipe = Recipe {
+        argv: vec![
+            std::env::current_exe()?
+                .to_str()
+                .ok_or("UTF-8 tasks path required")?
+                .into(),
+            "__phone-install".into(),
+            phone.serial.clone(),
+            apk.to_str().ok_or("UTF-8 APK path required")?.into(),
+        ],
+        resource: Resource::Device(phone.lock.clone()),
+    };
+    let submitted = call(&socket, Action::Submit(recipe.spec(owner, source)?))?;
+    if let Some(e) = submitted.error {
+        return Err(e.into());
+    }
+    let install = submitted
+        .submitted_id
+        .ok_or("daemon did not return submitted_id; do not resubmit blindly")?;
+    eprintln!("tasks: install job {install} on {}", phone.serial);
+    approve_and_start(&socket, Action::ApproveCommand(install), install)?;
+    std::process::exit(wait_job(&socket, install)?.1);
 }
 
 fn open_ui() -> Result<()> {

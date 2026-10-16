@@ -15,13 +15,18 @@ pub enum Abis {
     Both,
 }
 impl Abis {
+    /// `emulator`/`phone` are input aliases only; stored configurations keep ABI names.
     pub fn parse(value: &str) -> Result<Self> {
         match value {
-            "x86_64" => Ok(Self::X86),
-            "arm64-v8a" => Ok(Self::Arm64),
+            "x86_64" | "emulator" => Ok(Self::X86),
+            "arm64-v8a" | "phone" => Ok(Self::Arm64),
             "x86_64,arm64-v8a" => Ok(Self::Both),
-            _ => Err("ABI must be x86_64, arm64-v8a or x86_64,arm64-v8a".into()),
+            _ => Err("ABI must be emulator (x86_64), phone (arm64-v8a) or x86_64,arm64-v8a".into()),
         }
+    }
+    /// Canonical job configuration; history and admission key on this exact string.
+    pub fn configuration(self) -> String {
+        format!("debug/{}/rust-debug/offline", self.names())
     }
     pub(crate) fn names(self) -> &'static str {
         match self {
@@ -207,7 +212,7 @@ fn preflight_at(
     Ok(Plan {
         schema: 1,
         executable: false,
-        configuration: format!("debug/{}/rust-debug/offline", abis.names()),
+        configuration: abis.configuration(),
         snapshot,
         steps,
         implicit_gradle_steps: [

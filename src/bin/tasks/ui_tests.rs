@@ -53,6 +53,54 @@ fn fixture() -> Dashboard {
         },
         log: None,
         raw_log: false,
+        devices: Devices {
+            scan: None,
+            pending: None,
+            checked: None,
+            source: String::new(),
+        },
+    }
+}
+
+#[test]
+fn devices_panel_renders_every_state_without_starting_adb() {
+    let phone = |serial: &str, state: &str, busy: bool| Device {
+        serial: serial.into(),
+        state: state.into(),
+        model: Some("synthetic phone".into()),
+        kind: "phone",
+        abis: vec!["arm64-v8a".into()],
+        lock: device::lock_serial(serial).unwrap(),
+        busy,
+        holder: busy.then(|| "other-agent:job-1".into()),
+    };
+    let scans: [DeviceScan; 4] = [
+        Ok(vec![]),
+        Err("adb unavailable: synthetic".into()),
+        Ok(vec![
+            phone("SYNTH0001", "device", false),
+            phone("192.168.0.2:5555", "device", true),
+            phone("SYNTH0002", "unauthorized", false),
+        ]),
+        Ok(vec![Device {
+            kind: "emulator",
+            abis: vec!["x86_64".into()],
+            ..phone("emulator-5554", "device", false)
+        }]),
+    ];
+    for scan in scans {
+        let context = egui::Context::default();
+        let mut dashboard = fixture();
+        dashboard.devices.scan = Some(scan);
+        dashboard.devices.source = "/synthetic/app".into();
+        let _ = context.run(egui::RawInput::default(), |context| {
+            egui::SidePanel::left("form")
+                .exact_width(250.0)
+                .show(context, |ui| dashboard.devices(ui));
+        });
+        // Rendering never scans or launches anything by itself.
+        assert!(dashboard.devices.pending.is_none());
+        assert!(dashboard.status.is_none());
     }
 }
 

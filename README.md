@@ -31,6 +31,24 @@ with the local user's rights, not a source snapshot/sandbox. Default compile slo
 --run is for already-built commands; --device requires separate device permission.
 Don't nest internally admitted helpers or override machine cache policy.
 
+## Phone and emulator targets
+
+`phone` = arm64-v8a only, `emulator` = x86_64 only; either name works wherever an
+Android ABI/config is accepted and is stored as the existing canonical config.
+
+```sh
+tasks devices            # read-only adb view: kind, ready/unauthorized, ABI, lock free/busy
+tasks phone-test /path/to/app-checkout [--device SERIAL]
+```
+
+`phone-test` builds the arm64 APK through the typed Android trial (running it is
+the per-job trial approval), then a separate job holding only that device's lock
+runs `adb install -r` (keeps app data) and opens the launcher activity. It never
+uninstalls, downgrades or clears data. Running it is explicit permission to
+install/launch on THAT device only. Without `--device` it needs exactly one ready
+phone. Wireless `host:port` serials use the existing `host_port` lock names. The
+window's Devices panel shows the same view and a "Test on phone" button.
+
 ## Development
 
 This is an independent Cargo workspace. No app checkout or workspace dependency

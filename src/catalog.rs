@@ -25,6 +25,27 @@ pub fn android_contract(spec: &JobSpec) -> Result<&'static str> {
     }
 }
 
+/// Client-side: maps `phone`/`emulator`/an ABI list to the canonical configuration.
+/// Daemons keep accepting only canonical strings, so older daemons stay compatible.
+pub fn android_configuration(value: &str) -> Result<String> {
+    let abis = value
+        .strip_prefix("debug/")
+        .and_then(|v| v.strip_suffix("/rust-debug/offline"))
+        .unwrap_or(value);
+    let abis = match abis {
+        "x86_64" | "emulator" => "x86_64",
+        "arm64-v8a" | "phone" => "arm64-v8a",
+        "x86_64,arm64-v8a" => "x86_64,arm64-v8a",
+        _ => {
+            return Err(
+                "Android target must be phone (arm64-v8a), emulator (x86_64) or x86_64,arm64-v8a"
+                    .into(),
+            );
+        }
+    };
+    Ok(format!("debug/{abis}/rust-debug/offline"))
+}
+
 #[derive(Debug, Serialize)]
 pub struct Suite {
     pub name: &'static str,
@@ -162,5 +183,36 @@ mod tests {
         let mut bad = spec();
         bad.revision = "HEAD".into();
         assert!(validate(&bad).is_err());
+    }
+    #[test]
+    fn android_target_aliases_canonicalize_before_submission() {
+        for (input, abis) in [
+            ("phone", "arm64-v8a"),
+            ("emulator", "x86_64"),
+            ("arm64-v8a", "arm64-v8a"),
+            ("x86_64,arm64-v8a", "x86_64,arm64-v8a"),
+            ("debug/phone/rust-debug/offline", "arm64-v8a"),
+            ("debug/x86_64/rust-debug/offline", "x86_64"),
+        ] {
+            let mut job = spec();
+            job.suite = ANDROID_SUITE.into();
+            job.cost = Cost::CpuSimulation;
+            job.configuration = android_configuration(input).unwrap();
+            assert_eq!(android_contract(&job).unwrap(), abis);
+        }
+        for bad in [
+            "",
+            "both",
+            "phone,emulator",
+            "release/phone/rust-debug/offline",
+        ] {
+            assert!(android_configuration(bad).is_err(), "{bad}");
+        }
+        // Aliases never reach stored state: the daemon contract stays canonical-only.
+        let mut job = spec();
+        job.suite = ANDROID_SUITE.into();
+        job.cost = Cost::CpuSimulation;
+        job.configuration = "debug/phone/rust-debug/offline".into();
+        assert!(android_contract(&job).is_err());
     }
 }

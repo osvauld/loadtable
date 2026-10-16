@@ -4,15 +4,19 @@ mod tests;
 
 use eframe::egui::{self, RichText};
 use std::collections::HashMap;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tinline_task_manager::device::{self, Device};
 use tinline_task_manager::{
     Action, Cost, Job, JobSpec, Phase, Response, RuntimeEstimate, request_with_reconnect,
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(2500);
 const STATUS_FADE: Duration = Duration::from_secs(4);
+/// adb is queried off the UI thread; a slow or missing adb never blocks the window.
+const DEVICE_INTERVAL: Duration = Duration::from_secs(10);
 const COSTS: [(Cost, &str); 6] = [
     (Cost::Quick, "quick"),
     (Cost::CpuSimulation, "cpu simulation"),
@@ -47,6 +51,17 @@ struct Form {
     cost: Cost,
 }
 
+type DeviceScan = Result<Vec<Device>, String>;
+
+/// Read-only device view plus the "Test on phone" launcher.
+struct Devices {
+    scan: Option<DeviceScan>,
+    pending: Option<Receiver<DeviceScan>>,
+    checked: Option<Instant>,
+    /// App checkout to build for phone tests (absolute path).
+    source: String,
+}
+
 struct Dashboard {
     socket: PathBuf,
     tx: Sender<Reply>,
@@ -67,6 +82,7 @@ struct Dashboard {
     form: Form,
     log: Option<tinline_task_manager::execution::LogTail>,
     raw_log: bool,
+    devices: Devices,
 }
 
 impl Dashboard {
@@ -144,6 +160,144 @@ impl Dashboard {
                     }
                 }
             }
+        }
+    }
+
+    fn scan_devices(&mut self, context: &egui::Context) {
+        if let Some(rx) = &self.devices.pending
+            && let Ok(scan) = rx.try_recv()
+        {
+            self.devices.scan = Some(scan);
+            self.devices.pending = None;
+        }
+        if self.devices.pending.is_some()
+            || self
+                .devices
+                .checked
+                .is_some_and(|at| at.elapsed() < DEVICE_INTERVAL)
+        {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.devices.pending = Some(rx);
+        self.devices.checked = Some(Instant::now());
+        let context = context.clone();
+        std::thread::spawn(move || {
+            let scan = std::panic::catch_unwind(device::list)
+                .map_err(|_| "device scan panicked".to_string())
+                .and_then(|scan| scan.map_err(|e| e.to_string()));
+            let _ = tx.send(scan);
+            context.request_repaint();
+        });
+    }
+
+    /// Runs `tasks phone-test` detached; its build/install jobs show up in the list.
+    fn start_phone_test(&mut self, serial: &str) {
+        let source = self.devices.source.trim().to_owned();
+        let owner = self.form.owner.trim().to_owned();
+        let started = (|| -> tinline_task_manager::Result<PathBuf> {
+            let log = tinline_task_manager::state_dir().join(format!(
+                "phone-test-{}-{}.log",
+                unix_now(),
+                std::process::id()
+            ));
+            let file = std::fs::File::create(&log)?;
+            let mut child = std::process::Command::new(std::env::current_exe()?)
+                .args(["phone-test", "--who", &owner, &source, "--device", serial])
+                .stdin(std::process::Stdio::null())
+                .stdout(file.try_clone()?)
+                .stderr(file)
+                .process_group(0)
+                .spawn()?;
+            std::thread::spawn(move || child.wait());
+            Ok(log)
+        })();
+        self.status = Some(match started {
+            Ok(log) => (
+                false,
+                format!(
+                    "Phone test started on {serial}; output in {}",
+                    log.display()
+                ),
+                Instant::now(),
+            ),
+            Err(e) => (true, format!("Phone test not started: {e}"), Instant::now()),
+        });
+    }
+
+    fn devices(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Devices");
+        ui.add_space(4.0);
+        let mut test_on = None;
+        match &self.devices.scan {
+            None => {
+                ui.label(RichText::new("Checking adb…").weak());
+            }
+            Some(Err(error)) => {
+                ui.colored_label(ui.visuals().error_fg_color, error);
+            }
+            Some(Ok(list)) if list.is_empty() => {
+                ui.label(RichText::new("No phone or emulator connected").weak());
+            }
+            Some(Ok(list)) => {
+                let source_set = !self.devices.source.trim().is_empty();
+                for d in list {
+                    let (state, color) = if d.ready() {
+                        ("ready", ui.visuals().text_color())
+                    } else {
+                        (d.state.as_str(), ui.visuals().error_fg_color)
+                    };
+                    let availability = match (&d.holder, d.busy) {
+                        (Some(who), _) => format!("busy: {who}"),
+                        (None, true) => "busy".into(),
+                        (None, false) => "free".into(),
+                    };
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Label::new(RichText::new(&d.serial).strong()).truncate());
+                        ui.label(RichText::new(d.kind).weak());
+                    });
+                    ui.label(
+                        RichText::new(format!(
+                            "{} · {state} · {availability}",
+                            d.model.as_deref().unwrap_or("unknown model")
+                        ))
+                        .color(color)
+                        .small(),
+                    );
+                    if d.kind == "phone" {
+                        let ok = d.check_ready(device::PHONE_ABI);
+                        let hover = match (&ok, source_set) {
+                            (Err(e), _) => e.to_string(),
+                            (Ok(()), false) => "Set the app checkout first".into(),
+                            (Ok(()), true) if d.busy => {
+                                "Builds arm64-v8a now; install waits for the device".into()
+                            }
+                            (Ok(()), true) => {
+                                "Build arm64-v8a only, install -r (keeps data), launch".into()
+                            }
+                        };
+                        if ui
+                            .add_enabled(
+                                ok.is_ok() && source_set,
+                                egui::Button::new("Test on phone"),
+                            )
+                            .on_hover_text(hover.clone())
+                            .on_disabled_hover_text(hover)
+                            .clicked()
+                        {
+                            test_on = Some(d.serial.clone());
+                        }
+                    }
+                    ui.add_space(4.0);
+                }
+            }
+        }
+        ui.horizontal(|ui| {
+            ui.label("App checkout");
+            ui.add(egui::TextEdit::singleline(&mut self.devices.source).desired_width(140.0));
+        });
+        if let Some(serial) = test_on {
+            self.start_phone_test(&serial);
         }
     }
 
@@ -229,12 +383,21 @@ impl Dashboard {
             .add_enabled(complete && !self.submitting, egui::Button::new("Submit"))
             .clicked()
         {
+            let suite = f.suite.trim();
+            let mut configuration = f.configuration.trim().to_string();
+            // phone/emulator are input aliases; invalid values are left for the daemon to refuse.
+            if suite == tinline_task_manager::catalog::ANDROID_SUITE
+                && let Ok(canonical) =
+                    tinline_task_manager::catalog::android_configuration(&configuration)
+            {
+                configuration = canonical;
+            }
             let spec = JobSpec {
-                suite: f.suite.trim().into(),
+                suite: suite.into(),
                 owner: f.owner.trim().into(),
                 source: f.source.trim().into(),
                 revision: f.revision.trim().into(),
-                configuration: f.configuration.trim().into(),
+                configuration,
                 cost: f.cost.clone(),
             };
             self.submitting = true;
@@ -491,6 +654,7 @@ impl Dashboard {
 impl eframe::App for Dashboard {
     fn update(&mut self, context: &egui::Context, _: &mut eframe::Frame) {
         self.receive();
+        self.scan_devices(context);
         if self
             .last_poll
             .is_none_or(|at| at.elapsed() >= POLL_INTERVAL)
@@ -509,6 +673,8 @@ impl eframe::App for Dashboard {
             .show(context, |ui| {
                 ui.add_space(8.0);
                 self.form(ui, context);
+                ui.separator();
+                self.devices(ui);
             });
         egui::CentralPanel::default().show(context, |ui| self.jobs(ui, context));
         let mut refresh = None;
@@ -619,6 +785,12 @@ pub fn run(socket: PathBuf) -> eframe::Result {
                 show_cancelled: false,
                 log: None,
                 raw_log: false,
+                devices: Devices {
+                    scan: None,
+                    pending: None,
+                    checked: None,
+                    source: String::new(),
+                },
                 form: Form {
                     suite: tinline_task_manager::catalog::SUITE.into(),
                     owner: std::env::var("USER").unwrap_or_default(),
