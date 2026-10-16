@@ -1,0 +1,22 @@
+# Trial feedback: resumed LAN validation, pressure waits and nested output placement
+
+- Agent/session: `protocol-lan-resume-sol`, owned nested experiment in worktree `osvauld-foundation`.
+- Job ID(s): 64 (already submitted/approved/started by parent; monitored only), 68 (sole follow-up submission). Historical 56 had never reached Cargo; it was not replayed.
+- Outcome: validation passed after a narrow lint fix; pressure admission worked; known nested-output placement and client-timeout friction remain.
+- Redacted command, cwd type, resource class:
+  - Job 64, owner `protocol-lan-resume`: `sh -c 'cargo test --offline -j 2 && cargo test --offline --locked -j 2 && cargo clippy --offline --locked -j 2 --all-targets -- -D warnings'`.
+  - Job 68: `tasks run --who protocol-lan-resume-sol -- sh -c 'cargo test --offline --locked -j 2 && cargo clippy --offline --locked -j 2 --all-targets -- -D warnings'`.
+  - Cwd: independent nested Cargo workspace `experiments/osvauld-foundation`; resource compile. Trusted shell chain is recorded as one build stage, including test execution.
+- What was exercised: real installed shared queue, read-only list/admission/log queries, offline dependency resolution, locked regression tests, warnings-denied clippy, and timeout reconciliation. Networking was a synthetic-account loopback fixture only, not a LAN/worker model promoted to production.
+- Expected: preserve queued job 64 unchanged; inspect its actual terminal results; fix only a concrete owned test issue if needed; submit at most one follow-up and keep source stable during validation.
+- Observed:
+  - Job 64 waited for CPU/memory PSI, resolved LAN dependencies offline, and passed both test commands: each ran 4 LAN + 10 parent tests, 0 failed/ignored. Clippy actually ran and failed on unused `Exchange.request_body`; final job failed, stage exit 101. The test passes did not make the job a pass.
+  - After terminal failure, removed only that field and initializer. Job 68 waited for I/O/memory PSI and then passed 4 LAN + 10 parent tests, 0 failed/ignored, followed by offline/locked warnings-denied all-target clippy; terminal passed, stage exit 0. Recorded wait 740.814 s and command stage 18.408 s, not inferred test-only timings.
+  - The job-68 client call timed out at 30 seconds after printing ID 68 while it was waiting. Querying that ID recovered progress and the final result; no duplicate submission or cancellation. No EAGAIN/client defect was observed in this session.
+  - Operator-restored cache headroom cleared historical job 56's disk-reserve blocker. The explicitly authorized existing experiment `target` remained a real directory, same observed inode 38268639; installed placement still only handles the Git root. Outputs were preserved in place with no cache-policy override. The separate source placement candidate was not edited/deployed by this agent.
+- Impact: the four previously uncompiled LAN tests are now validated locally, while production network confinement/transfer/execution remain unvalidated. Admission waits delayed results but preserved the intended gates. A populated nested output directory still needs explicit handling before ordinary future build use.
+- Suggested improvement: retain the known nested-workspace placement/preserved-output reporting follow-up; no pressure-threshold relaxation is suggested. A bounded client timeout should explicitly direct callers to query the printed job ID rather than resubmit.
+- Acceptance test for suggestion: in an isolated fixture, both direct Cargo and trusted-shell jobs in a fresh nested workspace use a distinct per-workspace cache target; an existing populated nested target is preserved with identical inode and logged as preserved. Separate checkouts must never share targets. Detaching/timing out during a real admission wait must leave exactly one job and provide its ID/query instruction; querying later must show its actual terminal result. Any deployment is a separate authorized idle-window gate.
+- Workaround requested/authorized: user explicitly authorized this regression using the existing per-worktree output after operator disk recovery. No gate bypass, cleanup/migration, environment override, runtime replacement, service restart or unrelated-job cancellation was used or requested.
+
+Evidence: retained `tasks logs 64 --json` / `tasks logs 68 --json`; full task summary and limitations in `PROTOCOL-LAN-VALIDATION-REPORT.md`. No private keys, credentials or full logs included here.
