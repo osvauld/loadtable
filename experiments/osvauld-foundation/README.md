@@ -104,10 +104,91 @@ The binary is at `experiments/osvauld-foundation/target/debug/lan-peer` (debug, 
 - **(c)** Use `nix-shell -p patchelf` to patch the interpreter and rpath, or `programs.nix-ld.enable` on an installed system. Both need nixpkgs from the network or the store.
 - **(d)** Build on NixOS from source with `nix-shell -p cargo rustc gcc`. This needs this source tree, the osvauld2 path dependencies and a populated crate cache, which the absolute `/home/abe/osvauld2` paths prevent.
 
-**What this does NOT prove.** No real two-machine run has been done yet (loopback only). There is no LAN confinement proof, no multihomed/VPN or IPv6 test, and no iroh-blobs transfer. The account is synthetic and shared from a public mnemonic. Revocations and allowlists live in memory and in command-line files only. No command execution, approval envelope, cancellation or attempt reconciliation exists. Attestation expiry still compares the issuer's clock with the receiver's. A debug binary is not a reproducible, versioned package.
+**What this does NOT prove.** No real two-machine run has been done yet (loopback only). There is no LAN confinement proof and no multihomed/VPN or IPv6 test. (Source transfer was added later in phase 2; see below.) The account is synthetic and shared from a public mnemonic. Revocations and allowlists live in memory and in command-line files only. No command execution, approval envelope, cancellation or attempt reconciliation exists. Attestation expiry still compares the issuer's clock with the receiver's. A debug binary is not a reproducible, versioned package.
 
-**iroh-blobs (next gate, offline check only, not integrated).**
+**iroh-blobs (pre-integration offline check; superseded by phase 2 below).**
 - Cached `iroh-blobs 0.103.1` requires `iroh ^1.0.0` and `iroh-base ^1.0.0`, which semver-match the iroh 1.3.0 in use. All of its direct dependencies are in the offline cache, including `rand 0.10`, `irpc 0.17`, `bao-tree 0.16`, `redb 4` (optional, for fs-store) and `iroh-tickets 1.0`.
 - A reference lockfile (`/home/abe/p2p_chat/Cargo.lock`, read only) resolves `iroh-blobs 0.103.1` together with `iroh 1.3.0`.
 - Cached `iroh-blobs 0.98.0` needs iroh 0.96 and is NOT compatible.
 - Not verified: a full offline resolve and build in this workspace. Its `fs-store` feature uses redb 4, while the parent `storage` crate uses redb 2; both versions would coexist.
+
+## Source transfer (phase 2) (`src/source.rs`, `tests/source_transfer.rs`)
+
+Owner `osv-blob-transfer`. Content-addressed transfer of an explicit source file list into a worker's iroh-blobs store, then an immutable checkout. It reuses the gate-4 transport unchanged: the same LAN-only iroh 1.3 endpoint (no relays, no discovery, explicit binds) and the same `Policy::admit` gate (account attestation + local allowlist, checked before any challenge). Nothing received is executed.
+
+```text
+lan-peer manifest    SOURCE_DIR --files-from0 LIST          # LIST: NUL-separated relative paths
+lan-peer serve       --bind IP:PORT --data-dir DIR [--allow FILE]... --store STORE_DIR --checkouts CHECKOUT_DIR
+lan-peer push-source --peer ENDPOINT_ID --addr IP:PORT --data-dir DIR --allow FILE \
+                     --source SOURCE_DIR --manifest MANIFEST.json --checkout NAME [--bind IP:PORT]
+```
+
+Design decisions:
+
+- **Hash format.** Each manifest file's `iroh_blobs_hash` is the lowercase hex of `BLAKE3(content)`. That is exactly the iroh-blobs raw-format (`BlobFormat::Raw`) blob hash. The test pins the published BLAKE3 values of `""` and `"abc"` and checks them against `iroh_blobs::Hash::new`. The top-level `iroh_blobs_hash` (a collection hash) stays `null`, because each file is its own raw blob.
+- **Who hashes.** Python's stdlib has no BLAKE3, and the `blake3` module is not installed on this host. `worker_source.py` therefore fills the field only when `import blake3` succeeds; otherwise it stays `null`, never a substitute. The Rust `lan-peer manifest` command is the hashing path, because Rust already links iroh-blobs and its BLAKE3, so the two cannot disagree. It emits the same schema and the same SHA-256 receipt framing as the Python capture. The test checks that the receipt and every file's size, exec bit and SHA-256 are equal to `worker_source.py`'s for the same files. Selection policy stays in Python: `manifest` applies only structural path safety, not Python's credential/output denylist. Use `worker_source.attach_iroh_blobs_hashes(python_manifest, rust_manifest)` to merge. It refuses any difference in schema, receipt, path, size, exec bit or SHA-256.
+- **Store layout.** Upstream `iroh_blobs::store::fs::FsStore` lives at the caller-given `--store` directory (its `blobs.db` plus data files). There is no default or home path. GC is off (the upstream default). Each received blob gets the named persistent tag `task-manager/source/<hex>`, so it survives restarts and repeated pushes stay idempotent. The "which of these do you have" query is `blobs().has(hash)` over the manifest's distinct hashes. The empty blob is always present in an iroh-blobs store, so it is never sent.
+- **Protocol** (new ALPN `task-manager/source/0`; `serve` only accepts it when `--store`/`--checkouts` are given, and the ping ALPN is unchanged):
+  1. `Hello{attestation}`, then admission (rejected before a challenge if unattested, wrong account or endpoint, or not allowlisted).
+  2. `Challenge{nonce}`.
+  3. `Request{body, sig}`. The body is JSON `{checkout, manifest}` and the signature is over `task-manager/source/request/v0`, the nonce, both endpoint ids and `SHA-256(body)`. The server then validates the manifest (paths, sort/duplicates, file/dir conflicts, hex hashes, one size per hash, receipt, limits) and checks that the checkout name is free.
+  4. `Missing{hashes}`, the sorted hex hashes the store lacks.
+  5. For each missing hash, in order, `Blob{hash, size}` followed by exactly `size` raw bytes. The server checks the hash is the next expected one and the size matches the manifest, BLAKE3-verifies the bytes and only then imports them. A mismatch answers `Rejected{HashMismatch}`, stops the stream and imports nothing for that blob.
+  6. The server materializes, then sends `Response{body, sig}` signed over the response domain, nonce, both ids and both body hashes. The client verifies that freshness.
+
+  Limits default to the Python CEILING: 20 000 files, 64 MiB per file, 512 MiB total, depth 32. The request frame is capped at 32 MiB and the session at 300 s.
+- **Materializer.**
+  - Validates the checkout name (`[A-Za-z0-9._-]{1,64}`, no leading dot) and the manifest.
+  - Refuses an existing name, including a symlink or dangling symlink.
+  - Fetches and BLAKE3-checks every blob from the store before touching disk.
+  - Creates a private `.tmp-NAME-RANDOM` directory and writes through `openat` descent with `O_NOFOLLOW|O_DIRECTORY`, creating files with `O_CREAT|O_EXCL|O_NOFOLLOW`.
+  - Sets modes 0755/0644 from the exec bit, then fsyncs.
+  - Re-reads every file to verify size, mode, BLAKE3 and SHA-256.
+  - Publishes with `renameat2(RENAME_NOREPLACE)`, so checkouts are immutable.
+  - On any failure it removes only its own temp directory.
+
+Validation (owner `osv-blob-transfer`, offline, `-j 2`, through the shared coordinator):
+
+- Job 122 (red): the iroh-blobs fs store calls `tokio::task::block_in_place` but does not enable tokio's `rt-multi-thread` feature itself. This experiment now enables it.
+- Job 123 (red): the new tests failed to compile because `source` did not exist.
+- Job 124: a test borrow error.
+- Job 125 (green, `cargo test --offline -j 2`): the first offline resolve, which updated `Cargo.lock` to `iroh-blobs 0.103.1`. It passed 19 tests: `lan_identity` 4, `lan_peer_process` 1, `parent_contracts` 10 and `source_transfer` 4, with 0 failed and 0 ignored.
+- Job 128 (`sh -c 'cargo test --offline --locked -j 2 && cargo clippy --offline --locked -j 2 --all-targets -- -D warnings'`) passed the same 19 tests, and clippy was clean.
+- Python: job 126 was red (3 new tests erroring, before implementation), and job 127 passed all 31 `tests/test_linux_worker_contracts.py` tests.
+
+`tests/source_transfer.rs` covers:
+
+- **Two-process loopback** (`serve` plus separate `init`/`manifest`/`push-source` processes, each with its own installation):
+  - The first push sends every distinct non-empty blob (3 of 5 files, with one duplicate and one empty).
+  - Editing one file sends exactly one blob.
+  - Renames and moves send zero blobs.
+  - Checkout trees, contents and modes match the source.
+  - Pushing to an existing checkout name is refused with `Exists`.
+  - A same-account but non-allowlisted peer is refused with `NotAllowlisted` before any transfer.
+  - A `../` manifest path is refused with `UnsafePath` before any blob is requested.
+  - No temp directories remain.
+- **In process:**
+  - A tampered blob (correct claimed hash, flipped byte) is rejected with `HashMismatch`. Neither blob is stored and no checkout is created; an honest retry then succeeds.
+  - The materializer refuses `..`, absolute, `.`, empty, `//`, trailing slash, backslash, NUL and newline paths, duplicates, file/dir conflicts, unsafe checkout names, a symlinked destination (nothing is written through it), a wrong SHA-256 (caught by post-write verification) and an absent blob.
+  - The source reader refuses symlinked files and directories and escapes.
+
+Limitations (NOT proven):
+
+- Loopback only. There is no second machine, no LAN confinement proof and no interrupted or resumed transfer.
+- Whole blobs are buffered in memory: up to 64 MiB per blob, and the materializer holds all checkout contents at once. That is fine for bounded synthetic trees, not for large repositories.
+- There is no bao/verified-range streaming. The iroh-blobs wire protocol (`get`/`push` with incremental verification and resumption) is not used, only its store and hash. Switching to it over a second stream of the same authenticated connection is the natural next step.
+- The manifest travels as a JSON byte array, about 4x inflated, hence the 32 MiB frame cap.
+- There are no store quotas, eviction, GC policy or per-peer accounting. Any allowlisted peer can fill the store up to the per-session limits, repeatedly.
+- Checkout cleanup and retention are not implemented. Failed sessions can leave verified, tagged blobs in the store (content-addressed, so reusable).
+- Temp-directory cleanup is path-based and best effort. The checkout root itself is opened following symlinks (caller's choice), and a hostile same-UID writer is out of scope.
+- The `blake3` Python path is exercised only with a test double, because the module is not installed. The existing Python test that asserts `null` hashes would need adjusting on a host that has `blake3`.
+- The account is still the synthetic public-mnemonic account, and allowlists and revocations are still files plus memory.
+
+Next steps (out of scope here):
+
+- **Execution envelopes.** A signed approval that binds coordinator/worker endpoint, attempt id, manifest receipt and checkout, argv/cwd contract, resource limits and output policy. Account membership never authorizes execution.
+- **Remote job submission** into the worker's existing native admission and SQLite ledger, with durable attempt reconciliation (no replay or failover after disconnect).
+- **Log streaming** with sequence numbers.
+- **Artifact return** as content-addressed blobs in the reverse direction.
+- **Cancellation semantics** across reconnects.
+- **Transfer improvements:** bao streaming/resume and store quotas/GC.

@@ -1,7 +1,9 @@
-//! Experimental LAN identity/transport helpers (handover gates 3–4). NOT a worker: no blob
-//! transfer, no command execution, no persistence of revocations/allowlists. Reuses parent
-//! `identity`/`vault`/`courier` APIs unchanged and upstream iroh 1.3 configured without
-//! `presets::N0`, relays or address lookup.
+//! Experimental LAN identity/transport helpers (handover gates 3–4) and phase-2 content-addressed
+//! source transfer ([`source`]). NOT a worker: no command execution, no persistence of
+//! revocations/allowlists. Reuses parent `identity`/`vault`/`courier` APIs unchanged and upstream
+//! iroh 1.3 configured without `presets::N0`, relays or address lookup.
+
+pub mod source;
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -297,6 +299,9 @@ pub fn verify_sig(key: &PublicKey, message: &[u8], sig: &[u8]) -> bool {
     key.verify(message, &Signature::from_bytes(&sig)).is_ok()
 }
 
+/// Length-prefixed JSON frames. `Missing` and `Blob` are used only on [`source::SOURCE_ALPN`]:
+/// `Missing` lists the lowercase-hex iroh-blobs hashes the receiver's store lacks, in the exact
+/// order it expects them; `Blob` heads exactly `size` raw bytes that follow on the stream.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Frame {
     Hello { attestation: Option<Token> },
@@ -304,6 +309,8 @@ pub enum Frame {
     Request { body: Vec<u8>, sig: Vec<u8> },
     Response { body: Vec<u8>, sig: Vec<u8> },
     Rejected { reason: String },
+    Missing { hashes: Vec<String> },
+    Blob { hash: String, size: u64 },
 }
 
 pub async fn write_frame(send: &mut SendStream, frame: &Frame) -> Result<(), String> {
@@ -315,10 +322,15 @@ pub async fn write_frame(send: &mut SendStream, frame: &Frame) -> Result<(), Str
 }
 
 pub async fn read_frame(recv: &mut RecvStream) -> Result<Frame, String> {
+    read_frame_limited(recv, MAX_FRAME).await
+}
+
+/// [`read_frame`] with an explicit bound (the source request carries a whole manifest).
+pub async fn read_frame_limited(recv: &mut RecvStream, max: usize) -> Result<Frame, String> {
     let mut len = [0u8; 4];
     recv.read_exact(&mut len).await.map_err(|e| e.to_string())?;
     let len = u32::from_be_bytes(len) as usize;
-    if len > MAX_FRAME {
+    if len > max {
         return Err("frame too large".into());
     }
     let mut buf = vec![0u8; len];

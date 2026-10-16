@@ -3,12 +3,21 @@
 //! SYNTHETIC ONLY. Both sides recover one account from a PUBLIC BIP39 test vector, so the shared
 //! DID proves nothing about real ownership and the sealed key at rest protects nothing. Each
 //! installation still generates its own random iroh transport key. No relays, no address
-//! lookup, no portmapper, no unspecified bind, no command execution, no blob transfer.
+//! lookup, no portmapper, no unspecified bind, no command execution.
+//!
+//! Phase 2 adds content-addressed source transfer (see `source.rs`): `manifest` hashes an
+//! explicit file list (BLAKE3 = iroh-blobs raw hash), `push-source` sends only the blobs the
+//! server's store lacks, and `serve --store --checkouts` imports them and materializes an
+//! immutable checkout. No execution of anything received.
 //!
 //! ```text
-//! lan-peer init    --data-dir DIR
-//! lan-peer serve   --bind IP:PORT --data-dir DIR [--allow FILE]... [--max-connections N]
-//! lan-peer connect --peer ENDPOINT_ID --addr IP:PORT --data-dir DIR --allow FILE [--bind IP:PORT]
+//! lan-peer init        --data-dir DIR
+//! lan-peer serve       --bind IP:PORT --data-dir DIR [--allow FILE]... [--max-connections N]
+//!                      [--store DIR --checkouts DIR]
+//! lan-peer connect     --peer ENDPOINT_ID --addr IP:PORT --data-dir DIR --allow FILE [--bind IP:PORT]
+//! lan-peer manifest    SOURCE_DIR --files-from0 FILE
+//! lan-peer push-source --peer ENDPOINT_ID --addr IP:PORT --data-dir DIR --allow FILE
+//!                      --source DIR --manifest FILE --checkout NAME [--bind IP:PORT]
 //! ```
 //! Exit codes: 0 ok, 2 usage/config error, 3 rejected/verification failure, 4 transport/timeout.
 
@@ -19,7 +28,11 @@ use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
 use iroh::{EndpointAddr, PublicKey, SecretKey};
+use iroh_blobs::store::fs::FsStore;
 use serde_json::json;
+use task_manager_osvauld_foundation::source::{
+    self, Limits, Manifest, PushMode, SOURCE_ALPN, SourceOutcome,
+};
 use task_manager_osvauld_foundation::{
     ALPN, AttestationFile, LanReport, Mode, Outcome, Policy, accept_one, attest_endpoint, handle,
     lan_endpoint, load_or_create_transport_key, now_secs, open_synthetic_installation, request,
@@ -31,12 +44,18 @@ const DAY: u64 = 86_400;
 const ATTESTATION_TTL: u64 = 7 * DAY;
 const CONNECT_BUDGET: Duration = Duration::from_secs(30);
 const HANDLE_BUDGET: Duration = Duration::from_secs(30);
+/// Whole source session (manifest, missing blobs, materialize). Bounded, not resumable.
+const SOURCE_BUDGET: Duration = Duration::from_secs(300);
 const CLOSE_BUDGET: Duration = Duration::from_secs(5);
 const PING: &[u8] = b"lan-peer synthetic ping; not a command";
 const USAGE: &str = "usage:
-  lan-peer init    --data-dir DIR
-  lan-peer serve   --bind IP:PORT --data-dir DIR [--allow FILE]... [--max-connections N]
-  lan-peer connect --peer ENDPOINT_ID --addr IP:PORT --data-dir DIR --allow FILE [--bind IP:PORT]
+  lan-peer init        --data-dir DIR
+  lan-peer serve       --bind IP:PORT --data-dir DIR [--allow FILE]... [--max-connections N]
+                       [--store DIR --checkouts DIR]
+  lan-peer connect     --peer ENDPOINT_ID --addr IP:PORT --data-dir DIR --allow FILE [--bind IP:PORT]
+  lan-peer manifest    SOURCE_DIR --files-from0 FILE
+  lan-peer push-source --peer ENDPOINT_ID --addr IP:PORT --data-dir DIR --allow FILE
+                       --source DIR --manifest FILE --checkout NAME [--bind IP:PORT]
 SYNTHETIC test account only (public test mnemonic). No relays, discovery or 0.0.0.0 binds.";
 
 enum Fail {
@@ -180,7 +199,14 @@ fn emit(value: &serde_json::Value) {
 }
 
 async fn cmd_serve(args: &Args) -> Result<serde_json::Value, Fail> {
-    args.check_known(&["--bind", "--data-dir", "--allow", "--max-connections"])?;
+    args.check_known(&[
+        "--bind",
+        "--data-dir",
+        "--allow",
+        "--max-connections",
+        "--store",
+        "--checkouts",
+    ])?;
     let bind = parse_bind(&args.required("--bind")?)?;
     let max = match args.one("--max-connections")? {
         Some(n) => Some(
@@ -205,7 +231,27 @@ async fn cmd_serve(args: &Args) -> Result<serde_json::Value, Fail> {
         allowed.push(endpoint.to_string());
     }
 
-    let ep = lan_endpoint(inst.key.clone(), bind, vec![ALPN.to_vec()]).await?;
+    // Source transfer is opt-in: both a caller-given store dir and a checkout root.
+    let source = match (args.one("--store")?, args.one("--checkouts")?) {
+        (None, None) => None,
+        (Some(store), Some(checkouts)) => {
+            let checkouts = PathBuf::from(checkouts);
+            std::fs::create_dir_all(&checkouts)
+                .map_err(|e| format!("--checkouts {}: {e}", checkouts.display()))?;
+            std::fs::create_dir_all(&store).map_err(|e| format!("--store {store}: {e}"))?;
+            let store = FsStore::load(&store)
+                .await
+                .map_err(|e| format!("--store {store}: {e}"))?;
+            Some((store, checkouts))
+        }
+        _ => return Err(Fail::Usage("--store and --checkouts go together".into())),
+    };
+    let mut alpns = vec![ALPN.to_vec()];
+    if source.is_some() {
+        alpns.push(SOURCE_ALPN.to_vec());
+    }
+
+    let ep = lan_endpoint(inst.key.clone(), bind, alpns).await?;
     let lan = LanReport::of(&ep)?;
     if !lan.is_relay_and_lookup_free() {
         return Err(Fail::Usage(format!("endpoint is not LAN-only: {lan:?}")));
@@ -215,6 +261,7 @@ async fn cmd_serve(args: &Args) -> Result<serde_json::Value, Fail> {
     ready["addr"] = json!(lan.bound_sockets.first());
     ready["alpn"] = json!(String::from_utf8_lossy(ALPN));
     ready["allowed_endpoints"] = json!(allowed);
+    ready["source_transfer"] = json!(source.is_some());
     ready["lan"] = json!(lan);
     emit(&ready);
 
@@ -232,6 +279,38 @@ async fn cmd_serve(args: &Args) -> Result<serde_json::Value, Fail> {
         };
         let remote = conn.remote_id().to_string();
         policy.now_s = now_secs();
+        if conn.alpn() == SOURCE_ALPN
+            && let Some((store, checkouts)) = &source
+        {
+            let limits = Limits::default();
+            let session = source::handle_source(&ep, conn, &policy, store, checkouts, &limits);
+            let event = match timeout(SOURCE_BUDGET, session).await {
+                Ok(Ok(SourceOutcome::Materialized {
+                    checkout,
+                    files,
+                    blobs_requested,
+                    blobs_received,
+                    bytes_received,
+                })) => json!({
+                    "event": "source_materialized",
+                    "remote": remote,
+                    "checkout": checkout,
+                    "files": files,
+                    "blobs_requested": blobs_requested,
+                    "blobs_received": blobs_received,
+                    "bytes_received": bytes_received,
+                }),
+                Ok(Ok(SourceOutcome::Rejected(reason))) => {
+                    json!({"event": "rejected", "alpn": "source", "remote": remote, "reason": reason})
+                }
+                Ok(Err(error)) => {
+                    json!({"event": "error", "alpn": "source", "remote": remote, "error": error})
+                }
+                Err(_) => json!({"event": "timeout", "alpn": "source", "remote": remote}),
+            };
+            emit(&event);
+            continue;
+        }
         let event = match timeout(HANDLE_BUDGET, handle(&ep, conn, &policy, &handled)).await {
             Ok(Ok(Outcome::Handled)) => json!({"event": "handled", "remote": remote}),
             Ok(Ok(Outcome::Rejected(r))) => {
@@ -243,11 +322,23 @@ async fn cmd_serve(args: &Args) -> Result<serde_json::Value, Fail> {
         emit(&event);
     }
     let _ = timeout(CLOSE_BUDGET, ep.close()).await;
+    if let Some((store, _)) = source {
+        let _ = timeout(CLOSE_BUDGET, store.shutdown()).await;
+    }
     Ok(json!({"event": "stopped", "connections": seen}))
 }
 
-async fn cmd_connect(args: &Args) -> Result<serde_json::Value, Fail> {
-    args.check_known(&["--peer", "--addr", "--data-dir", "--allow", "--bind"])?;
+/// Shared requester setup: peer id, address, explicit bind, installation, and the requester-side
+/// check that `--allow` attests exactly `--peer` for our account (before dialing).
+struct Dial {
+    peer: PublicKey,
+    addr: SocketAddr,
+    bind: SocketAddr,
+    inst: Installation,
+    base: serde_json::Value,
+}
+
+fn dial_setup(args: &Args) -> Result<Dial, Fail> {
     let peer_text = args.required("--peer")?;
     let peer: PublicKey = peer_text
         .parse()
@@ -285,6 +376,24 @@ async fn cmd_connect(args: &Args) -> Result<serde_json::Value, Fail> {
         v["reason"] = json!("EndpointMismatch: --allow file attests a different endpoint");
         return Err(Fail::Rejected(v));
     }
+    Ok(Dial {
+        peer,
+        addr,
+        bind,
+        inst,
+        base,
+    })
+}
+
+async fn cmd_connect(args: &Args) -> Result<serde_json::Value, Fail> {
+    args.check_known(&["--peer", "--addr", "--data-dir", "--allow", "--bind"])?;
+    let Dial {
+        peer,
+        addr,
+        bind,
+        inst,
+        base,
+    } = dial_setup(args)?;
 
     let ep = lan_endpoint(inst.key.clone(), bind, vec![]).await?;
     let lan = LanReport::of(&ep)?;
@@ -345,6 +454,111 @@ async fn cmd_connect(args: &Args) -> Result<serde_json::Value, Fail> {
     result
 }
 
+/// `manifest SOURCE_DIR --files-from0 FILE`: prints the manifest (one JSON line) with BLAKE3
+/// iroh-blobs hashes. Structural path safety only; selection policy is the Python capture's.
+fn cmd_manifest(args: &[String]) -> Result<serde_json::Value, Fail> {
+    let (root, rest) = args
+        .split_first()
+        .ok_or_else(|| "manifest needs SOURCE_DIR".to_string())?;
+    let rest = Args(rest.to_vec());
+    rest.check_known(&["--files-from0"])?;
+    let list = rest.required("--files-from0")?;
+    let bytes = std::fs::read(&list).map_err(|e| format!("--files-from0 {list}: {e}"))?;
+    let paths = source::parse_files0(&bytes).map_err(|e| e.to_string())?;
+    let manifest = source::manifest_from_files(Path::new(root), &paths, &Limits::default())
+        .map_err(|e| e.to_string())?;
+    serde_json::to_value(manifest).map_err(|e| Fail::Usage(e.to_string()))
+}
+
+async fn cmd_push_source(args: &Args) -> Result<serde_json::Value, Fail> {
+    args.check_known(&[
+        "--peer",
+        "--addr",
+        "--data-dir",
+        "--allow",
+        "--bind",
+        "--source",
+        "--manifest",
+        "--checkout",
+    ])?;
+    let source_dir = PathBuf::from(args.required("--source")?);
+    let manifest_path = args.required("--manifest")?;
+    let checkout = args.required("--checkout")?;
+    let manifest: Manifest = serde_json::from_slice(
+        &std::fs::read(&manifest_path).map_err(|e| format!("--manifest {manifest_path}: {e}"))?,
+    )
+    .map_err(|e| format!("--manifest {manifest_path}: {e}"))?;
+    let Dial {
+        peer,
+        addr,
+        bind,
+        inst,
+        base,
+    } = dial_setup(args)?;
+
+    let ep = lan_endpoint(inst.key.clone(), bind, vec![]).await?;
+    let to = EndpointAddr::new(peer).with_ip_addr(addr);
+    let attempt = timeout(
+        SOURCE_BUDGET,
+        source::push_source(
+            &ep,
+            to,
+            Some(inst.attestation.attestation.clone()),
+            &source_dir,
+            &manifest,
+            &checkout,
+            PushMode::Honest,
+        ),
+    )
+    .await;
+    let mut out = base;
+    out["checkout_name"] = json!(checkout);
+    let result = match attempt {
+        Err(_) => {
+            out["status"] = json!("error");
+            out["stage"] = json!("timeout");
+            Err(Fail::Transport(out))
+        }
+        Ok(Err(error)) if error.starts_with("rejected:") => {
+            out["status"] = json!("rejected");
+            out["stage"] = json!("receiver");
+            out["reason"] = json!(error.trim_start_matches("rejected: "));
+            Err(Fail::Rejected(out))
+        }
+        Ok(Err(error)) if error.starts_with("source:") => {
+            out["status"] = json!("error");
+            out["stage"] = json!("source");
+            out["error"] = json!(error);
+            Err(Fail::Rejected(out))
+        }
+        Ok(Err(error)) => {
+            out["status"] = json!("error");
+            out["stage"] = json!("transport");
+            out["error"] = json!(error);
+            Err(Fail::Transport(out))
+        }
+        Ok(Ok(report)) => {
+            out["blobs_missing"] = json!(report.missing);
+            out["blobs_sent"] = json!(report.blobs_sent);
+            out["bytes_sent"] = json!(report.bytes_sent);
+            out["files"] = json!(manifest.files.len());
+            out["receiver"] = serde_json::from_slice(&report.response_body).unwrap_or_default();
+            if report.response_fresh {
+                out["status"] = json!("ok");
+                out["response_fresh"] = json!(true);
+                Ok(out)
+            } else {
+                out["status"] = json!("rejected");
+                out["stage"] = json!("response");
+                out["reason"] = json!("response not bound to this session");
+                Err(Fail::Rejected(out))
+            }
+        }
+    };
+    let _ = timeout(CLOSE_BUDGET, ep.close()).await;
+    result
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let mut argv: Vec<String> = std::env::args().skip(1).collect();
@@ -353,13 +567,21 @@ async fn main() -> ExitCode {
         return ExitCode::from(if argv.is_empty() { 2 } else { 0 });
     }
     let command = argv.remove(0);
+    if command == "manifest" {
+        return finish(cmd_manifest(&argv));
+    }
     let args = Args(argv);
     let result = match command.as_str() {
         "init" => cmd_init(&args),
+        "push-source" => cmd_push_source(&args).await,
         "serve" => cmd_serve(&args).await,
         "connect" => cmd_connect(&args).await,
         other => Err(Fail::Usage(format!("unknown command {other}"))),
     };
+    finish(result)
+}
+
+fn finish(result: Result<serde_json::Value, Fail>) -> ExitCode {
     match result {
         Ok(value) => {
             emit(&value);

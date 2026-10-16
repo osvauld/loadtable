@@ -25,11 +25,18 @@ courier = { path = "/home/abe/osvauld2/courier" }
 # Same iroh major as the parent's voice POC; configured without presets::N0, relays or
 # address lookup (see src/lib.rs).
 iroh = "1.3"
-tokio = { version = "1", features = ["macros", "rt", "time"] }
+# rt-multi-thread: iroh-blobs fs-store uses block_in_place but does not enable it itself.
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 rand = "0.8"
+# Phase 2 source transfer: content-addressed file-backed blob store (raw BLAKE3 hashes).
+# 0.103.x is the line that depends on iroh ^1.0; 0.98 targets iroh 0.96 and is incompatible.
+# Default features off: only the fs store is used, no irpc/noq RPC.
+iroh-blobs = { version = "=0.103.1", default-features = false, features = ["fs-store"] }
+# no-follow openat/mkdirat/renameat2 for the materializer (Linux only).
+libc = "0.2"
 
 [dev-dependencies]
 loro = "1.13.9"

@@ -520,5 +520,84 @@ class SourceTests(unittest.TestCase):
                 self.capture()
 
 
+
+class SourceIrohBlobsHashTests(unittest.TestCase):
+    """Phase 2: per-file iroh_blobs_hash = hex BLAKE3(content), never a substitute digest."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='osv-blob-source-')
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        (self.root / 'src').mkdir()
+        (self.root / 'src/main.rs').write_bytes(b'synthetic main\n')
+        (self.root / 'docs.txt').write_bytes(b'abc')
+        self.paths = ['src/main.rs', 'docs.txt']
+
+    def capture(self):
+        return source.capture(self.root, self.paths)
+
+    def test_hash_is_null_without_blake3_module(self):
+        with mock.patch.object(source, '_blake3', None):
+            manifest = self.capture().manifest()
+            self.assertIsNone(source.iroh_blobs_hash(b'abc'))
+        self.assertTrue(all(f['iroh_blobs_hash'] is None for f in manifest['files']))
+
+    def test_hash_comes_from_blake3_module_and_never_changes_receipt(self):
+        seen = []
+
+        class FakeDigest:
+            def __init__(self, content):
+                seen.append(content)
+
+            def hexdigest(self):
+                return 'ab' * 32
+
+        fake = mock.Mock(blake3=FakeDigest)
+        with mock.patch.object(source, '_blake3', None):
+            plain = self.capture()
+        with mock.patch.object(source, '_blake3', fake):
+            hashed = self.capture()
+            manifest = hashed.manifest()
+        self.assertEqual(plain.receipt, hashed.receipt)
+        self.assertEqual([f['iroh_blobs_hash'] for f in manifest['files']], ['ab' * 32] * 2)
+        self.assertIn(b'abc', seen)
+        self.assertIsNone(manifest['iroh_blobs_hash'])
+        bad = mock.Mock(blake3=lambda content: mock.Mock(hexdigest=lambda: 'XYZ'))
+        with mock.patch.object(source, '_blake3', bad):
+            with self.assertRaisesRegex(ValueError, 'BLAKE3'):
+                self.capture().manifest()
+
+    def hashed_copy(self, manifest):
+        other = json.loads(json.dumps(manifest))
+        for index, entry in enumerate(other['files']):
+            entry['iroh_blobs_hash'] = f'{index:064x}'
+        return other
+
+    def test_attach_hashes_from_rust_manifest_requires_identical_capture(self):
+        with mock.patch.object(source, '_blake3', None):
+            manifest = self.capture().manifest()
+        rust = self.hashed_copy(manifest)
+        merged = source.attach_iroh_blobs_hashes(manifest, rust)
+        self.assertEqual([f['iroh_blobs_hash'] for f in merged['files']],
+                         [f'{0:064x}', f'{1:064x}'])
+        self.assertEqual(merged['receipt'], manifest['receipt'])
+        self.assertTrue(all(f['iroh_blobs_hash'] is None for f in manifest['files']),
+                        'input not mutated')
+        for mutate in (
+                lambda m: m.__setitem__('receipt', '0' * 64),
+                lambda m: m['files'][0].__setitem__('sha256', '0' * 64),
+                lambda m: m['files'][0].__setitem__('size', 999),
+                lambda m: m['files'][0].__setitem__('executable', True),
+                lambda m: m['files'][0].__setitem__('path', 'other.rs'),
+                lambda m: m['files'].pop(),
+                lambda m: m['files'][0].__setitem__('iroh_blobs_hash', 'A' * 64),
+                lambda m: m['files'][0].__setitem__('iroh_blobs_hash', None),
+                lambda m: m.__setitem__('schema', 'other')):
+            other = self.hashed_copy(manifest)
+            mutate(other)
+            with self.assertRaises(ValueError):
+                source.attach_iroh_blobs_hashes(manifest, other)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -12,6 +12,11 @@ import os
 from pathlib import Path
 import stat
 
+try:  # Optional third-party module; the stdlib has no BLAKE3. Never substituted.
+    import blake3 as _blake3
+except ImportError:
+    _blake3 = None
+
 SCHEMA = 'task-manager-local-source-manifest-v1'
 DOMAIN = SCHEMA.encode('ascii') + b'\0'
 
@@ -127,6 +132,26 @@ def _marked_output(parent_fd, name):
     return False
 
 
+def _hex64(value):
+    return (isinstance(value, str) and len(value) == 64
+            and all(c in '0123456789abcdef' for c in value))
+
+
+def iroh_blobs_hash(content):
+    """Lowercase hex BLAKE3(content): the iroh-blobs raw blob hash.
+
+    Returns None when the optional `blake3` module is unavailable; callers then
+    use `lan-peer manifest` (Rust) and attach_iroh_blobs_hashes(). Never a
+    SHA-256 or other substitute.
+    """
+    if _blake3 is None:
+        return None
+    value = _blake3.blake3(content).hexdigest()
+    if not _hex64(value):
+        raise ValueError('BLAKE3 module returned an unexpected digest format')
+    return value
+
+
 def _identity(meta):
     return (meta.st_dev, meta.st_ino, meta.st_mode, meta.st_nlink,
             meta.st_size, meta.st_mtime_ns, meta.st_ctime_ns)
@@ -143,11 +168,11 @@ class CapturedFile:
         return hashlib.sha256(self.content).hexdigest()
 
     def entry(self):
-        # iroh-blobs addresses content by BLAKE3, not SHA-256; a future
-        # transport fills iroh_blobs_hash. It is never part of the receipt.
+        # iroh-blobs addresses content by BLAKE3, not SHA-256. Filled only
+        # when the blake3 module exists (else null); never part of the receipt.
         return {'path': self.path, 'size': len(self.content),
                 'executable': self.executable, 'sha256': self.sha256,
-                'iroh_blobs_hash': None}
+                'iroh_blobs_hash': iroh_blobs_hash(self.content)}
 
 
 def open_parent(root_fd, parts):
@@ -302,6 +327,33 @@ def diff(previous, current):
     return {'added': sorted(new.keys() - old.keys()),
             'removed': sorted(old.keys() - new.keys()),
             'changed': sorted(p for p in old.keys() & new.keys() if old[p] != new[p])}
+
+
+def attach_iroh_blobs_hashes(manifest, hashed):
+    """Return a copy of `manifest` with per-file hashes from `hashed`.
+
+    `hashed` is typically `lan-peer manifest` output for the same explicit file
+    list. Schema, receipt and every file's path/size/executable/sha256 must be
+    identical, so BLAKE3 values can only describe the bytes this capture holds.
+    The inputs are not mutated; the top-level collection hash stays null.
+    """
+    keys = ('path', 'size', 'executable', 'sha256')
+    if (not isinstance(manifest, dict) or not isinstance(hashed, dict)
+            or manifest.get('schema') != SCHEMA or hashed.get('schema') != SCHEMA
+            or manifest.get('hash_algorithm') != hashed.get('hash_algorithm')
+            or manifest.get('receipt') != hashed.get('receipt')):
+        raise ValueError('manifests differ in schema or receipt')
+    files, others = manifest.get('files'), hashed.get('files')
+    if not isinstance(files, list) or not isinstance(others, list) or len(files) != len(others):
+        raise ValueError('manifests list different files')
+    merged = json.loads(json.dumps(manifest))
+    for entry, other in zip(merged['files'], others):
+        if not isinstance(other, dict) or any(entry.get(k) != other.get(k) for k in keys):
+            raise ValueError('manifests describe different file contents')
+        if not _hex64(other.get('iroh_blobs_hash')):
+            raise ValueError('iroh_blobs_hash must be 64 lowercase hex (BLAKE3)')
+        entry['iroh_blobs_hash'] = other['iroh_blobs_hash']
+    return merged
 
 
 def main():
