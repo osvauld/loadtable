@@ -39,6 +39,11 @@ impl DiskSpace {
 pub fn disk_space(path: &Path) -> Result<DiskSpace> {
     cache_space_with(path, &crate::admission::thresholds()?)
 }
+/// Free space at `path` without a reserve (`reserve_bytes` 0); callers apply their
+/// own floor (offload admission).
+pub fn disk_space_raw(path: &Path) -> Result<DiskSpace> {
+    measure(path, 0)
+}
 pub fn cache_space_with(
     path: &Path,
     thresholds: &crate::admission::Thresholds,

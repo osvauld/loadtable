@@ -1,7 +1,9 @@
 //! One binary for everyone: agents use the subcommands, people open the window. Any
 //! command that needs the queue starts the background daemon if it is not running.
+mod alerts;
 mod daemon;
 mod display;
+mod doctor;
 mod follow;
 mod log_view;
 mod mcp;
@@ -55,6 +57,10 @@ const USAGE: &str = "usage: tasks [ui [--fixtures DIR]]  # DIR: cluster snapshot
          # build phone APK, install -r, launch; default: step progress, then the last 40 log lines
        tasks status [--json]  # this machine: CPU/memory/PSI, slots, jobs with live use, progress, ETA
        tasks tmp-usage [--json] [PATH...]  # read-only bounded /tmp+cache inventory; never deletes
+       tasks alerts [--json] [--all] [--severity info|warn|critical] [--node NAME]
+         # health alerts of this machine and its peers, disks, missing capabilities
+       tasks alerts clear NODE [CAPABILITY]  # drop a node's missing-capability mark(s)
+       tasks doctor [--json]  # node-setup checks with fix lines; exit 1 when this machine is unhealthy
        tasks record SUITE CONFIG STAGE SECONDS
        tasks daemon
        tasks mcp [--no-start-daemon]  # MCP server for agents (stdio JSON-RPC)";
@@ -146,6 +152,13 @@ fn run() -> Result<()> {
             return status::run(args.len() == 2);
         }
         Some("tmp-usage") => return tinline_task_manager::tmp_usage::cli(&args[1..]),
+        Some("alerts") => return alerts::run(&args[1..]),
+        Some("doctor") => {
+            if !doctor::run(&args[1..])? {
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
         Some("__phone-install") if args.len() == 3 => {
             return tinline_task_manager::device::install_and_launch(&args[1], Path::new(&args[2]));
         }
@@ -426,7 +439,9 @@ fn anywhere_spec(
     use tinline_task_manager::placement;
     let socket = state_dir().join("taskd.sock");
     ensure_daemon(&socket)?;
-    let inputs = placement::gather(&socket, Duration::from_secs(15))?;
+    let mut inputs = placement::gather(&socket, Duration::from_secs(15))?;
+    let cwd = std::env::current_dir().ok();
+    placement::retain_needed(&mut inputs.peers, &recipe.argv, cwd.as_deref());
     let class = place_class(&recipe.resource);
     let decision =
         placement::decide_with(&recipe.argv, &class, &placement::Request::Anywhere, &inputs)?;
@@ -484,7 +499,9 @@ fn place_command(args: &[String]) -> Result<()> {
     };
     let socket = state_dir().join("taskd.sock");
     ensure_daemon(&socket)?;
-    let inputs = placement::gather(&socket, Duration::from_secs(15))?;
+    let mut inputs = placement::gather(&socket, Duration::from_secs(15))?;
+    let cwd = std::env::current_dir().ok();
+    placement::retain_needed(&mut inputs.peers, &argv, cwd.as_deref());
     let decision = placement::decide_with(&argv, &class, &request, &inputs)?;
     if parsed.json {
         println!("{}", serde_json::to_string_pretty(&decision)?);

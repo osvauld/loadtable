@@ -134,19 +134,80 @@ fn offload_memory_floor_never_exceeds_the_configured_reserve() {
     assert_eq!(compiling().blocker_for(&t, &Kind::Offload), None);
 }
 
-#[test]
-fn offload_waits_for_the_cache_disk_reserve() {
-    let space = |available_bytes| crate::cache::DiskSpace {
+fn cache_space(available_bytes: u64) -> Result<crate::cache::DiskSpace> {
+    Ok(crate::cache::DiskSpace {
         path: "/synthetic/build-cache".into(),
         available_bytes,
-        reserve_bytes: 20 * GIB,
+        reserve_bytes: 0,
+    })
+}
+fn state_space(available_bytes: u64) -> Result<crate::cache::DiskSpace> {
+    Ok(crate::cache::DiskSpace {
+        path: "/synthetic/state".into(),
+        available_bytes,
+        reserve_bytes: crate::cache::MIN_STATE_FREE_BYTES,
+    })
+}
+
+#[test]
+fn offload_job_is_admitted_below_the_cache_reserve_but_above_the_fetch_floor() {
+    let t = Thresholds::default();
+    assert_eq!(t.min_cache_free_bytes, 20 * GIB);
+    let floor = OFFLOAD_FETCH_FLOOR + t.min_state_free_bytes;
+    assert_eq!(OFFLOAD_FETCH_FLOOR, 2 * GIB);
+    // 10 GiB free: a local compile job would wait (20 GiB reserve); offload does not.
+    for fetches in [true, false] {
+        assert_eq!(
+            offload_disk_blocker(fetches, cache_space(10 * GIB), state_space(GIB), &t),
+            None,
+            "fetches={fetches}"
+        );
+    }
+    assert_eq!(
+        offload_disk_blocker(true, cache_space(floor), state_space(GIB), &t),
+        None
+    );
+}
+
+#[test]
+fn fetching_offload_job_waits_below_the_floor_non_fetching_only_on_the_state_reserve() {
+    let t = Thresholds::default();
+    let floor = OFFLOAD_FETCH_FLOOR + t.min_state_free_bytes;
+    let text = offload_disk_blocker(true, cache_space(floor - 1), state_space(GIB), &t).unwrap();
+    assert!(text.contains("offload fetch floor"), "{text}");
+    assert!(text.contains("/synthetic/build-cache"), "{text}");
+    assert!(text.contains("2.2 GiB reserve"), "{text}");
+    // Without a fetch the cache disk is irrelevant, even when full or unmeasurable.
+    assert_eq!(
+        offload_disk_blocker(false, cache_space(0), state_space(GIB), &t),
+        None
+    );
+    assert_eq!(
+        offload_disk_blocker(false, Err("HOME is required".into()), state_space(GIB), &t),
+        None
+    );
+    // The state reserve always applies; unmeasurable fails closed.
+    let text = offload_disk_blocker(false, cache_space(0), state_space(1), &t).unwrap();
+    assert!(text.contains("state disk below reserve"), "{text}");
+    let text = offload_disk_blocker(false, cache_space(0), Err("gone".into()), &t).unwrap();
+    assert!(text.contains("state disk not measured"), "{text}");
+    let text =
+        offload_disk_blocker(true, Err("HOME is required".into()), state_space(GIB), &t).unwrap();
+    assert!(text.contains("cache disk not measured"), "{text}");
+}
+
+#[test]
+fn local_compile_disk_gate_still_needs_the_full_cache_reserve() {
+    let t = Thresholds::default();
+    let low = crate::cache::DiskSpace {
+        path: "/synthetic/build-cache".into(),
+        available_bytes: 10 * GIB,
+        reserve_bytes: t.min_cache_free_bytes,
     };
-    assert_eq!(offload_disk_blocker(Ok(space(20 * GIB))), None);
-    let text = offload_disk_blocker(Ok(space(20 * GIB - 1))).unwrap();
+    // The same 10 GiB that admits an offload job blocks local output placement.
+    assert!(!low.admitted());
+    let text = crate::cache::disk_blocker(Some(&low), None).unwrap();
     assert!(text.contains("cache disk below reserve"), "{text}");
-    assert!(text.contains("offload"), "{text}");
-    let text = offload_disk_blocker(Err("HOME is required".into())).unwrap();
-    assert!(text.contains("not measured"), "{text}");
 }
 
 #[test]
@@ -279,7 +340,7 @@ fn status_reports_the_offload_blocker_and_floor() {
     };
     with_disks(&mut status, Ok(low_cache), Err("synthetic".into()));
     let text = status.offload_pressure_blocker.unwrap();
-    assert!(text.contains("cache disk below reserve"), "{text}");
+    assert!(text.contains("offload fetch floor"), "{text}");
     let mut status = status_at(&f.0, quiet()).unwrap();
     with_disks(
         &mut status,

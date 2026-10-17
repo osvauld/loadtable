@@ -1342,3 +1342,157 @@ fn mcp_anywhere_falls_back_when_the_peer_is_down_and_a_named_peer_is_a_clean_err
     assert_eq!(machines[1]["online"], false);
     assert_eq!(machines[1]["state"], "offline");
 }
+
+// ---- feature/health-alerts ------------------------------------------------------------------
+
+/// The `tasks alerts --json` view of a node.
+fn alerts_json(node: &Node) -> serde_json::Value {
+    let out = node.cli(&["alerts", "--json", "--all"], &node.root);
+    assert!(out.status.success(), "{}", stderr(&out));
+    serde_json::from_slice(&out.stdout).unwrap_or_default()
+}
+
+/// Two real daemons: B's (fixture) cache reserve is above any real disk, so B's own health
+/// monitor raises `disk_reserve`; A, the controller, sees B's disks and that alert over the
+/// status stream. A forwarded job failing with job 456's libclang line makes A mark beta as
+/// lacking libclang; then `placement anywhere` skips beta for a Cargo command (explaining
+/// why) while a plain shell command still goes there, with the capability alert attached.
+#[test]
+fn controller_sees_worker_disk_alerts_and_libclang_failure_marks_the_peer() {
+    let mut a = Node::new("health", "alpha");
+    let mut b = Node::new("health", "beta");
+    a.allow(&b, "worker");
+    b.allow(&a, "host");
+    for n in [&mut a, &mut b] {
+        n.extra_env
+            .push(("TASKS_HEALTH_INTERVAL_S".into(), "1".into()));
+        n.extra_env
+            .push(("TASKS_HEALTH_NOTIFY".into(), "off".into()));
+    }
+    b.extra_env
+        .push(("TASKS_MIN_CACHE_FREE_GIB".into(), "65536".into()));
+    b.start();
+    a.start();
+    wait_peer_online(&a, &b);
+    let host = hostname();
+
+    // 1. B's disk alert and disks, as A aggregates them.
+    let view = until("beta's disk alert at alpha", &[&a, &b], WAIT, || {
+        let v = alerts_json(&a);
+        let found = v["alerts"].as_array()?.iter().any(|x| {
+            x["kind"] == "disk_reserve" && x["reported_by"] == "beta" && x["node"] == host.as_str()
+        });
+        found.then_some(v)
+    });
+    let beta = view["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["name"] == "beta")
+        .cloned()
+        .unwrap();
+    assert_eq!(beta["online"], true, "{view}");
+    assert!(!beta["disks"].as_array().unwrap().is_empty(), "{view}");
+    let text = stdout(&a.cli(&["alerts"], &a.root));
+    assert!(
+        text.contains("[via beta]") && text.contains("below its reserve"),
+        "{text}"
+    );
+
+    // 2. A forwarded job fails with the libclang line: A marks beta.
+    let repo = repo(&a);
+    // Job 456's lines (synthetic paths), synced to beta with the checkout.
+    std::fs::write(
+        repo.join("build-456.txt"),
+        "error: failed to run custom build command for `webrtc-audio-processing-sys v0.4.0`\n\
+         Unable to find libclang: \"couldn't find any valid shared libraries matching: \
+         ['libclang.so', 'libclang-*.so', 'libclang.so.*', 'libclang-*.so.*'], set the \
+         `LIBCLANG_PATH` environment variable to a path where one of these files can be found \
+         (invalid: [])\"\n",
+    )
+    .unwrap();
+    let script = "cat build-456.txt; exit 101";
+    let out = forward(&a, &repo, &[], script);
+    assert_eq!(
+        out.status.code(),
+        Some(101),
+        "{}\n{}",
+        stderr(&out),
+        diagnose(&[&a, &b])
+    );
+    let view = until("beta's libclang mark at alpha", &[&a, &b], WAIT, || {
+        let v = alerts_json(&a);
+        let alpha = v["nodes"]
+            .as_array()?
+            .iter()
+            .find(|n| n["name"] == "local")?
+            .clone();
+        let marked = alpha["capabilities"].as_array()?.iter().any(|m| {
+            m["node"] == "beta"
+                && m["capability"] == "libclang"
+                && m["source"] == "forwarded job log"
+                && m["line"]
+                    .as_str()
+                    .is_some_and(|l| l.contains("Unable to find libclang"))
+        });
+        marked.then_some(v)
+    });
+    assert!(
+        view["alerts"].as_array().unwrap().iter().any(|x| {
+            x["id"] == "missing_capability:beta:libclang" && x["reported_by"] == "local"
+        }),
+        "{view}"
+    );
+
+    // 3. Placement anywhere: a Cargo command (no Cargo.lock: libclang may be needed) skips
+    //    beta and says why; a shell command still goes to beta, with the alert attached.
+    let out = a.cli(&["place", "--json", "--", "cargo", "build"], &repo);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let decision: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(decision["target"]["kind"], "local", "{decision}");
+    let skipped = decision["skipped"].to_string();
+    assert!(
+        skipped.contains("beta") && skipped.contains("lacks libclang"),
+        "{decision}"
+    );
+    let mut mcp = Mcp::start(&a);
+    let result = mcp.tool(
+        "submit",
+        serde_json::json!({"who": "fixture-agent", "cwd": repo, "placement": "anywhere",
+                           "argv": ["/bin/sh", "-c", "echo shell-ok"],
+                           "wait": true, "timeout_s": 170}),
+    );
+    assert_eq!(
+        result["isError"],
+        false,
+        "{result}\n{}",
+        diagnose(&[&a, &b])
+    );
+    assert_eq!(result["structuredContent"]["machine"], "beta", "{result}");
+    let alerts = result["structuredContent"]["alerts"].to_string();
+    assert!(alerts.contains("lacks libclang"), "{result}");
+    let listed = mcp.tool(
+        "alerts",
+        serde_json::json!({"node": "beta", "severity": "warn"}),
+    );
+    let ids = listed["structuredContent"]["alerts"].to_string();
+    assert!(ids.contains("missing_capability:beta:libclang"), "{listed}");
+    assert!(ids.contains("disk_reserve:"), "{listed}");
+
+    // 4. A manual clear removes the mark.
+    let out = a.cli(&["alerts", "clear", "beta", "libclang"], &a.root);
+    assert!(out.status.success(), "{}", stderr(&out));
+    until("mark cleared", &[&a, &b], WAIT, || {
+        let v = alerts_json(&a);
+        let alpha = v["nodes"]
+            .as_array()?
+            .iter()
+            .find(|n| n["name"] == "local")?
+            .clone();
+        alpha["capabilities"]
+            .as_array()?
+            .iter()
+            .all(|m| m["node"] != "beta")
+            .then_some(())
+    });
+}

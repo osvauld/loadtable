@@ -294,3 +294,60 @@ execution JSON (`{"warmth","warmth_reason","wall_s","cpu_user_s","cpu_sys_s",
 (other keys untouched, never overwritten) once the job is terminal. No SQLite
 schema change; older releases ignore the key. Per-stage usage and start
 warmth also stay as small files in the job directory (state dir, not Git).
+
+## `health` (feature/health-alerts; additive, optional)
+
+`health` is an optional top-level field (serde default; absent from older daemons and
+before the first check pass, so readers must treat it as optional). It reaches the
+controller over the peer status stream unchanged, so the controller sees each worker's
+disks, alerts and capability marks.
+
+```jsonc
+"health": {
+  "node": "nixos", "checked_at": 1792216000.0, "interval_s": 30.0,
+  "alerts": [ {                                   // active, most severe first
+    "id": "disk_reserve:kurukkan:/home/u/build-cache",   // KIND:NODE[:SUBJECT], stable
+    "kind": "disk_reserve", "severity": "info"|"warn"|"critical",
+    "node": "kurukkan", "origin": "kurukkan", "summary": "...", "evidence": ["..."],
+    "fix": "...", "first_seen": 0.0, "last_seen": 0.0, "cleared_at": null,
+    "count": 3, "needs_human": true, "check": "disk"
+  } ],
+  "recent": [ /* up to 10 recently cleared alerts, same shape */ ],
+  "disks": [ {
+    "filesystem": "/home/u/build-cache", "roots": ["cache=/home/u/build-cache", "..."],
+    "total_bytes": 0, "free_bytes": 0, "reserve_bytes": 0, "reserve_class": "cache"|"state",
+    "growth_bytes_per_h": null, "time_to_full_s": null,
+    "top": [ { "path": "...", "bytes": 0, "checkout": null } ],
+    "scanned_at": null, "scan_truncated": false
+  } ],
+  "scan": { "at": 0.0, "elapsed_s": 0.0, "cpu_s": 0.0, "entries": 0, "truncated": false,
+            "max_entries": 300000, "max_s": 15.0, "runs": 1 },
+  "capabilities": [ {                             // missing-capability marks
+    "node": "worker", "capability": "libclang", "family": "libclang", "job": 456,
+    "remote_job": 77, "kind_key": "cargo build", "line": "Unable to find libclang: ...",
+    "marked_at": 0.0, "expires_at": 0.0, "source": "forwarded job log"
+  } ]
+}
+```
+
+Rules:
+- Each daemon runs the checks on its own thread every `TASKS_HEALTH_INTERVAL_S` (30 s),
+  never on a socket thread. Free/total come from statvfs on every pass; top consumers come
+  from a bounded read-only `tmp_usage` scan (`TASKS_HEALTH_DISK_SCAN_S`, default 600 s,
+  bounded by `TASKS_HEALTH_DISK_SCAN_FILES`/`_MAX_S`, never follows symlinks) on a
+  second low-priority thread. Growth and time to full come from a small history in
+  `<state>/health/disk-history.json`.
+- A machine publishes only the alerts it raised; the controller (`tasks alerts`, MCP
+  `alerts`/`cluster_status`/`submit`, the dashboard banner) merges its own and each peer's.
+- Capability marks: see `src/health/capability.rs` (pattern table in `classify.rs`).
+  Placement `anywhere` skips a peer with a mark the command needs; a named peer gets a note.
+- `health.probes` (additive): capability probes of the daemon's environment,
+  `{name, declared, ok, detail, fix}`. `TASKS_DECLARED_CAPABILITIES` (comma list from the
+  node's declaration, e.g. `libclang,jdk,android-sdk,cargo-ndk,htop`) marks what the node
+  promises; a declared probe that fails raises `declared_capability:NODE:NAME` and adds a
+  transient mark (source `declared capability probe`) to `health.capabilities`.
+- Node-setup alert ids (docs/design/node-setup-policy.md): `slot-holder:NODE:LOCK` (a
+  slot-lock held with no live job: holder pid, cmdline, `TASKS_JOB_ID` from its environ;
+  shared with fix/lease-leak), `compiler-cache:NODE:sccache` (sccache server started inside a
+  job, holding a `p2p-*.lock` descriptor, or not running when `RUSTC_WRAPPER` is sccache),
+  `declared_capability:NODE:NAME`. `tasks doctor` prints them with fix lines.

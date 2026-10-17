@@ -363,5 +363,6 @@ pub fn assemble(inputs: Inputs) -> Snapshot {
         taken_at: inputs.now,
         machine: inputs.machine.clone(),
         jobs,
+        health: None,
     }
 }

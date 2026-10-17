@@ -183,8 +183,25 @@ pub struct Snapshot {
     pub taken_at: Option<f64>,
     pub machine: Machine,
     pub jobs: Vec<Job>,
+    /// Active health alerts this machine reports (`health.alerts`; empty without one).
+    pub alerts: Vec<BannerAlert>,
     /// Reader problems (skipped jobs, unreadable machine, newer version).
     pub warnings: Vec<String>,
+}
+
+/// The part of a health alert the dashboard banner shows.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct BannerAlert {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub severity: String,
+    #[serde(default)]
+    pub node: String,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub fix: String,
 }
 
 impl Snapshot {
@@ -232,11 +249,17 @@ impl Snapshot {
                 }
             }
         }
+        let alerts = object
+            .get("health")
+            .and_then(|h| h.get("alerts"))
+            .and_then(|a| serde_json::from_value::<Vec<BannerAlert>>(a.clone()).ok())
+            .unwrap_or_default();
         Ok(Self {
             version,
             taken_at,
             machine,
             jobs,
+            alerts,
             warnings,
         })
     }
@@ -533,7 +556,13 @@ pub struct MachineCard {
     pub mem_history: Vec<Option<f32>>,
     pub history_span: String,
     pub warnings: Vec<String>,
+    /// `stale · 9 s old`: the feed is older than [`STALE_FEEDS`] sample intervals while the
+    /// card still counts as online (its numbers may be out of date).
+    pub stale: Option<String>,
 }
+
+/// A card is stale once its snapshot is older than this many sample intervals.
+pub const STALE_FEEDS: f64 = 3.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SlotChip {
@@ -644,6 +673,9 @@ pub struct Details {
 pub struct View {
     /// `2 agents active · 3 running · 2 queued · 13.2 cores busy across 2 machines`.
     pub summary: String,
+    /// Active health alerts of every machine for the banner, most severe first:
+    /// (severity, `CRITICAL nixos: summary — fix`).
+    pub alerts: Vec<(String, String)>,
     pub machines: Vec<MachineCard>,
     pub running: Vec<RunningCard>,
     pub queued: Vec<QueuedRow>,
@@ -926,9 +958,18 @@ pub fn machine_card(state: &MachineState) -> MachineCard {
     {
         warnings.push(error.clone());
     }
+    let interval = history.interval_s.filter(|i| *i > 0.0).unwrap_or(2.0);
+    let status = online(state);
+    let stale = match (&status, state.seen_ago_s) {
+        (Presence::Online, Some(age)) if age > STALE_FEEDS * interval => {
+            Some(format!("stale · {} old", ago(age)))
+        }
+        _ => None,
+    };
     MachineCard {
+        stale,
         title,
-        status: online(state),
+        status,
         cpu_fraction: cpu_fraction.map(|f| f as f32),
         cpu_text,
         ram_fraction: ram_fraction.map(|f| f as f32),
@@ -1230,6 +1271,31 @@ fn warmth_reason(job: &Job) -> String {
 }
 
 /// Builds the whole view. Pure: the same states always give the same view.
+/// Banner lines: every machine's active alerts, deduplicated by id, most severe first.
+pub fn banner(states: &[MachineState]) -> Vec<(String, String)> {
+    let rank = |s: &str| match s {
+        "critical" => 0,
+        "warn" => 1,
+        _ => 2,
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<(String, String)> = vec![];
+    for s in states {
+        for a in s.snapshot.iter().flat_map(|s| &s.alerts) {
+            if !seen.insert(a.id.clone()) {
+                continue;
+            }
+            let mut line = format!("{} {}: {}", a.severity.to_uppercase(), a.node, a.summary);
+            if !a.fix.is_empty() {
+                line.push_str(&format!(" — {}", a.fix));
+            }
+            out.push((a.severity.clone(), line));
+        }
+    }
+    out.sort_by_key(|(s, _)| rank(s));
+    out
+}
+
 pub fn build(states: &[MachineState]) -> View {
     let ctx = Ctx { states };
     let list = entries(states);
@@ -1313,6 +1379,7 @@ pub fn build(states: &[MachineState]) -> View {
 
     let mut view = View {
         machines: states.iter().map(machine_card).collect(),
+        alerts: banner(states),
         ..View::default()
     };
     for (i, e) in list.iter().enumerate() {
