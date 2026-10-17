@@ -3,6 +3,7 @@
 //! revocations/allowlists. Reuses parent `identity`/`vault`/`courier` APIs unchanged and upstream
 //! iroh 1.3 configured without `presets::N0`, relays or address lookup.
 
+pub mod artifact;
 pub mod prune;
 pub mod source;
 pub mod sync;
