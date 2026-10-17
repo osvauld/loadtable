@@ -62,7 +62,14 @@
     # p2p_chat desktop crate: alsa (cpal), meson for webrtc-audio-processing's bundled build,
     # patchelf to make worker-built binaries run on other distros (deploy/worker/README.md).
     alsa-lib alsa-lib.dev meson patchelf
+    # p2p_chat Android APK: Gradle 9.8.1 (wrapper) and AGP 9.4.1 need a JDK; the main host
+    # uses OpenJDK 21. cargo-ndk 4.1.2 matches the main host. The Android SDK itself is
+    # installed per user with Google's sdkmanager into ~/Android/Sdk (deploy/worker/README.md);
+    # unzip unpacks its cmdline-tools archive.
+    jdk21 cargo-ndk unzip
   ];
+  # Stable JAVA_HOME for the tasks daemon unit (Environment=JAVA_HOME=/etc/taskworker/jdk21).
+  environment.etc."taskworker/jdk21".source = pkgs.jdk21.home;
   # Expose the .pc files above at /run/current-system/sw/lib/pkgconfig; the tasks
   # daemon unit points PKG_CONFIG_PATH there.
   environment.pathsToLink = [ "/lib/pkgconfig" ];
