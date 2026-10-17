@@ -15,7 +15,19 @@ tasks list
 tasks admission
 tasks logs JOB_ID
 tasks cancel JOB_ID                 # your own job only
+tasks list --active                 # compact table of unfinished jobs + live lock holders
+tasks list --who my-agent --limit 5 # compact table; add --json for the same filter as JSON
+tasks run --who my-agent --follow -- cargo test --offline --locked -j 2   # stream the log live
 ```
+
+Plain `tasks list` (no options) still prints the full JSON response so existing
+scripts keep working; any option switches to a compact table (`--json` keeps JSON,
+filtered). The table abbreviates long `NAME=value` env arguments such as PATH for
+display only; stored and executed argv are unchanged. `tasks run` prints the
+resolved cwd and command on its `submitted job N;` line and warns (without
+blocking) when other owners have unfinished jobs in the same cwd. In JSON replies
+`execution_enabled` means "a worker process was alive at reply time", not "this
+job ran"; `logs`/`approve-*` print the job's phase on stderr to make that clear.
 
 Installed command: `/home/abe/.local/bin/tasks`. Shared on-demand daemon/state:
 `~/.local/state/tinline-task-manager-native`. Extraction does not change the
@@ -38,8 +50,12 @@ Android ABI/config is accepted and is stored as the existing canonical config.
 
 ```sh
 tasks devices            # read-only adb view: kind, ready/unauthorized, ABI, lock free/busy
-tasks phone-test /path/to/app-checkout [--device SERIAL]
+tasks phone-test /path/to/app-checkout [--device SERIAL] [--follow | --full-log | --tail N]
 ```
+
+While waiting, `phone-test` prints each Android build step as it starts and, at
+the end, only the last 40 log lines (`--tail N` to change, `--full-log` for the
+previous full retained log, `--follow` to stream the whole log live).
 
 `phone-test` builds the arm64 APK through the typed Android trial (running it is
 the per-job trial approval), then a separate job holding only that device's lock
