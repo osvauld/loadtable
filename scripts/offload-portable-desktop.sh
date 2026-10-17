@@ -81,7 +81,12 @@ EOF
 read -r -d '' BUILD <<'EOF' || true
 t=$(rustc -vV | sed -n 's/^host: //p' | tr - _)
 aom=$(python3 scripts/build_libaom.py --target host --jobs "$jobs" | tail -n1)
-vpx=$(python3 scripts/build_libvpx.py --target host --jobs "$jobs" | tail -n1)
+# build_libvpx.py's configure flags differ between branches (decoder-only vs. encoder) but its
+# install prefix doesn't, so a shared VPX_CACHE would be rebuilt in place under other jobs.
+# Key a private cache by the script's content instead.
+vpx_key=$(sha256sum scripts/build_libvpx.py | cut -c1-12)
+vpx=$(VPX_CACHE="$HOME/build-cache/p2p_chat/libvpx-portable-$vpx_key" \
+  python3 scripts/build_libvpx.py --target host --jobs "$jobs" | tail -n1)
 # CMake's GNUInstallDirs installs libaom into lib64/ on NixOS; crates/video/build.rs wants lib/.
 # Point it at a shim prefix in this checkout's target dir (the shared cache is left as is).
 if [ ! -f "$aom/lib/libaom.a" ] && [ -f "$aom/lib64/libaom.a" ]; then
