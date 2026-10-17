@@ -58,6 +58,14 @@ limitation in feedback rather than nesting it or pretending it was tracked.
 Hardware operations need separate explicit authorization; a device resource flag
 is NOT permission to install, launch, wipe, sign or publish.
 
+## Broad `cargo test` policy (source branch feature/log-search, not deployed)
+
+Once deployed, a `cargo test` with a name filter but no target selector is refused at submit
+(exit 2, nothing queued) because it builds every test target of the package. Name the targets
+the refusal suggests (`--lib`, `--test NAME`); pass `--broad-test` only when you really need
+every target, and say why in your feedback. Do not edit `~/.config/tasks/policy.huml` or set
+`TASKS_BROAD_TEST=warn` to get around a refusal: that is the operator's setting.
+
 ## Feedback is required
 
 After meaningful use in each agent session:

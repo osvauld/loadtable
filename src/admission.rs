@@ -633,6 +633,10 @@ pub struct Status {
     pub resources: Vec<ResourceStatus>,
     pub waiting: Vec<Note>,
     pub warnings: Vec<String>,
+    /// The submission policy (`crate::policy`): each layer's path/presence/trust and the
+    /// effective values with their source. Additive field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy: Option<crate::policy::Effective>,
 }
 /// This process's admission lock directory: TASKS_LOCK_DIR, else exactly
 /// `/tmp/claude-$EUID` (see admission_lock_dir.rs). Invalid values fail closed.
@@ -875,6 +879,11 @@ pub fn status() -> Result<Status> {
         crate::cache::cache_root().and_then(|cache| crate::cache::cache_space_with(&cache, &t));
     let state_disk = crate::cache::state_space_with(&state, &t);
     with_disks(&mut status, cache_disk, state_disk);
+    let policy = crate::policy::effective();
+    status
+        .warnings
+        .extend(policy.errors.iter().map(|e| format!("policy ERROR: {e}")));
+    status.policy = Some(policy);
     Ok(status)
 }
 /// Additive disk fields; a measurement error becomes a warning, not a failure.
@@ -935,6 +944,7 @@ fn status_with(
         resources: vec![],
         waiting: vec![],
         warnings,
+        policy: None,
     };
     if !root.try_exists()? {
         return Ok(status);

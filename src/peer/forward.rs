@@ -41,9 +41,22 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum BridgeRequest {
-    Forward { job_id: i64, offset: u64 },
-    Cancel { job_id: i64 },
-    Watch { peer: String },
+    Forward {
+        job_id: i64,
+        offset: u64,
+    },
+    Cancel {
+        job_id: i64,
+    },
+    Watch {
+        peer: String,
+    },
+    /// Read-only log search on a worker/both peer (`jobs/0` `search_logs`); answered with one
+    /// `line` event holding the peer's report, or `error`.
+    SearchLogs {
+        peer: String,
+        query: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,7 +148,40 @@ pub async fn serve_bridge(shared: Arc<Shared>, stream: UnixStream) {
         BridgeRequest::Watch { peer } => {
             super::runtime::watch_peer(&shared, &peer, &mut sink).await
         }
+        BridgeRequest::SearchLogs { peer, query } => {
+            let reply = match search_peer_logs(&shared, &peer, query).await {
+                Ok(value) => BridgeEvent::Line { value },
+                Err(message) => BridgeEvent::Error { message },
+            };
+            let _ = sink.event(&reply).await;
+        }
     }
+}
+
+/// How long one peer log search may take (connect, scan on the peer, reply).
+pub const SEARCH_TIMEOUT: Duration = Duration::from_secs(60);
+
+async fn search_peer_logs(
+    shared: &Shared,
+    name: &str,
+    query: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let peer = shared
+        .config
+        .peer(name)
+        .ok_or_else(|| format!("unknown peer {name:?}"))?;
+    let addr = peer
+        .addr
+        .ok_or_else(|| format!("peer {name} has no addr (only peers I can dial are searched)"))?;
+    let to = task_manager_peer::peer_addr(peer.endpoint, addr);
+    jobs::search_logs(&shared.ep, to, query, SEARCH_TIMEOUT)
+        .await
+        .map_err(|e| match e {
+            ClientError::Refused(reason) if reason.starts_with("BadRequest") => {
+                format!("{name} refused the search ({reason}): its tasks predates log search")
+            }
+            other => format!("log search on {name}: {other}"),
+        })
 }
 
 async fn read_request(read: OwnedReadHalf) -> Result<BridgeRequest, String> {
@@ -602,6 +648,9 @@ async fn sync_and_submit(
             ForwardResource::Run => RemoteResource::Run,
             ForwardResource::Device(s) => RemoteResource::Device(s.clone()),
         },
+        // The submitter's recorded --broad-test escape travels with the job; the peer still
+        // applies its own policy.
+        broad_test: Recipe::from_spec_unvalidated(&job.spec).is_ok_and(|r| r.broad_test),
     });
     let deadline = Instant::now() + shared.config.reattach_timeout;
     let mut delivered_maybe = false;

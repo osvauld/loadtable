@@ -230,6 +230,7 @@ impl JobHost for DaemonJobHost {
                 // nested admission helpers, Cargo -j cap, never-use devices (built-in plus this
                 // daemon's TASKS_DENIED_DEVICES and config file).
                 Recipe {
+                    broad_test: request.broad_test,
                     argv: request.argv.clone(),
                     resource,
                 }
@@ -335,6 +336,42 @@ impl JobHost for DaemonJobHost {
             }
         }
         Ok(job_state(&job(&self.socket, id)?))
+    }
+
+    /// Read-only, bounded search of this daemon's job logs for a host peer (every job of this
+    /// ledger; the query's bounds are clamped as for a local search). Forwarded jobs of this
+    /// machine name their own peer as the machine.
+    fn search_logs(
+        &self,
+        peer: &PeerEntry,
+        query: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let query: crate::log_search::Query =
+            serde_json::from_value(query.clone()).map_err(|e| format!("BadQuery({e})"))?;
+        let response = ask(&self.socket, Action::List)?;
+        if let Some(e) = response.error {
+            return Err(e);
+        }
+        let hostname = task_manager_peer::select::hostname();
+        let machine_of = crate::log_search::local_machine_of(&self.paths.state, &hostname);
+        let report = crate::log_search::search(
+            &self.paths.state,
+            &response.jobs,
+            &query,
+            &hostname,
+            crate::execution::now(),
+            &machine_of,
+            &|_| true,
+        )?;
+        eprintln!(
+            "{} peer: log search for {}: {} matches in {} jobs ({} bytes)",
+            crate::execution::now(),
+            peer.name,
+            report.matches.len(),
+            report.jobs_scanned,
+            report.bytes_scanned
+        );
+        serde_json::to_value(report).map_err(|e| e.to_string())
     }
 
     fn lookup(&self, peer: &PeerEntry, key: &str) -> Result<Option<i64>, String> {

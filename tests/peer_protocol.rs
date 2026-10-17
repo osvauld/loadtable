@@ -156,6 +156,7 @@ fn old_clients_work_against_a_daemon_with_peer_support() {
         use tinline_task_manager::local_command::{Recipe, Resource};
         let mut store = tinline_task_manager::Store::open(&state.join("tasks.sqlite")).unwrap();
         let spec = Recipe {
+            broad_test: false,
             argv: vec!["true".into()],
             resource: Resource::Run,
         }

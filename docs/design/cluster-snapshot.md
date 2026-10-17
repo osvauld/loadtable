@@ -49,7 +49,8 @@ guessed. Unknown fields must be ignored by readers (forward compatible).
       "cpu_cores": 7.8, "rss_bytes": 0, "processes": 14,
       "history": { "interval_s": 2.0, "cpu_cores": [ ], "rss_bytes": [ ] }
     },
-    "progress": { "crates_compiled": 212, "crates_expected": 310 | null },  // cargo only; null otherwise
+    "progress": { "crates_compiled": 212, "crates_expected": 310 | null,   // cargo only; null otherwise
+                  "test_targets_built": 3 },      // optional (feature/log-search); absent until one is seen
     "warmth": "cold" | "warm" | "unknown",
     "warmth_reason": "no build output for this checkout on this machine",
     "estimate": {                                 // null if no history: the UI shows "unknown"
@@ -58,12 +59,19 @@ guessed. Unknown fields must be ignored by readers (forward compatible).
     },
     "result": {                                   // finished jobs only
       "exit_code": 0, "wall_s": 0.0, "cpu_user_s": 0.0, "cpu_sys_s": 0.0,
-      "peak_rss_bytes": 0, "crates_compiled": 0, "warmth": "warm"
+      "peak_rss_bytes": 0, "crates_compiled": 0, "warmth": "warm",
+      "test_targets_built": 9, "broad_test_build": false   // optional (feature/log-search)
     },
     "offload": {                                  // laptop-side record of an offload, else null
       "worker": "abe@192.168.1.7", "remote_job_id": 93, "transport": "ssh"|"iroh",
       "sync_s": 1.0, "fetch_s": null
-    }
+    },
+    "compiling": [ {                              // optional (feature/log-search): executing jobs only
+      "tool": "cargo", "proc": "rustc", "unit": "profile_sync", "crate": "profile_sync",
+      "kind": "lib"|"bin"|"test"|"build-script"|"build-script-run"|"doctest"|"doc"|"cargo",
+      "pid": 4242, "elapsed_s": 12.4, "cpu": 0.98 | null, "rss_bytes": 0
+    } ],
+    "broad_test_build": true                      // optional: only present (true) for a broad cargo test
   } ],
   "stream": {                                     // added by the watchers only (see below);
     "transport": "iroh" | "ssh", "peer": "...",   // never printed by `tasks status --json`
@@ -294,3 +302,35 @@ execution JSON (`{"warmth","warmth_reason","wall_s","cpu_user_s","cpu_sys_s",
 (other keys untouched, never overwritten) once the job is terminal. No SQLite
 schema change; older releases ignore the key. Per-stage usage and start
 warmth also stay as small files in the job directory (state dir, not Git).
+
+## feature/log-search: live compile attribution and test scope (additive, optional)
+
+All new fields are optional with serde defaults and are omitted when absent, so older
+readers and the fixtures are unchanged (the contract test checks that).
+
+- `jobs[].compiling` (executing jobs): the compiler processes in the job's process tree at
+  the last 2 s sample, largest `elapsed_s` first, at most 32. The sampler adds no `/proc`
+  walk: it already reads each member's `/proc/PID/stat`; the comm field (now kept in
+  `ProcStat`) decides whether `/proc/PID/cmdline` is read, only for `rustc`, `rustdoc`,
+  `clippy-driver`, `sccache`, `cargo`, `cargo-clippy` and `build-script-*`. Attribution
+  (`metrics::compile`, Cargo/rustc only for now): the first of the leading three argv words
+  whose basename is the compiler (so `sccache rustc ...`, `clippy-driver rustc ...` and an
+  interpreter-run script `/bin/sh .../rustc ...` work); `unit`/`crate` = `--crate-name`
+  (`rustc -vV` and other runs without it are not compiles); `kind` = `test` with `--test`,
+  `build-script` for `build_script_*`, `lib` for `--crate-type lib|rlib|dylib|cdylib|
+  staticlib|proc-macro`, else `bin`; `rustdoc --test` is `doctest`; a running
+  `target/.../build/X-HASH/build-script-build` is `build-script-run` of `X`; a `cargo`
+  process lists its `-p` packages (`unit` may be empty). `cpu` = cores over the last sample
+  interval (lifetime average on first sight); `rss_bytes` that process's RSS.
+  Limits: with sccache, a cache-miss compile runs inside the sccache server (outside the job)
+  and shows as the sccache client; compiles shorter than the sample interval are missed.
+- `progress.test_targets_built` / `result.test_targets_built` (Cargo): distinct test
+  binaries named by the log's `Running ...`/`Executable ...` lines plus `Doc-tests X`, or the
+  number of distinct `rustc --test` crates seen live, whichever is larger. Persisted in
+  `execution.metrics.test_targets_built` (additive) when the job finishes.
+- `broad_test_build`: on a job only when true; in `result` / `execution.metrics` true or
+  false for `cargo test` commands. A `cargo test` with a name filter (before or after `--`)
+  and no target selector (`--lib`, `--test T`, `--tests`, `--bin B`, `--bins`, `--doc`,
+  `--example(s)`, `--bench(es)`, `--all-targets`) builds every test target of the package
+  (`metrics::testscope`). The submission policy (`src/policy.rs`, README "Policy") refuses
+  or warns about it at submit.

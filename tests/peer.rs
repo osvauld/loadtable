@@ -918,6 +918,7 @@ fn submit_is_idempotent_per_key_and_scoped_to_the_submitting_peer() {
             sub: String::new(),
             argv: vec!["true".into()],
             resource: RemoteResource::Run,
+            broad_test: false,
         })
     };
     let t = Duration::from_secs(10);
@@ -1341,4 +1342,492 @@ fn mcp_anywhere_falls_back_when_the_peer_is_down_and_a_named_peer_is_a_clean_err
     assert_eq!(machines[1]["name"], "beta");
     assert_eq!(machines[1]["online"], false);
     assert_eq!(machines[1]["state"], "offline");
+}
+
+// ---------------------------------------------------------------------------------------------
+// feature/log-search: compile attribution, log search and the submission policy over MCP.
+
+/// One daemon with a peer config but no peers (the peer runtime runs; placement is local).
+fn single(test: &str) -> Node {
+    let mut a = Node::new(test, "alpha");
+    a.start();
+    a
+}
+
+/// A script named like the compiler: its process's comm is `rustc` and its cmdline is
+/// `/bin/sh .../rustc ARGS`, exactly what the sampler reads for a real rustc.
+fn fake_compiler(node: &Node, name: &str, seconds: u32) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = node.root.join("fake-bin");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    std::fs::write(
+        &path,
+        format!("#!/bin/sh\necho \"   Compiling fake-unit v0.1.0\"\nsleep {seconds}\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+#[test]
+fn mcp_who_is_compiling_names_the_job_compiling_a_crate() {
+    let a = single("who-compiling");
+    let rustc = fake_compiler(&a, "rustc", 40);
+    let mut mcp = Mcp::start(&a);
+    let submitted = mcp.tool(
+        "submit",
+        serde_json::json!({"who": "fixture-agent@synthetic", "cwd": a.root, "class": "run",
+                           "placement": "local",
+                           "argv": [rustc, "--crate-name", "profile_sync", "--edition=2024",
+                                    "tests/profile_sync.rs", "--test"]}),
+    );
+    assert_eq!(submitted["isError"], false, "{submitted}");
+    let id = submitted["structuredContent"]["job_id"].as_i64().unwrap();
+    // Admission may hold the job under host memory pressure (the fixture keeps the PSI gates).
+    let found = until("profile_sync in who_is_compiling", &[&a], WAIT * 3, || {
+        std::thread::sleep(Duration::from_millis(900));
+        let r = mcp.tool(
+            "who_is_compiling",
+            serde_json::json!({"crate": "profile-sync"}),
+        );
+        let jobs = r["structuredContent"]["machines"][0]["jobs"]
+            .as_array()?
+            .clone();
+        (!jobs.is_empty()).then_some(r)
+    });
+    eprintln!(
+        "who_is_compiling {{\"crate\": \"profile-sync\"}} ->\n{}",
+        text_of(&found)
+    );
+    let s = &found["structuredContent"];
+    let m = &s["machines"][0];
+    assert_eq!(m["machine"], hostname(), "{found}");
+    assert_eq!(m["local"], true);
+    let job = &m["jobs"][0];
+    assert_eq!(job["id"], id, "{found}");
+    assert_eq!(job["owner"], "fixture-agent@synthetic");
+    assert_eq!(job["agent"], "fixture-agent");
+    let c = &job["compiling"][0];
+    assert_eq!(
+        (
+            c["tool"].as_str(),
+            c["unit"].as_str(),
+            c["crate"].as_str(),
+            c["kind"].as_str(),
+            c["proc"].as_str()
+        ),
+        (
+            Some("cargo"),
+            Some("profile_sync"),
+            Some("profile_sync"),
+            Some("test"),
+            Some("rustc")
+        ),
+        "{found}"
+    );
+    assert!(
+        c["pid"].as_u64().unwrap() > 1 && c["rss_bytes"].as_u64().unwrap() > 0,
+        "{found}"
+    );
+    let text = text_of(&found);
+    assert!(
+        text.contains("fixture-agent@synthetic") && text.contains("profile_sync (test via rustc)"),
+        "{text}"
+    );
+    // Another crate: nobody. cluster_status carries the same `compiling` list.
+    let other = mcp.tool("who_is_compiling", serde_json::json!({"crate": "video"}));
+    assert!(
+        other["structuredContent"]["machines"][0]["jobs"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(text_of(&other).contains("nobody is compiling video"));
+    let status = mcp.tool("cluster_status", serde_json::json!({}));
+    let jobs = status["structuredContent"]["jobs"].as_array().unwrap();
+    let live = jobs.iter().find(|j| j["id"] == id).unwrap();
+    assert!(live["compiling"].is_array(), "{live}");
+    // job_cost of a live job reports live values.
+    let cost = mcp.tool("job_cost", serde_json::json!({"id": id}));
+    assert_eq!(cost["structuredContent"]["source"], "live", "{cost}");
+    let cancelled = mcp.tool(
+        "cancel",
+        serde_json::json!({"id": id, "who": "fixture-agent@synthetic"}),
+    );
+    assert_eq!(cancelled["isError"], false, "{cancelled}");
+    until("job cancelled", &[&a], WAIT, || {
+        a.job(id).phase.terminal().then_some(())
+    });
+}
+
+#[test]
+fn mcp_search_logs_finds_lines_of_finished_jobs_within_bounds() {
+    let a = single("search");
+    let mut mcp = Mcp::start(&a);
+    let run = |mcp: &mut Mcp, script: &str| {
+        let r = mcp.tool(
+            "submit",
+            serde_json::json!({"who": "fixture-agent", "cwd": a.root, "class": "run",
+                               "placement": "local", "argv": ["/bin/sh", "-c", script],
+                               "wait": true, "timeout_s": 170}),
+        );
+        assert_eq!(
+            r["structuredContent"]["phase"],
+            "passed",
+            "{r}\n{}",
+            diagnose(&[&a])
+        );
+        r["structuredContent"]["job_id"].as_i64().unwrap()
+    };
+    // The needle is assembled at run time, so the job log's argv line does not contain it.
+    let first = run(
+        &mut mcp,
+        "n=needle; echo alpha; echo $n-xyz-1; echo omega; echo $n-xyz-2",
+    );
+    let second = run(&mut mcp, "echo nothing to see");
+    let r = mcp.tool(
+        "search_logs",
+        serde_json::json!({"pattern": "needle-xyz", "context": 1}),
+    );
+    eprintln!(
+        "search_logs {{\"pattern\": \"needle-xyz\", \"context\": 1}} ->\n{}",
+        text_of(&r)
+    );
+    let s = &r["structuredContent"];
+    assert_eq!(r["isError"], false, "{r}");
+    let matches = s["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 2, "{r}");
+    let m = &matches[0];
+    assert_eq!(
+        (m["job_id"].as_i64(), m["owner"].as_str()),
+        (Some(first), Some("fixture-agent"))
+    );
+    assert_eq!(m["machine"], hostname());
+    assert_eq!(m["line"], "needle-xyz-1");
+    assert_eq!(m["before"], serde_json::json!(["alpha"]));
+    assert_eq!(m["after"], serde_json::json!(["omega"]));
+    assert_eq!(
+        matches[1]["line_number"].as_u64().unwrap(),
+        m["line_number"].as_u64().unwrap() + 2
+    );
+    assert_eq!(s["truncated"], false);
+    assert!(
+        text_of(&r).contains(&format!("#{first} fixture-agent (passed) line")),
+        "{}",
+        text_of(&r)
+    );
+    // Bounds: one match; newest job only.
+    let r = mcp.tool(
+        "search_logs",
+        serde_json::json!({"pattern": "needle-xyz", "max_matches": 1}),
+    );
+    assert_eq!(
+        r["structuredContent"]["matches"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(r["structuredContent"]["truncated"], true);
+    assert_eq!(
+        r["structuredContent"]["machines"][0]["report"]["truncated_reason"],
+        "max_matches"
+    );
+    let r = mcp.tool(
+        "search_logs",
+        serde_json::json!({"pattern": "needle-xyz", "max_jobs": 1}),
+    );
+    let report = &r["structuredContent"]["machines"][0]["report"];
+    assert_eq!(
+        (
+            report["jobs_scanned"].as_u64(),
+            report["truncated_reason"].as_str()
+        ),
+        (Some(1), Some("max_jobs")),
+        "{r}"
+    );
+    assert!(
+        r["structuredContent"]["matches"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    // Regex subset, filters and time.
+    let r = mcp.tool(
+        "search_logs",
+        serde_json::json!({"pattern": "^needle-x[a-z]z-\\d$", "regex": true, "owner": "fixture-agent",
+                           "job_ids": [first, second], "since": "1h", "phases": ["passed"]}),
+    );
+    assert_eq!(
+        r["structuredContent"]["matches"].as_array().unwrap().len(),
+        2,
+        "{r}"
+    );
+    let r = mcp.tool(
+        "search_logs",
+        serde_json::json!({"pattern": "needle", "owner": "somebody-else"}),
+    );
+    assert!(
+        r["structuredContent"]["matches"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let bad = mcp.tool(
+        "search_logs",
+        serde_json::json!({"pattern": "(x", "regex": true}),
+    );
+    assert_eq!(bad["isError"], true, "{bad}");
+    let bad = mcp.tool(
+        "search_logs",
+        serde_json::json!({"pattern": "x", "machine": "nowhere"}),
+    );
+    assert!(text_of(&bad).contains("unknown machine"), "{bad}");
+    // job_cost of a finished job.
+    let cost = mcp.tool("job_cost", serde_json::json!({"id": first}));
+    let c = &cost["structuredContent"];
+    assert_eq!(
+        (c["source"].as_str(), c["machine"].as_str()),
+        (Some("ledger"), Some(hostname().as_str())),
+        "{cost}"
+    );
+    assert!(
+        c["wall_s"].as_f64().is_some() && c["hint"].is_string(),
+        "{cost}"
+    );
+}
+
+#[test]
+fn mcp_search_logs_finds_forwarded_and_peer_only_jobs_and_names_the_machine() {
+    let (a, b) = pair("search-peer");
+    let repo = repo(&a);
+    let out = forward(&a, &repo, &["--run"], "echo forwarded-needle-42");
+    assert!(
+        out.status.success(),
+        "{}\n{}",
+        stderr(&out),
+        diagnose(&[&a, &b])
+    );
+    let a_job = only_job(&a);
+    let b_forwarded = only_job(&b);
+    // A job that exists only on B (never forwarded from A).
+    let out = b.cli(
+        &[
+            "run",
+            "--who",
+            "beta-local",
+            "--run",
+            "--",
+            "/bin/sh",
+            "-c",
+            "echo beta-only-needle-7",
+        ],
+        &b.root,
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let b_local = b.jobs().into_iter().map(|j| j.id).max().unwrap();
+    let mut mcp = Mcp::start(&a);
+    let r = mcp.tool(
+        "search_logs",
+        serde_json::json!({"pattern": "forwarded-needle-42"}),
+    );
+    eprintln!(
+        "search_logs {{\"pattern\": \"forwarded-needle-42\"}} ->\n{}",
+        text_of(&r)
+    );
+    let matches = r["structuredContent"]["matches"]
+        .as_array()
+        .unwrap()
+        .clone();
+    // Found once (A's mirror; B skips the job A mirrors), named by the peer.
+    let hits: Vec<_> = matches
+        .iter()
+        .filter(|m| m["line"] == "forwarded-needle-42")
+        .collect();
+    assert_eq!(hits.len(), 1, "{r}\n{}", diagnose(&[&a, &b]));
+    assert_eq!(hits[0]["machine"], "beta", "{r}");
+    assert_eq!(hits[0]["job_id"], a_job.id);
+    assert_eq!(hits[0]["remote_job_id"], b_forwarded.id, "{r}");
+    assert!(
+        text_of(&r).contains(&format!("beta #{} (remote #{})", a_job.id, b_forwarded.id)),
+        "{}",
+        text_of(&r)
+    );
+    // A job that lives only on B is searched there over the peer link.
+    let r = mcp.tool(
+        "search_logs",
+        serde_json::json!({"pattern": "beta-only-needle-7"}),
+    );
+    let matches = r["structuredContent"]["matches"].as_array().unwrap();
+    let hit = matches
+        .iter()
+        .find(|m| m["line"] == "beta-only-needle-7")
+        .unwrap_or_else(|| panic!("{r}\n{}", diagnose(&[&a, &b])));
+    assert_eq!(
+        (
+            hit["machine"].as_str(),
+            hit["job_id"].as_i64(),
+            hit["owner"].as_str()
+        ),
+        (Some("beta"), Some(b_local), Some("beta-local")),
+        "{r}"
+    );
+    // Machine filters.
+    let r = mcp.tool(
+        "search_logs",
+        serde_json::json!({"pattern": "forwarded-needle-42", "machine": "local"}),
+    );
+    assert!(
+        r["structuredContent"]["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m["line"] != "forwarded-needle-42"),
+        "{r}"
+    );
+    let r = mcp.tool(
+        "search_logs",
+        serde_json::json!({"pattern": "needle", "machine": "beta"}),
+    );
+    let lines: Vec<&str> = r["structuredContent"]["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["line"].as_str())
+        .collect();
+    assert!(
+        lines.contains(&"forwarded-needle-42") && lines.contains(&"beta-only-needle-7"),
+        "{r}"
+    );
+    assert!(
+        b.daemon_log().contains("log search for alpha"),
+        "{}",
+        b.daemon_log()
+    );
+}
+
+#[test]
+fn broad_cargo_tests_are_refused_at_submit_unless_escaped() {
+    let a = single("policy");
+    let checkout = a.root.join("ws");
+    std::fs::create_dir_all(checkout.join("tests")).unwrap();
+    std::fs::create_dir_all(checkout.join("src")).unwrap();
+    std::fs::write(
+        checkout.join("Cargo.toml"),
+        "[package]\nname = \"p2pcore\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    for f in ["src/lib.rs", "tests/video_calls.rs", "tests/audio.rs"] {
+        std::fs::write(checkout.join(f), "").unwrap();
+    }
+    let broad = ["cargo", "test", "--offline", "-p", "p2pcore", "video_call"];
+    // CLI: exit 2, the message names the count and the matching targets, nothing queued.
+    let mut args = vec!["run", "--who", "fixture-agent", "--run", "--"];
+    args.extend_from_slice(&broad);
+    let out = a.cli(&args, &checkout);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("refused: this builds all 3 test targets of -p p2pcore; your filter 'video_call' matches: --lib, --test video_calls. Re-run with those, or pass --broad-test"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(a.jobs().is_empty(), "nothing queued");
+    // A full suite (no filter) and a narrowed one are not affected (enqueue: never run).
+    for cmd in [
+        vec!["cargo", "test", "-p", "p2pcore"],
+        vec![
+            "cargo",
+            "test",
+            "-p",
+            "p2pcore",
+            "--test",
+            "video_calls",
+            "video_call",
+        ],
+    ] {
+        let mut args = vec!["enqueue", "--who", "fixture-agent", "--run", "--"];
+        args.extend_from_slice(&cmd);
+        let out = a.cli(&args, &checkout);
+        assert!(out.status.success(), "{cmd:?}: {}", stderr(&out));
+    }
+    // The escape hatch is recorded on the job.
+    let mut args = vec![
+        "enqueue",
+        "--who",
+        "fixture-agent",
+        "--run",
+        "--broad-test",
+        "--",
+    ];
+    args.extend_from_slice(&broad);
+    let out = a.cli(&args, &checkout);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("--broad-test: building every target deliberately"),
+        "{}",
+        stderr(&out)
+    );
+    let escaped = a.jobs().into_iter().max_by_key(|j| j.id).unwrap();
+    let recipe: serde_json::Value = serde_json::from_str(&escaped.spec.configuration).unwrap();
+    assert_eq!(recipe["broad_test"], true, "{recipe}");
+    // MCP: a tool error and nothing submitted; broad_test: true is accepted and recorded.
+    let before = a.jobs().len();
+    let mut mcp = Mcp::start(&a);
+    let r = mcp.tool(
+        "submit",
+        serde_json::json!({"who": "fixture-agent", "cwd": checkout, "class": "run",
+                           "placement": "local", "argv": broad}),
+    );
+    assert_eq!(r["isError"], true, "{r}");
+    assert!(
+        text_of(&r).contains("refused: this builds all 3 test targets")
+            && text_of(&r).contains("Nothing was submitted"),
+        "{r}"
+    );
+    assert_eq!(a.jobs().len(), before);
+    // The policy is visible in `tasks admission` with its layers.
+    let out = a.cli(&["admission"], &a.root);
+    let admission: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let policy = &admission["policy"];
+    assert_eq!(policy["policy"]["broad_test"], "refuse", "{admission}");
+    assert_eq!(
+        (
+            policy["broad_test_source"].as_str(),
+            policy["file_present"].as_bool()
+        ),
+        (Some("default"), Some(false))
+    );
+    assert!(
+        policy["path"]
+            .as_str()
+            .unwrap()
+            .ends_with(".config/tasks/policy.huml"),
+        "{policy}"
+    );
+    assert!(
+        stderr(&out).contains("policy: broad_test=refuse (from default)"),
+        "{}",
+        stderr(&out)
+    );
+    // A strict, malformed policy file: loud on submit, defaults (refuse) still apply.
+    std::fs::write(
+        a.config().with_file_name("policy.huml"),
+        "%HUML v0.2.0
+broad_tset: \"warn\"\n",
+    )
+    .unwrap();
+    let mut args = vec!["enqueue", "--who", "fixture-agent", "--run", "--"];
+    args.extend_from_slice(&broad);
+    let out = a.cli(&args, &checkout);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(stderr(&out).contains("broad_tset"), "{}", stderr(&out));
+    let out = a.cli(&["admission"], &a.root);
+    let admission: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        admission["policy"]["source"], "default (file invalid)",
+        "{admission}"
+    );
+    assert!(stderr(&out).contains("policy ERROR"), "{}", stderr(&out));
+    // Queued jobs are never re-evaluated: cancel what we enqueued.
+    for j in a.jobs() {
+        let _ = tinline_task_manager::request(&a.socket(), Action::Cancel(j.id));
+    }
 }

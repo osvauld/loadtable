@@ -86,6 +86,9 @@ pub struct ProcStat {
     pub child_ticks: u64,
     pub start_ticks: u64,
     pub rss_pages: u64,
+    /// The kernel's short command name (`comm`, at most 15 bytes): a cheap filter
+    /// before reading a member's cmdline for compile attribution.
+    pub comm: String,
 }
 
 /// Parses `/proc/PID/stat`. comm may hold spaces and parentheses, so fields are
@@ -93,6 +96,10 @@ pub struct ProcStat {
 pub fn parse_proc_stat(text: &str) -> Option<ProcStat> {
     let (head, rest) = text.rsplit_once(')')?;
     let pid = head.split_whitespace().next()?.parse().ok()?;
+    let comm = head
+        .split_once('(')
+        .map(|(_, c)| c.to_owned())
+        .unwrap_or_default();
     let f: Vec<&str> = rest.split_whitespace().collect();
     let num = |i: usize| f.get(i).and_then(|v| v.parse::<i64>().ok());
     Some(ProcStat {
@@ -105,6 +112,7 @@ pub fn parse_proc_stat(text: &str) -> Option<ProcStat> {
         child_ticks: (num(13)? + num(14)?).max(0) as u64,
         start_ticks: num(19)? as u64,
         rss_pages: num(21)?.max(0) as u64,
+        comm,
     })
 }
 

@@ -850,9 +850,12 @@ pub fn decide_with(
 /// The job to submit for a decision: a validated local live command, or the local
 /// forwarding job of `peer_link::forwarded_spec` (the peer validates the inner command).
 /// `fetch` is ignored when the job stays here (its outputs are already here).
+// The submission's parts as `tasks run` has them; grouping them would only move the list.
+#[allow(clippy::too_many_arguments)]
 pub fn job_spec(
     decision: &Decision,
     resource: crate::local_command::Resource,
+    broad_test: bool,
     owner: String,
     cwd: std::path::PathBuf,
     fetch: &[String],
@@ -860,6 +863,7 @@ pub fn job_spec(
     exe: &Path,
 ) -> crate::Result<crate::JobSpec> {
     let recipe = crate::local_command::Recipe {
+        broad_test,
         argv: decision.argv.clone(),
         resource,
     };

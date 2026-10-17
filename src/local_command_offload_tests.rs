@@ -4,6 +4,7 @@ use super::*;
 
 fn recipe(argv: &[&str], resource: Resource) -> Recipe {
     Recipe {
+        broad_test: false,
         argv: argv.iter().map(|s| s.to_string()).collect(),
         resource,
     }

@@ -53,6 +53,12 @@ pub fn run() -> Result<()> {
     let active = Arc::new(AtomicUsize::new(0));
     // In-memory machine/job sampling for `tasks status` (2 s ticks, own ledger connection).
     let sampler = Sampler::start(state.clone());
+    // Submission policy: report it (and any error loudly) once at startup; submissions read
+    // it fresh, and an error there falls back to the built-in defaults (never disables it).
+    let policy = tinline_task_manager::policy::effective();
+    for line in policy.summary().lines() {
+        eprintln!("{} {line}", tinline_task_manager::execution::now());
+    }
     // Peer link (iroh) in its own thread/runtime, only when a peer config exists. It talks to
     // this daemon through the socket below like any client; nothing here waits for it.
     let peers = tinline_task_manager::peer::runtime::start(&state, &socket);

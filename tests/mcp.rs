@@ -292,7 +292,10 @@ fn tools_list_matches_the_schemas() {
             "job_logs",
             "submit",
             "cancel",
-            "wait_job"
+            "wait_job",
+            "who_is_compiling",
+            "search_logs",
+            "job_cost"
         ]
     );
     for tool in tools.as_array().unwrap() {

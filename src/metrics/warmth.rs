@@ -159,35 +159,70 @@ pub fn refine(
     }
 }
 
-/// Counts cargo `Compiling ` status lines (`   Compiling foo v0.1.0 (...)`).
+/// Counts cargo `Compiling ` status lines (`   Compiling foo v0.1.0 (...)`) and the test
+/// targets a `cargo test` built: one per distinct `Running`/`Executable` binary
+/// (`     Running tests/a.rs (target/debug/deps/a-0123...)`) plus one per `Doc-tests X`.
 #[derive(Clone, Debug, Default)]
 pub struct CompileCounter {
     pub count: u64,
     partial: Vec<u8>,
+    /// Distinct test binaries (path in parentheses) and doc-test crates seen; bounded.
+    test_targets: std::collections::HashSet<String>,
 }
+
+/// Longest line prefix kept for classification (test-binary lines carry a path).
+const LINE_PREFIX: usize = 1024;
+const MAX_TEST_TARGETS: usize = 4096;
+
 impl CompileCounter {
     pub fn feed(&mut self, bytes: &[u8]) {
         for &b in bytes {
             if b == b'\n' {
                 self.line();
-            } else if self.partial.len() < 256 {
+            } else if self.partial.len() < LINE_PREFIX {
                 self.partial.push(b);
             }
         }
     }
     fn line(&mut self) {
         let text = String::from_utf8_lossy(&self.partial);
-        if text.trim_start().starts_with("Compiling ") {
+        let text = text.trim();
+        if text.starts_with("Compiling ") {
             self.count += 1;
+        } else if let Some(key) = test_target_key(text)
+            && self.test_targets.len() < MAX_TEST_TARGETS
+        {
+            self.test_targets.insert(key);
         }
         self.partial.clear();
     }
+    /// Test targets seen so far (see the type docs).
+    pub fn test_targets(&self) -> u64 {
+        self.test_targets.len() as u64
+    }
     /// Counts all complete lines of a whole text.
     pub fn count_text(text: &[u8]) -> u64 {
+        Self::of_text(text).count
+    }
+    pub fn of_text(text: &[u8]) -> Self {
         let mut c = Self::default();
         c.feed(text);
-        c.count
+        c
     }
+}
+
+/// `Running unittests src/lib.rs (target/debug/deps/x-hash)` / `Executable tests/a.rs (...)`
+/// -> the binary path; `Doc-tests video` -> `doc:video`.
+fn test_target_key(line: &str) -> Option<String> {
+    if let Some(name) = line.strip_prefix("Doc-tests ") {
+        return Some(format!("doc:{}", name.trim()));
+    }
+    let rest = line
+        .strip_prefix("Running ")
+        .or_else(|| line.strip_prefix("Executable "))?;
+    let open = rest.rfind(" (")?;
+    let path = rest[open + 2..].strip_suffix(')')?;
+    (!path.is_empty()).then(|| path.to_string())
 }
 
 /// An unknown start state with the given reason.

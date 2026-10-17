@@ -35,6 +35,10 @@ pub struct JobExtras {
     pub live: Option<Live>,
     /// `Compiling` lines seen so far in the job log (active jobs).
     pub crates_so_far: Option<u64>,
+    /// Test targets seen so far (log test binaries or live `rustc --test` crates).
+    pub test_targets_so_far: Option<u64>,
+    /// Live compile attribution (executing jobs only).
+    pub compiling: Option<Vec<super::compile::Compiling>>,
     /// Start warmth (worker file, or the daemon's own first-sight check).
     pub start: Option<StartWarmth>,
     /// Unix time the current stage was admitted (`STAGE-admitted.json`).
@@ -289,6 +293,7 @@ fn job_view(job: &Job, inputs: &Inputs, history: &History) -> JobView {
     let progress = (cargo && !terminal).then(|| Progress {
         crates_compiled: crates_now,
         crates_expected: history.crates_expected(&kind_key, warmth, job.id),
+        test_targets_built: extras.test_targets_so_far.filter(|&n| n > 0),
     });
     let estimate = (!terminal)
         .then(|| history.estimate(&kind_key, warmth, job.id))
@@ -320,12 +325,15 @@ fn job_view(job: &Job, inputs: &Inputs, history: &History) -> JobView {
         peak_rss_bytes: metrics.and_then(|m| m.peak_rss_bytes),
         crates_compiled: metrics.and_then(|m| m.crates_compiled),
         warmth,
+        test_targets_built: metrics.and_then(|m| m.test_targets_built),
+        broad_test_build: metrics.and_then(|m| m.broad_test_build),
     });
     let device = match &resource {
         Resource::Device(lock) => Some(crate::device::adb_serial_for_lock(lock)),
         _ => None,
     };
     let (checkout, checkout_name) = extras.checkout.clone();
+    let broad_test_build = super::testscope::broad_flag(&argv).filter(|&b| b);
     JobView {
         id: job.id,
         owner: job.spec.owner.clone(),
@@ -348,6 +356,8 @@ fn job_view(job: &Job, inputs: &Inputs, history: &History) -> JobView {
         estimate,
         result,
         offload: extras.offload.clone(),
+        compiling: extras.compiling.clone().filter(|_| !terminal),
+        broad_test_build,
     }
 }
 

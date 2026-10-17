@@ -31,6 +31,12 @@ pub fn is_offload(spec: &JobSpec) -> bool {
 pub struct Recipe {
     pub argv: Vec<String>,
     pub resource: Resource,
+    /// The submitter deliberately allowed a broad `cargo test` (a name filter without a
+    /// target selector; `tasks run --broad-test`, MCP `broad_test: true`), recorded with the
+    /// approved recipe. Absent (false) on every other job, so their configuration is
+    /// unchanged; a daemon that predates the field refuses a job that sets it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub broad_test: bool,
 }
 impl Recipe {
     /// Validates against this process's own `TASKS_MAX_CARGO_JOBS` (daemon
@@ -150,7 +156,29 @@ impl Recipe {
     /// forwarded, so the cap is the last worker's recorded value (else this
     /// process's own); daemon approval and the worker re-check their own.
     pub fn spec(&self, owner: String, cwd: PathBuf) -> Result<JobSpec> {
+        self.spec_with_policy(owner, cwd, &crate::policy::effective())
+    }
+    /// The submission policy verdict for this recipe run from `cwd` (broad test commands,
+    /// parallelism caps; `crate::policy`). Callers print warnings; [`Self::spec`] refuses.
+    pub fn policy_verdict(
+        &self,
+        cwd: &Path,
+        policy: &crate::policy::Effective,
+    ) -> crate::policy::Verdict {
+        crate::policy::check(policy, &self.argv, cwd, self.broad_test)
+    }
+    /// [`Self::spec`] under an explicit policy (tests, and callers that already loaded it).
+    /// A refusal is an error starting with `refused: ` and nothing is submitted.
+    pub fn spec_with_policy(
+        &self,
+        owner: String,
+        cwd: PathBuf,
+        policy: &crate::policy::Effective,
+    ) -> Result<JobSpec> {
         self.check(crate::admission::submission_max_cargo_jobs)?;
+        if let crate::policy::Verdict::Refused(message) = self.policy_verdict(&cwd, policy) {
+            return Err(message.into());
+        }
         Ok(JobSpec {
             suite: SUITE.into(),
             configuration: serde_json::to_string(self)?,
@@ -649,6 +677,7 @@ mod tests {
                     .collect();
                 assert!(
                     Recipe {
+                        broad_test: false,
                         argv,
                         resource: Resource::Compile
                     }
@@ -658,6 +687,7 @@ mod tests {
             }
         }
         let recipe = Recipe {
+            broad_test: false,
             argv: [
                 "env",
                 "VPX_DIR=/synthetic",
@@ -690,6 +720,7 @@ mod tests {
         assert!(override_recipe.validate().is_err());
         // Explicit trusted shell commands aren't parsed as Cargo commands.
         let shell = Recipe {
+            broad_test: false,
             argv: vec!["sh".into(), "-c".into(), "printf synthetic".into()],
             resource: Resource::Compile,
         };
@@ -698,6 +729,7 @@ mod tests {
     }
     fn cargo(flags: &[&str]) -> Recipe {
         Recipe {
+            broad_test: false,
             argv: ["cargo", "test"]
                 .iter()
                 .chain(flags)
@@ -747,6 +779,7 @@ mod tests {
         assert!(cargo(&["-j", "65"]).validate_with_max(64).is_err());
         // Non-Cargo commands never consult the cap.
         Recipe {
+            broad_test: false,
             argv: vec!["make".into(), "-j".into(), "64".into()],
             resource: Resource::Compile,
         }
@@ -760,6 +793,7 @@ mod tests {
             execution::{ProcessIdentity, StageTiming},
         };
         let r = Recipe {
+            broad_test: false,
             argv: vec!["true".into()],
             resource: Resource::Run,
         };
@@ -798,6 +832,7 @@ mod tests {
     #[test]
     fn nested_legacy_admission_is_rejected() {
         let r = Recipe {
+            broad_test: false,
             argv: vec!["python3".into(), "scripts/build_android.py".into()],
             resource: Resource::Compile,
         };
@@ -806,6 +841,7 @@ mod tests {
     #[test]
     fn cargo_test_has_distinct_compile_and_run_without_filter_rewrite() {
         let r = Recipe {
+            broad_test: false,
             argv: [
                 "cargo",
                 "+1.99.0",
@@ -830,6 +866,7 @@ mod tests {
     #[test]
     fn denylisted_devices_are_refused_by_resource_and_by_argv() {
         let recipe = |argv: &[&str], resource: Resource| Recipe {
+            broad_test: false,
             argv: argv.iter().map(|s| s.to_string()).collect(),
             resource,
         };
@@ -889,6 +926,7 @@ mod tests {
     #[test]
     fn recipes_reject_invalid_argv_and_do_not_claim_source_revision() {
         let r = Recipe {
+            broad_test: false,
             argv: vec!["true".into()],
             resource: Resource::Run,
         };
@@ -897,6 +935,7 @@ mod tests {
         assert_eq!(Recipe::from_spec(&s).unwrap().stages(), ["run"]);
         assert!(
             Recipe {
+                broad_test: false,
                 argv: vec![],
                 resource: Resource::Compile
             }
@@ -905,6 +944,7 @@ mod tests {
         );
         assert!(
             Recipe {
+                broad_test: false,
                 argv: vec!["bad\0".into()],
                 resource: Resource::Compile
             }
@@ -1058,6 +1098,7 @@ mod tests {
             .enumerate()
             {
                 let recipe = Recipe {
+                    broad_test: false,
                     argv: argv.into_iter().map(String::from).collect(),
                     resource: Resource::Compile,
                 };

@@ -21,6 +21,8 @@ eframe = { version = "0.33", default-features = false, features = ["default_font
 # Daemon-to-daemon link (iroh, LAN only); runs in the daemon's own peer thread/runtime.
 task-manager-peer = { path = "crates/peer" }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time", "net", "io-util"] }
+# Submission policy file (~/.config/tasks/policy.huml); only dependency: serde.
+huml-rs = "0.3.0"
 
 [[bin]]
 name = "tasks"

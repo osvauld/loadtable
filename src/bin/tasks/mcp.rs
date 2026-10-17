@@ -65,7 +65,8 @@ machine's cap; `local` keeps it here (Cargo `-j` at most this machine's limit); 
 forwards it there. Check `cluster_status` to see every machine and why work is queued; queuing \
 under pressure is intended, never work around it. Never resubmit a job that is still live: \
 use `wait_job` / `job_logs` with its id. `cancel` only your own jobs. Never use the device \
-ZD22257P6G.";
+ZD22257P6G. `who_is_compiling` shows who is compiling which crate right now on every machine, \
+`search_logs` searches job logs on every machine, `job_cost` shows what a job cost.";
 
 /// Where a tool's daemon requests go: the local daemon's socket (it forwards to peers).
 pub struct Daemon {
@@ -97,7 +98,7 @@ impl Daemon {
     }
 
     /// A call whose daemon-side error is also an error.
-    fn ok(&self, action: Action) -> Result<Response> {
+    pub fn ok(&self, action: Action) -> Result<Response> {
         let response = self.call(action)?;
         match response.error {
             Some(error) => Err(error.into()),
@@ -518,7 +519,7 @@ impl Ctx {
     }
 }
 
-pub const TOOL_NAMES: [&str; 7] = [
+pub const TOOL_NAMES: [&str; 10] = [
     "cluster_status",
     "list_jobs",
     "job",
@@ -526,6 +527,9 @@ pub const TOOL_NAMES: [&str; 7] = [
     "submit",
     "cancel",
     "wait_job",
+    "who_is_compiling",
+    "search_logs",
+    "job_cost",
 ];
 
 const PHASES: [&str; 11] = [
@@ -584,8 +588,9 @@ pub fn tools() -> Vec<Value> {
                 and an online/stale flag. Per machine: CPU, memory, swap and pressure (PSI), the admission \
                 pressure blockers holding work back per slot class (compile, run, offload), the compile/run/offload/device \
                 slots with the job and agent holding each, and running and queued jobs with \
-                owner, queue position, what they wait for, ETA, live CPU/RSS and build-cache \
-                warmth. Call it before heavy work to see whether it will queue, and to explain \
+                owner, queue position, what they wait for, ETA, live CPU/RSS, build-cache \
+                warmth and `compiling` (the crates/Gradle tasks each job's compiler processes \
+                are working on right now). Call it before heavy work to see whether it will queue, and to explain \
                 a waiting job. Read-only.",
             "inputSchema": {
                 "type": "object",
@@ -677,7 +682,11 @@ pub fn tools() -> Vec<Value> {
                 a timeout leaves the job running. `placement` (default anywhere once a worker \
                 peer is configured) may run it on another machine: the result names the \
                 machine, why, and the remote job id; with anywhere or a peer, a Cargo -j is \
-                replaced by the chosen machine's cap."),
+                replaced by the chosen machine's cap. Policy: a `cargo test` with a name \
+                filter but no --lib/--test/--bin/--bench/--doc/--tests/--all-targets builds \
+                every test target and is refused by default (a tool error naming the targets \
+                your filter matches; nothing is queued): name those targets, or pass \
+                broad_test=true to build everything deliberately (recorded on the job)."),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -698,6 +707,8 @@ pub fn tools() -> Vec<Value> {
                     "tail_lines": {"type": "integer", "minimum": 0, "maximum": MAX_TAIL, "default": 60,
                         "description": "Log lines returned when the job finished while waiting."},
                     "placement": submit_placement_schema(),
+                    "broad_test": {"type": "boolean", "default": false,
+                        "description": "Deliberately build every test target of a filtered test command (e.g. `cargo test -p X NAME` without --lib/--test T). This host's policy refuses such a command by default and the refusal names the targets your filter can be in: prefer naming them. true is recorded on the job."},
                     "fetch": {"type": "array", "items": {"type": "string"}, "maxItems": 64,
                         "description": "Only for a job that runs on a peer: relative paths in the checkout to copy back after it passes (into ~/build-cache/offload/WHO/JOB_ID here)."},
                 },
@@ -749,13 +760,104 @@ pub fn tools() -> Vec<Value> {
             },
             "annotations": {"readOnlyHint": true, "openWorldHint": false}
         }),
+        json!({
+            "name": "who_is_compiling",
+            "title": "Who is compiling what, on every machine",
+            "description": "Answers \"who is compiling X right now?\" across this machine and each \
+                peer (e.g. the LAN worker). Per machine: every executing job with its owner, \
+                agent (owner up to @), checkout, command, phase, elapsed time and live CPU/RSS, \
+                plus `compiling`: the compiler processes in that job's process tree at the last \
+                2 s sample (crate name, kind lib/bin/test/build-script/build-script-run/doctest, \
+                tool rustc/rustdoc/cargo/gradle/kotlin, pid, elapsed, CPU, RSS). With `crate`, \
+                only jobs compiling that crate (Cargo package or crate name; - and _ are the \
+                same) are listed. A job forwarded to a peer appears under the peer that runs \
+                it. Limits: a crate compiled inside an sccache server (cache miss) shows as the \
+                sccache client in the job; short compiles between samples are not seen. \
+                Read-only.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "crate": {"type": "string", "maxLength": 128,
+                        "description": "Only jobs compiling this crate/package (e.g. \"profile_sync\" or \"profile-sync\")."},
+                    "placement": placement_schema(),
+                },
+                "additionalProperties": false
+            },
+            "annotations": {"readOnlyHint": true, "openWorldHint": false}
+        }),
+        json!({
+            "name": "search_logs",
+            "title": "Search job logs on every machine",
+            "description": "Search the retained logs of jobs (newest job first) for a substring \
+                (default) or, with regex=true, a small regex subset: literals, ., [a-z], [^...], \
+                \\d \\w \\s (and \\D \\W \\S), * + ?, ^ $ and top-level | (no groups or {n,m}). \
+                Filter by owner (exact, or the agent part before @), job_ids, phases, since/until \
+                (unix seconds or relative like \"2h\", \"30m\", \"3d\": jobs whose run overlaps \
+                the window) and machine (\"all\" by default, \"local\", this machine's id, or a \
+                peer name). Each match has machine, job id, owner, phase, line number, the line \
+                and `context` lines around it. Jobs forwarded to a peer are searched in their \
+                mirrored local log and named by the peer (with its remote job id); jobs that \
+                exist only on a peer are searched there over the peer link. Bounded per machine \
+                by max_jobs, max_matches, max_bytes (log bytes read) and max_output_bytes; \
+                `truncated`/`truncated_reason` say when a bound stopped it: narrow the filters \
+                rather than raising every bound. Read-only.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "minLength": 1, "maxLength": 1000,
+                        "description": "Substring to find (or regex subset with regex=true)."},
+                    "regex": {"type": "boolean", "default": false},
+                    "ignore_case": {"type": "boolean", "default": false},
+                    "owner": {"type": "string", "description": "Exact owner, or the agent name before @host."},
+                    "job_ids": {"type": "array", "items": {"type": "integer", "minimum": 1}, "maxItems": 500,
+                        "description": "Only these job ids (ids of the machine that ran them)."},
+                    "phases": {"type": "array", "items": {"type": "string", "enum": PHASES}},
+                    "since": {"type": ["string", "integer"], "description": "Unix seconds or e.g. \"2h\" (ago)."},
+                    "until": {"type": ["string", "integer"], "description": "Unix seconds or e.g. \"30m\" (ago)."},
+                    "machine": {"type": "string", "default": "all",
+                        "description": "\"all\", \"local\", this machine's id, or a peer name (see cluster_status)."},
+                    "context": {"type": "integer", "minimum": 0, "maximum": tinline_task_manager::log_search::MAX_CONTEXT, "default": 0,
+                        "description": "Lines of context before and after each match."},
+                    "max_jobs": {"type": "integer", "minimum": 1, "maximum": tinline_task_manager::log_search::MAX_MAX_JOBS,
+                        "default": tinline_task_manager::log_search::DEFAULT_MAX_JOBS},
+                    "max_matches": {"type": "integer", "minimum": 1, "maximum": tinline_task_manager::log_search::MAX_MAX_MATCHES,
+                        "default": tinline_task_manager::log_search::DEFAULT_MAX_MATCHES},
+                    "max_bytes": {"type": "integer", "minimum": 1, "maximum": tinline_task_manager::log_search::MAX_MAX_BYTES,
+                        "default": tinline_task_manager::log_search::DEFAULT_MAX_BYTES},
+                    "max_output_bytes": {"type": "integer", "minimum": 1024, "maximum": tinline_task_manager::log_search::MAX_MAX_OUTPUT_BYTES,
+                        "default": tinline_task_manager::log_search::DEFAULT_MAX_OUTPUT_BYTES},
+                    "placement": placement_schema(),
+                },
+                "required": ["pattern"],
+                "additionalProperties": false
+            },
+            "annotations": {"readOnlyHint": true, "openWorldHint": false}
+        }),
+        json!({
+            "name": "job_cost",
+            "title": "What a job cost",
+            "description": "The compute a job used, to spot waste: wall time, CPU seconds and \
+                average cores, peak RSS, build-cache warmth (and why), crates compiled, test \
+                targets built, `broad_test_build` (a cargo test with a name filter but no \
+                --lib/--test/--bin/--doc selector builds every test target of the package) and \
+                a `hint` saying how to make the next run cheaper. Live jobs report the values \
+                so far. A job forwarded to a peer is reported from the peer's snapshot when \
+                available (else from the mirrored log). Read-only.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"id": id("Job id (of this machine's ledger)."), "placement": placement_schema()},
+                "required": ["id"],
+                "additionalProperties": false
+            },
+            "annotations": {"readOnlyHint": true, "openWorldHint": false}
+        }),
     ]
 }
 
 /// A tool's successful outcome: text for the model, structured data for programs.
-struct Outcome {
-    text: String,
-    structured: Value,
+pub struct Outcome {
+    pub text: String,
+    pub structured: Value,
 }
 
 /// Runs one tool. Argument and daemon failures are tool errors (`isError`) so the
@@ -773,6 +875,9 @@ pub fn call_tool(daemon: &Daemon, name: &str, args: &Map<String, Value>, ctx: &C
             "submit" => submit(daemon, &args, ctx),
             "cancel" => cancel(daemon, &args),
             "wait_job" => wait_job(daemon, &args, ctx),
+            "who_is_compiling" => crate::mcp_compute::who_is_compiling(daemon, &args),
+            "search_logs" => crate::mcp_compute::search_logs(daemon, &args),
+            "job_cost" => crate::mcp_compute::job_cost(daemon, &args),
             _ => Err(format!("unknown tool: {name}").into()),
         }
     });
@@ -794,7 +899,7 @@ pub fn call_tool(daemon: &Daemon, name: &str, args: &Map<String, Value>, ctx: &C
 }
 
 /// Typed access to a tool's arguments; rejects unknown keys and wrong types.
-struct Args<'a>(&'a Map<String, Value>);
+pub struct Args<'a>(&'a Map<String, Value>);
 
 impl<'a> Args<'a> {
     fn new(tool: &str, map: &'a Map<String, Value>) -> Result<Self> {
@@ -826,24 +931,24 @@ impl<'a> Args<'a> {
         }
         Ok(Self(map))
     }
-    fn get(&self, key: &str) -> Option<&'a Value> {
+    pub fn get(&self, key: &str) -> Option<&'a Value> {
         self.0.get(key).filter(|v| !v.is_null())
     }
-    fn str(&self, key: &str) -> Result<Option<&'a str>> {
+    pub fn str(&self, key: &str) -> Result<Option<&'a str>> {
         match self.get(key) {
             None => Ok(None),
             Some(Value::String(s)) => Ok(Some(s)),
             Some(_) => Err(format!("{key} must be a string").into()),
         }
     }
-    fn bool(&self, key: &str, default: bool) -> Result<bool> {
+    pub fn bool(&self, key: &str, default: bool) -> Result<bool> {
         match self.get(key) {
             None => Ok(default),
             Some(Value::Bool(b)) => Ok(*b),
             Some(_) => Err(format!("{key} must be true or false").into()),
         }
     }
-    fn int(&self, key: &str, min: i64, max: i64, default: i64) -> Result<i64> {
+    pub fn int(&self, key: &str, min: i64, max: i64, default: i64) -> Result<i64> {
         match self.get(key) {
             None => Ok(default),
             Some(v) => match v.as_i64() {
@@ -852,7 +957,7 @@ impl<'a> Args<'a> {
             },
         }
     }
-    fn id(&self) -> Result<i64> {
+    pub fn id(&self) -> Result<i64> {
         self.int("id", 1, i64::MAX, 0)
     }
     fn placement(&self) -> Result<()> {
@@ -868,7 +973,7 @@ impl<'a> Args<'a> {
     }
 }
 
-fn phase_name(phase: &Phase) -> String {
+pub fn phase_name(phase: &Phase) -> String {
     phase.as_db().unwrap_or_else(|_| format!("{phase:?}"))
 }
 
@@ -1266,6 +1371,7 @@ fn wait_job(daemon: &Daemon, args: &Args, ctx: &Ctx) -> Result<Outcome> {
 /// The submission `tasks run` would make from `cwd`: same owner bound, same
 /// device lock name and the same `Recipe::spec` checks (argv bounds, Cargo `-j`
 /// cap, no nested admission helpers, offload client rule, device denylist).
+#[cfg(test)]
 pub fn run_spec(
     who: &str,
     cwd: &str,
@@ -1274,7 +1380,12 @@ pub fn run_spec(
     serial: Option<&str>,
 ) -> Result<tinline_task_manager::JobSpec> {
     let (cwd, resource) = submission(who, cwd, class, serial)?;
-    Recipe { argv, resource }.spec(who.to_owned(), cwd)
+    Recipe {
+        broad_test: false,
+        argv,
+        resource,
+    }
+    .spec(who.to_owned(), cwd)
 }
 
 /// The resolved checkout and admission class of a submission (the `tasks run` checks).
@@ -1433,12 +1544,36 @@ fn submit(daemon: &Daemon, args: &Args, ctx: &Ctx) -> Result<Outcome> {
         None => placement::Request::Anywhere,
         Some(text) => placement::Request::parse(text)?,
     };
+    let broad_test = args.bool("broad_test", false)?;
+    // Submission policy (crate::policy): a refusal is a tool error and nothing is queued.
+    let mut policy_warnings = vec![];
+    {
+        let (resolved, resource) = submission(who, cwd, class, serial)?;
+        let recipe = Recipe {
+            broad_test,
+            argv: argv.clone(),
+            resource,
+        };
+        match recipe.policy_verdict(&resolved, &tinline_task_manager::policy::effective()) {
+            tinline_task_manager::policy::Verdict::Refused(message) => {
+                return Err(format!("{message} Nothing was submitted.").into());
+            }
+            tinline_task_manager::policy::Verdict::Warn(lines) => policy_warnings = lines,
+            tinline_task_manager::policy::Verdict::Allowed => {}
+        }
+    }
     // `local` (and anywhere without peers) is exactly the previous submission.
     let (spec, decision) = if request == placement::Request::Local {
         if !fetch.is_empty() {
             return Err("fetch only applies when the job runs on a peer".into());
         }
-        (run_spec(who, cwd, argv, class, serial)?, None)
+        let (cwd, resource) = submission(who, cwd, class, serial)?;
+        let recipe = Recipe {
+            broad_test,
+            argv,
+            resource,
+        };
+        (recipe.spec(who.to_owned(), cwd)?, None)
     } else {
         let (cwd, resource) = submission(who, cwd, class, serial)?;
         daemon.ensure()?;
@@ -1450,6 +1585,7 @@ fn submit(daemon: &Daemon, args: &Args, ctx: &Ctx) -> Result<Outcome> {
         let spec = placement::job_spec(
             &decision,
             resource,
+            broad_test,
             who.to_owned(),
             cwd,
             &fetch,
@@ -1532,6 +1668,15 @@ fn submit(daemon: &Daemon, args: &Args, ctx: &Ctx) -> Result<Outcome> {
     if let Some(warning) = warning {
         outcome.text.push_str(&format!("\nwarning: {warning}"));
         outcome.structured["warning"] = json!(warning);
+    }
+    for line in &policy_warnings {
+        outcome.text.push_str(&format!("\nwarning: {line}"));
+    }
+    if !policy_warnings.is_empty() {
+        outcome.structured["policy_warnings"] = json!(policy_warnings);
+    }
+    if broad_test {
+        outcome.structured["broad_test"] = json!(true);
     }
     Ok(outcome)
 }

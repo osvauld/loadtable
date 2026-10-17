@@ -3,9 +3,11 @@
 //! only a finished job's result (`Execution::metrics`) is persisted, inside the
 //! existing execution JSON, so older releases keep reading the ledger.
 pub mod command;
+pub mod compile;
 pub mod history;
 pub mod procfs;
 pub mod ring;
+pub mod testscope;
 pub mod types;
 pub mod warmth;
 
