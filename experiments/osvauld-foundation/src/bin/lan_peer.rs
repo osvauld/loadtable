@@ -10,6 +10,11 @@
 //! server's store lacks, and `serve --store --checkouts` imports them and materializes an
 //! immutable checkout. No execution of anything received.
 //!
+//! Phase 2b: `sync-push` updates a STABLE checkout in place (unchanged files keep their mtime;
+//! prune rules shared with `scripts/offload_agent.py`) and `fetch` returns artifacts from a
+//! checkout over the `task-manager/artifact/0` ALPN into a NEW local directory, asking only for
+//! blobs missing from a local store.
+//!
 //! ```text
 //! lan-peer init        --data-dir DIR
 //! lan-peer serve       --bind IP:PORT --data-dir DIR [--allow FILE]... [--max-connections N]
@@ -18,8 +23,13 @@
 //! lan-peer manifest    SOURCE_DIR --files-from0 FILE
 //! lan-peer push-source --peer ENDPOINT_ID --addr IP:PORT --data-dir DIR --allow FILE
 //!                      --source DIR --manifest FILE --checkout NAME [--bind IP:PORT]
+//! lan-peer sync-push   (same arguments as push-source)
+//! lan-peer fetch       --peer ENDPOINT_ID --addr IP:PORT --data-dir DIR --allow FILE
+//!                      --checkout NAME --path REL [--path REL]... --store DIR --dest NEW_DIR
+//!                      [--bind IP:PORT]
 //! ```
-//! Exit codes: 0 ok, 2 usage/config error, 3 rejected/verification failure, 4 transport/timeout.
+//! Exit codes: 0 ok, 2 usage/config/local error (nothing sent), 3 rejected/verification
+//! failure, 4 transport/timeout.
 
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -30,8 +40,9 @@ use std::time::Duration;
 use iroh::{EndpointAddr, PublicKey, SecretKey};
 use iroh_blobs::store::fs::FsStore;
 use serde_json::json;
+use task_manager_osvauld_foundation::artifact::{self, ARTIFACT_ALPN, ArtifactOutcome};
 use task_manager_osvauld_foundation::source::{
-    self, Limits, Manifest, PushMode, SOURCE_ALPN, SourceOutcome,
+    self, Limits, Manifest, PushMode, SOURCE_ALPN, SourceMode, SourceOutcome,
 };
 use task_manager_osvauld_foundation::{
     ALPN, AttestationFile, LanReport, Mode, Outcome, Policy, accept_one, attest_endpoint, handle,
@@ -47,6 +58,8 @@ const HANDLE_BUDGET: Duration = Duration::from_secs(30);
 /// Whole source session (manifest, missing blobs, materialize). Bounded, not resumable.
 const SOURCE_BUDGET: Duration = Duration::from_secs(300);
 const CLOSE_BUDGET: Duration = Duration::from_secs(5);
+/// How long `fetch` waits for another `fetch` holding the same local store.
+const STORE_LOCK_WAIT: Duration = Duration::from_secs(300);
 const PING: &[u8] = b"lan-peer synthetic ping; not a command";
 const USAGE: &str = "usage:
   lan-peer init        --data-dir DIR
@@ -56,10 +69,16 @@ const USAGE: &str = "usage:
   lan-peer manifest    SOURCE_DIR --files-from0 FILE
   lan-peer push-source --peer ENDPOINT_ID --addr IP:PORT --data-dir DIR --allow FILE
                        --source DIR --manifest FILE --checkout NAME [--bind IP:PORT]
+  lan-peer sync-push   (same arguments as push-source; updates a stable checkout in place)
+  lan-peer fetch       --peer ENDPOINT_ID --addr IP:PORT --data-dir DIR --allow FILE
+                       --checkout NAME --path REL [--path REL]... --store DIR --dest NEW_DIR
+                       [--bind IP:PORT]
 SYNTHETIC test account only (public test mnemonic). No relays, discovery or 0.0.0.0 binds.";
 
 enum Fail {
     Usage(String),
+    /// A local refusal before anything was sent (exit 2, JSON with `stage: local`).
+    Local(serde_json::Value),
     Rejected(serde_json::Value),
     Transport(serde_json::Value),
 }
@@ -249,6 +268,7 @@ async fn cmd_serve(args: &Args) -> Result<serde_json::Value, Fail> {
     let mut alpns = vec![ALPN.to_vec()];
     if source.is_some() {
         alpns.push(SOURCE_ALPN.to_vec());
+        alpns.push(ARTIFACT_ALPN.to_vec());
     }
 
     let ep = lan_endpoint(inst.key.clone(), bind, alpns).await?;
@@ -262,6 +282,7 @@ async fn cmd_serve(args: &Args) -> Result<serde_json::Value, Fail> {
     ready["alpn"] = json!(String::from_utf8_lossy(ALPN));
     ready["allowed_endpoints"] = json!(allowed);
     ready["source_transfer"] = json!(source.is_some());
+    ready["artifact_return"] = json!(source.is_some());
     ready["lan"] = json!(lan);
     emit(&ready);
 
@@ -324,6 +345,36 @@ async fn cmd_serve(args: &Args) -> Result<serde_json::Value, Fail> {
                     json!({"event": "error", "alpn": "source", "remote": remote, "error": error})
                 }
                 Err(_) => json!({"event": "timeout", "alpn": "source", "remote": remote}),
+            };
+            emit(&event);
+            continue;
+        }
+        if conn.alpn() == ARTIFACT_ALPN
+            && let Some((store, checkouts)) = &source
+        {
+            let limits = Limits::default();
+            let session = artifact::handle_artifact(&ep, conn, &policy, store, checkouts, &limits);
+            let event = match timeout(SOURCE_BUDGET, session).await {
+                Ok(Ok(ArtifactOutcome::Served {
+                    checkout,
+                    files,
+                    blobs_sent,
+                    bytes_sent,
+                })) => json!({
+                    "event": "artifacts_served",
+                    "remote": remote,
+                    "checkout": checkout,
+                    "files": files,
+                    "blobs_sent": blobs_sent,
+                    "bytes_sent": bytes_sent,
+                }),
+                Ok(Ok(ArtifactOutcome::Rejected(reason))) => {
+                    json!({"event": "rejected", "alpn": "artifact", "remote": remote, "reason": reason})
+                }
+                Ok(Err(error)) => {
+                    json!({"event": "error", "alpn": "artifact", "remote": remote, "error": error})
+                }
+                Err(_) => json!({"event": "timeout", "alpn": "artifact", "remote": remote}),
             };
             emit(&event);
             continue;
@@ -487,7 +538,7 @@ fn cmd_manifest(args: &[String]) -> Result<serde_json::Value, Fail> {
     serde_json::to_value(manifest).map_err(|e| Fail::Usage(e.to_string()))
 }
 
-async fn cmd_push_source(args: &Args) -> Result<serde_json::Value, Fail> {
+async fn cmd_push_source(args: &Args, kind: SourceMode) -> Result<serde_json::Value, Fail> {
     args.check_known(&[
         "--peer",
         "--addr",
@@ -517,7 +568,7 @@ async fn cmd_push_source(args: &Args) -> Result<serde_json::Value, Fail> {
     let to = EndpointAddr::new(peer).with_ip_addr(addr);
     let attempt = timeout(
         SOURCE_BUDGET,
-        source::push_source(
+        source::push_source_as(
             &ep,
             to,
             Some(inst.attestation.attestation.clone()),
@@ -525,6 +576,7 @@ async fn cmd_push_source(args: &Args) -> Result<serde_json::Value, Fail> {
             &manifest,
             &checkout,
             PushMode::Honest,
+            kind,
         ),
     )
     .await;
@@ -560,6 +612,11 @@ async fn cmd_push_source(args: &Args) -> Result<serde_json::Value, Fail> {
             out["bytes_sent"] = json!(report.bytes_sent);
             out["files"] = json!(manifest.files.len());
             out["receiver"] = serde_json::from_slice(&report.response_body).unwrap_or_default();
+            if kind == SourceMode::Sync {
+                for key in ["unchanged", "written", "mode_fixed", "deleted"] {
+                    out[key] = out["receiver"][key].clone();
+                }
+            }
             if report.response_fresh {
                 out["status"] = json!("ok");
                 out["response_fresh"] = json!(true);
@@ -573,6 +630,144 @@ async fn cmd_push_source(args: &Args) -> Result<serde_json::Value, Fail> {
         }
     };
     let _ = timeout(CLOSE_BUDGET, ep.close()).await;
+    result
+}
+
+/// Exclusive use of a local blob store directory across `fetch` processes (its database is
+/// single-process). The lock file lives inside the store directory.
+async fn lock_store(dir: &Path) -> Result<std::fs::File, String> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = dir.join(".lan-peer-fetch.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let deadline = std::time::Instant::now() + STORE_LOCK_WAIT;
+    loop {
+        // SAFETY: valid fd owned by `file`.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(file);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!("{} is held by another fetch", path.display()));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn cmd_fetch(args: &Args) -> Result<serde_json::Value, Fail> {
+    args.check_known(&[
+        "--peer",
+        "--addr",
+        "--data-dir",
+        "--allow",
+        "--bind",
+        "--checkout",
+        "--path",
+        "--store",
+        "--dest",
+    ])?;
+    let checkout = args.required("--checkout")?;
+    let paths = args.many("--path");
+    let store_dir = PathBuf::from(args.required("--store")?);
+    let dest = PathBuf::from(args.required("--dest")?);
+    let local =
+        |error: String| Fail::Local(json!({"status": "error", "stage": "local", "error": error}));
+    if paths.is_empty() {
+        return Err(Fail::Usage("at least one --path".into()));
+    }
+    for p in &paths {
+        source::check_path(p, &Limits::default()).map_err(|e| local(format!("--path {p}: {e}")))?;
+    }
+    if dest.symlink_metadata().is_ok() {
+        return Err(local(format!(
+            "--dest {}: Exists (must be a new directory)",
+            dest.display()
+        )));
+    }
+    let Dial {
+        peer,
+        addr,
+        bind,
+        inst,
+        base,
+    } = dial_setup(args)?;
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| local(format!("{}: {e}", parent.display())))?;
+    }
+    std::fs::create_dir_all(&store_dir)
+        .map_err(|e| local(format!("--store {}: {e}", store_dir.display())))?;
+    let _store_lock = lock_store(&store_dir).await.map_err(local)?;
+    let store = FsStore::load(&store_dir)
+        .await
+        .map_err(|e| local(format!("--store {}: {e}", store_dir.display())))?;
+
+    let ep = lan_endpoint(inst.key.clone(), bind, vec![]).await?;
+    let to = EndpointAddr::new(peer).with_ip_addr(addr);
+    let attempt = timeout(
+        SOURCE_BUDGET,
+        artifact::fetch_artifacts(
+            &ep,
+            to,
+            Some(inst.attestation.attestation.clone()),
+            &checkout,
+            &paths,
+            &store,
+            &dest,
+        ),
+    )
+    .await;
+    let mut out = base;
+    out["checkout_name"] = json!(checkout);
+    let result = match attempt {
+        Err(_) => {
+            out["status"] = json!("error");
+            out["stage"] = json!("timeout");
+            Err(Fail::Transport(out))
+        }
+        Ok(Err(error)) if error.starts_with("local:") => {
+            out["status"] = json!("error");
+            out["stage"] = json!("local");
+            out["error"] = json!(error);
+            Err(Fail::Local(out))
+        }
+        Ok(Err(error)) if error.starts_with("rejected:") => {
+            out["status"] = json!("rejected");
+            out["stage"] = json!("receiver");
+            out["reason"] = json!(error.trim_start_matches("rejected: "));
+            Err(Fail::Rejected(out))
+        }
+        Ok(Err(error)) if error.starts_with("verify:") => {
+            out["status"] = json!("rejected");
+            out["stage"] = json!("verify");
+            out["reason"] = json!(error.trim_start_matches("verify: "));
+            Err(Fail::Rejected(out))
+        }
+        Ok(Err(error)) => {
+            out["status"] = json!("error");
+            out["stage"] = json!("transport");
+            out["error"] = json!(error);
+            Err(Fail::Transport(out))
+        }
+        Ok(Ok(report)) => {
+            out["status"] = json!("ok");
+            out["response_fresh"] = json!(report.response_fresh);
+            out["dest"] = json!(report.dest);
+            out["files"] = json!(report.manifest.files.len());
+            out["blobs_missing"] = json!(report.blobs_missing);
+            out["blobs_received"] = json!(report.blobs_received);
+            out["bytes_received"] = json!(report.bytes_received);
+            out["skipped"] = json!(report.skipped);
+            Ok(out)
+        }
+    };
+    let _ = timeout(CLOSE_BUDGET, ep.close()).await;
+    let _ = timeout(CLOSE_BUDGET, store.shutdown()).await;
     result
 }
 
@@ -590,7 +785,9 @@ async fn main() -> ExitCode {
     let args = Args(argv);
     let result = match command.as_str() {
         "init" => cmd_init(&args),
-        "push-source" => cmd_push_source(&args).await,
+        "push-source" => cmd_push_source(&args, SourceMode::Immutable).await,
+        "sync-push" => cmd_push_source(&args, SourceMode::Sync).await,
+        "fetch" => cmd_fetch(&args).await,
         "serve" => cmd_serve(&args).await,
         "connect" => cmd_connect(&args).await,
         other => Err(Fail::Usage(format!("unknown command {other}"))),
@@ -607,6 +804,10 @@ fn finish(result: Result<serde_json::Value, Fail>) -> ExitCode {
         Err(Fail::Usage(error)) => {
             emit(&json!({"status": "error", "stage": "usage", "error": error}));
             eprintln!("{USAGE}");
+            ExitCode::from(2)
+        }
+        Err(Fail::Local(value)) => {
+            emit(&value);
             ExitCode::from(2)
         }
         Err(Fail::Rejected(value)) => {
