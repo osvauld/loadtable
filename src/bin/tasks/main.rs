@@ -35,6 +35,11 @@ const USAGE: &str = "usage: tasks [ui [--fixtures DIR]]  # DIR: cluster snapshot
        tasks run|enqueue --peer NAME [--run | --device SERIAL] [--fetch REL]... -- COMMAND [ARGS...]
          # forward to a peer daemon over iroh: sync this checkout, run there under ITS admission,
          # stream its log here, exit with its exit code (needs a peer config; tasks peer list)
+       tasks run|enqueue --anywhere [--run | --device SERIAL] [--fetch REL]... -- COMMAND [ARGS...]
+         # placement picks this machine or a worker peer (sooner finish; ties to the worker) and
+         # sets Cargo's jobs to that machine's cap; device class and --run stay local
+       tasks place [--run | --device SERIAL] [--peer NAME] [--json] -- COMMAND [ARGS...]
+         # dry run: print where --anywhere (or --peer) would run it and why; submits nothing
        tasks peer init --bind IP:PORT [--config PATH] | id | list [--json] | status-watch NAME
        tasks approve-command JOB_ID  # trusted LIVE cwd/argv, not a source snapshot
        # local.command cost=cpu_simulation is a legacy label, NOT the resource class
@@ -66,6 +71,8 @@ fn run() -> Result<()> {
     let run_now = args.first().is_some_and(|s| s == "run");
     let plain_logs = args.first().is_some_and(|s| s == "logs") && args.len() == 2;
     let mut output = options::Output::Full;
+    // A placement decision to record once the job id is known (`--anywhere`).
+    let mut placed: Option<tinline_task_manager::placement::Decision> = None;
     let action = match args.first().map(String::as_str) {
         None | Some("ui") if args.len() <= 1 => return open_ui(None),
         Some("ui") if args.len() == 3 && args[1] == "--fixtures" => {
@@ -77,6 +84,7 @@ fn run() -> Result<()> {
         }
         Some("peer") => return peer_command(&args[1..]),
         Some("mcp") => return mcp::run(&args[1..]),
+        Some("place") => return place_command(&args[1..]),
         Some("catalog") if args.len() == 1 => {
             println!(
                 "{}",
@@ -184,6 +192,11 @@ fn run() -> Result<()> {
                 resource,
             };
             match &parsed.peer {
+                None if parsed.anywhere => {
+                    let (spec, decision) = anywhere_spec(recipe, owner, &parsed.fetch)?;
+                    placed = decision.decided().then_some(decision);
+                    Action::Submit(spec)
+                }
                 None => Action::Submit(recipe.spec(owner, std::env::current_dir()?)?),
                 Some(peer) => Action::Submit(forward_spec(
                     peer,
@@ -300,6 +313,15 @@ fn run() -> Result<()> {
     if response.error.is_some() {
         std::process::exit(1);
     }
+    if let (Some(decision), Some(id)) = (&placed, response.submitted_id)
+        && let Err(e) = tinline_task_manager::placement::record(
+            &fs::canonicalize(state_dir()).unwrap_or_else(|_| state_dir()),
+            id,
+            decision,
+        )
+    {
+        eprintln!("tasks: could not record the placement of job {id}: {e}");
+    }
     if submitting && let Some(id) = response.submitted_id {
         let job = response.jobs.iter().find(|j| j.id == id);
         let cwd = job.map_or("?", |j| j.spec.source.as_str());
@@ -392,6 +414,103 @@ fn forward_spec(peer: &str, fetch: &[String], inner: JobSpec) -> Result<JobSpec>
         &fs::canonicalize(state_dir())?,
         &std::env::current_exe()?,
     )
+}
+
+/// `tasks run --anywhere`: the library placement over the peer link, then the job for the
+/// chosen machine (a local live command or the forwarding job). Prints the decision.
+fn anywhere_spec(
+    recipe: tinline_task_manager::local_command::Recipe,
+    owner: String,
+    fetch: &[String],
+) -> Result<(JobSpec, tinline_task_manager::placement::Decision)> {
+    use tinline_task_manager::placement;
+    let socket = state_dir().join("taskd.sock");
+    ensure_daemon(&socket)?;
+    let inputs = placement::gather(&socket, Duration::from_secs(15))?;
+    let class = place_class(&recipe.resource);
+    let decision =
+        placement::decide_with(&recipe.argv, &class, &placement::Request::Anywhere, &inputs)?;
+    eprintln!("tasks: {}", decision.line());
+    for note in &decision.notes {
+        eprintln!("tasks: note: {note}");
+    }
+    let spec = placement::job_spec(
+        &decision,
+        recipe.resource,
+        owner,
+        std::env::current_dir()?,
+        fetch,
+        &fs::canonicalize(state_dir())?,
+        &std::env::current_exe()?,
+    )?;
+    Ok((spec, decision))
+}
+
+fn place_class(
+    resource: &tinline_task_manager::local_command::Resource,
+) -> tinline_task_manager::placement::Class {
+    use tinline_task_manager::local_command::Resource;
+    use tinline_task_manager::placement::Class;
+    match resource {
+        Resource::Run => Class::Run,
+        Resource::Device(serial) => Class::Device(serial.clone()),
+        Resource::Compile | Resource::Offload => Class::Compile,
+    }
+}
+
+/// `tasks place [--run | --device S] [--peer NAME] [--json] -- CMD`: a dry run of placement.
+fn place_command(args: &[String]) -> Result<()> {
+    use tinline_task_manager::placement;
+    let split = args.iter().position(|s| s == "--").ok_or(format!(
+        "tasks place requires -- before the command; usage: {}",
+        options::PLACE_USAGE
+    ))?;
+    let parsed = options::place(&args[..split])?;
+    let argv = args[split + 1..].to_vec();
+    if argv.is_empty() {
+        return Err(format!("usage: {}", options::PLACE_USAGE).into());
+    }
+    let class = match &parsed.class {
+        None => placement::Class::Compile,
+        Some(options::Class::Run) => placement::Class::Run,
+        Some(options::Class::Device(s)) => {
+            placement::Class::Device(tinline_task_manager::device::lock_serial(s)?)
+        }
+        Some(options::Class::Offload) => return Err(options::PLACE_USAGE.into()),
+    };
+    let request = match &parsed.peer {
+        Some(name) => placement::Request::parse(name)?,
+        None => placement::Request::Anywhere,
+    };
+    let socket = state_dir().join("taskd.sock");
+    ensure_daemon(&socket)?;
+    let inputs = placement::gather(&socket, Duration::from_secs(15))?;
+    let decision = placement::decide_with(&argv, &class, &request, &inputs)?;
+    if parsed.json {
+        println!("{}", serde_json::to_string_pretty(&decision)?);
+        return Ok(());
+    }
+    println!("{}", decision.line());
+    for s in &decision.scores {
+        println!(
+            "  {:<16} total ~{:>4}  wait ~{:>4} [{}]  run ~{:>4} [{}]  cargo jobs {}",
+            s.machine,
+            placement::duration(s.total_s),
+            placement::duration(s.wait_s),
+            s.wait_basis,
+            placement::duration(s.run_s),
+            s.run_basis,
+            s.cargo_jobs.map_or("?".into(), |j| j.to_string())
+        );
+    }
+    for s in &decision.skipped {
+        println!("  {:<16} skipped: {}", s.machine, s.why);
+    }
+    for note in &decision.notes {
+        println!("  note: {note}");
+    }
+    println!("  would run: {}", decision.argv.join(" "));
+    Ok(())
 }
 
 /// `tasks peer ...`: set-up and inspection of the peer link.

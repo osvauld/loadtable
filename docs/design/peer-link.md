@@ -131,6 +131,43 @@ job reuses the worker's warm checkout of the same laptop path.
    transport: "iroh", sync_s, fetch_s}`, so the UI pairs the two jobs as for `tasks-offload`;
    the receiver's job shows the sender's checkout path through `<id>.identity`.
 
+### Placement (feature/mcp-placement)
+
+`src/placement.rs` decides where one live command runs: this machine or a worker/both peer.
+It is used by MCP `submit` (`placement`: `"local"`, a peer name, or `"anywhere"`, the default
+once a worker peer is configured), `tasks run --anywhere` and the dry run `tasks place`. No ssh
+and no `tasks-offload`: a forward is `peer_link::forwarded_spec`, exactly `tasks run --peer`.
+
+* **Inputs.** This machine's snapshot (`Action::Status`) and the peer runtime's latest snapshot
+  of every worker/both peer with an `addr`: the runtime subscribes to each peer's `status/0`
+  stream and keeps the newest document (history rings dropped) with `state`
+  (`connecting`/`online`/`offline`/`status_error`), `error`, `received_at`; `Action::Peers`
+  returns them as `snapshots` with `age_s` and `stale` (older than 3 x `status_interval_s` +
+  10 s) filled at reply time. Reconnect backoff 1 s doubling to 30 s; `taskd.log` gets state
+  changes only (`peer: status of NAME: online -> offline (...)`). Without a peer config nobody
+  asks the daemon and placement is local.
+* **Score per machine** = wait + run. Wait: the compile slot holder's remaining ETA (10 min when
+  unknown, e.g. a holder outside the ledger) plus each compile job queued ahead (its ETA, else
+  10 min); a pressure blocker adds 10 min (a blocked machine is slower, not skipped); a peer
+  also waits for this machine's offload backlog (the bridge needs a local offload slot). Run:
+  median wall time of passed runs of the same command kind on that machine (for a peer, else
+  this machine's forwarded runs of it); else another machine's median x its Cargo cap / this
+  one's; with no history anywhere the same 10 min guess everywhere, so the wait decides.
+* **Choice.** Lowest total; ties and fully unknown cases go to a worker peer. Offline, never
+  reached (`connecting`) and stale peers are skipped with a note (anywhere then falls back to
+  local). The device class always stays local; the run class stays local unless a peer is
+  named. A named peer that is offline is an error and nothing is submitted.
+* **Cargo jobs.** For a plain `cargo` / `env K=V... cargo` command placed by anywhere or sent to
+  a named peer, a user `-j N`/`--jobs N`/`CARGO_BUILD_JOBS` is stripped and
+  `env CARGO_BUILD_JOBS=<cap of the chosen machine>` is set. The cap comes from the snapshot's
+  new optional `machine.cargo_jobs_max` (admission's effective `TASKS_MAX_CARGO_JOBS`; laptop
+  2, worker 6). A peer whose snapshot lacks it gets the command unchanged (noted); the ratio
+  then assumes 2. The receiving peer still validates against its own cap. Other commands pass
+  through unchanged; `local` never rewrites.
+* **Record.** The decision behind a submitted job is written to `<state>/placement/<id>.json`
+  (scores, skipped machines, reason, the applied cap); MCP `job`/`wait_job` show it with the
+  peer's remote job id from the link record.
+
 ### Failure semantics
 
 * **Lost link mid-run** (no frame for `link_stall_s`): remote state `uncertain` in the link

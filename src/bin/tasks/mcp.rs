@@ -13,9 +13,14 @@
 //! `wait_job` does not block `ping` or other calls; `notifications/cancelled`
 //! stops a wait (never the job itself).
 //!
-//! Placement: every tool goes through [`Daemon`], today always the local
-//! socket. The `placement` argument accepts only `"local"`; a later
-//! cross-machine target plugs in there without changing the tool contracts.
+//! Placement: every tool talks to the LOCAL daemon. `submit` takes `placement`:
+//! `"local"`, a peer name (forwarded over the iroh peer link with
+//! `peer_link::forwarded_spec`, exactly like `tasks run --peer NAME`) or
+//! `"anywhere"` (the default once a worker peer is configured; the library's
+//! `placement::decide` picks the machine from this machine's snapshot and the
+//! peers' latest snapshots, which the daemon's peer runtime keeps). A forwarded
+//! job is a local job here (offload slot) whose log mirrors the peer's job.
+//! The read tools accept only `"local"`; `cluster_status` lists every machine.
 use std::collections::HashMap;
 use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
@@ -25,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 use tinline_task_manager::local_command::{Recipe, Resource};
-use tinline_task_manager::{Action, Job, Phase, Response, Result, metrics::Snapshot};
+use tinline_task_manager::{Action, Job, Phase, Response, Result, metrics::Snapshot, placement};
 
 use crate::display;
 
@@ -51,15 +56,18 @@ const INVALID_PARAMS: i64 = -32602;
 const INTERNAL_ERROR: i64 = -32603;
 const SERVER_BUSY: i64 = -32000;
 
-const INSTRUCTIONS: &str = "Shared build/test queue of this machine (the `tasks` daemon). \
-Use `submit` instead of running cargo, gradle or heavy tests directly. Always pass your own \
-unique `who` and the absolute path of your OWN checkout as `cwd`. Keep Cargo at `-j 2` or \
-less (the daemon limit). Check `cluster_status` to see why work is queued; queuing under \
-pressure is intended, never work around it. Never resubmit a job that is still live: use \
-`wait_job` / `job_logs` with its id. `cancel` only your own jobs. Never use the device \
+const INSTRUCTIONS: &str = "Shared build/test queue of this machine (the `tasks` daemon) and \
+of its peer machines (e.g. a LAN build worker). Use `submit` instead of running cargo, gradle \
+or heavy tests directly. Always pass your own unique `who` and the absolute path of your OWN \
+checkout as `cwd`. Placement: by default (`anywhere`, once a worker peer is configured) the \
+task manager picks the machine that should finish first and sets Cargo's job count to that \
+machine's cap; `local` keeps it here (Cargo `-j` at most this machine's limit); a peer name \
+forwards it there. Check `cluster_status` to see every machine and why work is queued; queuing \
+under pressure is intended, never work around it. Never resubmit a job that is still live: \
+use `wait_job` / `job_logs` with its id. `cancel` only your own jobs. Never use the device \
 ZD22257P6G.";
 
-/// Where a tool's daemon requests go. Today always the local daemon's socket.
+/// Where a tool's daemon requests go: the local daemon's socket (it forwards to peers).
 pub struct Daemon {
     pub socket: PathBuf,
     /// Start `tasks daemon` when no socket answers, like every other subcommand.
@@ -115,6 +123,21 @@ impl Daemon {
             .into_iter()
             .find(|j| j.id == id)
             .ok_or_else(|| format!("job {id} is not in the ledger").into())
+    }
+
+    /// The daemon's state directory (forwarded jobs name it; placement records live there).
+    pub fn state(&self) -> PathBuf {
+        let dir = self.socket.parent().map(PathBuf::from).unwrap_or_default();
+        std::fs::canonicalize(&dir).unwrap_or(dir)
+    }
+
+    /// Starts the daemon when allowed and needed (placement reads it before submitting).
+    fn ensure(&self) -> Result<()> {
+        if self.autostart {
+            crate::ensure_daemon(&self.socket).map_err(|e| self.unreachable(e).into())
+        } else {
+            Ok(())
+        }
     }
 
     pub fn status(&self) -> Result<Snapshot> {
@@ -522,8 +545,25 @@ const PHASES: [&str; 11] = [
 fn placement_schema() -> Value {
     json!({
         "type": "string", "enum": ["local"], "default": "local",
-        "description": "Which machine's daemon handles this. Only \"local\" exists today; \
-                        cross-machine placement will be added here later."
+        "description": "Which daemon answers: always this machine's (\"local\"). Jobs \
+                        forwarded to a peer are local jobs here; `job`/`wait_job` show the \
+                        peer and its remote job id, and cluster_status lists every machine."
+    })
+}
+
+fn submit_placement_schema() -> Value {
+    json!({
+        "type": "string",
+        "description": "Where the command runs. \"anywhere\" (the default when a worker peer is \
+            configured; otherwise the same as local): the task manager compares the expected \
+            wait (slot holder ETA, queue, pressure) plus run time (median of earlier passed runs \
+            of this command per machine) of this machine and each online worker peer, picks the \
+            sooner (ties go to the worker), and replaces a Cargo -j with CARGO_BUILD_JOBS = that \
+            machine's cap. class device always stays local; class run stays local unless a peer \
+            is named. \"local\": this machine, command unchanged. A peer name (see \
+            cluster_status, e.g. \"worker\"): forward there over the peer link (the checkout is \
+            synced; the job runs under the peer's admission; its log streams back; an offline \
+            peer is an error and nothing is submitted)."
     })
 }
 
@@ -538,8 +578,10 @@ pub fn tools() -> Vec<Value> {
         json!({
             "name": "cluster_status",
             "title": "Machine and queue status",
-            "description": "Live status of this machine's shared build/test queue (same data as \
-                `tasks status --json`): CPU, memory, swap and pressure (PSI), the admission \
+            "description": "Live status of every machine: this machine's shared build/test queue \
+                (same data as `tasks status --json`, at the top level) plus `machines`: this \
+                machine and each peer (e.g. the LAN worker) with its latest snapshot, its age \
+                and an online/stale flag. Per machine: CPU, memory, swap and pressure (PSI), the admission \
                 pressure blockers holding work back per slot class (compile, run, offload), the compile/run/offload/device \
                 slots with the job and agent holding each, and running and queued jobs with \
                 owner, queue position, what they wait for, ETA, live CPU/RSS and build-cache \
@@ -632,7 +674,10 @@ pub fn tools() -> Vec<Value> {
                 ZD22257P6G is always refused. wait=false (default) returns the job id \
                 immediately; then use wait_job / job_logs and never resubmit a live job. \
                 wait=true blocks up to timeout_s and returns phase, exit code and a log tail; \
-                a timeout leaves the job running."),
+                a timeout leaves the job running. `placement` (default anywhere once a worker \
+                peer is configured) may run it on another machine: the result names the \
+                machine, why, and the remote job id; with anywhere or a peer, a Cargo -j is \
+                replaced by the chosen machine's cap."),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -652,7 +697,9 @@ pub fn tools() -> Vec<Value> {
                         "description": "Wait budget when wait=true. Keep it below your MCP client's tool timeout."},
                     "tail_lines": {"type": "integer", "minimum": 0, "maximum": MAX_TAIL, "default": 60,
                         "description": "Log lines returned when the job finished while waiting."},
-                    "placement": placement_schema(),
+                    "placement": submit_placement_schema(),
+                    "fetch": {"type": "array", "items": {"type": "string"}, "maxItems": 64,
+                        "description": "Only for a job that runs on a peer: relative paths in the checkout to copy back after it passes (into ~/build-cache/offload/WHO/JOB_ID here)."},
                 },
                 "required": ["who", "cwd", "argv"],
                 "additionalProperties": false
@@ -715,7 +762,9 @@ struct Outcome {
 /// agent sees the message and can correct itself; the server keeps running.
 pub fn call_tool(daemon: &Daemon, name: &str, args: &Map<String, Value>, ctx: &Ctx) -> Value {
     let outcome = Args::new(name, args).and_then(|args| {
-        args.placement()?;
+        if name != "submit" {
+            args.placement()?;
+        }
         match name {
             "cluster_status" => cluster_status(daemon, &args),
             "list_jobs" => list_jobs(daemon, &args),
@@ -810,7 +859,9 @@ impl<'a> Args<'a> {
         match self.str("placement")? {
             None | Some("local") => Ok(()),
             Some(other) => Err(format!(
-                "placement {other:?} is not available; only \"local\" (this machine's daemon) exists today"
+                "placement {other:?} is not available for this tool; only \"local\" (this \
+                 machine's daemon, which also knows the jobs it forwarded to peers). Placement \
+                 on another machine is chosen at submit"
             )
             .into()),
         }
@@ -883,13 +934,8 @@ fn job_line(job: &Job) -> String {
     )
 }
 
-fn cluster_status(daemon: &Daemon, args: &Args) -> Result<Outcome> {
-    let recent = args.int("recent_finished", 0, 50, 5)? as usize;
-    let admission = args.bool("include_admission", false)?;
-    let mut snapshot = daemon.status()?;
-    let mut text = crate::status::render(&snapshot);
-    // Keep every live job and the newest `recent` finished ones; drop the
-    // sparkline rings, which only a chart needs.
+/// Keeps every live job and the newest `recent` finished ones.
+fn keep_recent(snapshot: &mut Snapshot, recent: usize) {
     let finished: Vec<i64> = snapshot
         .jobs
         .iter()
@@ -901,15 +947,112 @@ fn cluster_status(daemon: &Daemon, args: &Args) -> Result<Outcome> {
     snapshot
         .jobs
         .retain(|j| !j.phase.terminal() || kept.contains(&j.id));
-    let mut structured = serde_json::to_value(&snapshot)?;
-    if let Some(machine) = structured.get_mut("machine").and_then(Value::as_object_mut) {
+}
+
+/// A snapshot as JSON without the sparkline rings, which only a chart needs.
+fn trimmed(snapshot: &Snapshot) -> Result<Value> {
+    let mut value = serde_json::to_value(snapshot)?;
+    if let Some(machine) = value.get_mut("machine").and_then(Value::as_object_mut) {
         machine.remove("history");
     }
-    for job in structured["jobs"].as_array_mut().into_iter().flatten() {
+    for job in value["jobs"].as_array_mut().into_iter().flatten() {
         if let Some(live) = job.get_mut("live").and_then(Value::as_object_mut) {
             live.remove("history");
         }
     }
+    Ok(value)
+}
+
+/// Every machine: this one, then each worker/both peer's latest snapshot from the daemon's
+/// peer runtime, with its age and an online/stale flag.
+fn machines(
+    daemon: &Daemon,
+    local: &Snapshot,
+    recent: usize,
+    text: &mut String,
+) -> Result<Vec<Value>> {
+    let mut out = vec![json!({
+        "name": local.machine.id, "local": true, "role": local.machine.role,
+        "state": "online", "online": true, "stale": false, "age_s": 0.0,
+        "machine_id": local.machine.id, "cargo_jobs_max": local.machine.cargo_jobs_max,
+        "snapshot": "top level (machine, jobs)",
+    })];
+    if !placement::peer_config_present() {
+        return Ok(out);
+    }
+    let report = match tinline_task_manager::peer_link::request_peers(
+        &daemon.socket,
+        Duration::from_secs(30),
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            text.push_str(&format!("\npeer machines unavailable: {e}\n"));
+            return Ok(out);
+        }
+    };
+    if !report.enabled {
+        text.push_str(&format!(
+            "\npeer link not enabled in the daemon: {}\n",
+            report.error.as_deref().unwrap_or("still starting")
+        ));
+        return Ok(out);
+    }
+    for peer in &report.snapshots {
+        let age = peer
+            .age_s
+            .map(|a| format!("{a:.1}s old"))
+            .unwrap_or_else(|| "no snapshot".into());
+        let flag = match (peer.online(), peer.stale) {
+            (true, false) => "online",
+            (true, true) => "online, STALE",
+            (false, _) => "OFFLINE",
+        };
+        text.push_str(&format!(
+            "\n=== peer {} ({}): {} [{flag}], snapshot {age}{}\n",
+            peer.name,
+            peer.role,
+            peer.state,
+            peer.error
+                .as_deref()
+                .map(|e| format!("; last error: {e}"))
+                .unwrap_or_default()
+        ));
+        let parsed = peer
+            .snapshot
+            .as_ref()
+            .map(|v| serde_json::from_value::<Snapshot>(v.clone()));
+        let mut entry = json!({
+            "name": peer.name, "local": false, "role": peer.role, "state": peer.state,
+            "online": peer.online(), "stale": peer.stale, "age_s": peer.age_s,
+            "received_at": peer.received_at, "error": peer.error,
+            "machine_id": null, "cargo_jobs_max": null, "snapshot": null,
+        });
+        match parsed {
+            Some(Ok(mut snap)) => {
+                text.push_str(&crate::status::render(&snap));
+                keep_recent(&mut snap, recent);
+                entry["machine_id"] = json!(snap.machine.id);
+                entry["cargo_jobs_max"] = json!(snap.machine.cargo_jobs_max);
+                entry["snapshot"] = trimmed(&snap)?;
+            }
+            Some(Err(e)) => {
+                text.push_str(&format!("(unreadable snapshot: {e})\n"));
+                entry["error"] = json!(format!("unreadable snapshot: {e}"));
+            }
+            None => {}
+        }
+        out.push(entry);
+    }
+    Ok(out)
+}
+
+fn cluster_status(daemon: &Daemon, args: &Args) -> Result<Outcome> {
+    let recent = args.int("recent_finished", 0, 50, 5)? as usize;
+    let admission = args.bool("include_admission", false)?;
+    let mut snapshot = daemon.status()?;
+    let mut text = crate::status::render(&snapshot);
+    keep_recent(&mut snapshot, recent);
+    let mut structured = trimmed(&snapshot)?;
     // The snapshot's `blocker` is the compile gate's only; run and offload
     // slots have their own gates (read from the local admission report, not
     // the daemon), so an agent can tell whether run-class work would start.
@@ -945,6 +1088,7 @@ fn cluster_status(daemon: &Daemon, args: &Args) -> Result<Outcome> {
             }
         }
     }
+    structured["machines"] = json!(machines(daemon, &snapshot, recent, &mut text)?);
     Ok(Outcome { text, structured })
 }
 
@@ -1001,7 +1145,9 @@ fn job(daemon: &Daemon, args: &Args) -> Result<Outcome> {
     if let Some(e) = &job.execution {
         text.push_str(&format!("\n  detail: {}", e.detail));
     }
-    Ok(Outcome { text, structured })
+    let mut outcome = Outcome { text, structured };
+    add_placement(daemon, &job, &mut outcome);
+    Ok(outcome)
 }
 
 /// The last `lines` lines of the daemon's retained log tail for `id`.
@@ -1078,6 +1224,15 @@ fn waited(daemon: &Daemon, job: &Job, timed_out: bool, tail: usize) -> Outcome {
     let mut text = job_line(job);
     let mut structured = job_summary(job);
     structured["timed_out"] = json!(timed_out);
+    if let Some(p) = placement_of(&daemon.state(), job) {
+        text.push('\n');
+        text.push_str(&placement_text(&p));
+        structured["machine"] = p["machine"].clone();
+        if p["forwarded"] == true {
+            structured["remote_job_id"] = p["remote_job_id"].clone();
+        }
+        structured["placement"] = p;
+    }
     if timed_out {
         text.push_str(&format!(
             "\nstill {} when the wait ended (budget spent or server shutting down); the job keeps running. Call wait_job {{\"id\": {id}}} again; do not resubmit.",
@@ -1118,6 +1273,17 @@ pub fn run_spec(
     class: &str,
     serial: Option<&str>,
 ) -> Result<tinline_task_manager::JobSpec> {
+    let (cwd, resource) = submission(who, cwd, class, serial)?;
+    Recipe { argv, resource }.spec(who.to_owned(), cwd)
+}
+
+/// The resolved checkout and admission class of a submission (the `tasks run` checks).
+fn submission(
+    who: &str,
+    cwd: &str,
+    class: &str,
+    serial: Option<&str>,
+) -> Result<(PathBuf, Resource)> {
     if who.trim().is_empty() || who.len() > 128 {
         return Err("bounded owner required".into());
     }
@@ -1142,7 +1308,94 @@ pub fn run_spec(
             return Err(format!("class must be compile, run or device, got {other:?}").into());
         }
     };
-    Recipe { argv, resource }.spec(who.to_owned(), cwd)
+    Ok((cwd, resource))
+}
+
+/// How long placement waits for a just-started daemon's peer runtime to connect.
+const PLACEMENT_SETTLE: Duration = Duration::from_secs(15);
+/// How long a non-waiting submit waits for a forwarded job's remote id.
+const REMOTE_ID_WAIT: Duration = Duration::from_secs(10);
+
+/// The link record of a forwarded local job (`<state>/peer/links/<id>.json`).
+fn forward_link(state: &std::path::Path, id: i64) -> Option<Value> {
+    serde_json::from_slice(&std::fs::read(state.join(format!("peer/links/{id}.json"))).ok()?).ok()
+}
+
+/// Where a job runs and why: the peer and remote job of a forwarded job (from its argv and
+/// link record) and the recorded placement decision, if one was made. None for a plain local
+/// job that had no placement decision.
+pub fn placement_of(state: &std::path::Path, job: &Job) -> Option<Value> {
+    let recorded = placement::recorded(state, job.id);
+    let peer = recipe(job).and_then(|r| {
+        tinline_task_manager::peer_link::ForwardArgs::from_recipe_argv(&r.argv)?
+            .ok()
+            .map(|a| a.peer)
+    });
+    if recorded.is_none() && peer.is_none() {
+        return None;
+    }
+    let mut out = json!({
+        "machine": peer.clone().or_else(|| recorded.as_ref()
+            .and_then(|r| r["machine"].as_str().map(str::to_owned))),
+        "forwarded": peer.is_some(),
+        "peer": peer,
+    });
+    if let Some(r) = &recorded {
+        out["requested"] = r["requested"].clone();
+        out["reason"] = r["reason"].clone();
+        out["machine_id"] = r["machine_id"].clone();
+        out["cargo_jobs"] = r["cargo_jobs"].clone();
+        out["notes"] = r["notes"].clone();
+    }
+    if out["forwarded"] == true {
+        let link = forward_link(state, job.id);
+        let field = |k: &str| link.as_ref().map_or(Value::Null, |l| l[k].clone());
+        out["remote_job_id"] = field("remote_job_id");
+        out["remote_phase"] = field("remote_phase");
+        out["remote_state"] = field("remote_state");
+        out["link_stage"] = field("stage");
+    }
+    Some(out)
+}
+
+fn placement_text(p: &Value) -> String {
+    let machine = p["machine"].as_str().unwrap_or("?");
+    let mut text = format!("placement: {machine}");
+    if p["forwarded"] == true {
+        match p["remote_job_id"].as_i64() {
+            Some(id) => text.push_str(&format!(" (forwarded; remote job {id} on {machine}")),
+            None => text.push_str(" (forwarded; remote job id not known yet"),
+        }
+        if let Some(phase) = p["remote_phase"].as_str() {
+            text.push_str(&format!(", {phase}"));
+        }
+        text.push(')');
+    }
+    if let Some(reason) = p["reason"].as_str() {
+        text.push_str(&format!(
+            " — {}: {reason}",
+            p["requested"].as_str().unwrap_or("?")
+        ));
+    }
+    for note in p["notes"].as_array().into_iter().flatten() {
+        if let Some(n) = note.as_str() {
+            text.push_str(&format!("\n  note: {n}"));
+        }
+    }
+    text
+}
+
+/// Adds the placement of `job` (if any) to a tool result.
+fn add_placement(daemon: &Daemon, job: &Job, outcome: &mut Outcome) {
+    if let Some(p) = placement_of(&daemon.state(), job) {
+        outcome.text.push('\n');
+        outcome.text.push_str(&placement_text(&p));
+        outcome.structured["machine"] = p["machine"].clone();
+        if p["forwarded"] == true {
+            outcome.structured["remote_job_id"] = p["remote_job_id"].clone();
+        }
+        outcome.structured["placement"] = p;
+    }
 }
 
 fn submit(daemon: &Daemon, args: &Args, ctx: &Ctx) -> Result<Outcome> {
@@ -1164,12 +1417,59 @@ fn submit(daemon: &Daemon, args: &Args, ctx: &Ctx) -> Result<Outcome> {
     let wait = args.bool("wait", false)?;
     let timeout = args.int("timeout_s", 1, MAX_WAIT_S, DEFAULT_WAIT_S)?;
     let tail = args.int("tail_lines", 0, MAX_TAIL, 60)? as usize;
-    let spec = run_spec(who, cwd, argv, class, serial)?;
+    let fetch: Vec<String> = match args.get("fetch") {
+        None => vec![],
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| "fetch must be an array of relative paths".into())
+            })
+            .collect::<Result<_>>()?,
+        Some(_) => return Err("fetch must be an array of relative paths".into()),
+    };
+    let request = match args.str("placement")? {
+        None => placement::Request::Anywhere,
+        Some(text) => placement::Request::parse(text)?,
+    };
+    // `local` (and anywhere without peers) is exactly the previous submission.
+    let (spec, decision) = if request == placement::Request::Local {
+        if !fetch.is_empty() {
+            return Err("fetch only applies when the job runs on a peer".into());
+        }
+        (run_spec(who, cwd, argv, class, serial)?, None)
+    } else {
+        let (cwd, resource) = submission(who, cwd, class, serial)?;
+        daemon.ensure()?;
+        let inputs = placement::gather(&daemon.socket, PLACEMENT_SETTLE)
+            .map_err(|e| daemon.unreachable(e))?;
+        let decision =
+            placement::decide_with(&argv, &crate::place_class(&resource), &request, &inputs)?;
+        eprintln!("tasks mcp: {}", decision.line());
+        let spec = placement::job_spec(
+            &decision,
+            resource,
+            who.to_owned(),
+            cwd,
+            &fetch,
+            &daemon.state(),
+            &std::env::current_exe()?,
+        )?;
+        // Without peers nothing was decided: keep the old, quiet result.
+        let decided = decision.decided();
+        (spec, decided.then_some(decision))
+    };
     let response = daemon.ok(Action::Submit(spec))?;
     let id = response
         .submitted_id
         .ok_or("daemon did not return submitted_id; do not resubmit blindly: check list_jobs")?;
     eprintln!("tasks mcp: submitted job {id} for {who}");
+    if let Some(decision) = &decision
+        && let Err(e) = placement::record(&daemon.state(), id, decision)
+    {
+        eprintln!("tasks mcp: could not record the placement of job {id}: {e}");
+    }
     let warning = display::shared_cwd_warning(&response.jobs, id)
         .map(|w| w.trim_start_matches("tasks: ").to_owned());
     // Same approval sequence as `tasks run`: this call is the explicit approval.
@@ -1181,11 +1481,24 @@ fn submit(daemon: &Daemon, args: &Args, ctx: &Ctx) -> Result<Outcome> {
             .into());
         }
     }
+    let forwarded = decision.as_ref().is_some_and(|d| d.peer().is_some());
     let mut outcome = if wait {
         let (job, timed_out) = wait_for(daemon, id, Duration::from_secs(timeout as u64), ctx)
             .map_err(|e| format!("{e}; {}", tinline_task_manager::live_job_hint(id)))?;
         waited(daemon, &job, timed_out, tail)
     } else {
+        if forwarded {
+            // The bridge needs a local offload slot and a sync first; wait briefly for the
+            // remote id so the agent can see it, never for the job.
+            let end = Instant::now() + REMOTE_ID_WAIT;
+            while Instant::now() < end
+                && !ctx.cancelled()
+                && forward_link(&daemon.state(), id)
+                    .is_none_or(|l| l["remote_job_id"].is_null() && l["stage"] != "done")
+            {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
         let job = response.jobs.iter().find(|j| j.id == id);
         let cwd = job.map_or("?", |j| j.spec.source.as_str());
         Outcome {
@@ -1201,6 +1514,21 @@ fn submit(daemon: &Daemon, args: &Args, ctx: &Ctx) -> Result<Outcome> {
         }
     };
     outcome.structured["job_id"] = json!(id);
+    if !wait && decision.is_some() {
+        match daemon.job(id) {
+            Ok(job) => add_placement(daemon, &job, &mut outcome),
+            Err(_) => {
+                if let Some(d) = &decision {
+                    outcome.structured["machine"] = json!(d.machine);
+                }
+            }
+        }
+    }
+    if let Some(d) = &decision {
+        // The full decision (scores, skipped machines) as made at submit.
+        outcome.text = format!("{}\n{}", d.line(), outcome.text);
+        outcome.structured["decision"] = serde_json::to_value(d)?;
+    }
     if let Some(warning) = warning {
         outcome.text.push_str(&format!("\nwarning: {warning}"));
         outcome.structured["warning"] = json!(warning);

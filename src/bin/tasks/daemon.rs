@@ -150,6 +150,12 @@ fn serve(
         if valid && matches!(action, Action::Peers) {
             drop(store);
             let mut report = peers.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            report.refresh(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs_f64())
+                    .unwrap_or(0.0),
+            );
             let paths = tinline_task_manager::peer::records::Paths::new(&state);
             let tail = |mut v: Vec<serde_json::Value>| {
                 let skip = v.len().saturating_sub(50);

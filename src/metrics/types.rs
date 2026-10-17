@@ -42,7 +42,15 @@ pub struct Machine {
     /// Admission's current (compile-gate) pressure blocker.
     pub blocker: Option<String>,
     pub slots: Vec<Slot>,
+    /// Always written; a reader accepts a document without it (peer snapshots kept for
+    /// placement drop the rings).
+    #[serde(default)]
     pub history: MachineHistory,
+    /// Largest Cargo `-j`/`CARGO_BUILD_JOBS` this machine's admission accepts (the worker's
+    /// recorded `TASKS_MAX_CARGO_JOBS`, else the daemon's own). Additive and optional: absent
+    /// in older snapshots and in the fixtures, where readers must treat it as unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cargo_jobs_max: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -72,7 +80,7 @@ pub struct Slot {
     pub holder_who: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct MachineHistory {
     pub interval_s: f64,
     pub cpu_busy_cores: Vec<f64>,
@@ -126,10 +134,11 @@ pub struct Live {
     pub cpu_cores: Option<f64>,
     pub rss_bytes: u64,
     pub processes: u32,
+    #[serde(default)]
     pub history: LiveHistory,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct LiveHistory {
     pub interval_s: f64,
     pub cpu_cores: Vec<f64>,

@@ -367,6 +367,66 @@ pub struct PeersReport {
     /// Inbound records (jobs peers forwarded here), newest last.
     #[serde(default)]
     pub inbound: Vec<serde_json::Value>,
+    /// The latest status/0 snapshot of every worker/both peer, kept by the peer runtime
+    /// (read-only; older daemons omit the key). Ages are filled at reply time.
+    #[serde(default)]
+    pub snapshots: Vec<PeerSnapshot>,
+}
+
+/// Link state of a peer's status stream as the runtime last saw it.
+pub const STREAM_CONNECTING: &str = "connecting";
+pub const STREAM_ONLINE: &str = "online";
+pub const STREAM_OFFLINE: &str = "offline";
+pub const STREAM_STATUS_ERROR: &str = "status_error";
+
+/// One worker/both peer's latest snapshot (cluster snapshot v1, `history` rings dropped) and
+/// how fresh it is.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PeerSnapshot {
+    /// Configured peer name (`[[peer]] name`).
+    pub name: String,
+    pub role: String,
+    /// `connecting` (no attempt finished yet), `online`, `offline`, `status_error` (reachable,
+    /// but its status sample failed; the last snapshot is kept).
+    pub state: String,
+    /// When `state` last changed (Unix seconds).
+    pub since: f64,
+    /// The last connection or status error, if any.
+    #[serde(default)]
+    pub error: Option<String>,
+    /// When the last live snapshot arrived (this machine's clock).
+    #[serde(default)]
+    pub received_at: Option<f64>,
+    /// Seconds since `received_at`, at reply time.
+    #[serde(default)]
+    pub age_s: Option<f64>,
+    /// No live snapshot, or older than `stale_after_s`, at reply time.
+    #[serde(default)]
+    pub stale: bool,
+    pub stale_after_s: f64,
+    #[serde(default)]
+    pub snapshot: Option<serde_json::Value>,
+}
+
+impl PeerSnapshot {
+    /// The stream is up (a live snapshot arrived and no loss was seen since).
+    pub fn online(&self) -> bool {
+        matches!(self.state.as_str(), STREAM_ONLINE | STREAM_STATUS_ERROR)
+    }
+    /// Fills `age_s`/`stale` for a reply at `now`.
+    pub fn refresh(&mut self, now: f64) {
+        self.age_s = self.received_at.map(|t| (now - t).max(0.0));
+        self.stale = self.age_s.is_none_or(|age| age > self.stale_after_s);
+    }
+}
+
+impl PeersReport {
+    /// Fills every snapshot's age and stale flag for a reply at `now`.
+    pub fn refresh(&mut self, now: f64) {
+        for s in &mut self.snapshots {
+            s.refresh(now);
+        }
+    }
 }
 
 /// Reply to `Action::Peers`, a separate shape like `StatusResponse`. A daemon that predates

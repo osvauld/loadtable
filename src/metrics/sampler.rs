@@ -83,6 +83,8 @@ struct State {
     mem: Option<procfs::MemInfo>,
     pressure: Option<Pressure>,
     blockers: Blockers,
+    /// Admission's effective Cargo jobs cap (None while thresholds are invalid).
+    cargo_jobs_max: Option<u64>,
     scan: Scan,
     cpu_hist: Ring<f64>,
     mem_hist: Ring<u64>,
@@ -421,6 +423,7 @@ impl Sampler {
                 mem: None,
                 pressure: None,
                 blockers: Blockers::default(),
+                cargo_jobs_max: None,
                 scan: Scan::default(),
                 cpu_hist: Ring::new(HISTORY_POINTS),
                 mem_hist: Ring::new(HISTORY_POINTS),
@@ -474,6 +477,10 @@ impl Sampler {
             admission::thresholds(),
             admission::Thresholds::overridden(|n| std::env::var_os(n)),
         );
+        let cargo_jobs_max = report
+            .as_ref()
+            .ok()
+            .map(|(r, _)| r.effective.max_cargo_jobs);
         let blockers = match (&pressure, report) {
             (None, _) => Blockers::all("pressure (PSI) not readable; admission fails closed"),
             (_, Err(e)) => Blockers::all(&format!("invalid admission thresholds: {e}")),
@@ -524,6 +531,7 @@ impl Sampler {
                 io_some_avg10: p.io_some_avg10,
             });
             s.blockers = blockers;
+            s.cargo_jobs_max = cargo_jobs_max;
             s.scan = scan;
         }
         let Some(store) = store else { return Ok(()) };
@@ -799,6 +807,7 @@ impl Sampler {
                 cpu_busy_cores: s.cpu_hist.to_vec(),
                 mem_used_bytes: s.mem_hist.to_vec(),
             },
+            cargo_jobs_max: s.cargo_jobs_max,
         };
         let mut extras = HashMap::new();
         for job in &selected {

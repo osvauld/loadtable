@@ -28,7 +28,9 @@ guessed. Unknown fields must be ignored by readers (forward compatible).
     "slots": [ { "kind": "compile"|"run"|"offload"|"device", "name": "p2p-build",
                  "busy": true, "holder_job": 91 | null, "holder_who": "view-step-up@kurukkan" | null } ],
     "history": { "interval_s": 2.0,   // ring buffer, newest last, <= 150 points (5 min)
-                 "cpu_busy_cores": [ ], "mem_used_bytes": [ ] }
+                 "cpu_busy_cores": [ ], "mem_used_bytes": [ ] },
+    "cargo_jobs_max": 2               // optional (feature/mcp-placement): admission's effective Cargo
+                                      // jobs cap; absent in older snapshots = unknown
   },
   "jobs": [ {
     "id": 91,
