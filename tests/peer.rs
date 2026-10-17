@@ -491,6 +491,65 @@ fn status_stream_reaches_an_allowlisted_peer_and_refuses_an_unknown_one() {
 
 /// A forwarded job sees the WORKER daemon's bindgen wiring (LIBCLANG_PATH,
 /// BINDGEN_EXTRA_CLANG_ARGS from its unit), never the controller's.
+/// Pairing without editing TOML: `tasks peer add` writes entries the daemons then admit.
+#[test]
+fn peer_add_pairs_two_daemons_and_refuses_invalid_or_duplicate_entries() {
+    let mut a = Node::new("add", "alpha");
+    let mut b = Node::new("add", "beta");
+    let root = a.root.clone();
+    let b_addr = format!("127.0.0.1:{}", b.port);
+    let a_addr = format!("127.0.0.1:{}", a.port);
+    let refused = |node: &Node, args: &[&str], needle: &str| {
+        let before = std::fs::read_to_string(node.config()).unwrap();
+        let mut argv = vec!["peer", "add"];
+        argv.extend_from_slice(args);
+        let out = node.cli(&argv, &root);
+        assert!(!out.status.success(), "{args:?} was accepted");
+        assert!(stderr(&out).contains(needle), "{args:?}: {}", stderr(&out));
+        assert_eq!(std::fs::read_to_string(node.config()).unwrap(), before);
+    };
+    refused(&a, &["beta", "not-a-key", &b_addr], "endpoint id");
+    refused(&a, &["bad name", &b.id, &b_addr], "peer name");
+    refused(&a, &["beta\"x", &b.id, &b_addr], "peer name");
+    refused(&a, &["beta", &b.id, "nowhere"], "addr");
+    refused(&a, &["beta", &b.id, &b_addr, "--role", "admin"], "--role");
+    refused(&a, &["beta", &b.id], "usage");
+
+    let out = a.cli(&["peer", "add", "beta", &b.id, &b_addr], &root);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("added peer beta (worker)"),
+        "{}",
+        stdout(&out)
+    );
+    let out = b.cli(
+        &["peer", "add", "alpha", &a.id, &a_addr, "--role", "host"],
+        &root,
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(a.config()).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+    // The same name or the same endpoint again is a duplicate of the whole-file validation.
+    refused(&a, &["beta", &b.id, &b_addr], "duplicate peer name");
+    refused(&a, &["beta2", &b.id, &b_addr], "duplicate endpoint_id");
+    let parsed = net::PeerConfig::parse(
+        &std::fs::read_to_string(a.config()).unwrap(),
+        &a.config(),
+        Some(&a.home()),
+    )
+    .unwrap();
+    assert_eq!(parsed.peers.len(), 1);
+    assert_eq!(parsed.peers[0].role, net::Role::Worker);
+
+    b.start();
+    a.start();
+    let repo = repo(&a);
+    let out = forward(&a, &repo, &["--run"], "echo paired-by-peer-add");
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    assert!(a.job_log(only_job(&a).id).contains("paired-by-peer-add"));
+}
+
 #[test]
 fn worker_bindgen_environment_reaches_forwarded_jobs() {
     let mut a = Node::new("bindgen", "alpha");

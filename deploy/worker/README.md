@@ -18,10 +18,13 @@ applied anywhere. Full guide, options and the migration of 192.168.1.7: `nix/REA
 3. `services.tasks-worker = { enable = true; peer.bind = "<worker IP>:7843";
    peer.controllers = [ { name = "laptop"; endpointId = "<step 1>"; } ]; };`
 4. `sudo nixos-rebuild build`, then `switch` (compiles `tasks` on the worker).
-5. `sudo -u tasks-worker tasks-worker-peer-id` → a `[[peer]] role = "worker"` entry with
-   that id and `addr` in the controller's `~/.config/tasks/peer.toml`; restart the
+5. `journalctl -u tasks-worker-announce` (or `sudo -u tasks-worker tasks-worker-peer-id`)
+   gives the id; on the controller `tasks peer add NAME ID <worker IP>:7843`; restart the
    controller daemon when idle.
 6. `tasks peer list` / `tasks place -- …` / `tasks run --peer NAME -- true` on the controller.
+
+A **fresh install** (new machine, its disk wiped) uses `nixosConfigurations.<host>` from
+`nix/hosts/<host>/` with nixos-anywhere or the installer ISO: `nix/README.md`, "Fresh install".
 
 The rest of this file describes the portable user unit (any distro) and the
 ssh/tasks-offload path, which the existing worker still uses.

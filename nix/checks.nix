@@ -9,6 +9,7 @@
   system,
   workerModule,
   hostExample,
+  nixosConfigurations,
 }:
 
 let
@@ -132,8 +133,103 @@ let
       };
     }
   ];
+
+  # sccache off: no wrapper, no server unit, no ordering on it.
+  noCache = eval [
+    {
+      services.tasks-worker = {
+        enable = true;
+        peer.enable = false;
+        sccache.enable = false;
+      };
+    }
+  ];
+  dCache = dedicated.systemd.services.tasks-worker-sccache;
+
+  # 6. Fresh-install machines (flake nixosConfigurations; real package, evaluated only).
+  tpl = nixosConfigurations.worker-template.config;
+  ex = nixosConfigurations.worker-example.config;
+  tplFw = tpl.networking.firewall;
+  diskOf = cfg: cfg.disko.devices.disk.main;
 in
 {
+  template-and-example-host = expect "template" [
+    [
+      "worker-template: worker enabled as the dedicated user, peer on the template address"
+      (
+        tpl.services.tasks-worker.enable
+        && tpl.services.tasks-worker.user == "tasks-worker"
+        && tpl.services.tasks-worker.peer.rendered.bind == "192.168.1.50:7843"
+        && (builtins.head tpl.services.tasks-worker.peer.rendered.peer).role == "host"
+      )
+    ]
+    [
+      "worker-template: firewall opens only TCP 22 (ssh) and UDP 7843 (peer)"
+      (
+        tpl.networking.firewall.enable
+        && tplFw.allowedTCPPorts == [ 22 ]
+        && tplFw.allowedUDPPorts == [ 7843 ]
+        && tplFw.allowedTCPPortRanges == [ ]
+        && tplFw.allowedUDPPortRanges == [ ]
+      )
+    ]
+    [
+      "worker-template: ssh key-only, keys for root and admin"
+      (
+        tpl.services.openssh.enable
+        && !tpl.services.openssh.settings.PasswordAuthentication
+        && tpl.services.openssh.settings.PermitRootLogin == "prohibit-password"
+        && tpl.users.users.root.openssh.authorizedKeys.keys != [ ]
+        && tpl.users.users.admin.openssh.authorizedKeys.keys != [ ]
+      )
+    ]
+    [
+      "worker-template: disko single disk, GPT, EFI vfat /boot + ext4 /, systemd-boot"
+      (
+        (diskOf tpl).device == "/dev/nvme0n1"
+        && (diskOf tpl).content.partitions.ESP.content.mountpoint == "/boot"
+        && (diskOf tpl).content.partitions.root.content.format == "ext4"
+        && tpl.fileSystems."/".fsType == "ext4"
+        && tpl.boot.loader.systemd-boot.enable
+      )
+    ]
+    [
+      "worker-template: placeholders are flagged as warnings"
+      (lib.length tpl.warnings >= 2 && builtins.any (has "placeholder") tpl.warnings)
+    ]
+    [
+      "worker-template: pairing oneshot prints `tasks peer add` after the daemon"
+      (
+        tpl.systemd.services.tasks-worker-announce.serviceConfig.Type == "oneshot"
+        && builtins.elem "tasks-worker.service" tpl.systemd.services.tasks-worker-announce.after
+        && has "tasks peer add worker-template " tpl.systemd.services.tasks-worker-announce.script
+        && has " 192.168.1.50:7843" tpl.systemd.services.tasks-worker-announce.script
+      )
+    ]
+    [
+      "worker-template: sccache server unit and htop come with the module"
+      (
+        tpl.systemd.services ? tasks-worker-sccache
+        && builtins.any (p: (p.pname or "") == "htop") tpl.environment.systemPackages
+      )
+    ]
+    [
+      "worker-template: build cache on the root fs (no separate mount), no failed assertions"
+      (!(tpl.fileSystems ? "/var/lib/tasks-worker") && failedAssertions tpl == [ ])
+    ]
+    [
+      "worker-example: its own name, address, controller id, disk; no placeholder warnings"
+      (
+        ex.networking.hostName == "worker-example"
+        && ex.services.tasks-worker.peer.rendered.bind == "192.168.1.51:7843"
+        && (builtins.head ex.services.tasks-worker.peer.rendered.peer).endpoint_id == laptopId
+        && (diskOf ex).device == "/dev/nvme0n1"
+        && failedAssertions ex == [ ]
+        && !(builtins.any (has "placeholder") ex.warnings)
+      )
+    ]
+  ];
+
   module-dedicated-user = expect "dedicated-user" [
     [
       "dedicated system user tasks-worker with home /var/lib/tasks-worker"
@@ -178,6 +274,39 @@ in
         has "/bin/sccache" dEnv.RUSTC_WRAPPER
         && dEnv.SCCACHE_CACHE_SIZE == "40G"
         && dEnv.SCCACHE_DIR == "/var/lib/tasks-worker/build-cache/sccache"
+      )
+    ]
+    [
+      "sccache server: own unit as the service user, same dir/size, never idles out, before the daemon"
+      (
+        dCache.serviceConfig.User == "tasks-worker"
+        && has "/bin/sccache" dCache.serviceConfig.ExecStart
+        && dCache.environment.SCCACHE_DIR == dEnv.SCCACHE_DIR
+        && dCache.environment.SCCACHE_CACHE_SIZE == dEnv.SCCACHE_CACHE_SIZE
+        && dCache.environment.SCCACHE_IDLE_TIMEOUT == "0"
+        && dCache.environment.SCCACHE_START_SERVER == "1"
+        && dCache.environment.SCCACHE_NO_DAEMON == "1"
+        && dCache.serviceConfig.Restart == "always"
+        && builtins.elem "multi-user.target" dCache.wantedBy
+        && builtins.elem "tasks-worker.service" dCache.before
+        && builtins.elem "tasks-worker-sccache.service" dSvc.after
+        && builtins.elem "tasks-worker-sccache.service" dSvc.wants
+      )
+    ]
+    [
+      "operator tools (htop) in systemPackages, not on the daemon's PATH"
+      (
+        builtins.any (p: (p.pname or "") == "htop") dedicated.environment.systemPackages
+        && !(has "htop" dEnv.PATH)
+      )
+    ]
+    [
+      "sccache.enable = false: no wrapper, no server unit, no ordering"
+      (
+        !(noCache.systemd.services ? tasks-worker-sccache)
+        && !(noCache.systemd.services.tasks-worker.environment ? RUSTC_WRAPPER)
+        && !(builtins.elem "tasks-worker-sccache.service" noCache.systemd.services.tasks-worker.after)
+        && failedAssertions noCache == [ ]
       )
     ]
     [

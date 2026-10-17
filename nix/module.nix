@@ -85,6 +85,7 @@ let
     if cfg.android.sdkRoot != null then cfg.android.sdkRoot else "${home}/Android/Sdk";
   javaHome = "/etc/taskworker/jdk21";
   libclang = cfg.bindgen.llvmPackages.libclang;
+  sccacheServer = cfg.enable && cfg.sccache.enable && cfg.sccache.server;
 
   # What every live command needs regardless of the toolchain choice: the cache-link step
   # runs `git rev-parse --show-toplevel`.
@@ -288,6 +289,19 @@ in
         default = null;
         description = "SCCACHE_DIR; null = <user home>/build-cache/sccache (the existing worker's value and tasks' cache-policy path).";
       };
+      server = mkOption {
+        type = types.bool;
+        default = true;
+        description = ''
+          Run the sccache server as its own service, `tasks-worker-sccache.service` (as `user`,
+          same SCCACHE_DIR/SCCACHE_CACHE_SIZE, SCCACHE_IDLE_TIMEOUT=0, restarted if it exits),
+          ordered before the daemon. Without it the first job's rustc spawns the server inside
+          that job, and the server inherits the job's slot-lock lease (`p2p-build.lock`),
+          holding the compile slot after the job ends (worker jobs 154/155). It is a system
+          unit running as `user` rather than a systemd --user unit, so it also works for the
+          dedicated system user, which has no user manager.
+        '';
+      };
     };
 
     peer = {
@@ -343,6 +357,15 @@ in
         internal = true;
         default = peerSettings;
         description = "The peer.toml content (as an attrset) written to /etc/tasks-worker/peer.toml; for checks.";
+      };
+      announce = mkOption {
+        type = types.bool;
+        default = true;
+        description = ''
+          Pairing: after the daemon starts, a oneshot `tasks-worker-announce.service` prints this
+          worker's endpoint id and the controller command (`tasks peer add NAME ID ADDR`) to
+          the journal and the console, and writes it to stateDir/endpoint-id.
+        '';
       };
       waitForAddressSec = mkOption {
         type = types.ints.unsigned;
@@ -439,6 +462,18 @@ in
         defaultText = literalExpression "pkgs.llvmPackages";
         description = "LLVM package set whose libclang bindgen loads.";
       };
+    };
+
+    operatorTools = mkOption {
+      type = types.listOf types.package;
+      default = with pkgs; [
+        htop
+        iotop-c
+        lsof
+        tmux
+      ];
+      defaultText = literalExpression "with pkgs; [ htop iotop-c lsof tmux ]";
+      description = "Tools for the operator's SSH sessions (systemPackages only, not the daemon's PATH): no `nix-shell -p htop` on a worker.";
     };
 
     nixLd = {
@@ -557,6 +592,7 @@ in
         pkgs.git
       ]
       ++ cfg.toolchains
+      ++ cfg.operatorTools
       ++ optional cfg.sccache.enable cfg.sccache.package;
       # The .pc files of toolchains at /run/current-system/sw/lib/pkgconfig (PKG_CONFIG_PATH).
       environment.pathsToLink = [ "/lib/pkgconfig" ];
@@ -564,8 +600,8 @@ in
       systemd.services.tasks-worker = {
         description = "task-manager worker daemon (tasks daemon, native admission, iroh peer link)";
         wantedBy = [ "multi-user.target" ];
-        wants = [ "network-online.target" ];
-        after = [ "network-online.target" ];
+        wants = [ "network-online.target" ] ++ optional sccacheServer "tasks-worker-sccache.service";
+        after = [ "network-online.target" ] ++ optional sccacheServer "tasks-worker-sccache.service";
         restartIfChanged = cfg.restartOnSwitch;
         environment = lib.mapAttrs (_: lib.mkForce) serviceEnvironment;
         serviceConfig = {
@@ -592,8 +628,64 @@ in
       };
     }
 
+    (mkIf sccacheServer {
+      # The compiler-cache server, started outside every job (see sccache.server).
+      systemd.services.tasks-worker-sccache = {
+        description = "sccache server for task-manager jobs (outside any job's slot lease)";
+        wantedBy = [ "multi-user.target" ];
+        before = [ "tasks-worker.service" ];
+        environment = {
+          SCCACHE_DIR = sccacheDir;
+          SCCACHE_CACHE_SIZE = cfg.sccache.size;
+          SCCACHE_IDLE_TIMEOUT = "0";
+          # Foreground server (what `sccache --start-server` runs, without daemonizing), so
+          # systemd tracks and restarts it.
+          SCCACHE_START_SERVER = "1";
+          SCCACHE_NO_DAEMON = "1";
+        };
+        serviceConfig = {
+          Type = "simple";
+          User = cfg.user;
+          Group = group;
+          WorkingDirectory = home;
+          UMask = "0077";
+          ExecStart = lib.getExe' cfg.sccache.package "sccache";
+          # A restarted server serves the same on-disk cache; between exit and restart a
+          # job's rustc would spawn one inside the job again, so keep the gap short.
+          Restart = "always";
+          RestartSec = 2;
+          # Same reason as the daemon: no private /tmp or home.
+        };
+      };
+    })
+
     # Two mkIfs, not an `if` choosing attribute names: the module system must see the
     # attribute structure without evaluating config (that `if` is infinite recursion).
+    (mkIf (cfg.peer.enable && cfg.peer.announce) {
+      systemd.services.tasks-worker-announce = {
+        description = "Print the task-manager worker's endpoint id for pairing";
+        wantedBy = [ "multi-user.target" ];
+        after = [ "tasks-worker.service" ];
+        wants = [ "tasks-worker.service" ];
+        serviceConfig = {
+          Type = "oneshot";
+          User = cfg.user;
+          Group = group;
+          UMask = "0022";
+          StandardOutput = "journal+console";
+        };
+        script = ''
+          key=${lib.escapeShellArg cfg.peer.secretKeyFile}
+          # The daemon's ExecStartPre creates the key; give a slow first boot a minute.
+          for _ in $(seq 60); do [ -e "$key" ] && break; sleep 1; done
+          id=$(${lib.getExe peerIdScript})
+          echo "$id" > ${lib.escapeShellArg "${cfg.stateDir}/endpoint-id"}
+          echo "tasks-worker: endpoint id $id"
+          echo "tasks-worker: on the controller run: tasks peer add ${config.networking.hostName} $id ${toString cfg.peer.bind}"
+        '';
+      };
+    })
+
     (mkIf (cfg.peer.enable && cfg.firewall.openPeerPort && bindPort != null) {
       networking.firewall.allowedUDPPorts = mkIf (cfg.firewall.interfaces == [ ]) [ bindPort ];
       networking.firewall.interfaces = mkIf (cfg.firewall.interfaces != [ ]) (

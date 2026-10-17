@@ -10,10 +10,13 @@ cannot raise a worker's limits: they are the worker unit's environment.
 
 | File | What |
 | --- | --- |
-| `../flake.nix` | The flake: `packages.<system>.{tasks-worker,tasks,default}`, `overlays.default`, `nixosModules.{worker,default}`, `checks.<system>.module-*` |
+| `../flake.nix` | The flake: `packages.<system>.{tasks-worker,tasks,default,installer-iso}`, `overlays.default`, `nixosModules.{worker,default}`, `nixosConfigurations.{worker-template,<host>}`, `checks.<system>.*`; inputs nixpkgs (nixos-26.05) and disko |
 | `package.nix` | `rustPlatform.buildRustPackage` of this checkout, `cargoLock.lockFile = Cargo.lock` |
 | `module.nix` | `services.tasks-worker` |
 | `checks.nix` | Evaluation-only checks of example configurations |
+| `template/worker.nix` | Fresh-install machine: disko layout, ssh key-only, firewall, the worker; per-host values are `tasksWorkerHost.*` |
+| `hosts/<name>/default.nix` | One fresh-install host (`nixosConfigurations.<name>`); `hosts/worker-example/` is the example. Its `facter.json` is written by nixos-anywhere |
+| `installer.nix` | `packages.<system>.installer-iso`: installer image with sshd (key-only), headless `tasks`, disko and this flake at `/etc/task-manager` |
 | `hosts/lan-worker.nix` | The worker 192.168.1.7 expressed with the module (migration target; not applied) |
 | `taskworker-host.nix` | What is applied there today as `/etc/nixos/taskworker.nix`; superseded by the module once migrated (kept: `deploy/worker/enable-test-phone.sh` installs it) |
 
@@ -70,6 +73,8 @@ something: `tasks run --who … -- cargo test --offline --locked -j 2`, for both
 | `android.enable` | false | `ANDROID_HOME` (`android.sdkRoot`, null = `<home>/Android/Sdk`) and `JAVA_HOME=/etc/taskworker/jdk21` (a link to `android.jdk`, default jdk21). The SDK is installed per user with sdkmanager; **the module never accepts Android SDK licences** |
 | `android.adbUsb` | false | Group `adbusers` for `user` + udev rules (headless: no seat, no uaccess) |
 | `bindgen.enable` / `bindgen.llvmPackages` | true / `pkgs.llvmPackages` | `LIBCLANG_PATH=<libclang.lib>/lib`, `BINDGEN_EXTRA_CLANG_ARGS="-isystem <libclang.lib>/lib/clang/<major>/include -isystem <glibc.dev>/include"` (bindgen loads libclang itself; worker job 456 failed with "Unable to find libclang"). Forwarded to live commands by tasks (this branch) |
+| `sccache.server` | true | `tasks-worker-sccache.service`: the sccache server as `user`, outside every job (same `SCCACHE_DIR`/`SCCACHE_CACHE_SIZE`, `SCCACHE_IDLE_TIMEOUT=0`, foreground, `Restart=always`), ordered before `tasks-worker.service`. A server spawned by a job's rustc inherits that job's `p2p-build.lock` lease and holds the compile slot after the job ends (worker jobs 154/155). A system unit as `user`, not a `--user` unit, so the dedicated user (no user manager) gets it too |
+| `operatorTools` | htop iotop-c lsof tmux | systemPackages only (SSH sessions), not the daemon PATH |
 | `nixLd.enable` / `nixLd.libraries` | true / libaom libvpx libvmaf openssl | `programs.nix-ld` for rustup toolchains, the SDK's adb and offloaded test binaries |
 | `keepAwake` | true | logind ignores lid/idle; sleep/suspend/hibernate targets off |
 | `excludeLockDirFromTmpCleaning` | true | tmpfiles `x /tmp/claude-*` (stable flock inodes) |
@@ -146,18 +151,74 @@ address (DHCP reservation), and a peer-capable `tasks` on the controller.
    "Full build" for the cost), then `sudo nixos-rebuild switch`. With the dedicated user,
    install its Rust toolchain once (`sudo -iu tasks-worker rustup default stable`, online)
    or set `toolchains` to nixpkgs' `rustc`/`cargo`.
-5. **Endpoint id:** `sudo -u tasks-worker tasks-worker-peer-id` (the key was generated at the
-   first start). On the controller, add to `~/.config/tasks/peer.toml`
-   ```toml
-   [[peer]]
-   name = "worker2"
-   endpoint_id = "<id from step 5>"
-   addr = "192.168.1.8:7843"
-   role = "worker"
-   ```
-   and restart the controller's daemon when it is idle (`tasks list --active` empty).
+5. **Endpoint id:** `journalctl -u tasks-worker-announce` prints the line to run on the
+   controller (or `sudo -u tasks-worker tasks-worker-peer-id`; the key was generated at the
+   first start). On the controller:
+   `tasks peer add worker2 <id> 192.168.1.8:7843` (role `worker` by default; it validates
+   the whole `~/.config/tasks/peer.toml` before replacing it), then restart the
+   controller's daemon when it is idle (`tasks list --active` empty).
 6. **Check:** `tasks peer list` on the controller shows the worker online;
    `tasks place -- cargo build --offline --locked` names it; `tasks run --peer worker2 -- true`.
+
+## Fresh install of a new worker (WIPES the target disk)
+
+New workers are whole machines installed from this flake; the machine's existing OS and
+**every partition on `disk` are destroyed**. `nix/template/worker.nix` is the machine:
+
+- `services.tasks-worker` as the dedicated `tasks-worker` user, peer on `address:7843`, the
+  controller from the host file as the only allowlisted peer;
+- disko: one disk, GPT, 1 GiB EFI (vfat `/boot`, systemd-boot) + ext4 `/`; the build cache
+  (`/var/lib/tasks-worker/build-cache`, sccache, offload checkouts) is on the root fs;
+- ssh key-only (no passwords, root `prohibit-password`), a wheel `admin` login with the same
+  keys; firewall: TCP 22 and UDP 7843 only (only on `interface` when set);
+- hardware: `hosts/<name>/facter.json` (nixos-facter, `hardware.facter.reportPath`), else
+  `hosts/<name>/hardware-configuration.nix` (nixos-generate-config), else generic modules;
+- pairing: `tasks-worker-announce.service`, a oneshot after the daemon, prints the endpoint
+  id and the exact `tasks peer add NAME ID ADDR` line to the journal and the console, and
+  writes it to `/var/lib/tasks-worker/endpoint-id`. (Invite/accept codes come later.)
+
+`nixosConfigurations.worker-template` is the template with placeholders (they raise
+evaluation warnings; never install it as is). Steps:
+
+1. **Host file:** `cp -r nix/hosts/worker-example nix/hosts/<host>`; set `hostName`,
+   `address` (DHCP reservation), `disk` (check with `lsblk` on the target: it is ERASED),
+   `controller.endpointId` (the laptop's `tasks peer id`) and `sshAuthorizedKeys`.
+   `nixosConfigurations.<host>` exists for every `nix/hosts/<dir>/default.nix`.
+2. **Boot the target** into any Linux with root ssh by key (e.g. the NixOS installer, or
+   `packages.installer-iso` below).
+3. **Install, from a machine with Nix** (the existing NixOS worker 192.168.1.7 can be that
+   machine; the laptop has no Nix). **THIS WIPES THE TARGET DISK:**
+   ```sh
+   nix run github:nix-community/nixos-anywhere -- \
+     --flake .#<host> \
+     --generate-hardware-config nixos-facter nix/hosts/<host>/facter.json \
+     root@<target IP>
+   ```
+   It writes `facter.json` into this checkout, partitions with disko, builds the system
+   (including `tasks`; see "Full build") and reboots. Commit `nix/hosts/<host>/` afterwards.
+4. **Pair:** on the worker, `journalctl -u tasks-worker-announce` (or the console) shows
+   `tasks peer add <host> <id> <address>:7843`; run that on the controller and restart the
+   controller daemon when idle.
+5. **Toolchain:** the dedicated user has no Rust yet: `sudo -iu tasks-worker rustup default
+   stable` (online), or set `services.tasks-worker.toolchains` to nixpkgs' `rustc`/`cargo`.
+
+**In person, without nixos-anywhere:** set `installerKeys` in `flake.nix` to your public
+key(s), `nix build .#installer-iso` (a NixOS installer image, roughly 1–1.5 GB; it also
+compiles `tasks`), write it to a USB stick and boot the target. Then, over ssh or at the
+console (**WIPES `disk`**):
+
+```sh
+sudo disko --mode destroy,format,mount --flake /etc/task-manager#<host>
+sudo nixos-install --flake /etc/task-manager#<host>
+```
+
+The ISO carries the flake as it was when built: host files added later need a rebuild, or
+`--flake github:…`/a copied checkout instead of `/etc/task-manager`. Without a facter report
+the host evaluates with generic kernel modules; run `nixos-facter -o facter.json` on the
+target first for a precise one.
+
+Neither nixos-anywhere, disko, nixos-install nor the ISO build has been run; the
+configurations and the ISO derivation are evaluated by `nix flake check --no-build`.
 
 ## Migrating the existing worker (192.168.1.7): not performed
 
@@ -184,6 +245,12 @@ jobs only once it is a release containing this branch's `src/worker.rs` change (
 releases clear them; check with a `--run` job that echoes `$LIBCLANG_PATH`). Until then a job
 can pass them itself: `env LIBCLANG_PATH=… BINDGEN_EXTRA_CLANG_ARGS=… cargo …`.
 
+Node setup policy (docs/design/node-setup-policy.md, rule 1 "declared, not hand-made"): the
+module declares what was done by hand or by scratch scripts on 192.168.1.7: the bindgen env
+(`worker-libclang.sh` wrote exactly `bindgen.enable`'s two values into
+`/etc/taskworker/bindgen.env`), the sccache server outside jobs (`sccache.server`) and htop
+(`operatorTools`; it was only ever run as `nix-shell -p htop`).
+
 Steps (user, in an idle window: `tasks list --active` empty on the worker):
 
 1. Paste the laptop's `tasks peer id` into `nix/hosts/lan-worker.nix` (the committed
@@ -205,7 +272,9 @@ Steps (user, in an idle window: `tasks list --active` empty on the worker):
 3. Stop and disable the old user unit (stops only the daemon; running jobs continue):
    `systemctl --user disable --now tasks-daemon.service`. Only one daemon can own the state
    directory; the new one exits 2 (not retried) while the old one runs.
-4. `sudo nixos-rebuild switch`. It starts `tasks-worker.service`; the first start creates
+4. Stop a job-spawned sccache server first (`sccache --stop-server` as abe; it may hold a
+   slot lease and port 4226, which the new `tasks-worker-sccache.service` binds), then
+   `sudo nixos-rebuild switch`. It starts `tasks-worker-sccache.service` and `tasks-worker.service`; the first start creates
    `/var/lib/tasks-worker/peer.key`. Check `systemctl status tasks-worker`, `tasks admission`
    (`thresholds.source: worker-record`, `max_cargo_jobs: 6`, `lock_dir /tmp/claude-1000`)
    and `tasks list --limit 3` (the old jobs are still there).
@@ -236,9 +305,20 @@ a stub `tasks` and throw the list of failed expectations:
   old unit's, UDP 7843 only on wlo1, manual approval rendered, adb group, nix-ld, no sleep;
 - `module-refusals`: placeholder id, 0.0.0.0, missing port, no controllers, key in the
   store, undeclared user;
-- `module-peer-disabled`: nothing rendered or opened.
+- `module-peer-disabled`: nothing rendered or opened;
+- `template-and-example-host`: `nixosConfigurations.worker-template` (dedicated user, peer
+  bind, firewall exactly TCP 22 + UDP 7843, ssh key-only, disko EFI + ext4 on one disk,
+  placeholder warnings, the announce oneshot, no separate cache mount, no failed assertions)
+  and `worker-example` (its own name/address/controller id/disk, no placeholder warnings).
+  These use the real package but only evaluate it.
 
-They never build `tasks`, so even a full `nix flake check` builds only empty marker files.
+`nix flake check --no-build` also evaluates `packages.*.installer-iso` and both
+`nixosConfigurations` (their derivations are instantiated, never built). One host directly:
+`nix eval .#nixosConfigurations.worker-example.config.system.build.toplevel.drvPath`.
+
+The `module-*` checks use a stub `tasks`. The template check reads the real package's
+store path, so a full `nix flake check` (without `--no-build`) would compile `tasks` once;
+use `--no-build`.
 
 ## Full build (not run; needs the user's go-ahead)
 
@@ -248,7 +328,9 @@ nix build .#tasks-worker -L --max-jobs 1 --cores 4
 
 It builds inside nix-daemon, **outside `tasks` admission, cancellation and the job ledger**.
 Cost: see the estimate in the feedback file of this change. `nixos-rebuild` of a config that
-enables the module runs the same build.
+enables the module, nixos-anywhere and the installer ISO run the same build. The ISO and a
+host toplevel additionally fetch (mostly substitute) a NixOS closure:
+`nix build .#installer-iso` / `.#nixosConfigurations.<host>.config.system.build.toplevel`.
 
 ## Limitations
 
