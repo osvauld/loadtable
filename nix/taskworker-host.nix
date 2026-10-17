@@ -40,6 +40,10 @@
   systemd.targets.hibernate.enable = false;
   systemd.targets.hybrid-sleep.enable = false;
 
+  # Dedicated compute node: boot headless so the desktop doesn't hold ~2 GB.
+  # KDE stays installed; start it on demand with `sudo systemctl start display-manager`.
+  systemd.defaultUnit = "multi-user.target";
+
   nix.settings.experimental-features = [ "nix-command" "flakes" ];
 
   # rustup toolchains (rust-toolchain.toml) and prebuilt tools need a dynamic loader.
