@@ -71,14 +71,19 @@ fn closed_client_stdout_sends_no_mutation_after_the_job_is_terminal() {
                     }
                     Action::ApproveCommand(42) => "approve_command".into(),
                     Action::StartWorker => "start_worker".into(),
-                    Action::List => {
+                    action @ (Action::List | Action::Job(42)) => {
                         response["jobs"] = serde_json::json!([{
                             "id": 42, "phase": "passed", "submitted_at": 0,
                             "spec": {"suite": "local.command", "owner": "synthetic-sigpipe",
                                      "source": "/", "revision": "live-workspace",
                                      "configuration": "{}", "cost": "cpu_simulation"}
                         }]);
-                        "list".into()
+                        if matches!(action, Action::List) {
+                            "list"
+                        } else {
+                            "job"
+                        }
+                        .into()
                     }
                     Action::Logs(42) => {
                         response["log"] =
@@ -130,7 +135,8 @@ fn closed_client_stdout_sends_no_mutation_after_the_job_is_terminal() {
     let seen = seen.lock().unwrap().clone();
     let logs = seen.iter().position(|s| s == "logs").expect("logs fetched");
     assert_eq!(&seen[..3], ["submit", "approve_command", "start_worker"]);
-    assert!(seen[3..logs].iter().all(|s| s == "list"), "{seen:?}");
+    // A waiting client polls its one job, not the whole listing.
+    assert!(seen[3..logs].iter().all(|s| s == "job"), "{seen:?}");
     assert_eq!(
         logs,
         seen.len() - 1,
