@@ -1346,7 +1346,7 @@ fn warmth_badge(ui: &mut egui::Ui, warmth: Warmth, reason: &str) {
 
 /// A horizontal usage bar; green, amber above 70 %, red above 90 %.
 fn meter(ui: &mut egui::Ui, fraction: Option<f32>, width: f32) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 10.0), Sense::hover());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 12.0), Sense::hover());
     let painter = ui.painter();
     painter.rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
     if let Some(f) = fraction {
@@ -1371,7 +1371,7 @@ fn sparkline(
     color: Color32,
     width: f32,
 ) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 16.0), Sense::hover());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 22.0), Sense::hover());
     let painter = ui.painter();
     painter.rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
     let n = values.len();
@@ -1391,14 +1391,14 @@ fn sparkline(
             Some(v) => segment.push(point(i, *v)),
             None => {
                 if segment.len() > 1 {
-                    painter.line(std::mem::take(&mut segment), Stroke::new(1.2_f32, color));
+                    painter.line(std::mem::take(&mut segment), Stroke::new(1.5_f32, color));
                 }
                 segment.clear();
             }
         }
     }
     if segment.len() > 1 {
-        painter.line(segment, Stroke::new(1.2_f32, color));
+        painter.line(segment, Stroke::new(1.5_f32, color));
     }
     response
 }
@@ -1460,13 +1460,13 @@ fn machine_card(ui: &mut egui::Ui, card: &MachineCard) {
         ui.horizontal(|ui| {
             meter(ui, card.cpu_fraction, 110.0);
             ui.label(&card.cpu_text);
-            sparkline(ui, &card.cpu_history, CPU_LINE, 72.0)
+            sparkline(ui, &card.cpu_history, CPU_LINE, 140.0)
                 .on_hover_text(format!("CPU, {}", card.history_span));
         });
         ui.horizontal(|ui| {
             meter(ui, card.ram_fraction, 110.0);
             ui.label(&card.ram_text);
-            sparkline(ui, &card.mem_history, MEM_LINE, 72.0)
+            sparkline(ui, &card.mem_history, MEM_LINE, 140.0)
                 .on_hover_text(format!("Memory used, {}", card.history_span));
         });
         ui.horizontal(|ui| {
@@ -1641,6 +1641,16 @@ fn head_revision(source: &Path) -> Option<String> {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
 }
 
+/// Whole-UI scale: `TASKS_UI_ZOOM` (0.5..=3), default 1.3 so text and charts
+/// read comfortably on a laptop panel.
+fn ui_zoom() -> f32 {
+    std::env::var("TASKS_UI_ZOOM")
+        .ok()
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|z| z.is_finite())
+        .map_or(1.3, |z| z.clamp(0.5, 3.0))
+}
+
 /// Opens the window. `fixtures`: replay snapshot files from that directory and
 /// contact nothing (no daemon, adb or worker).
 pub fn run(socket: PathBuf, fixtures: Option<PathBuf>) -> Result<(), String> {
@@ -1648,10 +1658,11 @@ pub fn run(socket: PathBuf, fixtures: Option<PathBuf>) -> Result<(), String> {
         Some(dir) => Some(FixtureSource::open_dir(dir)?),
         None => None,
     };
+    let zoom = ui_zoom();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Tinline task manager")
-            .with_inner_size([1180.0, 760.0])
+            .with_inner_size([1180.0 * zoom, 760.0 * zoom])
             .with_min_inner_size([760.0, 420.0]),
         ..Default::default()
     };
@@ -1659,6 +1670,8 @@ pub fn run(socket: PathBuf, fixtures: Option<PathBuf>) -> Result<(), String> {
         "Tinline task manager",
         options,
         Box::new(move |creation| {
+            // Ctrl +/- / Ctrl 0 still adjust this live (egui keyboard zoom).
+            creation.egui_ctx.set_zoom_factor(zoom);
             let feeds: Vec<Feed> = match fixture_sources {
                 Some(sources) => sources
                     .into_iter()
