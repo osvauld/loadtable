@@ -6,6 +6,7 @@ use std::os::unix::{
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use tinline_task_manager::metrics::{StatusResponse, sampler::Sampler};
 use tinline_task_manager::{
     Action, PROTOCOL_VERSION, Request, Response, Result, Store, handle, state_dir, worker,
 };
@@ -49,6 +50,8 @@ pub fn run() -> Result<()> {
     }
     let store = Arc::new(Mutex::new(ledger));
     let active = Arc::new(AtomicUsize::new(0));
+    // In-memory machine/job sampling for `tasks status` (2 s ticks, own ledger connection).
+    let sampler = Sampler::start(state.clone());
     eprintln!(
         "taskd: socket={} (execution requires per-job approval and explicit local worker)",
         socket.display()
@@ -71,8 +74,9 @@ pub fn run() -> Result<()> {
         }
         let store = store.clone();
         let active = active.clone();
+        let sampler = sampler.clone();
         std::thread::spawn(move || {
-            serve(stream, &store);
+            serve(stream, &store, &sampler);
             active.fetch_sub(1, Ordering::SeqCst);
         });
     }
@@ -80,7 +84,7 @@ pub fn run() -> Result<()> {
 }
 
 /// Socket I/O happens without the store lock; only `handle` is serialized.
-fn serve(mut stream: UnixStream, store: &Mutex<Store>) {
+fn serve(mut stream: UnixStream, store: &Mutex<Store>, sampler: &Sampler) {
     let response = (|| -> Result<Option<Response>> {
         stream.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
         stream.set_write_timeout(Some(std::time::Duration::from_secs(2)))?;
@@ -114,6 +118,25 @@ fn serve(mut stream: UnixStream, store: &Mutex<Store>) {
         }
         let action = request.action.clone();
         let valid = request.version == PROTOCOL_VERSION;
+        if valid && matches!(action, Action::Status) {
+            // Own reply shape; the ledger is only read, then released before assembly.
+            let jobs = store.jobs();
+            drop(store);
+            let reply = match jobs {
+                Ok(jobs) => StatusResponse {
+                    version: PROTOCOL_VERSION,
+                    error: None,
+                    status: Some(sampler.snapshot(&jobs)),
+                },
+                Err(error) => StatusResponse {
+                    version: PROTOCOL_VERSION,
+                    error: Some(error.to_string()),
+                    status: None,
+                },
+            };
+            write_line(&mut stream, &reply);
+            return Ok(None);
+        }
         let mut response = if valid && matches!(action, Action::StartWorker | Action::Logs(_)) {
             handle(
                 &mut store,
@@ -158,6 +181,10 @@ fn error_response(error: &str) -> Response {
 }
 
 fn reply(stream: &mut UnixStream, response: &Response) {
+    write_line(stream, response);
+}
+
+fn write_line<T: serde::Serialize>(stream: &mut UnixStream, response: &T) {
     let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(2)));
     if let Err(error) = serde_json::to_writer(&mut *stream, response)
         .and_then(|_| stream.write_all(b"\n").map_err(serde_json::Error::io))

@@ -14,6 +14,7 @@ pub mod device_denylist;
 pub mod execution;
 pub mod ledger;
 pub mod local_command;
+pub mod metrics;
 #[cfg(target_os = "linux")]
 pub mod retention;
 pub mod snapshot;
@@ -331,6 +332,9 @@ pub enum Action {
     StartWorker,
     Logs(i64),
     Record(RuntimeSample),
+    /// Local machine snapshot (cluster snapshot v1). Answered with a
+    /// `metrics::StatusResponse`, not `Response`; see [`request_status`].
+    Status,
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Response {
@@ -360,7 +364,9 @@ pub fn handle(store: &mut Store, request: Request) -> Response {
             Action::Approve(id) => store.approve(id),
             Action::ApproveAndroidTrial(id) => store.approve_android_trial(id),
             Action::ApproveCommand(id) => store.approve_command(id),
-            Action::StartWorker | Action::Logs(_) => Err("action requires local daemon".into()),
+            Action::StartWorker | Action::Logs(_) | Action::Status => {
+                Err("action requires local daemon".into())
+            }
             Action::Record(sample) => {
                 if sample.stage.starts_with("worker.") {
                     Err("worker.* runtime stages are reserved for worker observations".into())
@@ -581,6 +587,7 @@ pub fn request_with_reconnect_timeouts(
             "record was sent but no reply arrived ({lost}); it may have been applied. Do not resend blindly"
         )
         .into()),
+        Action::Status => Err(format!("status request got no reply ({lost})").into()),
     }
 }
 
@@ -762,6 +769,36 @@ fn exchange(
         return Err("unsupported response version; an older daemon may still own this state directory. Stop/restart it only after checking its active work, or choose a new TASK_MANAGER_STATE_DIR".into());
     }
     Ok(Attempt::Answered(response))
+}
+
+/// `tasks status`: one read-only request for the daemon's machine snapshot.
+/// An older daemon does not know the action and answers with an error.
+#[cfg(unix)]
+pub fn request_status(path: &Path, timeout: Duration) -> Result<metrics::StatusResponse> {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let mut stream = std::os::unix::net::UnixStream::connect(path)?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let request = serde_json::to_vec(&Request {
+        version: PROTOCOL_VERSION,
+        action: Action::Status,
+    })?;
+    stream.write_all(&request)?;
+    stream.write_all(b"\n")?;
+    let mut line = String::new();
+    BufReader::new(stream.take(MAX_REPLY)).read_line(&mut line)?;
+    if !line.ends_with('\n') {
+        return Err("incomplete status reply from the daemon".into());
+    }
+    let reply: metrics::StatusResponse = serde_json::from_str(&line)?;
+    if reply.status.is_none() && reply.error.as_deref().is_some_and(|e| e.contains("variant")) {
+        return Err(format!(
+            "the running daemon does not support `status` (older release): {}",
+            reply.error.unwrap_or_default()
+        )
+        .into());
+    }
+    Ok(reply)
 }
 
 #[cfg(unix)]

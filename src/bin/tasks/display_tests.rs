@@ -48,6 +48,7 @@ fn finished(mut j: Job, stages: &[(f64, f64, i32)]) -> Job {
         android_trial: false,
         local_command: true,
         detail: String::new(),
+        metrics: None,
     });
     j
 }

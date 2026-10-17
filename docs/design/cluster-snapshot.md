@@ -88,3 +88,117 @@ Ownership:
 - `feature/ui-v2`: the egui UI, consuming snapshots only (local via the daemon
   socket/`tasks status --json`, remote via `lan-peer status-watch` subprocess
   or the ssh fallback), developed against fixture files in `tests/fixtures/snapshot/`.
+
+## feature/metrics: how the local daemon fills the snapshot
+
+No field above was renamed, removed or retyped. The notes below pin down
+meanings the sketch left open; readers written against the sketch still work.
+Example documents generated from the Rust types (`src/metrics/types.rs`) are
+`tests/fixtures/snapshot/metrics-{laptop-busy,worker-busy,idle}.json`
+(synthetic hosts/owners/paths; regenerate with
+`cargo test --lib metrics::tests::fixture_tests::write_fixtures -- --ignored`).
+
+Transport. `tasks status --json` prints the document as ONE line. It asks the
+daemon with a new socket action `{"version":2,"action":{"type":"status"}}`; the
+reply is `{"version":2,"error":null,"status":{...snapshot...}}`, a separate
+shape from the `Response` of the existing actions (all of which are
+unchanged). An older daemon answers that action with an `error` (unknown
+variant); the client reports that the running daemon predates `status`.
+`tasks status` without `--json` prints a short text summary.
+
+Machine.
+- `id`: `/proc/sys/kernel/hostname`. `role`: `TASKS_MACHINE_ROLE=host|worker`
+  in the daemon's environment, else `worker` if `~/offload/checkouts` exists
+  (the tasks-offload landing directory), else `host`.
+- `cpu_busy_cores`: `/proc/stat` aggregate delta, (total - idle - iowait) /
+  total x logical CPUs; null until two samples. `history` keeps <= 150 points.
+- `pressure`: PSI avg10 values (null if PSI is unreadable). `blocker`:
+  admission's compile-gate pressure blocker under the worker's recorded
+  thresholds (disk-reserve waits are not included here; they appear in the
+  waiting job's `queue.waiting_for`).
+- `slots`: always `p2p-build`, `p2p-run-0..3`, `p2p-offload-0..3`, plus every
+  `p2p-device-*` lock file present. `busy` comes from `/proc/locks` (the
+  sampler never probes a lock, so it cannot steal a slot even briefly);
+  `holder_job`/`holder_who` from the native holder note `OWNER:job-ID` when its
+  process is alive (legacy holders: `holder_job` null, `holder_who` their text).
+
+Jobs.
+- Order: by id ascending; all non-terminal jobs (including unapproved
+  proposals) plus the newest 50 terminal ones.
+- `command` and `kind_key` are the same string: `env`/`NAME=value` prefixes,
+  `-j N`/`-jN`/`--jobs[=]N`, `--locked`, `--offline` dropped (before `--`
+  only); the program becomes its basename without a Cargo `-<16 hex>` hash;
+  absolute and `./`, `../`, `target/` argument paths become basenames; inside
+  `sh -c TEXT` the same rules apply per whitespace word; a `tasks-offload`
+  client becomes `[offload] ` + its inner command. Flag order is kept. Typed
+  suites (self-suite, Android trial) use `"<suite> <configuration>"` and `argv: []`.
+- `resource`: from the recipe (`compile` for typed suites); `device` is the adb
+  serial of a device job.
+- `checkout`: `spec.source`, except a worker path under
+  `.../offload/checkouts/<id>/<sub>` whose `<id>.identity` names the laptop
+  `toplevel`: then `toplevel/<sub>`. `checkout_name`: basename of that
+  toplevel, else of the nearest directory holding `.git`, else of the path.
+- `queue` (null unless waiting): `queued` -> `approval (tasks approve-command ID)`;
+  `approved` -> `worker pickup` (or `worker not running (tasks start-worker)`);
+  `preparing` -> the worker's "Waiting for disk reserve/target lease" detail,
+  else null; `waiting_build`/`waiting_run` -> `position` is the 1-based place
+  among live admission wait notes of the same slot label in admission's own
+  FIFO order (wait-file mtime, then path); `waiting_for` is, in admission's
+  order of checks: the gate's pressure blocker text; else `compile slot held by
+  #N` / `all 4 run slots busy (#a, #b, ...)` / `device SERIAL slot held by #N`;
+  else `behind #N in the LABEL queue`; else `admission check`.
+- `live` (building/running only): one sampling thread, one pass every 2 s.
+  Each job's tree is read directly (`/proc/PID/task/*/children` from the
+  supervisor, then each member's `/proc/PID/stat`); one full `/proc` walk every
+  15th tick (30 s) finds group orphans, and every tick if the kernel lacks the
+  children files. Measured (`metrics::tests::sampler_cost`, debug build): a
+  tick with 4 running jobs and a 304-row ledger costs 2.6 ms CPU on the worker
+  and 6.4 ms on the laptop (<= 0.33% of one core). Members = the job's stage supervisor (`tasks __stage`, recorded in
+  the ledger) and all its descendants by parent pid, plus every process in a
+  process group of one of those (keeps orphans that stayed in the job's
+  admission group). A process that left the group/session AND is no longer a
+  descendant (a double-forked adb or sccache server) is NOT counted: it
+  outlives the job and serves others. `cpu_cores` = delta of
+  utime+stime+cutime+cstime over members / interval (reaped children count);
+  `rss_bytes` = summed RSS (shared pages counted per process: an overcount);
+  the counts include the three small `tasks` wrapper processes.
+  Limitation: with sccache as rustc wrapper, cache-miss compiles of dependency
+  crates run inside the sccache server, so a compile job's `cpu_cores` misses
+  them (the machine total does not).
+- `progress` (Cargo commands, live jobs only; finished jobs carry
+  `result.crates_compiled`): `crates_compiled` counts `Compiling ` lines in the
+  job log as they arrive; `crates_expected` = median of earlier successful runs
+  of the same `kind_key` on this machine: cold runs if this job is cold, else
+  warm runs; null without such history.
+- `warmth`: (1) before output placement the worker checks the profile's output
+  directory (`target[/TRIPLE]/debug|release|PROFILE`, following tasks' cache
+  link; `--target-dir`, `CARGO_TARGET_DIR=`, `--manifest-path` respected): no
+  `.fingerprint` entries -> `cold`, else `unknown`; written to
+  `jobs/ID/warmth.json`. (2) Compiling lines vs R = median crate count of
+  earlier cold runs of this kind (else the largest count of any successful
+  run): more than 20% of R -> `cold`; build finished with <= 20% of R ->
+  `warm`; build finished with 0 crates -> `warm`; otherwise `unknown`.
+  Non-Cargo commands and offload clients stay `unknown` with that reason.
+- `estimate` (non-terminal jobs; null without history): median of the newest
+  <= 20 successful runs of the same `kind_key` with the same warmth; else of
+  any warmth, said in `basis`. Durations are stage execution seconds (queue
+  and admission waits excluded). `remaining_s` = max(0, total - finished stage
+  seconds - time since the current stage was admitted). History includes every
+  ledger row written before metrics existed ("backfill", read-only): they have
+  argv and stage seconds, and count as warmth `unknown`.
+- `result` (terminal jobs): `exit_code` of the last stage; `wall_s` = stage
+  execution seconds (waits excluded); `cpu_user_s`/`cpu_sys_s` from
+  getrusage(RUSAGE_CHILDREN) around the command's wait in its own per-job
+  `__command` process (exact for every waited-for descendant, correct with
+  concurrent jobs; daemonized processes excluded); `peak_rss_bytes` = max of
+  the sampler's largest summed RSS and the largest single process
+  (ru_maxrss); `crates_compiled` from the job log. Null = not measured (e.g.
+  jobs from before metrics, or run by an older worker).
+- `offload`: always null from feature/metrics (feature/status-stream fills it).
+
+Persistence. A finished local command gets `metrics` inside its existing
+execution JSON (`{"warmth","warmth_reason","wall_s","cpu_user_s","cpu_sys_s",
+"peak_rss_bytes","crates_compiled"}`), merged at JSON level by the daemon
+(other keys untouched, never overwritten) once the job is terminal. No SQLite
+schema change; older releases ignore the key. Per-stage usage and start
+warmth also stay as small files in the job directory (state dir, not Git).
