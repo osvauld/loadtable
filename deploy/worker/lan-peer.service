@@ -1,0 +1,49 @@
+# Portable systemd USER unit template: `lan-peer serve` for tasks-offload --transport iroh.
+# NOT installed or enabled by anything in this repository. Review, then:
+#
+#   install -Dm755 lan-peer ~/.local/bin/lan-peer             # release build, see README.md
+#   ~/.local/bin/lan-peer init --data-dir ~/lan-peer-worker   # once; prints endpoint_id
+#   install -Dm644 CLIENT_attestation.json ~/lan-peer-worker/allow/client.json
+#   install -Dm644 deploy/worker/lan-peer.service ~/.config/systemd/user/lan-peer.service
+#   $EDITOR ~/.config/systemd/user/lan-peer.service           # bind address, allow files
+#   systemctl --user daemon-reload && systemctl --user enable --now lan-peer.service
+#   journalctl --user -u lan-peer -f                          # one JSON event per line
+#
+# EXPERIMENTAL and SYNTHETIC: every installation recovers the public test-vector account
+# (experiments/osvauld-foundation/README.md). Admission = account attestation + the --allow
+# files below; the firewall only limits exposure to the LAN interface (UDP 7842 on wlo1 in
+# nix/taskworker-host.nix). Nothing received is executed: commands still run over ssh with
+# `tasks run`.
+#
+# Attestations are valid for 7 days. The server re-issues its own on start when less than a
+# day remains, but the CLIENT attestation copied into allow/ must be refreshed (run
+# `lan-peer init` on the client and copy attestation.json again) before it expires; an
+# expired --allow file makes `serve` refuse to start (exit 2; the unit then retries every 30 s
+# and logs the reason until the file is refreshed).
+[Unit]
+Description=lan-peer serve (iroh source sync and artifact return for tasks-offload)
+# A user unit cannot order itself after the system's network-online.target; if wlo1 has no
+# address yet, the bind fails and Restart= below retries.
+
+[Service]
+Type=simple
+# --bind must name the LAN interface address; 0.0.0.0 and :: are refused.
+# --checkouts must be the directory tasks-offload runs jobs in (~/offload/checkouts), so the
+# iroh-synced checkout and v0's rsync checkout are the same directory with the same warm
+# target/. --store is the worker's iroh-blobs FsStore (blobs are tagged, never GC'd).
+ExecStart=%h/.local/bin/lan-peer serve \
+    --bind 192.168.1.7:7842 \
+    --data-dir %h/lan-peer-worker \
+    --allow %h/lan-peer-worker/allow/client.json \
+    --store %h/offload/iroh-store \
+    --checkouts %h/offload/checkouts
+WorkingDirectory=%h
+UMask=0077
+# Retries also cover "address not available" at boot before Wi-Fi is up.
+Restart=on-failure
+RestartSec=30
+# Deliberately NO PrivateTmp/ProtectHome: the checkouts must be the same files that
+# `tasks run` (over ssh) builds in.
+
+[Install]
+WantedBy=default.target

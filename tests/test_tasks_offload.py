@@ -103,8 +103,116 @@ open(os.path.join(state, 'finished-%d' % job), 'w').close()
 sys.exit(code)
 '''
 
+# Fake `lan-peer` (iroh transport seam). Same CLI and last-line JSON as the real binary, but
+# local: sync-push writes into FAKE_REMOTE_HOME/offload/checkouts/NAME, fetch copies back, and
+# each side keeps a fake content-addressed store so "blobs sent" counts are realistic. The
+# iroh_blobs_hash is a stand-in digest (no blake3 module here); the real binary is exercised
+# by IrohLoopbackTests below when it is built.
+FAKE_LAN_PEER = r'''#!/usr/bin/env python3
+import hashlib, json, os, shutil, sys
+args = sys.argv[1:]
+with open(os.environ['FAKE_LAN_PEER_LOG'], 'a') as log:
+    log.write(json.dumps(args) + '\n')
+def opt(name, many=False):
+    vals = [args[i + 1] for i, a in enumerate(args[:-1]) if a == name]
+    return vals if many else (vals[0] if vals else None)
+def out(value, code=0):
+    print(json.dumps(value))
+    sys.exit(code)
+remote = os.path.join(os.environ['FAKE_REMOTE_HOME'], 'offload', 'checkouts')
+domain = b'task-manager-local-source-manifest-v1\0'
+cmd = args[0]
+if cmd == 'manifest':
+    root = args[1]
+    paths = [p for p in open(opt('--files-from0'), 'rb').read().decode().split('\0') if p]
+    files, digest = [], hashlib.sha256(domain)
+    for p in sorted(paths, key=lambda p: p.encode()):
+        data = open(os.path.join(root, p), 'rb').read()
+        ex = bool(os.stat(os.path.join(root, p)).st_mode & 0o111)
+        sha = hashlib.sha256(data).hexdigest()
+        if os.environ.get('FAKE_LAN_PEER_CORRUPT'):
+            sha = hashlib.sha256(data + b'x').hexdigest()
+        files.append({'path': p, 'size': len(data), 'executable': ex, 'sha256': sha,
+                      'iroh_blobs_hash': hashlib.blake2s(data).hexdigest()})
+        digest.update(len(p.encode()).to_bytes(8, 'little') + p.encode() + bytes([ex])
+                      + len(data).to_bytes(8, 'little') + bytes.fromhex(sha))
+    out({'schema': 'task-manager-local-source-manifest-v1', 'hash_algorithm': 'sha256',
+         'receipt': digest.hexdigest(), 'iroh_blobs_hash': None, 'files': files})
+if os.environ.get('FAKE_LAN_PEER_FAIL') == cmd:
+    out({'status': 'rejected', 'stage': 'receiver', 'reason': 'NotAllowlisted'}, 3)
+if cmd == 'sync-push':
+    manifest = json.load(open(opt('--manifest')))
+    name, src = opt('--checkout'), opt('--source')
+    store = os.path.join(os.environ['FAKE_REMOTE_HOME'], 'fake-store')
+    os.makedirs(store, exist_ok=True)
+    dest = os.path.join(remote, name)
+    created = not os.path.isdir(dest)
+    os.makedirs(dest, exist_ok=True)
+    sent = sent_bytes = written = unchanged = 0
+    for f in manifest['files']:
+        blob = os.path.join(store, f['iroh_blobs_hash'])
+        data = open(os.path.join(src, f['path']), 'rb').read()
+        if not os.path.exists(blob) and f['size']:
+            open(blob, 'wb').write(data)
+            sent, sent_bytes = sent + 1, sent_bytes + len(data)
+        target = os.path.join(dest, f['path'])
+        mode = 0o755 if f['executable'] else 0o644
+        if (os.path.isfile(target) and open(target, 'rb').read() == data
+                and os.stat(target).st_mode & 0o777 == mode):
+            unchanged += 1
+            continue
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        open(target, 'wb').write(data)
+        os.chmod(target, mode)
+        written += 1
+    keep = {f['path'] for f in manifest['files']}
+    deleted = []
+    for dirpath, dirnames, filenames in os.walk(dest):
+        rel = os.path.relpath(dirpath, dest)
+        if rel == '.':
+            dirnames[:] = [d for d in dirnames if d != 'target']
+        for fn in filenames:
+            p = fn if rel == '.' else rel + '/' + fn
+            if p not in keep:
+                os.unlink(os.path.join(dest, p))
+                deleted.append(p)
+    out({'status': 'ok', 'response_fresh': True, 'checkout_name': name, 'files': len(keep),
+         'blobs_sent': sent, 'bytes_sent': sent_bytes, 'blobs_missing': [],
+         'receiver': {'mode': 'sync', 'checkout': dest, 'created': created,
+                      'files': len(keep), 'unchanged': unchanged, 'written': written,
+                      'mode_fixed': 0, 'deleted': len(deleted), 'deleted_paths': sorted(deleted),
+                      'kept_non_source': 0, 'blobs_received': sent,
+                      'bytes_received': sent_bytes}})
+if cmd == 'fetch':
+    dest, store = opt('--dest'), opt('--store')
+    if os.path.lexists(dest):
+        out({'status': 'error', 'stage': 'local', 'error': 'local: Exists'}, 3)
+    os.makedirs(store, exist_ok=True)
+    src = os.path.join(remote, opt('--checkout'))
+    n = got = got_bytes = 0
+    for rel in opt('--path', many=True):
+        for dirpath, _, filenames in (os.walk(os.path.join(src, rel))
+                                      if os.path.isdir(os.path.join(src, rel))
+                                      else [(os.path.dirname(os.path.join(src, rel)), [],
+                                             [os.path.basename(rel)])]):
+            for fn in filenames:
+                full = os.path.join(dirpath, fn)
+                data = open(full, 'rb').read()
+                blob = os.path.join(store, hashlib.blake2s(data).hexdigest())
+                if not os.path.exists(blob):
+                    open(blob, 'wb').write(data)
+                    got, got_bytes = got + 1, got_bytes + len(data)
+                target = os.path.join(dest, os.path.relpath(full, src))
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                shutil.copy2(full, target)
+                n += 1
+    out({'status': 'ok', 'files': n, 'blobs_received': got, 'bytes_received': got_bytes,
+         'blobs_missing': [], 'dest': dest, 'skipped': []})
+out({'status': 'error', 'stage': 'usage', 'error': 'unknown command'}, 2)
+'''
 
-class OffloadTests(unittest.TestCase):
+
+class OffloadFixture(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='tasks-offload-test-')
         self.addCleanup(self.tmp.cleanup)
@@ -171,6 +279,8 @@ class OffloadTests(unittest.TestCase):
     def job_record(self, job):
         return json.loads((self.remote_home / f'fake-tasks/job-{job}.json').read_text())
 
+
+class OffloadTests(OffloadFixture):
     # tests -------------------------------------------------------------------
     def test_unborn_head_tracked_dirty_untracked_synced_and_ignored_skipped(self):
         self.assertNotEqual(subprocess.run(['git', 'rev-parse', '--verify', 'HEAD'], cwd=self.repo,
@@ -427,6 +537,223 @@ class OffloadTests(unittest.TestCase):
         r = self.offload('true', cwd=outside, check_exit=2)
         self.assertIn('git', r.stderr.lower())
         self.assertFalse(self.ssh_log.exists())
+
+
+class IrohTransportTests(OffloadFixture):
+    """--transport iroh against the fake lan-peer: content-addressed sync, ssh only for run."""
+
+    def setUp(self):
+        super().setUp()
+        base = Path(self.tmp.name)
+        self.peer_log = base / 'lan-peer.log'
+        fake = self.bin / 'fake-lan-peer'
+        fake.write_text(FAKE_LAN_PEER)
+        fake.chmod(0o755)
+        self.allow = base / 'worker-attestation.json'
+        self.allow.write_text(json.dumps({'synthetic': True, 'account_did': 'did:key:zSynthetic',
+                                          'endpoint_id': 'a' * 64, 'attestation': {}}))
+        self.env.update(TASKS_OFFLOAD_LAN_PEER=str(fake), FAKE_LAN_PEER_LOG=str(self.peer_log))
+        self.iroh = ('--transport', 'iroh', '--iroh-data-dir', str(base / 'peer-data'),
+                     '--iroh-allow', str(self.allow), '--iroh-addr', '127.0.0.1:7842')
+
+    def peer_calls(self):
+        if not self.peer_log.exists():
+            return []
+        return [json.loads(line) for line in self.peer_log.read_text().splitlines()]
+
+    def test_iroh_sync_runs_in_reported_checkout_without_rsync_or_agent(self):
+        self.write('src/lib.rs', 'pub fn dirty() {}\n')
+        r = self.offload('pwd', opts=self.iroh, check_exit=0)
+        s = self.summary(r)
+        root = self.remote_dir()
+        self.assertEqual((root / 'src/lib.rs').read_text(), 'pub fn dirty() {}\n')
+        self.assertEqual(s['transport'], 'iroh')
+        self.assertEqual(s['remote_dir'], str(root))
+        rec = self.job_record(s['remote_job_id'])
+        self.assertEqual(rec['cwd'], str(root))
+        self.assertTrue(rec['who'].startswith('offload-test@'))
+        sync = s['iroh']['sync']
+        self.assertEqual((sync['files'], sync['blobs_sent'], sync['written']), (2, 2, 2))
+        calls = self.peer_calls()
+        self.assertEqual([c[0] for c in calls], ['manifest', 'sync-push'])
+        push = calls[1]
+        self.assertEqual(push[push.index('--checkout') + 1], root.name)
+        self.assertEqual(push[push.index('--peer') + 1], 'a' * 64)
+        self.assertEqual(push[push.index('--addr') + 1], '127.0.0.1:7842')
+        self.assertNotIn('--bind', push)
+        ssh = self.ssh_log.read_text()
+        self.assertNotIn('rsync', ssh)
+        self.assertNotIn('install-agent', ssh)
+        self.assertNotIn('agent.py', ssh)
+        # The same checkout id as the ssh transport: the warm target is shared.
+        r = self.offload('true', check_exit=0)
+        self.assertEqual(self.summary(r)['remote_dir'], '~/offload/checkouts/' + root.name)
+
+    def test_iroh_second_sync_sends_nothing_and_one_edit_sends_one_blob(self):
+        self.write('a.txt', 'A\n')
+        self.offload('true', opts=self.iroh, check_exit=0)
+        r = self.offload('true', opts=self.iroh, check_exit=0)
+        sync = self.summary(r)['iroh']['sync']
+        self.assertEqual((sync['blobs_sent'], sync['bytes_sent'], sync['written']), (0, 0, 0))
+        self.assertEqual(sync['unchanged'], 3)
+        self.write('a.txt', 'A2\n')
+        (self.repo / 'src/lib.rs').unlink()
+        self.git('rm', '-q', '--cached', 'src/lib.rs')
+        r = self.offload('true', opts=self.iroh, check_exit=0)
+        s = self.summary(r)
+        self.assertEqual(s['iroh']['sync']['blobs_sent'], 1)
+        self.assertEqual(s['pruned'], ['src/lib.rs'])
+        self.assertEqual(s['pruned_count'], 1)
+
+    def test_iroh_bind_is_forwarded(self):
+        self.offload('true', opts=(*self.iroh, '--iroh-bind', '127.0.0.1:0'), check_exit=0)
+        push = self.peer_calls()[1]
+        self.assertEqual(push[push.index('--bind') + 1], '127.0.0.1:0')
+
+    def test_iroh_requires_peer_options_and_valid_attestation_file(self):
+        for drop in ('--iroh-data-dir', '--iroh-allow', '--iroh-addr'):
+            opts = list(self.iroh)
+            i = opts.index(drop)
+            del opts[i:i + 2]
+            r = self.offload('true', opts=opts, check_exit=2)
+            self.assertIn(drop, r.stderr)
+        self.allow.write_text('{"endpoint_id": "../../x"}')
+        self.offload('true', opts=self.iroh, check_exit=2)
+        self.assertFalse(self.ssh_log.exists())
+        self.assertEqual(self.peer_calls(), [])
+
+    def test_iroh_refuses_symlinks_before_contacting_anything(self):
+        os.symlink('src/lib.rs', self.repo / 'link.rs')
+        r = self.offload('true', opts=self.iroh, check_exit=2)
+        self.assertIn('symlink', r.stderr)
+        self.assertIn('--transport ssh', r.stderr)
+        self.assertEqual(self.peer_calls(), [])
+        self.assertFalse(self.ssh_log.exists())
+
+    def test_iroh_hash_disagreement_refuses_to_sync(self):
+        self.env['FAKE_LAN_PEER_CORRUPT'] = '1'
+        r = self.offload('true', opts=self.iroh, check_exit=2)
+        self.assertIn('changed', r.stderr)
+        self.assertEqual([c[0] for c in self.peer_calls()], ['manifest'])
+        self.assertFalse(self.ssh_log.exists())
+
+    def test_iroh_rejection_is_reported_and_nothing_submitted(self):
+        self.env['FAKE_LAN_PEER_FAIL'] = 'sync-push'
+        r = self.offload('true', opts=self.iroh, check_exit=255)
+        self.assertIn('NotAllowlisted', r.stderr)
+        s = self.summary(r)
+        self.assertEqual(s['remote_state'], 'not_submitted')
+        self.assertFalse(self.ssh_log.exists())
+
+    def test_iroh_fetch_into_new_destinations_reuses_local_blobs(self):
+        build = ('sh', '-c', 'mkdir -p target/release && echo artifact > target/release/foo')
+        r = self.offload(*build, opts=(*self.iroh, '--fetch', 'target/release/foo'),
+                         check_exit=0)
+        s = self.summary(r)
+        dest = self.local_home / 'build-cache/offload/offload-test' / str(s['remote_job_id'])
+        self.assertEqual((dest / 'target/release/foo').read_text(), 'artifact\n')
+        self.assertEqual(s['fetched'], ['target/release/foo'])
+        self.assertEqual(s['fetch_dest'], str(dest))
+        self.assertEqual(s['iroh']['fetch']['bytes_received'], len('artifact\n'))
+        fetch = [c for c in self.peer_calls() if c[0] == 'fetch'][0]
+        self.assertEqual(fetch[fetch.index('--store') + 1],
+                         str(self.local_home / 'build-cache/offload/.iroh-store'))
+        self.assertEqual(fetch[fetch.index('--checkout') + 1], self.remote_dir().name)
+        r = self.offload(*build, opts=(*self.iroh, '--fetch', 'target/release/foo'),
+                         check_exit=0)
+        s2 = self.summary(r)
+        self.assertNotEqual(s2['fetch_dest'], s['fetch_dest'])
+        self.assertEqual((s2['iroh']['fetch']['blobs_received'],
+                          s2['iroh']['fetch']['bytes_received']), (0, 0))
+
+    def test_iroh_existing_fetch_dest_refused_before_submission(self):
+        existing = Path(self.tmp.name) / 'already-there'
+        existing.mkdir()
+        r = self.offload('true', opts=(*self.iroh, '--fetch', 'x', '--fetch-dest', str(existing)),
+                         check_exit=2)
+        self.assertIn('must not exist', r.stderr)
+        self.assertFalse(self.ssh_log.exists())
+
+    def test_iroh_dry_run_contacts_nothing(self):
+        r = self.offload('true', opts=(*self.iroh, '--dry-run'), check_exit=0)
+        self.assertEqual(self.peer_calls(), [])
+        self.assertFalse(self.ssh_log.exists())
+        self.assertIn('iroh', r.stderr)
+        self.assertEqual(self.summary(r)['transport'], 'iroh')
+
+
+LAN_PEER_BIN = os.environ.get('LAN_PEER_BIN') or str(
+    Path(__file__).resolve().parents[1]
+    / 'experiments/osvauld-foundation/target/debug/lan-peer')
+
+
+@unittest.skipUnless(os.access(LAN_PEER_BIN, os.X_OK),
+                     f'real lan-peer binary not built ({LAN_PEER_BIN})')
+class IrohLoopbackTests(OffloadFixture):
+    """--transport iroh against a REAL `lan-peer serve` on 127.0.0.1 (synthetic account)."""
+
+    def setUp(self):
+        super().setUp()
+        base = Path(self.tmp.name)
+        self.server_data = base / 'lan-peer-server'
+        self.client_data = base / 'lan-peer-client'
+        client = self.lan_peer('init', '--data-dir', str(self.client_data))
+        checkouts = self.remote_home / 'offload/checkouts'
+        checkouts.mkdir(parents=True)
+        self.server = subprocess.Popen(
+            [LAN_PEER_BIN, 'serve', '--bind', '127.0.0.1:0', '--data-dir', str(self.server_data),
+             '--allow', client['attestation_file'], '--store', str(base / 'server-store'),
+             '--checkouts', str(checkouts)],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        self.addCleanup(self.stop_server)
+        ready = json.loads(self.server.stdout.readline())
+        self.assertEqual(ready['event'], 'listening', ready)
+        self.iroh = ('--transport', 'iroh', '--lan-peer', LAN_PEER_BIN,
+                     '--iroh-data-dir', str(self.client_data),
+                     '--iroh-allow', ready['attestation_file'], '--iroh-addr', ready['addr'])
+
+    def stop_server(self):
+        self.server.kill()
+        self.server.wait()
+        self.server.stdout.close()
+
+    def lan_peer(self, *args):
+        out = subprocess.run([LAN_PEER_BIN, *args], capture_output=True, text=True, timeout=120)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        return json.loads(out.stdout.strip().splitlines()[-1])
+
+    def test_real_loopback_sync_run_and_fetch(self):
+        self.write('a.txt', 'A\n')
+        self.write('run.sh', '#!/bin/sh\necho ran-$1\n', mode=0o755)
+        r = self.offload('./run.sh', 'one', opts=self.iroh, check_exit=0)
+        s = self.summary(r)
+        self.assertIn('ran-one', r.stdout)
+        root = Path(s['remote_dir'])
+        self.assertEqual(root, self.remote_dir())
+        self.assertEqual(s['iroh']['sync']['blobs_sent'], 4)
+        self.assertTrue(os.access(root / 'run.sh', os.X_OK))
+        os.utime(root / 'a.txt', ns=(10**18, 10**18))
+
+        r = self.offload('true', opts=self.iroh, check_exit=0)
+        sync = self.summary(r)['iroh']['sync']
+        self.assertEqual((sync['blobs_sent'], sync['bytes_sent'], sync['written']), (0, 0, 0))
+        self.assertEqual((root / 'a.txt').stat().st_mtime_ns, 10**18)
+
+        self.write('run.sh', '#!/bin/sh\necho ran2-$1\n', mode=0o755)
+        build = ('sh', '-c', 'mkdir -p target/debug && printf bin > target/debug/app')
+        r = self.offload(*build, opts=(*self.iroh, '--fetch', 'target/debug/app'), check_exit=0)
+        s = self.summary(r)
+        self.assertEqual(s['iroh']['sync']['blobs_sent'], 1)
+        self.assertEqual((root / 'a.txt').stat().st_mtime_ns, 10**18)
+        self.assertEqual(Path(s['fetch_dest'], 'target/debug/app').read_text(), 'bin')
+        self.assertEqual(s['iroh']['fetch']['bytes_received'], 3)
+
+        r = self.offload('true', opts=(*self.iroh, '--fetch', 'target/debug/app'), check_exit=0)
+        s = self.summary(r)
+        self.assertEqual(Path(s['fetch_dest'], 'target/debug/app').read_text(), 'bin')
+        self.assertEqual((s['iroh']['fetch']['blobs_received'],
+                          s['iroh']['fetch']['bytes_received']), (0, 0))
+        self.assertTrue((root / 'target/debug/app').is_file(), 'target is never pruned')
 
 
 if __name__ == '__main__':

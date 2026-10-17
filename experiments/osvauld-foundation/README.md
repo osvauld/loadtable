@@ -192,3 +192,63 @@ Next steps (out of scope here):
 - **Artifact return** as content-addressed blobs in the reverse direction.
 - **Cancellation semantics** across reconnects.
 - **Transfer improvements:** bao streaming/resume and store quotas/GC.
+
+## Stable sync and artifact return (phase 2b) (`src/sync.rs`, `src/prune.rs`, `src/artifact.rs`)
+
+Owner `osv-blobs`, branch `feature/osv-blobs`. Goal: hash when a job comes, push only changed
+files into a warm worker checkout, build there over the existing ssh `tasks run`, and bring
+artifacts back the same content-addressed way. Nothing received is executed.
+
+```text
+lan-peer sync-push --peer ID --addr IP:PORT --data-dir DIR --allow FILE \
+                   --source DIR --manifest FILE --checkout NAME [--bind IP:PORT]
+lan-peer fetch     --peer ID --addr IP:PORT --data-dir DIR --allow FILE \
+                   --checkout NAME --path REL [--path REL]... --store DIR --dest NEW_DIR [--bind IP:PORT]
+```
+
+- **Sync mode is a request kind on the existing source ALPN** (`task-manager/source/0`): the
+  signed request body gains `"mode": "sync"`. The field is omitted for immutable requests, so
+  phase-2 request bodies, signatures and the immutable materializer are unchanged (an existing
+  name is still refused there). In sync mode the worker:
+  - prechecks before requesting any blob: checkout name, manifest (paths, receipt, limits),
+    every path acceptable as source by worker_source's rules, and no path through a
+    marker-adjacent `target`/`build` (by the manifest's own markers);
+  - takes `flock` on `CHECKOUTS/.lock-NAME` (waits up to 120 s, else `Busy`), so two syncs of
+    one checkout never interleave, also across server processes;
+  - creates `CHECKOUTS/NAME` (0700) if absent; refuses it if it is a symlink;
+  - inspects each manifest file no-follow: same size, exec bit and BLAKE3 means **unchanged**
+    (not rewritten: mtime and inode are kept; a drifted mode such as 0664 is fixed with
+    `fchmod`, which keeps mtime);
+  - fetches and BLAKE3-verifies every needed blob from the store before touching the checkout;
+  - prunes with `prune.rs`, a line-by-line port of `offload_agent.py` + `worker_source.py`;
+  - replaces changed/new files through `.tmp-sync-RANDOM` (`O_CREAT|O_EXCL|O_NOFOLLOW`, mode
+    0644/0755, fsync) and `renameat` (a symlink at the name is replaced, never followed);
+    descent refuses symlinked and marker-adjacent output directories;
+  - re-reads and verifies every manifest file (size, mode, BLAKE3, SHA-256), then answers with
+    signed counts: `created, files, unchanged, written, written_bytes, mode_fixed, deleted,
+    deleted_paths (first 200), kept_non_source, blobs_received, bytes_received`.
+- **Prune parity.** `tests/sync_checkout.rs` asserts the Rust rule constants equal the Python
+  ones (by running Python), and runs the real `offload_agent.py apply` and `prune.rs` on two
+  copies of one fixture covering every rule (top-level and marker-adjacent outputs, preserved
+  cache links, excluded names/prefixes/suffixes, case-insensitivity, symlinks as leaves,
+  emptied directories, C1/DEL control characters and a non-UTF-8 name). Pruned lists, kept
+  counts and resulting trees must be identical.
+- **Artifact return is a new ALPN** `task-manager/artifact/0` (served with `--store
+  --checkouts`): the same `Hello` → admission → `Challenge` → signed `Request{checkout,
+  paths}`; the worker validates paths (structural rules, inside the checkout, no-follow; a
+  requested symlink is refused, symlinks/special files inside requested directories are
+  skipped and listed; hardlinks allowed because Cargo hardlinks binaries), imports the files
+  tagged `task-manager/artifact/<hex>`, and replies with a signed `{checkout, manifest,
+  skipped}` (domain `task-manager/artifact/response/v0`). The client verifies the signature,
+  validates the manifest itself, rejects any path outside the requested ones, sends
+  `Missing{hashes}` for what its own FsStore lacks, checks each `Blob` header's order and
+  size, BLAKE3-verifies before import, and materializes into a NEW directory with the
+  immutable materializer. `fetch` holds an `flock` on `STORE/.lan-peer-fetch.lock`, because
+  the store's database is single-process.
+
+Validation (owner `osv-blobs`, offline, `-j 2`, through the shared coordinator): see the
+report in `feedback/osv-blobs-*.md` for job ids. Limitations, not proven here: no resumable
+or range-verified (bao) transfer; whole blobs buffered; no store quotas or GC; sync is not
+atomic as a whole tree (a crash leaves a mix that the next sync repairs); the client side of
+`tasks-offload --transport iroh` refuses in-tree symlinks; the account is still the synthetic
+public-mnemonic account and attestations expire after 7 days.
