@@ -93,7 +93,7 @@ Last stdout line is a one-line JSON summary: `worker`, `remote_dir`,
 `synced_bytes`, `excluded_files`, `deleted_tracked`, `pruned` (first 200),
 `pruned_count`, `fetched`, `fetch_dest`, `cancel_requested`, `dry_run`,
 `durations` (`scan_s`, `sync_s`, `cargo_fetch_s`, `run_s`, `fetch_s`, `total_s`),
-`transport`, and with `--transport iroh` also `iroh`: `peer`, `addr`, `sync`
+`transport`, `sidecar` (path of the job sidecar below, or null), and with `--transport iroh` also `iroh`: `peer`, `addr`, `sync`
 (`files`, `blobs_sent`, `bytes_sent`, `created`, `unchanged`, `written`,
 `mode_fixed`, `deleted`, `kept_non_source`) and `fetch` (`files`,
 `blobs_received`, `bytes_received`, `skipped`).
@@ -204,6 +204,88 @@ collision is not detected. The account is the experiment's SYNTHETIC public
 test-vector account; attestations expire after 7 days. Limits are the
 experiment's (20 000 files, 64 MiB per file, 512 MiB total), smaller than v0's,
 and whole blobs are held in memory.
+
+## Status stream (cluster snapshots of the worker)
+
+The UI shows the worker's live state from the same document `tasks status
+--json` prints locally (contract: `docs/design/cluster-snapshot.md`). Two
+interchangeable sources print **one JSON snapshot per line** on stdout, with
+`machine.online = true` and a `stream` object, or a synthetic marker line
+(`stream.marker = "offline"`, `machine.online = false`; or `"status_error"`
+when the worker answered but its status command failed) and then retry with
+backoff. The UI uses iroh when it is configured, else ssh.
+
+**iroh (read-only ALPN `task-manager/status/0`).** Worker:
+`lan-peer serve ... --status [--status-cmd CMD] [--status-interval SECS]
+[--status-max-bytes N]`. Laptop:
+
+```sh
+lan-peer status-watch --peer WORKER_ENDPOINT_ID --addr 192.168.1.7:7842 \
+  --bind 192.168.1.25:0 --data-dir ~/lan-peer-client \
+  --allow ~/lan-peer-client/worker-attestation.json --machine-id WORKER_HOSTNAME
+```
+
+- `--status-cmd` (default `~/.local/bin/tasks status --json`) is split on
+  whitespace (no shell; a leading `~/` becomes `$HOME/`) once at start. It runs
+  in its own process group with stdin `/dev/null`, killed after 15 s, stdout
+  bounded by `--status-max-bytes` (default and maximum 4 MiB), and must print one
+  JSON object with a numeric `version` (re-serialized compactly).
+- One sampler per server, every `--status-interval` (default 2 s, minimum 1 s),
+  only while at least one subscriber is connected (it stops at the first tick
+  without subscribers); all subscribers share it and see only the latest
+  sample, so a slow client queues nothing. At most 8 streams; each stream runs
+  in its own task and never blocks source sync or artifact fetches.
+- `status-watch` options: `--count N` (exit after N lines), `--max-bytes`
+  (client bound, at most 4 MiB), `--stall-timeout SECS` (default 3 x the
+  server's interval + 10 s), `--backoff-max SECS` (default 30),
+  `--machine-id ID` (marker id before the first snapshot; default the
+  `--addr` IP). The handshake (connect, admission, signed hello) is bounded
+  by 30 s. Exit 2 on usage errors and 3 if `--allow` does not attest
+  `--peer`; otherwise it runs until killed.
+
+**Security argument.** The status ALPN has no remote-execution surface: the
+only process it ever starts is the argv fixed by the worker's own `serve`
+flags; the client's request is signed (freshness) but its body is ignored, so
+no client field reaches argv, environment, stdin, interval or bounds. A
+subscriber can at most cause the fixed command to run once per interval
+(minimum 1 s) while it stays connected. Admission is exactly the artifact
+ALPN's: TLS-proven endpoint id, valid account attestation and the local
+`--allow` list, checked before a challenge is issued; refused peers get no
+challenge, no sample and cause no command run. The information disclosed to an
+admitted peer is the snapshot itself (job owners, argv, checkout paths,
+machine load): the intended disclosure, to a peer that can already sync and
+fetch checkouts. The same synthetic-account caveats as the rest of `lan-peer`
+apply. Not opt-out per peer: every `--allow`ed peer may subscribe.
+
+**ssh fallback.** `scripts/status-watch-ssh --worker abe@192.168.1.7
+--ssh-key ~/.ssh/id_ed25519_nixos_worker [--interval 3] [--machine-id ID]`
+polls `"$HOME"/.local/bin/tasks status --json` (`--remote-cmd`) every
+`--interval` seconds (default 3, minimum 1) with key-only BatchMode ssh,
+reusing one master connection (`ControlMaster=auto`, `ControlPersist=60`,
+socket in `$XDG_RUNTIME_DIR`; `--no-multiplex` disables it). ssh exit 255 or a
+poll timeout (`--timeout`, 20 s) prints an `offline` marker and backs off (the
+interval doubling up to `--backoff-max`, 30 s); a non-zero remote exit, non-JSON
+or a snapshot over `--max-bytes` prints `status_error`. Same `--count`.
+Polling runs the remote command through the worker's login shell: the same
+trust as `tasks-offload` (anyone with this key can do more than this).
+
+**Offload linkage.** For laptop jobs that are `tasks-offload` clients,
+`tasks-offload` writes a sidecar per local job id
+(`$HOME/.local/state/tasks-offload/jobs/<id>.json` under `tasks run`; format and
+reader rules in the contract doc) with the worker, transport, remote job id and
+sync/run/fetch durations, updated at each stage. It needs `TASKS_JOB_ID` in the
+job environment, which the installed `tasks` does not set yet (owned by
+feature/metrics); without it no sidecar is written.
+
+**Validation** (synthetic, loopback): `experiments/osvauld-foundation/tests/
+status_stream.rs` (in-process endpoints: compact snapshots, rate, shared sampler,
+sampling stops without subscribers, unallowlisted/unattested/borrowed
+attestation refused before anything runs, server and client size bounds,
+failing/non-JSON/timed-out commands) and `tests/lan_peer_status.rs` (processes:
+`serve --status` + `status-watch`, refusal marker, offline marker after the
+server dies, flag validation); `tests/test_status_watch_ssh.py` (fake ssh shim:
+snapshots, offline/recovery, status_error, size bound, option checks) and
+`JobSidecarTests` in `tests/test_tasks_offload.py`.
 
 ## Security model: SSH v0 vs. the iroh plan
 

@@ -261,6 +261,72 @@ GLIBCXX ≤ 3.4.30, and the smoke start passed. `strings` still shows some
 C++ header paths remain in assertions. These are not load paths. Not validated:
 opening the GUI, audio, camera, calls, or any other distro than this Arch host.
 
+## Status stream
+
+The laptop UI shows this worker's live state (contract:
+`docs/design/cluster-snapshot.md`, details and security argument:
+`scripts/README-offload.md` "Status stream"). Two ways, the UI prefers iroh:
+
+- **ssh fallback (no worker change):** the laptop polls
+  `ssh abe@192.168.1.7 ~/.local/bin/tasks status --json` with
+  `scripts/status-watch-ssh`. It only needs a worker `tasks` that has
+  `status --json` (feature/metrics); until then every line is a
+  `status_error` marker.
+- **iroh, read-only ALPN `task-manager/status/0`:** `lan-peer serve` gains
+  `--status`; it runs `~/.local/bin/tasks status --json` (fixed at start) every
+  2 s only while a laptop is subscribed and pushes the result. Nothing a client
+  sends is executed.
+
+State as checked read-only on 2026-10-17: no `lan-peer` unit is installed or
+running on the worker (`systemctl --user` lists none; the last `serve` was a
+temporary `nohup` process from `~/lan-peer-worker/serve.pid`, now gone), its
+`~/.local/bin/lan-peer` predates `--status`, and its `tasks` has no `status`
+subcommand yet. Lingering is enabled.
+
+User steps to enable the iroh stream (the agent did none of these):
+
+1. Build a release `lan-peer` with the status stream on the laptop (the worker
+   cannot build this crate: its path dependencies under `/home/abe/osvauld2`
+   exist only on the laptop) and copy it over, keeping the old binary:
+   ```sh
+   cd /home/abe/task-manager-worktrees/status-stream/experiments/osvauld-foundation
+   tasks run --who lan-peer-release -- cargo build --offline --locked -j 2 --release --bin lan-peer
+   scp -i ~/.ssh/id_ed25519_nixos_worker target/release/lan-peer abe@192.168.1.7:.local/bin/lan-peer.new
+   ssh -i ~/.ssh/id_ed25519_nixos_worker abe@192.168.1.7 \
+     'cp -p ~/.local/bin/lan-peer ~/.local/bin/lan-peer.pre-status &&
+      mv ~/.local/bin/lan-peer.new ~/.local/bin/lan-peer && ~/.local/bin/lan-peer --help 2>&1 | grep status-watch'
+   ```
+   (The previous worker binary was also a laptop release build, job 244.)
+2. Start `serve` with `--status` on the worker. Either the same temporary way
+   as before (stops at logout/reboot; stop with `kill $(cat ~/lan-peer-worker/serve.pid)`):
+   ```sh
+   ssh -i ~/.ssh/id_ed25519_nixos_worker abe@192.168.1.7
+   nohup ~/.local/bin/lan-peer serve --bind 192.168.1.7:7842 \
+     --data-dir ~/lan-peer-worker --allow ~/lan-peer-worker/allow/client.json \
+     --store ~/offload/iroh-store --checkouts ~/offload/checkouts \
+     --status --status-interval 2 >> ~/lan-peer-worker/serve.log 2>&1 &
+   echo $! > ~/lan-peer-worker/serve.pid
+   ```
+   or install `deploy/worker/lan-peer.service` (its `ExecStart` now includes
+   `--status --status-interval 2`) as its header describes and
+   `systemctl --user daemon-reload && systemctl --user enable --now lan-peer.service`.
+   If a `serve` is already running, stop it first (`kill PID`, or
+   `systemctl --user restart lan-peer.service` after updating the unit); an
+   in-flight offload sync or fetch through it would fail and must be rerun.
+3. UDP 7842 is already open on wlo1 (`nix/taskworker-host.nix`); nothing new.
+4. Check from the laptop (expect `status_error` lines until the worker's `tasks`
+   has `status --json`, then live snapshots; Ctrl-C to stop):
+   ```sh
+   EXP=/home/abe/task-manager-worktrees/status-stream/experiments/osvauld-foundation
+   $EXP/target/release/lan-peer status-watch \
+     --peer "$(python3 -c 'import json;print(json.load(open("/home/abe/lan-peer-client/worker-attestation.json"))["endpoint_id"])')" \
+     --addr 192.168.1.7:7842 --bind 192.168.1.25:0 --data-dir ~/lan-peer-client \
+     --allow ~/lan-peer-client/worker-attestation.json --machine-id nixos --count 3
+   ```
+   The worker's `serve.log` shows `status_ended` / `rejected` events with
+   `"alpn":"status"`. The client attestation in `allow/client.json` expires 7
+   days after it was issued; refresh it as the unit header describes.
+
 ## Test phone on the worker
 
 Goal: an Android test phone plugged into the worker's USB, driven by agents

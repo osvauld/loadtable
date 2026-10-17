@@ -21,7 +21,7 @@
 # expired --allow file makes `serve` refuse to start (exit 2; the unit then retries every 30 s
 # and logs the reason until the file is refreshed).
 [Unit]
-Description=lan-peer serve (iroh source sync and artifact return for tasks-offload)
+Description=lan-peer serve (iroh source sync, artifact return and status stream for tasks-offload)
 # A user unit cannot order itself after the system's network-online.target; if wlo1 has no
 # address yet, the bind fails and Restart= below retries.
 
@@ -31,12 +31,16 @@ Type=simple
 # --checkouts must be the directory tasks-offload runs jobs in (~/offload/checkouts), so the
 # iroh-synced checkout and v0's rsync checkout are the same directory with the same warm
 # target/. --store is the worker's iroh-blobs FsStore (blobs are tagged, never GC'd).
+# --status serves the read-only task-manager/status/0 ALPN: it runs the fixed
+# `~/.local/bin/tasks status --json` every 2 s while an allowlisted peer is subscribed
+# (needs a lan-peer with the status stream; remove both flags for an older binary).
 ExecStart=%h/.local/bin/lan-peer serve \
     --bind 192.168.1.7:7842 \
     --data-dir %h/lan-peer-worker \
     --allow %h/lan-peer-worker/allow/client.json \
     --store %h/offload/iroh-store \
-    --checkouts %h/offload/checkouts
+    --checkouts %h/offload/checkouts \
+    --status --status-interval 2
 WorkingDirectory=%h
 UMask=0077
 # Retries also cover "address not available" at boot before Wi-Fi is up.
