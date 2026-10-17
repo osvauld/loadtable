@@ -59,6 +59,9 @@
     openssl openssl.dev perl protobuf
     # p2p_chat video crate: pkg-config aom/vpx, nasm for rav1e asm.
     nasm libaom libaom.dev libvpx libvpx.dev libvmaf libvmaf.dev
+    # p2p_chat desktop crate: alsa (cpal), meson for webrtc-audio-processing's bundled build,
+    # patchelf to make worker-built binaries run on other distros (deploy/worker/README.md).
+    alsa-lib alsa-lib.dev meson patchelf
   ];
   # Expose the .pc files above at /run/current-system/sw/lib/pkgconfig; the tasks
   # daemon unit points PKG_CONFIG_PATH there.
