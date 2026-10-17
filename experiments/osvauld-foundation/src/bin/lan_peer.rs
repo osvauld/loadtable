@@ -300,6 +300,23 @@ async fn cmd_serve(args: &Args) -> Result<serde_json::Value, Fail> {
                     "blobs_received": blobs_received,
                     "bytes_received": bytes_received,
                 }),
+                Ok(Ok(SourceOutcome::Synced {
+                    report,
+                    blobs_received,
+                    bytes_received,
+                })) => json!({
+                    "event": "source_synced",
+                    "remote": remote,
+                    "checkout": report.checkout,
+                    "created": report.created,
+                    "files": report.files,
+                    "unchanged": report.unchanged,
+                    "written": report.written,
+                    "mode_fixed": report.mode_fixed,
+                    "deleted": report.deleted.len(),
+                    "blobs_received": blobs_received,
+                    "bytes_received": bytes_received,
+                }),
                 Ok(Ok(SourceOutcome::Rejected(reason))) => {
                     json!({"event": "rejected", "alpn": "source", "remote": remote, "reason": reason})
                 }
