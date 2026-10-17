@@ -159,3 +159,25 @@ fn essential_job_columns_fit_compact_windows_without_wrapped_actions() {
         assert_eq!(dashboard.next_seq, 0, "layout test must not issue requests");
     }
 }
+
+#[test]
+fn self_suite_default_source_matches_only_the_embedded_layout() {
+    let base = std::env::temp_dir().join(format!("tasks-ui-layout-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    // Legacy layout: CHECKOUT/tools/task-manager is the crate; CHECKOUT is the source.
+    let legacy = base.join("legacy-checkout");
+    std::fs::create_dir_all(legacy.join("tools/task-manager")).unwrap();
+    assert_eq!(
+        self_suite_source(&legacy.join("tools/task-manager")),
+        Some(std::fs::canonicalize(&legacy).unwrap())
+    );
+    // Standalone layout: the crate is the repository root; `../..` is not a source.
+    let standalone = base.join("home/user/task-manager");
+    std::fs::create_dir_all(&standalone).unwrap();
+    assert_eq!(self_suite_source(&standalone), None);
+    // A sibling named like the adapter directory does not make it the legacy layout.
+    std::fs::create_dir_all(base.join("home/tools/task-manager")).unwrap();
+    assert_eq!(self_suite_source(&base.join("home/user")), None);
+    assert_eq!(self_suite_source(&base.join("missing")), None);
+    std::fs::remove_dir_all(&base).unwrap();
+}
