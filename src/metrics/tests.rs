@@ -584,6 +584,7 @@ pub(super) fn job(
             local_command: true,
             detail: String::new(),
             metrics,
+            peer: None,
         }),
     }
 }

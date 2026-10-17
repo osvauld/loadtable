@@ -41,6 +41,8 @@ pub struct JobExtras {
     pub admitted_at: Option<i64>,
     /// (checkout, checkout_name) as the owner knows it.
     pub checkout: (String, String),
+    /// Peer forwarding link of a forwarded job (`<state>/peer/links/<id>.json`).
+    pub offload: Option<super::types::OffloadLink>,
 }
 
 pub struct Inputs<'a> {
@@ -345,7 +347,7 @@ fn job_view(job: &Job, inputs: &Inputs, history: &History) -> JobView {
         warmth_reason,
         estimate,
         result,
-        offload: None,
+        offload: extras.offload.clone(),
     }
 }
 

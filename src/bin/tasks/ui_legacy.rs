@@ -431,6 +431,7 @@ mod tests {
                 local_command: true,
                 detail: String::new(),
                 metrics: None,
+                peer: None,
             }),
         }
     }

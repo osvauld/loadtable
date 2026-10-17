@@ -17,6 +17,7 @@ pub enum Resource {
 }
 /// argv[0] basenames (after an optional `env NAME=value...` prefix) admitted to
 /// the offload slot. A guard against accidental local heavy work, not a sandbox.
+/// A forwarded job (`tasks peer-forward ...`, see `peer_link`) is admitted there too.
 pub const OFFLOAD_CLIENTS: [&str; 2] = ["tasks-offload", "offload-portable-desktop.sh"];
 /// True for a live command recorded with the offload resource. Unparseable
 /// configurations are not offloads (they fail later, in the general pool).
@@ -85,7 +86,9 @@ impl Recipe {
                 }
             }
         }
-        if self.resource == Resource::Offload && tool_index(&self.argv, &OFFLOAD_CLIENTS).is_none()
+        if self.resource == Resource::Offload
+            && tool_index(&self.argv, &OFFLOAD_CLIENTS).is_none()
+            && !crate::peer_link::is_forward_argv(&self.argv)
         {
             return Err(format!(
                 "--offload admits only an offload client as the command ({}, optionally after \
@@ -113,15 +116,35 @@ impl Recipe {
         Ok(())
     }
     pub fn from_spec(spec: &JobSpec) -> Result<Self> {
+        let r = Self::from_spec_unvalidated(spec)?;
+        r.validate()?;
+        Ok(r)
+    }
+    /// The recipe of a live-command spec WITHOUT this host's validation (forwarding: the
+    /// peer that runs the inner command validates it against its own policy).
+    pub fn from_spec_unvalidated(spec: &JobSpec) -> Result<Self> {
         if spec.suite != SUITE
             || spec.revision != "live-workspace"
             || !Path::new(&spec.source).is_absolute()
         {
             return Err("invalid live command contract".into());
         }
-        let r: Self = serde_json::from_str(&spec.configuration)?;
-        r.validate()?;
-        Ok(r)
+        Ok(serde_json::from_str(&spec.configuration)?)
+    }
+    /// A spec for this recipe without validation; only for building a forwarded job, whose
+    /// own (local) recipe is validated by [`crate::peer_link::forwarded_spec`].
+    pub fn unchecked_spec(&self, owner: String, cwd: PathBuf) -> Result<JobSpec> {
+        Ok(JobSpec {
+            suite: SUITE.into(),
+            configuration: serde_json::to_string(self)?,
+            cost: Cost::CpuSimulation,
+            owner,
+            source: cwd
+                .into_os_string()
+                .into_string()
+                .map_err(|_| "UTF-8 cwd required")?,
+            revision: "live-workspace".into(),
+        })
     }
     /// Client-side submission check. A client shell's environment is not
     /// forwarded, so the cap is the last worker's recorded value (else this

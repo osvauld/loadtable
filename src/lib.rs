@@ -16,6 +16,9 @@ pub mod ledger;
 pub mod local_command;
 pub mod metrics;
 #[cfg(target_os = "linux")]
+pub mod peer;
+pub mod peer_link;
+#[cfg(target_os = "linux")]
 pub mod retention;
 pub mod snapshot;
 #[cfg(target_os = "linux")]
@@ -347,6 +350,9 @@ pub enum Action {
     /// Local machine snapshot (cluster snapshot v1). Answered with a
     /// `metrics::StatusResponse`, not `Response`; see [`request_status`].
     Status,
+    /// The daemon's peer runtime (config, endpoint, forwarded/inbound links). Answered with a
+    /// `peer_link::PeersResponse`; daemons older than it answer "unknown variant".
+    Peers,
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Response {
@@ -388,7 +394,7 @@ pub fn handle(store: &mut Store, request: Request) -> Response {
             Action::Approve(id) => store.approve(id),
             Action::ApproveAndroidTrial(id) => store.approve_android_trial(id),
             Action::ApproveCommand(id) => store.approve_command(id),
-            Action::StartWorker | Action::Logs(_) | Action::Status => {
+            Action::StartWorker | Action::Logs(_) | Action::Status | Action::Peers => {
                 Err("action requires local daemon".into())
             }
             Action::Record(sample) => {
@@ -616,6 +622,7 @@ pub fn request_with_reconnect_timeouts(
         )
         .into()),
         Action::Status => Err(format!("status request got no reply ({lost})").into()),
+        Action::Peers => Err(format!("peers request got no reply ({lost})").into()),
     }
 }
 

@@ -1,5 +1,12 @@
 # Parent foundation characterization
 
+> **Superseded for daemon use.** The LAN peer code (endpoint, status/source/artifact ALPNs,
+> sync, prune, materializer) now lives in the coordinator as `crates/peer` and runs inside
+> `tasks daemon` (allowlist admission, plus the new jobs ALPN; see
+> `docs/design/peer-link.md`). This experiment and its `lan-peer` CLI are kept unchanged and
+> still back `tasks-offload --transport iroh` and `lan-peer status-watch` until those are
+> retired; new work goes to `crates/peer`.
+
 Independent test-only Cargo workspace. Imports `/home/abe/osvauld2` directly; no Tinline dependency, worker listener or command execution. Parent source and the installed coordinator remain unchanged.
 
 See [the plan](../../docs/design/osvauld-foundation.md) for acceptance gates and audited gaps. In particular, the parent derives the same device key from the same mnemonic, courier's proof timestamps currently assume a shared clock, and its permissions do not grant compute execution.

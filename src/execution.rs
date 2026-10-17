@@ -83,6 +83,10 @@ pub struct Execution {
     /// older releases ignore it, rows without it read as unknown warmth.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics: Option<crate::metrics::JobMetrics>,
+    /// Peer forwarding link of a finished job (both directions; `peer_link`). Optional and
+    /// additive like `metrics`: written once the job is terminal, older releases ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<crate::peer_link::PeerLink>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -187,6 +191,7 @@ impl Store {
             android_trial: trial,
             local_command: command,
             metrics: None,
+            peer: None,
             detail: if command {
                 "Explicitly approved trusted local argv/live cwd; NOT a source snapshot or sandbox; command may write to workspace"
             } else if trial {

@@ -7,6 +7,7 @@ use std::os::unix::{
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tinline_task_manager::metrics::{StatusResponse, sampler::Sampler};
+use tinline_task_manager::peer_link::{PeersReport, PeersResponse};
 use tinline_task_manager::{
     Action, PROTOCOL_VERSION, Request, Response, Result, Store, handle, state_dir, worker,
 };
@@ -52,6 +53,9 @@ pub fn run() -> Result<()> {
     let active = Arc::new(AtomicUsize::new(0));
     // In-memory machine/job sampling for `tasks status` (2 s ticks, own ledger connection).
     let sampler = Sampler::start(state.clone());
+    // Peer link (iroh) in its own thread/runtime, only when a peer config exists. It talks to
+    // this daemon through the socket below like any client; nothing here waits for it.
+    let peers = tinline_task_manager::peer::runtime::start(&state, &socket);
     eprintln!(
         "taskd: socket={} (execution requires per-job approval and explicit local worker)",
         socket.display()
@@ -75,8 +79,9 @@ pub fn run() -> Result<()> {
         let store = store.clone();
         let active = active.clone();
         let sampler = sampler.clone();
+        let peers = peers.clone();
         std::thread::spawn(move || {
-            serve(stream, &store, &sampler);
+            serve(stream, &store, &sampler, &peers);
             active.fetch_sub(1, Ordering::SeqCst);
         });
     }
@@ -84,7 +89,12 @@ pub fn run() -> Result<()> {
 }
 
 /// Socket I/O happens without the store lock; only `handle` is serialized.
-fn serve(mut stream: UnixStream, store: &Mutex<Store>, sampler: &Sampler) {
+fn serve(
+    mut stream: UnixStream,
+    store: &Mutex<Store>,
+    sampler: &Sampler,
+    peers: &Mutex<PeersReport>,
+) {
     let response = (|| -> Result<Option<Response>> {
         stream.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
         stream.set_write_timeout(Some(std::time::Duration::from_secs(2)))?;
@@ -135,6 +145,37 @@ fn serve(mut stream: UnixStream, store: &Mutex<Store>, sampler: &Sampler) {
                 },
             };
             write_line(&mut stream, &reply);
+            return Ok(None);
+        }
+        if valid && matches!(action, Action::Peers) {
+            drop(store);
+            let mut report = peers.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            let paths = tinline_task_manager::peer::records::Paths::new(&state);
+            let tail = |mut v: Vec<serde_json::Value>| {
+                let skip = v.len().saturating_sub(50);
+                v.drain(..skip);
+                v
+            };
+            report.forwarded = tail(
+                tinline_task_manager::peer::records::outbound_links(&paths)
+                    .iter()
+                    .filter_map(|l| serde_json::to_value(l).ok())
+                    .collect(),
+            );
+            report.inbound = tail(
+                tinline_task_manager::peer::records::inbound_records(&paths)
+                    .iter()
+                    .filter_map(|r| serde_json::to_value(r).ok())
+                    .collect(),
+            );
+            write_line(
+                &mut stream,
+                &PeersResponse {
+                    version: PROTOCOL_VERSION,
+                    error: None,
+                    peers: Some(report),
+                },
+            );
             return Ok(None);
         }
         let mut response = if valid && matches!(action, Action::StartWorker | Action::Logs(_)) {

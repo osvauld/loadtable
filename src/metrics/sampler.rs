@@ -368,6 +368,44 @@ pub fn write_metrics(store: &mut Store, id: i64, metrics: &JobMetrics) -> Result
     Ok(true)
 }
 
+/// The `offload` object of a job forwarded to a peer, from the daemon's link record (live) or
+/// the ledger link (`execution.peer`, finished). Other jobs: `None` (tasks-offload sidecars are
+/// not read here).
+fn peer_offload(state_dir: &Path, job: &Job) -> Option<super::types::OffloadLink> {
+    let argv = crate::local_command::Recipe::from_spec_unvalidated(&job.spec)
+        .ok()?
+        .argv;
+    if !crate::peer_link::is_forward_argv(&argv) {
+        return None;
+    }
+    let path = state_dir
+        .join("peer/links")
+        .join(format!("{}.json", job.id));
+    let link: serde_json::Value = std::fs::read(path)
+        .ok()
+        .filter(|b| b.len() <= 64 * 1024)
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    let peer = job.execution.as_ref().and_then(|e| e.peer.clone());
+    let worker = link["peer"]
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| peer.as_ref().map(|p| p.peer.clone()))?;
+    Some(super::types::OffloadLink {
+        worker,
+        remote_job_id: link["remote_job_id"]
+            .as_i64()
+            .or_else(|| peer.as_ref().and_then(|p| p.peer_job_id)),
+        transport: "iroh".into(),
+        sync_s: link["sync_s"]
+            .as_f64()
+            .or_else(|| peer.as_ref().and_then(|p| p.sync_s)),
+        fetch_s: link["fetch_s"]
+            .as_f64()
+            .or_else(|| peer.as_ref().and_then(|p| p.fetch_s)),
+    })
+}
+
 impl Sampler {
     pub fn new(state_dir: PathBuf) -> Self {
         Self {
@@ -792,6 +830,7 @@ impl Sampler {
                     start,
                     admitted_at: snapshot::admitted_at(&self.state_dir, job),
                     checkout: snapshot::checkout_of(&job.spec.source),
+                    offload: peer_offload(&self.state_dir, job),
                 },
             );
         }
