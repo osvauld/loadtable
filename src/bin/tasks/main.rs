@@ -1,7 +1,10 @@
 //! One binary for everyone: agents use the subcommands, people open the window. Any
 //! command that needs the queue starts the background daemon if it is not running.
 mod daemon;
+mod display;
+mod follow;
 mod log_view;
+mod options;
 mod ui;
 
 use std::fs;
@@ -14,9 +17,14 @@ use tinline_task_manager::{
 };
 
 const USAGE: &str = "usage: tasks [ui]
-       tasks list | submit SPEC.json | approve JOB_ID | cancel JOB_ID
+       tasks list  # full JSON response (unchanged, for scripts)
+       tasks list [--who OWNER] [--active] [--limit N] [--json | --table | --brief]
+         # with any option: compact table by default (--active adds live lock holders); --json = filtered JSON
+       tasks submit SPEC.json | approve JOB_ID | cancel JOB_ID
        tasks logs JOB_ID [--json]  # plain log text by default; --json preserves v2 response
-       tasks run [--who OWNER] [--run | --device SERIAL] -- COMMAND [ARGS...]
+       tasks run [--who OWNER] [--run | --device SERIAL] [--follow] -- COMMAND [ARGS...]
+         # --run: already-built command, run slot; --device: exclusive device lock (never with --run)
+         # --follow: stream the job log while it runs (default: phases, then the log at the end)
        tasks enqueue [--who OWNER] [--run | --device SERIAL] -- COMMAND [ARGS...]
        tasks approve-command JOB_ID  # trusted LIVE cwd/argv, not a source snapshot
        # local.command cost=cpu_simulation is a legacy label, NOT the resource class
@@ -28,7 +36,8 @@ const USAGE: &str = "usage: tasks [ui]
        tasks android-host SOURCE [emulator|phone|x86_64,arm64-v8a]  # read-only host audit
        # phone = arm64-v8a only, emulator = x86_64 only; SPEC.json config may use either
        tasks devices [--json]  # read-only: connected phones/emulators, ABI, ready, lock free/busy
-       tasks phone-test [--who OWNER] SOURCE [--device SERIAL]  # build phone APK, install -r, launch
+       tasks phone-test [--who OWNER] SOURCE [--device SERIAL] [--follow | --full-log | --tail N]
+         # build phone APK, install -r, launch; default: step progress, then the last 40 log lines
        tasks record SUITE CONFIG STAGE SECONDS
        tasks daemon";
 
@@ -43,6 +52,7 @@ fn run() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let run_now = args.first().is_some_and(|s| s == "run");
     let plain_logs = args.first().is_some_and(|s| s == "logs") && args.len() == 2;
+    let mut output = options::Output::Full;
     let action = match args.first().map(String::as_str) {
         None | Some("ui") if args.len() <= 1 => return open_ui(),
         Some("daemon") if args.len() == 1 => return daemon::run(),
@@ -121,38 +131,31 @@ fn run() -> Result<()> {
         Some("approve-command") if args.len() == 2 => Action::ApproveCommand(args[1].parse()?),
         Some("enqueue" | "run") => {
             use tinline_task_manager::local_command::{Recipe, Resource};
-            let split = args
-                .iter()
-                .position(|s| s == "--")
-                .ok_or("enqueue requires -- before argv")?;
-            let mut owner = std::env::var("USER").unwrap_or_else(|_| "local-agent".into());
-            let mut resource = None;
-            let mut i = 1;
-            while i < split {
-                match args[i].as_str() {
-                    "--who" if i + 1 < split => {
-                        owner = args[i + 1].clone();
-                        i += 2;
-                    }
-                    "--run" if resource.is_none() => {
-                        resource = Some(Resource::Run);
-                        i += 1;
-                    }
-                    "--device" if resource.is_none() && i + 1 < split => {
-                        resource = Some(Resource::Device(
-                            tinline_task_manager::device::lock_serial(&args[i + 1])?,
-                        ));
-                        i += 2;
-                    }
-                    _ => return Err("invalid/conflicting enqueue options".into()),
-                }
+            let split = args.iter().position(|s| s == "--").ok_or(format!(
+                "{} requires -- before the command; usage: {}",
+                args[0],
+                options::RUN_USAGE
+            ))?;
+            let parsed = options::enqueue(&args[1..split], run_now)?;
+            let owner = parsed
+                .owner
+                .unwrap_or_else(|| std::env::var("USER").unwrap_or_else(|_| "local-agent".into()));
+            if parsed.follow {
+                output = options::Output::Follow;
             }
             if owner.trim().is_empty() || owner.len() > 128 {
                 return Err("bounded owner required".into());
             }
+            let resource = match parsed.class {
+                None => Resource::Compile,
+                Some(options::Class::Run) => Resource::Run,
+                Some(options::Class::Device(serial)) => {
+                    Resource::Device(tinline_task_manager::device::lock_serial(&serial)?)
+                }
+            };
             let recipe = Recipe {
                 argv: args[split + 1..].to_vec(),
-                resource: resource.unwrap_or(Resource::Compile),
+                resource,
             };
             Action::Submit(recipe.spec(owner, std::env::current_dir()?)?)
         }
@@ -217,6 +220,7 @@ fn run() -> Result<()> {
             );
         }
         Some("list") if args.len() == 1 => Action::List,
+        Some("list") => return list(&args[1..]),
         Some("submit") if args.len() == 2 => {
             let mut spec: JobSpec = serde_json::from_slice(&fs::read(&args[1])?)?;
             if spec.suite == tinline_task_manager::catalog::ANDROID_SUITE {
@@ -235,6 +239,14 @@ fn run() -> Result<()> {
         _ => return Err(USAGE.into()),
     };
     let socket = state_dir().join("taskd.sock");
+    let focus = match &action {
+        Action::Logs(id)
+        | Action::Approve(id)
+        | Action::ApproveCommand(id)
+        | Action::ApproveAndroidTrial(id) => Some(*id),
+        _ => None,
+    };
+    let submitting = matches!(action, Action::Submit(_));
     let response = request_with_reconnect(&socket, action, || ensure_daemon(&socket))?;
     if plain_logs {
         if let Some(error) = &response.error {
@@ -245,16 +257,36 @@ fn run() -> Result<()> {
     } else if !run_now || response.error.is_some() {
         println!("{}", serde_json::to_string_pretty(&response)?);
     }
+    // Human-only notes go to stderr; stdout JSON is unchanged for scripts.
+    if let Some(job) = focus.and_then(|id| response.jobs.iter().find(|j| j.id == id)) {
+        eprintln!(
+            "{}",
+            display::job_status_line(job, response.execution_enabled)
+        );
+    }
     if response.error.is_some() {
         std::process::exit(1);
+    }
+    if submitting && let Some(id) = response.submitted_id {
+        let job = response.jobs.iter().find(|j| j.id == id);
+        let cwd = job.map_or("?", |j| j.spec.source.as_str());
+        if run_now {
+            eprintln!("{}", display::submit_line(id, cwd, job));
+        } else {
+            eprintln!(
+                "tasks: enqueued job {id}; cwd {cwd}; approve with tasks approve-command {id}, then tasks start-worker"
+            );
+        }
+        if let Some(warning) = display::shared_cwd_warning(&response.jobs, id) {
+            eprintln!("{warning}");
+        }
     }
     if run_now {
         let id = response
             .submitted_id
             .ok_or("daemon did not return submitted_id; do not resubmit blindly")?;
-        eprintln!("tasks: submitted job {id}; Ctrl-C detaches, tasks cancel {id} cancels");
         approve_and_start(&socket, Action::ApproveCommand(id), id)?;
-        std::process::exit(wait_job(&socket, id)?.1);
+        std::process::exit(wait_job(&socket, id, output)?.1);
     }
     Ok(())
 }
@@ -274,8 +306,23 @@ fn approve_and_start(socket: &Path, approve: Action, id: i64) -> Result<()> {
 
 /// Follows one job to a terminal phase, prints its log and summary, returns the job
 /// and the exit code `tasks run` uses (0 passed, 130 cancelled, else the stage code).
-fn wait_job(socket: &Path, id: i64) -> Result<(tinline_task_manager::Job, i32)> {
+/// `output` chooses whether the log streams live, prints at the end, or is reduced to
+/// progress lines and a bounded tail.
+fn wait_job(
+    socket: &Path,
+    id: i64,
+    output: options::Output,
+) -> Result<(tinline_task_manager::Job, i32)> {
+    use options::Output;
     let mut previous = None;
+    let mut live = LiveLog {
+        id,
+        output,
+        follower: follow::LogFollower::new(follow::job_log(&state_dir(), id)),
+        lines: follow::Lines::default(),
+        streaming: output != Output::Full,
+        at_line_start: true,
+    };
     loop {
         let r = call(socket, Action::List)?;
         if let Some(e) = r.error {
@@ -290,14 +337,37 @@ fn wait_job(socket: &Path, id: i64) -> Result<(tinline_task_manager::Job, i32)> 
             eprintln!("tasks: job {id} {:?}", j.phase);
             previous = Some(j.phase.clone());
         }
+        live.pump(false);
         if j.phase.terminal() {
-            let logs = call(socket, Action::Logs(id))?;
-            let text = logs.log.map(|log| log.text).unwrap_or_default();
+            live.pump(true);
+            let followed = output == Output::Follow && live.streaming && live.follower.offset() > 0;
+            let text = if followed {
+                // Already printed; only make sure the summary starts on its own line.
+                String::new()
+            } else {
+                let logs = call(socket, Action::Logs(id))?;
+                if let Some(error) = logs.error {
+                    eprintln!("tasks: job {id} log unavailable: {error}");
+                }
+                let text = logs.log.map(|log| log.text).unwrap_or_default();
+                match output {
+                    Output::Progress { tail } => {
+                        let (shown, omitted) = follow::tail(&text, tail);
+                        if omitted > 0 {
+                            eprintln!(
+                                "tasks: job {id}: {omitted} earlier log lines omitted; tasks logs {id} (or --full-log) shows the retained log"
+                            );
+                        }
+                        shown.to_owned()
+                    }
+                    _ => text,
+                }
+            };
             print!("{text}");
-            if let Some(error) = logs.error {
-                eprintln!("tasks: job {id} log unavailable: {error}");
-            }
             if !text.is_empty() && !text.ends_with('\n') {
+                println!();
+            }
+            if followed && !live.at_line_start {
                 println!();
             }
             let code = if j.phase == tinline_task_manager::Phase::Passed {
@@ -321,6 +391,51 @@ fn wait_job(socket: &Path, id: i64) -> Result<(tinline_task_manager::Job, i32)> 
             return Ok((j, code));
         }
         std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// Streams a job's log file while a client waits (`--follow`, phone-test progress).
+struct LiveLog {
+    id: i64,
+    output: options::Output,
+    follower: follow::LogFollower,
+    lines: follow::Lines,
+    /// Cleared when the file cannot be read; the log is then shown at the end.
+    streaming: bool,
+    at_line_start: bool,
+}
+
+impl LiveLog {
+    fn pump(&mut self, drain: bool) {
+        use std::io::Write;
+        if !self.streaming {
+            return;
+        }
+        let id = self.id;
+        let bytes = if drain {
+            self.follower.drain()
+        } else {
+            self.follower.poll()
+        };
+        match bytes {
+            Ok(bytes) if bytes.is_empty() => {}
+            Ok(bytes) if self.output == options::Output::Follow => {
+                let mut stdout = std::io::stdout().lock();
+                let _ = stdout.write_all(&bytes).and_then(|_| stdout.flush());
+                self.at_line_start = bytes.ends_with(b"\n");
+            }
+            Ok(bytes) => {
+                for line in self.lines.push(&bytes) {
+                    if let Some(step) = follow::progress(&line) {
+                        eprintln!("tasks: job {id} step: {step}");
+                    }
+                }
+            }
+            Err(error) => {
+                eprintln!("tasks: job {id}: cannot stream log ({error}); showing it at the end");
+                self.streaming = false;
+            }
+        }
     }
 }
 
@@ -357,21 +472,19 @@ fn print_devices(devices: &[tinline_task_manager::device::Device]) {
 fn phone_test(args: &[String]) -> Result<()> {
     use tinline_task_manager::local_command::{Recipe, Resource};
     use tinline_task_manager::{catalog, device};
-    let mut owner = std::env::var("USER").unwrap_or_else(|_| "local-agent".into());
-    let (mut source, mut serial) = (None, None);
-    let mut rest = args.iter();
-    while let Some(arg) = rest.next() {
-        match arg.as_str() {
-            "--who" => owner = rest.next().ok_or(USAGE)?.clone(),
-            "--device" if serial.is_none() => serial = Some(rest.next().ok_or(USAGE)?.clone()),
-            s if source.is_none() && !s.starts_with('-') => source = Some(s.to_owned()),
-            _ => return Err(USAGE.into()),
-        }
-    }
+    let options::PhoneTest {
+        owner,
+        source,
+        serial,
+        output,
+    } = options::phone_test(
+        args,
+        std::env::var("USER").unwrap_or_else(|_| "local-agent".into()),
+    )?;
     if owner.trim().is_empty() || owner.len() > 128 {
         return Err("bounded owner required".into());
     }
-    let source = fs::canonicalize(source.ok_or(USAGE)?)?;
+    let source = fs::canonicalize(source)?;
     // Fail before compiling if the phone is missing, unauthorized or not arm64.
     let phone = device::select_phone(&device::list()?, serial.as_deref())?;
     if phone.busy {
@@ -413,7 +526,7 @@ fn phone_test(args: &[String]) -> Result<()> {
         phone.serial
     );
     approve_and_start(&socket, Action::ApproveAndroidTrial(build), build)?;
-    let (job, code) = wait_job(&socket, build)?;
+    let (job, code) = wait_job(&socket, build, output)?;
     if code != 0 {
         std::process::exit(code);
     }
@@ -446,7 +559,79 @@ fn phone_test(args: &[String]) -> Result<()> {
         .ok_or("daemon did not return submitted_id; do not resubmit blindly")?;
     eprintln!("tasks: install job {install} on {}", phone.serial);
     approve_and_start(&socket, Action::ApproveCommand(install), install)?;
-    std::process::exit(wait_job(&socket, install)?.1);
+    std::process::exit(wait_job(&socket, install, output)?.1);
+}
+
+/// `tasks list` with options: filtered table (default) or filtered JSON (`--json`).
+fn list(args: &[String]) -> Result<()> {
+    let options = options::list(args)?;
+    let socket = state_dir().join("taskd.sock");
+    let mut response = call(&socket, Action::List)?;
+    if let Some(error) = &response.error {
+        eprintln!("tasks: {error}");
+        std::process::exit(1);
+    }
+    let all = std::mem::take(&mut response.jobs);
+    response.jobs = display::select(
+        all.clone(),
+        options.who.as_deref(),
+        options.active,
+        options.limit,
+    );
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+        return Ok(());
+    }
+    let now = tinline_task_manager::execution::now();
+    let home = std::env::var("HOME").ok();
+    print!(
+        "{}",
+        display::job_table(&response.jobs, now, home.as_deref())
+    );
+    if options.active {
+        match tinline_task_manager::admission::status() {
+            Ok(status) => {
+                let note =
+                    |slot: String, n: &tinline_task_manager::admission::Note| display::Holder {
+                        slot,
+                        who: n.who.clone(),
+                        pid: Some(n.pid),
+                        since: n.since,
+                    };
+                let holders: Vec<_> = status
+                    .resources
+                    .iter()
+                    .filter(|r| r.busy)
+                    .map(|r| {
+                        let slot = display::slot_name(
+                            &r.path.file_name().unwrap_or_default().to_string_lossy(),
+                        );
+                        match &r.holder {
+                            Some(n) => note(slot, n),
+                            None => display::Holder {
+                                slot,
+                                who: "(no live holder note)".into(),
+                                pid: None,
+                                since: now as f64,
+                            },
+                        }
+                    })
+                    .collect();
+                let waiting: Vec<_> = status
+                    .waiting
+                    .iter()
+                    .map(|n| note(n.slot.clone().unwrap_or_else(|| "-".into()), n))
+                    .collect();
+                print!(
+                    "{}",
+                    display::holders_section(&holders, &waiting, &all, now)
+                );
+            }
+            Err(error) => eprintln!("tasks: live admission unavailable: {error}"),
+        }
+    }
+    eprintln!("tasks: {}", display::TABLE_LEGEND);
+    Ok(())
 }
 
 fn open_ui() -> Result<()> {

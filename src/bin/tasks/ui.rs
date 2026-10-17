@@ -5,7 +5,7 @@ mod tests;
 use eframe::egui::{self, RichText};
 use std::collections::HashMap;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tinline_task_manager::device::{self, Device};
@@ -406,7 +406,7 @@ impl Dashboard {
         ui.add_space(12.0);
         ui.label(
             RichText::new(
-                "Executable catalog: task-manager.tests\nConfig: debug/offline; cost: quick\nSource: absolute repo root; revision: full HEAD\nSubmit, approve trusted source, then start worker.\nNo arbitrary commands or device jobs.",
+                "Executable catalog: task-manager.tests\nConfig: debug/offline; cost: quick\nSource: absolute root of a checkout containing tools/task-manager (legacy Tinline layout; the standalone repo is not one); revision: full HEAD\nSubmit, approve trusted source, then start worker.\nLive commands: tasks run in a terminal.\nNo arbitrary commands or device jobs.",
             )
             .weak()
             .small(),
@@ -755,7 +755,31 @@ fn duration(seconds: f64) -> String {
     }
 }
 
+/// Default Source for the immutable self-suite form. The retained Tinline adapter
+/// captures `SOURCE/tools/task-manager`, so a default exists only when this crate is
+/// that embedded directory (legacy layout). In the standalone repository the crate
+/// is the repository root and there is no valid default: the field stays empty
+/// (Submit disabled) instead of pointing two levels above the checkout.
+pub(crate) fn self_suite_source(manifest_dir: &Path) -> Option<PathBuf> {
+    let manifest = std::fs::canonicalize(manifest_dir).ok()?;
+    let root = manifest.parent()?.parent()?;
+    let embedded = std::fs::canonicalize(root.join("tools/task-manager")).ok()?;
+    (embedded == manifest).then(|| root.to_owned())
+}
+
+fn head_revision(source: &Path) -> Option<String> {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(source)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+}
+
 pub fn run(socket: PathBuf) -> eframe::Result {
+    let default_source = self_suite_source(Path::new(env!("CARGO_MANIFEST_DIR")));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Tinline task manager")
@@ -794,18 +818,13 @@ pub fn run(socket: PathBuf) -> eframe::Result {
                 form: Form {
                     suite: tinline_task_manager::catalog::SUITE.into(),
                     owner: std::env::var("USER").unwrap_or_default(),
-                    source: std::fs::canonicalize(
-                        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
-                    )
-                    .unwrap_or_default()
-                    .display()
-                    .to_string(),
-                    revision: std::process::Command::new("git")
-                        .args(["-C", env!("CARGO_MANIFEST_DIR"), "rev-parse", "HEAD"])
-                        .output()
-                        .ok()
-                        .filter(|o| o.status.success())
-                        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+                    source: default_source
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default(),
+                    revision: default_source
+                        .as_deref()
+                        .and_then(head_revision)
                         .unwrap_or_default(),
                     configuration: tinline_task_manager::catalog::CONFIGURATION.into(),
                     cost: Cost::Quick,
