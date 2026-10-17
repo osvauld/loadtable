@@ -18,7 +18,7 @@ SUPPORTED = {('ubuntu', '24.04'), ('debian', '12')}
 # NixOS: any well-formed reported VERSION_ID is accepted and recorded verbatim.
 NIXOS_VERSION = re.compile(r'[0-9A-Za-z][0-9A-Za-z._+-]{0,63}')
 VOLATILE_FS = frozenset({'tmpfs', 'ramfs', 'overlay', 'squashfs', 'rootfs'})
-NIXOS_MODULE = 'nix/worker-module.nix'
+NIXOS_MODULE = 'nix/module.nix'  # services.tasks-worker, flake.nix nixosModules.worker
 ARCHES = {'x86_64', 'aarch64'}
 TOOLS = ('cargo', 'rustc', 'cc', 'clang', 'cmake', 'ninja', 'pkg-config',
          'java', 'javac', 'adb', 'emulator', 'sdkmanager')
@@ -351,10 +351,10 @@ def make_plan(report):
             'ready_to_apply': False, 'blockers': blockers,
             'proposals': [
                 {'kind': 'review-declarative-nixos-module', 'module': NIXOS_MODULE,
-                 'flake': 'nix/flake.nix', 'missing_tools': missing,
-                 'options': {'kvm.enable': False, 'service.enable': False,
-                             'nixLd.enable': False, 'androidEmulator.enable': False},
-                 'draft': True, 'validated': False, 'applied': False, 'approved': False}
+                 'flake': 'flake.nix', 'missing_tools': missing,
+                 'options': {'enable': False, 'peer.enable': True, 'sccache.enable': True,
+                             'nixLd.enable': True, 'android.enable': False},
+                 'draft': False, 'validated': False, 'applied': False, 'approved': False}
                 if nixos is not None else
                 {'kind': 'review-build-prerequisites', 'missing_tools': missing,
                  'version_pins': None, 'checksums': None, 'download_bytes': None,

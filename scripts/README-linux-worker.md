@@ -30,8 +30,9 @@ mount), `nix_ro_store_squashfs` (`/nix/.ro-store`), `root_volatile` and
 (`/lib64/ld-linux-x86-64.so.2` or the aarch64 loader). NixOS >= 24.05 ships a
 stub loader, so `ld_linux_present` alone is not nix-ld evidence. The NixOS plan
 proposes no package-manager command: its `review-declarative-nixos-module`
-proposal points at the DRAFT `nix/worker-module.nix`/`nix/flake.nix`, with every
-optional feature off and `draft/validated/applied/approved` explicit. A live ISO
+proposal points at `nix/module.nix` (`services.tasks-worker`) and the root `flake.nix`,
+with the module's defaults listed and `draft/validated/applied/approved` explicit
+(evaluated with `nix flake check --no-build`, never applied). A live ISO
 is a blocker (state is not persistent); unknown mounts are a blocker too.
 See [nix/README.md](../nix/README.md).
 

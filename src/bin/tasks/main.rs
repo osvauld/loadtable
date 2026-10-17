@@ -1,15 +1,23 @@
 //! One binary for everyone: agents use the subcommands, people open the window. Any
 //! command that needs the queue starts the background daemon if it is not running.
+//! Features: `ui` (the window and its modules) and `mcp` (`tasks mcp`) are default; a worker
+//! build without them keeps the daemon, CLI, peer link and status.
 mod daemon;
 mod display;
 mod follow;
+#[cfg(feature = "ui")]
 mod log_view;
+#[cfg(feature = "mcp")]
 mod mcp;
 mod options;
 mod status;
+#[cfg(feature = "ui")]
 mod ui;
+#[cfg(feature = "ui")]
 mod ui_legacy;
+#[cfg(feature = "ui")]
 mod ui_model;
+#[cfg(feature = "ui")]
 mod ui_source;
 
 use std::fs;
@@ -83,7 +91,7 @@ fn run() -> Result<()> {
             std::process::exit(tinline_task_manager::peer::bridge::run(&args[1..]));
         }
         Some("peer") => return peer_command(&args[1..]),
-        Some("mcp") => return mcp::run(&args[1..]),
+        Some("mcp") => return mcp_command(&args[1..]),
         Some("place") => return place_command(&args[1..]),
         Some("catalog") if args.len() == 1 => {
             println!(
@@ -1035,6 +1043,32 @@ fn list(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "mcp")]
+fn mcp_command(args: &[String]) -> Result<()> {
+    mcp::run(args)
+}
+
+#[cfg(not(feature = "mcp"))]
+fn mcp_command(_args: &[String]) -> Result<()> {
+    Err(without_feature("mcp"))
+}
+
+/// The error of a subcommand whose Cargo feature is off; `main` prints it and exits 2.
+#[cfg(not(all(feature = "ui", feature = "mcp")))]
+fn without_feature(feature: &str) -> Box<dyn std::error::Error + Send + Sync> {
+    format!(
+        "built without {feature} (worker build): `tasks {feature}` needs a build with the \
+         `{feature}` Cargo feature (default features); the daemon, CLI and peer link work here"
+    )
+    .into()
+}
+
+#[cfg(not(feature = "ui"))]
+fn open_ui(_fixtures: Option<std::path::PathBuf>) -> Result<()> {
+    Err(without_feature("ui"))
+}
+
+#[cfg(feature = "ui")]
 fn open_ui(fixtures: Option<std::path::PathBuf>) -> Result<()> {
     let socket = state_dir().join("taskd.sock");
     // The window keeps retrying if this fails, and shows why in its status line.

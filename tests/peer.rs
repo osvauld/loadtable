@@ -489,6 +489,44 @@ fn status_stream_reaches_an_allowlisted_peer_and_refuses_an_unknown_one() {
     assert_eq!(report.peers[0].role, "host");
 }
 
+/// A forwarded job sees the WORKER daemon's bindgen wiring (LIBCLANG_PATH,
+/// BINDGEN_EXTRA_CLANG_ARGS from its unit), never the controller's.
+#[test]
+fn worker_bindgen_environment_reaches_forwarded_jobs() {
+    let mut a = Node::new("bindgen", "alpha");
+    let mut b = Node::new("bindgen", "beta");
+    a.allow(&b, "worker");
+    b.allow(&a, "host");
+    b.extra_env = vec![
+        (
+            "LIBCLANG_PATH".into(),
+            "/synthetic/worker/libclang/lib".into(),
+        ),
+        (
+            "BINDGEN_EXTRA_CLANG_ARGS".into(),
+            "-isystem /synthetic/worker/include".into(),
+        ),
+    ];
+    a.extra_env = vec![("LIBCLANG_PATH".into(), "/synthetic/controller/lib".into())];
+    b.start();
+    a.start();
+    let repo = repo(&a);
+    let out = forward(
+        &a,
+        &repo,
+        &["--run"],
+        "echo \"clang=[$LIBCLANG_PATH] args=[$BINDGEN_EXTRA_CLANG_ARGS]\"",
+    );
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let log = a.job_log(only_job(&a).id);
+    assert!(
+        log.contains(
+            "clang=[/synthetic/worker/libclang/lib] args=[-isystem /synthetic/worker/include]"
+        ),
+        "{log}"
+    );
+}
+
 #[test]
 fn forwarded_jobs_run_on_the_peer_stream_logs_mirror_exit_codes_and_link_both_ledgers() {
     let (a, b) = pair("forward");
@@ -981,8 +1019,10 @@ fn submit_is_idempotent_per_key_and_scoped_to_the_submitting_peer() {
 
 // ---------------------------------------------------------------------------------------------
 // MCP placement over the peer link: `tasks mcp` on A, the peer runtime's snapshots of B.
+// Only with the `mcp` feature (a worker build has no `tasks mcp`).
 
 /// `tasks mcp --no-start-daemon` with a node's environment (its stderr goes to the state dir).
+#[cfg(feature = "mcp")]
 struct Mcp {
     child: Child,
     stdin: std::process::ChildStdin,
@@ -990,6 +1030,7 @@ struct Mcp {
     next: i64,
 }
 
+#[cfg(feature = "mcp")]
 impl Mcp {
     fn start(node: &Node) -> Self {
         let log = std::fs::File::options()
@@ -1056,6 +1097,7 @@ impl Mcp {
     }
 }
 
+#[cfg(feature = "mcp")]
 impl Drop for Mcp {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -1063,6 +1105,7 @@ impl Drop for Mcp {
     }
 }
 
+#[cfg(feature = "mcp")]
 fn text_of(result: &serde_json::Value) -> String {
     result["content"][0]["text"]
         .as_str()
@@ -1071,6 +1114,7 @@ fn text_of(result: &serde_json::Value) -> String {
 }
 
 /// A's peer runtime's view of B.
+#[cfg(feature = "mcp")]
 fn peer_view(a: &Node, name: &str) -> Option<tinline_task_manager::peer_link::PeerSnapshot> {
     tinline_task_manager::peer_link::request_peers(&a.socket(), Duration::from_secs(5))
         .ok()?
@@ -1079,12 +1123,14 @@ fn peer_view(a: &Node, name: &str) -> Option<tinline_task_manager::peer_link::Pe
         .find(|s| s.name == name)
 }
 
+#[cfg(feature = "mcp")]
 fn wait_peer_online(a: &Node, b: &Node) {
     until("B online in A's peer runtime", &[a, b], WAIT, || {
         peer_view(a, b.name).filter(|s| s.online() && !s.stale && s.snapshot.is_some())
     });
 }
 
+#[cfg(feature = "mcp")]
 fn hostname() -> String {
     std::fs::read_to_string("/proc/sys/kernel/hostname")
         .unwrap()
@@ -1094,6 +1140,7 @@ fn hostname() -> String {
 
 /// Holds a node's compile slot (its isolated `p2p-build.lock`) like a running build would,
 /// until dropped. Close-on-exec (std default), so no fixture process inherits it.
+#[cfg(feature = "mcp")]
 fn hold_compile_slot(node: &Node) -> std::fs::File {
     let file = std::fs::File::options()
         .create(true)
@@ -1106,6 +1153,7 @@ fn hold_compile_slot(node: &Node) -> std::fs::File {
     file
 }
 
+#[cfg(feature = "mcp")]
 fn compile_slot_busy(snapshot: &serde_json::Value) -> bool {
     snapshot["machine"]["slots"]
         .as_array()
@@ -1114,6 +1162,7 @@ fn compile_slot_busy(snapshot: &serde_json::Value) -> bool {
         .any(|s| s["kind"] == "compile" && s["busy"] == true)
 }
 
+#[cfg(feature = "mcp")]
 fn local_status(node: &Node) -> serde_json::Value {
     let status = tinline_task_manager::request_status(&node.socket(), Duration::from_secs(30))
         .unwrap()
@@ -1122,6 +1171,7 @@ fn local_status(node: &Node) -> serde_json::Value {
     serde_json::to_value(status).unwrap()
 }
 
+#[cfg(feature = "mcp")]
 #[test]
 fn mcp_submit_to_a_named_peer_runs_there_and_names_it() {
     let (a, b) = pair("mcp-named");
@@ -1177,6 +1227,7 @@ fn mcp_submit_to_a_named_peer_runs_there_and_names_it() {
     );
 }
 
+#[cfg(feature = "mcp")]
 #[test]
 fn mcp_cluster_status_lists_both_machines() {
     let (a, b) = pair("mcp-status");
@@ -1204,6 +1255,7 @@ fn mcp_cluster_status_lists_both_machines() {
     );
 }
 
+#[cfg(feature = "mcp")]
 #[test]
 fn mcp_anywhere_goes_where_the_compile_slot_is_free() {
     let (a, b) = pair("mcp-anywhere");
@@ -1290,6 +1342,7 @@ fn mcp_anywhere_goes_where_the_compile_slot_is_free() {
     );
 }
 
+#[cfg(feature = "mcp")]
 #[test]
 fn mcp_anywhere_falls_back_when_the_peer_is_down_and_a_named_peer_is_a_clean_error() {
     let mut a = Node::new("mcp-down", "alpha");

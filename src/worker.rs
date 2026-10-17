@@ -1303,11 +1303,16 @@ fn run_command(state: &Path, dir: &Path, job: &crate::Job, stage: &str) -> Resul
         cmd.args(&argv[1..]).current_dir(&job.spec.source);
         // tasks-offload names its per-job sidecar after this (cluster-snapshot.md).
         cmd.env("TASKS_JOB_ID", job.id.to_string());
+        // Host wiring from the daemon's own environment (the worker unit), never the client's:
+        // compile cache, Gradle home, and libclang for bindgen (NixOS has no libclang on a
+        // search path; e.g. webrtc-audio-processing's bindgen needs both).
         for name in [
             "RUSTC_WRAPPER",
             "SCCACHE_DIR",
             "SCCACHE_CACHE_SIZE",
             "GRADLE_USER_HOME",
+            "LIBCLANG_PATH",
+            "BINDGEN_EXTRA_CLANG_ARGS",
         ] {
             if let Some(v) = std::env::var_os(name) {
                 cmd.env(name, v);
