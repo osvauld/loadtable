@@ -380,14 +380,20 @@ fn wait_job(
                     _ => text,
                 }
             };
-            print!("{text}");
-            if !text.is_empty() && !text.ends_with('
-') {
-                println!();
+            // Like the live stream, ignore a closed stdout (`| head`): print!
+            // would panic with exit 101 and hide the job's own exit code.
+            let mut tail = text;
+            if !tail.is_empty() && !tail.ends_with('\n') {
+                tail.push('\n');
             }
             if followed && !live.at_line_start {
-                println!();
+                tail.push('\n');
             }
+            use std::io::Write;
+            let mut stdout = std::io::stdout().lock();
+            let _ = stdout
+                .write_all(tail.as_bytes())
+                .and_then(|()| stdout.flush());
             let code = if j.phase == tinline_task_manager::Phase::Passed {
                 0
             } else if j.phase == tinline_task_manager::Phase::Cancelled {
