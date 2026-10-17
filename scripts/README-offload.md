@@ -11,14 +11,50 @@ synthetic fake-worker suite below still covers the transport and edge cases.
 
 ## Usage
 
-Run on the host under the host ledger, holding only a run slot there:
+Run on the host under the host ledger, holding only an offload slot there:
 
 ```sh
 cd /path/to/checkout/or/subdir
-tasks run --run --who OWNER -- /abs/path/scripts/tasks-offload \
+tasks run --offload --who OWNER -- /abs/path/scripts/tasks-offload \
   --worker abe@192.168.1.7 --ssh-key ~/.ssh/OFFLOAD_KEY --who OWNER \
   --cargo-fetch -- cargo test --offline --locked -j 2
 ```
+
+### Host offload slot (`tasks run --offload`)
+
+The host process only scans, hashes, transfers and waits on ssh, so it has its
+own admission class instead of a run slot:
+
+- **Own pool:** four `p2p-offload-{0..3}.lock` files beside the existing locks.
+  It never takes the compile (`p2p-build.lock`), run (`p2p-run-N.lock`) or
+  device locks, and they never wait for it. Four lets four checkouts/agents
+  offload at once (one checkout is serialized by the client flock anyway) while
+  bounding local ssh/python clients; the worker's own admission queues the
+  real work. The host worker also gives offloads their own claim budget (one
+  per slot), so waiting offloads don't use up the five general job threads.
+- **Gates kept:** fail-closed PSI parsing; available memory at least
+  `min(TASKS_MIN_AVAILABLE_MEMORY_MIB, 2 GiB)` (a small client, but the iroh
+  transport holds whole blobs, up to 512 MiB, in memory); memory PSI full
+  avg10 at most 0.5% (the host is thrashing); the cache-disk reserve
+  (`TASKS_MIN_CACHE_FREE_GIB`, measured at `~/build-cache`, where fetched
+  artifacts land; unmeasurable fails closed). The state-disk reserve still
+  applies to every job as before.
+- **Gates dropped:** CPU PSI (including `TASKS_RUN_CPU_SOME_MAX_PCT`), memory
+  PSI some and I/O PSI. The client uses almost no CPU, and these are exactly
+  what a local compile raises, i.e. when offloading helps most.
+- **Allowlist:** the command (argv[0], optionally after `env NAME=value...`)
+  must be named `tasks-offload` or `offload-portable-desktop.sh`; anything
+  else is refused at submission, daemon approval and execution, so the
+  ungated slot cannot run local heavy work. This is a guard rail against
+  mistakes, not a sandbox.
+- **Visibility:** `tasks list` shows resource `offload`; `tasks admission`
+  lists the `p2p-offload-N` locks/holders, `offload_pressure_blocker`, and
+  `thresholds.offload_min_available_memory_bytes`/`offload_slots`.
+- **Compatibility:** stored as `"resource":"offload"` in the existing job
+  configuration JSON (no SQLite schema change). A release without the class
+  still lists such a job (resource `suite`) but refuses to approve or run it.
+  `tasks run --run ... -- tasks-offload ...` keeps working unchanged; use it
+  with an installed release that rejects `--offload`.
 
 ```
 tasks-offload --worker USER@HOST [--ssh-key PATH] --who OWNER

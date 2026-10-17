@@ -10,6 +10,20 @@ pub enum Resource {
     Compile,
     Run,
     Device(String),
+    /// Offload client slot (`p2p-offload-N.lock`): no CPU PSI gate, so only the
+    /// clients in OFFLOAD_CLIENTS may use it. Stored as `"offload"`; releases
+    /// without it refuse to approve/execute such a job (fail closed).
+    Offload,
+}
+/// argv[0] basenames (after an optional `env NAME=value...` prefix) admitted to
+/// the offload slot. A guard against accidental local heavy work, not a sandbox.
+pub const OFFLOAD_CLIENTS: [&str; 2] = ["tasks-offload", "offload-portable-desktop.sh"];
+/// True for a live command recorded with the offload resource. Unparseable
+/// configurations are not offloads (they fail later, in the general pool).
+pub fn is_offload(spec: &JobSpec) -> bool {
+    spec.suite == SUITE
+        && serde_json::from_str::<Recipe>(&spec.configuration)
+            .is_ok_and(|r| r.resource == Resource::Offload)
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -70,6 +84,16 @@ impl Recipe {
                     jobs(value)?;
                 }
             }
+        }
+        if self.resource == Resource::Offload && tool_index(&self.argv, &OFFLOAD_CLIENTS).is_none()
+        {
+            return Err(format!(
+                "--offload admits only an offload client as the command ({}, optionally after \
+                 `env NAME=value`): the offload slot skips CPU PSI, so it must not run local \
+                 work. Use --run for already-built local commands or the default compile slot",
+                OFFLOAD_CLIENTS.join(" or ")
+            )
+            .into());
         }
         if let Resource::Device(s) = &self.resource
             && (s.is_empty()
@@ -1325,3 +1349,6 @@ mod tests {
         }
     }
 }
+#[cfg(test)]
+#[path = "local_command_offload_tests.rs"]
+mod offload_tests;

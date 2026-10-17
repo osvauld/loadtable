@@ -22,10 +22,11 @@ const USAGE: &str = "usage: tasks [ui]
          # with any option: compact table by default (--active adds live lock holders); --json = filtered JSON
        tasks submit SPEC.json | approve JOB_ID | cancel JOB_ID
        tasks logs JOB_ID [--json]  # plain log text by default; --json preserves v2 response
-       tasks run [--who OWNER] [--run | --device SERIAL] [--follow] -- COMMAND [ARGS...]
+       tasks run [--who OWNER] [--run | --offload | --device SERIAL] [--follow] -- COMMAND [ARGS...]
          # --run: already-built command, run slot; --device: exclusive device lock (never with --run)
+         # --offload: tasks-offload/offload-portable-desktop.sh client only; own slots, no CPU PSI gate
          # --follow: stream the job log while it runs (default: phases, then the log at the end)
-       tasks enqueue [--who OWNER] [--run | --device SERIAL] -- COMMAND [ARGS...]
+       tasks enqueue [--who OWNER] [--run | --offload | --device SERIAL] -- COMMAND [ARGS...]
        tasks approve-command JOB_ID  # trusted LIVE cwd/argv, not a source snapshot
        # local.command cost=cpu_simulation is a legacy label, NOT the resource class
        tasks approve-android-trial JOB_ID   # EXPERIMENTAL build-only; trusts local source/host config
@@ -151,6 +152,7 @@ fn run() -> Result<()> {
             let resource = match parsed.class {
                 None => Resource::Compile,
                 Some(options::Class::Run) => Resource::Run,
+                Some(options::Class::Offload) => Resource::Offload,
                 Some(options::Class::Device(serial)) => {
                     Resource::Device(tinline_task_manager::device::lock_serial(&serial)?)
                 }

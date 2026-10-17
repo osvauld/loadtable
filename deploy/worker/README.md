@@ -200,10 +200,13 @@ A plain worker build does not run on another distro: its interpreter is
 p2p_chat clone (`git clone --local`), never a checkout another agent is editing:
 
 ```sh
-tasks run --run --who OWNER -- /path/to/task-manager/scripts/offload-portable-desktop.sh --who OWNER [--jobs 6]
-tasks run --run --who OWNER -- .../offload-portable-desktop.sh --who OWNER --preflight   # deps only, no compile
+tasks run --offload --who OWNER -- /path/to/task-manager/scripts/offload-portable-desktop.sh --who OWNER [--jobs 6]
+tasks run --offload --who OWNER -- .../offload-portable-desktop.sh --who OWNER --preflight   # deps only, no compile
 .../offload-portable-desktop.sh --check-only BINARY                                        # local checks only
 ```
+
+`--offload` holds a host offload slot (own lock pool, no CPU PSI gate; see
+`scripts/README-offload.md`). With an installed `tasks` that rejects it, use `--run`.
 
 The recipe, one remote compile job (`sh -c`, so `-j` is not capped by the worker:
 `--jobs` allows 1..8):

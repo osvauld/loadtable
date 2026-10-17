@@ -2,8 +2,7 @@
 //! Errors name the exact problem and the correct usage instead of a generic refusal.
 use tinline_task_manager::Result;
 
-pub const RUN_USAGE: &str =
-    "tasks run|enqueue [--who OWNER] [--run | --device SERIAL] [--follow] -- COMMAND [ARGS...]";
+pub const RUN_USAGE: &str = "tasks run|enqueue [--who OWNER] [--run | --offload | --device SERIAL] [--follow] -- COMMAND [ARGS...]";
 const LIST_USAGE: &str =
     "tasks list [--who OWNER] [--active] [--limit N] [--json | --table | --brief]";
 const PHONE_USAGE: &str =
@@ -13,6 +12,7 @@ const PHONE_USAGE: &str =
 #[derive(Debug, PartialEq)]
 pub enum Class {
     Run,
+    Offload,
     Device(String),
 }
 
@@ -35,9 +35,11 @@ pub fn enqueue(options: &[String], waits: bool) -> Result<Enqueue> {
                     .ok_or(format!("--who needs an OWNER value; usage: {RUN_USAGE}"))?;
                 parsed.owner = Some(owner.clone());
             }
-            "--run" | "--device" => {
+            "--run" | "--offload" | "--device" => {
                 let class = if option == "--run" {
                     Class::Run
+                } else if option == "--offload" {
+                    Class::Offload
                 } else {
                     Class::Device(
                         rest.next()
@@ -52,6 +54,18 @@ pub fn enqueue(options: &[String], waits: bool) -> Result<Enqueue> {
                     }
                     (Some(Class::Device(_)), Class::Device(_)) => {
                         return Err("--device was given twice; one job locks one device".into());
+                    }
+                    (Some(Class::Offload), Class::Offload) => {
+                        return Err("--offload was given twice".into());
+                    }
+                    (Some(Class::Offload), _) | (_, Class::Offload) => {
+                        return Err(
+                            "--offload conflicts with --run/--device: --offload selects its own \
+                             admission class (offload slot, no CPU PSI gate) for a tasks-offload \
+                             or offload-portable-desktop.sh client only. Use: tasks run --who \
+                             OWNER --offload -- tasks-offload ... -- COMMAND"
+                                .into(),
+                        );
                     }
                     _ => {
                         return Err(
@@ -246,6 +260,38 @@ mod tests {
         }
         let error = enqueue(&args("--follow"), false).unwrap_err().to_string();
         assert!(error.contains("use it with tasks run"), "{error}");
+    }
+
+    #[test]
+    fn offload_class_parses_and_conflicts_like_run() {
+        assert_eq!(
+            enqueue(&args("--who a --offload --follow"), true).unwrap(),
+            Enqueue {
+                owner: Some("a".into()),
+                class: Some(Class::Offload),
+                follow: true,
+            }
+        );
+        assert_eq!(
+            enqueue(&args("--offload"), false).unwrap().class,
+            Some(Class::Offload)
+        );
+        let error = enqueue(&args("--offload --offload"), true)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("--offload was given twice"), "{error}");
+        for order in [
+            "--offload --run",
+            "--run --offload",
+            "--offload --device S",
+            "--device S --offload",
+        ] {
+            let error = enqueue(&args(order), true).unwrap_err().to_string();
+            assert!(error.contains("conflict"), "{order}: {error}");
+            assert!(error.contains("--offload"), "{order}: {error}");
+            assert!(error.contains("tasks-offload"), "{order}: {error}");
+        }
+        assert!(RUN_USAGE.contains("--offload"), "{RUN_USAGE}");
     }
 
     #[test]

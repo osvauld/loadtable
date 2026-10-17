@@ -255,18 +255,42 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+    /// Oldest approved job, FIFO.
     pub fn claim(&mut self, worker: ProcessIdentity) -> Result<Option<Job>> {
+        self.claim_class(worker, true, true)
+    }
+    /// Oldest approved job of an accepted class, FIFO within it, so the worker can
+    /// keep separate capacity for offload clients (`local_command::is_offload`).
+    /// Anything that is not a readable offload recipe belongs to the general class.
+    pub fn claim_class(
+        &mut self,
+        worker: ProcessIdentity,
+        general: bool,
+        offload: bool,
+    ) -> Result<Option<Job>> {
         // Only one worker holds worker.lock, but the transaction also protects against CLI cancellation.
         let tx = self
             .0
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let id: Option<i64> = tx
-            .query_row(
-                "SELECT id FROM jobs WHERE phase='approved' ORDER BY id LIMIT 1",
-                [],
-                |r| r.get(0),
-            )
-            .optional()?;
+        let id = {
+            let mut statement =
+                tx.prepare("SELECT id,spec FROM jobs WHERE phase='approved' ORDER BY id")?;
+            let mut rows = statement.query([])?;
+            let mut found = None;
+            while let Some(row) = rows.next()? {
+                let accepted = (general && offload) || {
+                    let spec: String = row.get(1)?;
+                    let is_offload = serde_json::from_str::<crate::JobSpec>(&spec)
+                        .is_ok_and(|s| crate::local_command::is_offload(&s));
+                    if is_offload { offload } else { general }
+                };
+                if accepted {
+                    found = Some(row.get::<_, i64>(0)?);
+                    break;
+                }
+            }
+            found
+        };
         let Some(id) = id else { return Ok(None) };
         let data: String =
             tx.query_row("SELECT data FROM executions WHERE job_id=?1", [id], |r| {
