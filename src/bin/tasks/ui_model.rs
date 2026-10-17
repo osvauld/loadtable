@@ -53,6 +53,35 @@ pub struct Slot {
     pub busy: Option<bool>,
     pub holder_job: Option<i64>,
     pub holder_who: Option<String>,
+    /// Busy without a live holder note: the processes really holding it.
+    pub holder_processes: Vec<HolderProcess>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct HolderProcess {
+    pub pid: Option<u32>,
+    pub cmd: Option<String>,
+    pub tasks_job: Option<i64>,
+}
+impl HolderProcess {
+    fn text(&self) -> String {
+        let pid = self.pid.map_or("?".into(), |p| p.to_string());
+        let cmd = self.cmd.as_deref().unwrap_or("?");
+        match self.tasks_job {
+            Some(j) => format!("pid {pid} ({cmd}) from job #{j}"),
+            None => format!("pid {pid} ({cmd})"),
+        }
+    }
+}
+fn holder_processes_text(slot: &Slot) -> Option<String> {
+    (!slot.holder_processes.is_empty()).then(|| {
+        slot.holder_processes
+            .iter()
+            .map(HolderProcess::text)
+            .collect::<Vec<_>>()
+            .join(" and ")
+    })
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -762,7 +791,9 @@ pub fn slots_text(machine: &Machine) -> (String, String) {
             (Some(job), Some(who)) => format!(" by #{job} {who}"),
             (Some(job), None) => format!(" by #{job}"),
             (None, Some(who)) => format!(" by {who}"),
-            (None, None) => String::new(),
+            (None, None) => holder_processes_text(slot)
+                .map(|t| format!(" by {t}"))
+                .unwrap_or_default(),
         };
         detail.push(format!(
             "{kind} {}: {}{holder}",
@@ -826,7 +857,10 @@ pub fn slot_chip(slot: &Slot) -> SlotChip {
     }
     let hover = match (busy, &slot.holder_who, slot.busy) {
         (true, Some(who), _) => format!("{name}: held by {who}"),
-        (true, None, _) => format!("{name}: busy"),
+        (true, None, _) => match holder_processes_text(slot) {
+            Some(t) => format!("{name}: held by {t}"),
+            None => format!("{name}: busy"),
+        },
         (false, _, Some(false)) => format!("{name}: free"),
         _ => format!("{name}: state unknown"),
     };

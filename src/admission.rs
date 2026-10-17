@@ -610,6 +610,10 @@ pub struct ResourceStatus {
     pub path: PathBuf,
     pub busy: bool,
     pub holder: Option<Note>,
+    /// Additive: busy without a live holder note, the processes that really
+    /// hold the flock (pid, command, originating TASKS_JOB_ID).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub holder_processes: Vec<crate::metrics::HolderProcess>,
 }
 #[derive(Debug, Serialize)]
 pub struct Status {
@@ -728,6 +732,12 @@ impl Lease {
         Ok(())
     }
 }
+#[cfg(test)]
+impl Lease {
+    pub(crate) fn raw_fd(&self) -> std::os::fd::RawFd {
+        self.file.as_raw_fd()
+    }
+}
 impl Drop for Lease {
     fn drop(&mut self) {
         // The lock stays held by inherited children until their descriptors close.
@@ -806,6 +816,8 @@ fn acquire_gated(
     };
     let wait = Wait::new(root, &note)?;
     let mut previous_blocker = None;
+    let mut last_holder_check: Option<std::time::Instant> = None;
+    let mut previous_holders: Option<String> = None;
     loop {
         if stop() {
             return Ok(None);
@@ -854,9 +866,41 @@ fn acquire_gated(
                     pid: identity.pid,
                 }));
             }
+            // First in line and still blocked: if no live note names the
+            // holder, say which process really holds it (bounded, every 10 s).
+            if last_holder_check.is_none_or(|t| t.elapsed() >= HOLDER_CHECK_EVERY) {
+                last_holder_check = Some(std::time::Instant::now());
+                let found = untracked_holders(root, &names);
+                if found != previous_holders {
+                    if let Some(text) = &found {
+                        eprintln!(
+                            "Native admission waiting: {} slot held by {text} with no live tasks \
+                             holder note (it outlived or escaped its job; the slot frees when it \
+                             exits); inspect tasks admission",
+                            kind.label()
+                        );
+                    }
+                    previous_holders = found;
+                }
+            }
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+const HOLDER_CHECK_EVERY: Duration = Duration::from_secs(10);
+/// Every busy candidate slot that no live holder note names, described by the
+/// processes that really hold it; `None` when a note explains every holder or
+/// no holder process is visible. Read-only diagnostics.
+fn untracked_holders(root: &Path, names: &[String]) -> Option<String> {
+    let mut texts = vec![];
+    for name in names {
+        let path = root.join(name);
+        if read_note(&path.with_extension("holder")).is_ok_and(|n| n.alive()) {
+            continue;
+        }
+        texts.extend(holders::holders(&path).iter().map(holders::describe_text));
+    }
+    (!texts.is_empty()).then(|| texts.join(" and "))
 }
 pub fn status() -> Result<Status> {
     let (report, warnings) = report_thresholds(
@@ -958,7 +1002,17 @@ fn status_with(
             let holder = read_note(&path.with_extension("holder"))
                 .ok()
                 .filter(|n| busy && n.alive());
-            status.resources.push(ResourceStatus { path, busy, holder });
+            let holder_processes = if busy && holder.is_none() {
+                holders::holders(&path)
+            } else {
+                vec![]
+            };
+            status.resources.push(ResourceStatus {
+                path,
+                busy,
+                holder,
+                holder_processes,
+            });
         } else if name.starts_with("p2p-wait-") && name.ends_with(".json") {
             match read_note(&path) {
                 Ok(n) if n.alive() => status.waiting.push(n),
@@ -974,6 +1028,8 @@ fn status_with(
 #[path = "admission_tests.rs"]
 mod tests;
 // ---- Fresh-host portability and run-slot PSI (feedback #27/#29) ----
+#[path = "admission_holders.rs"]
+pub mod holders;
 #[path = "admission_lock_dir.rs"]
 mod lock_dir;
 pub use lock_dir::{

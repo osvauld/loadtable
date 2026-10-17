@@ -140,6 +140,15 @@ pub fn render(s: &Snapshot) -> String {
         .map(|s| match (s.holder_job, &s.holder_who) {
             (Some(j), Some(w)) => format!("{} #{j} {w}", s.name),
             (_, Some(w)) => format!("{} {w}", s.name),
+            _ if !s.holder_processes.is_empty() => format!(
+                "{} held by {}",
+                s.name,
+                s.holder_processes
+                    .iter()
+                    .map(tinline_task_manager::admission::holders::describe_text)
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            ),
             _ => format!("{} busy", s.name),
         })
         .collect();
