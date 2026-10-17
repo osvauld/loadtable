@@ -49,6 +49,7 @@ fn finished(mut j: Job, stages: &[(f64, f64, i32)]) -> Job {
         local_command: true,
         detail: String::new(),
         metrics: None,
+        peer: None,
     });
     j
 }

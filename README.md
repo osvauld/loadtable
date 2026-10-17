@@ -75,6 +75,20 @@ only add serials (`TASKS_DENIED_DEVICES`, `~/.config/tasks/denied-devices`).
 the adb server for them without lock descriptors. A test phone on the LAN worker:
 deploy/worker/README.md "Test phone on the worker".
 
+## Peer link (daemon to daemon over iroh; not deployed)
+
+`tasks run --peer NAME [--run | --device SERIAL] [--fetch REL]... -- CMD` forwards a command
+to another machine's daemon: this checkout is synced content-addressed (only missing blobs),
+the peer runs it under ITS admission, approvals and device denylist, its log streams into the
+local job and `tasks run` exits with the peer's exit code. Locally the job holds an offload
+slot. A lost link is UNCERTAIN (re-attached by remote id, never resubmitted); cancel works
+both ways; both ledgers record the link. Disabled unless `~/.config/tasks/peer.toml` exists
+(`tasks peer init --bind LAN_IP:PORT`, then add `[[peer]]` entries with the other side's
+`tasks peer id`); `tasks peer list` shows it, `tasks peer status-watch NAME` prints a peer's
+live snapshots (usable as `TASKS_UI_REMOTE_CMD`). Design, config, failure semantics and what
+remains before `tasks-offload` can go: [docs/design/peer-link.md](docs/design/peer-link.md);
+LAN check: `scripts/peer-lan-e2e.sh`.
+
 ## Window
 
 `tasks` (or `tasks ui`) opens a live dashboard of both machines: machine cards,

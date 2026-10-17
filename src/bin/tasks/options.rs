@@ -2,7 +2,7 @@
 //! Errors name the exact problem and the correct usage instead of a generic refusal.
 use tinline_task_manager::Result;
 
-pub const RUN_USAGE: &str = "tasks run|enqueue [--who OWNER] [--run | --offload | --device SERIAL] [--follow] -- COMMAND [ARGS...]";
+pub const RUN_USAGE: &str = "tasks run|enqueue [--who OWNER] [--run | --offload | --device SERIAL] [--peer NAME [--fetch REL]...] [--follow] -- COMMAND [ARGS...]";
 const LIST_USAGE: &str =
     "tasks list [--who OWNER] [--active] [--limit N] [--json | --table | --brief]";
 const PHONE_USAGE: &str =
@@ -21,6 +21,10 @@ pub struct Enqueue {
     pub owner: Option<String>,
     pub class: Option<Class>,
     pub follow: bool,
+    /// Forward the command to this peer daemon (`tasks peer list`).
+    pub peer: Option<String>,
+    /// Artifacts to fetch back from the peer's checkout after a passed job.
+    pub fetch: Vec<String>,
 }
 
 /// Parses the options before `--`. `--follow` only makes sense when this client waits.
@@ -78,6 +82,20 @@ pub fn enqueue(options: &[String], waits: bool) -> Result<Enqueue> {
                     }
                 }
             }
+            "--peer" => {
+                let name = rest
+                    .next()
+                    .ok_or(format!("--peer needs a NAME value; usage: {RUN_USAGE}"))?;
+                if parsed.peer.replace(name.clone()).is_some() {
+                    return Err("--peer was given twice; one job runs on one peer".into());
+                }
+            }
+            "--fetch" => {
+                let rel = rest
+                    .next()
+                    .ok_or(format!("--fetch needs a relative PATH; usage: {RUN_USAGE}"))?;
+                parsed.fetch.push(rel.clone());
+            }
             "--follow" if waits => parsed.follow = true,
             "--follow" => {
                 return Err(
@@ -92,6 +110,16 @@ pub fn enqueue(options: &[String], waits: bool) -> Result<Enqueue> {
                 );
             }
         }
+    }
+    if parsed.peer.is_some() && parsed.class == Some(Class::Offload) {
+        return Err(
+            "--peer and --offload conflict: --peer already uses an offload slot for the local \
+             bridge; the command runs in the peer's compile slot (or --run / --device there)"
+                .into(),
+        );
+    }
+    if !parsed.fetch.is_empty() && parsed.peer.is_none() {
+        return Err("--fetch only applies with --peer NAME".into());
     }
     Ok(parsed)
 }
@@ -240,6 +268,7 @@ mod tests {
                 owner: Some("a".into()),
                 class: Some(Class::Device("S".into())),
                 follow: true,
+                ..Enqueue::default()
             }
         );
         assert_eq!(
@@ -263,6 +292,27 @@ mod tests {
     }
 
     #[test]
+    fn peer_and_fetch_options_parse_and_conflict() {
+        let parsed = enqueue(
+            &args("--who a --peer worker --run --fetch out/x --fetch y"),
+            true,
+        )
+        .unwrap();
+        assert_eq!(parsed.peer.as_deref(), Some("worker"));
+        assert_eq!(parsed.class, Some(Class::Run));
+        assert_eq!(parsed.fetch, ["out/x", "y"]);
+        for (input, expected) in [
+            ("--peer a --peer b", "--peer was given twice"),
+            ("--peer", "--peer needs a NAME"),
+            ("--peer a --offload", "--peer and --offload conflict"),
+            ("--fetch x", "--fetch only applies with --peer"),
+        ] {
+            let error = enqueue(&args(input), true).unwrap_err().to_string();
+            assert!(error.contains(expected), "{input}: {error}");
+        }
+    }
+
+    #[test]
     fn offload_class_parses_and_conflicts_like_run() {
         assert_eq!(
             enqueue(&args("--who a --offload --follow"), true).unwrap(),
@@ -270,6 +320,7 @@ mod tests {
                 owner: Some("a".into()),
                 class: Some(Class::Offload),
                 follow: true,
+                ..Enqueue::default()
             }
         );
         assert_eq!(

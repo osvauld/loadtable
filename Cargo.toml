@@ -6,7 +6,9 @@ license = "GPL-3.0-or-later"
 publish = false
 
 # Standalone tooling workspace: do not drag app/media builds into the scheduler.
+# crates/peer: the daemon-to-daemon iroh link (LAN only). experiments/ stay independent.
 [workspace]
+members = ["crates/peer"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -16,6 +18,9 @@ sha2 = "0.10"
 toml = "0.8"
 libc = "0.2"
 eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+# Daemon-to-daemon link (iroh, LAN only); runs in the daemon's own peer thread/runtime.
+task-manager-peer = { path = "crates/peer" }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time", "net", "io-util"] }
 
 [[bin]]
 name = "tasks"

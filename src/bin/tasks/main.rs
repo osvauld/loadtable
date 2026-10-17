@@ -31,6 +31,10 @@ const USAGE: &str = "usage: tasks [ui [--fixtures DIR]]  # DIR: cluster snapshot
          # --offload: tasks-offload/offload-portable-desktop.sh client only; own slots, no CPU PSI gate
          # --follow: stream the job log while it runs (default: phases, then the log at the end)
        tasks enqueue [--who OWNER] [--run | --offload | --device SERIAL] -- COMMAND [ARGS...]
+       tasks run|enqueue --peer NAME [--run | --device SERIAL] [--fetch REL]... -- COMMAND [ARGS...]
+         # forward to a peer daemon over iroh: sync this checkout, run there under ITS admission,
+         # stream its log here, exit with its exit code (needs a peer config; tasks peer list)
+       tasks peer init --bind IP:PORT [--config PATH] | id | list [--json] | status-watch NAME
        tasks approve-command JOB_ID  # trusted LIVE cwd/argv, not a source snapshot
        # local.command cost=cpu_simulation is a legacy label, NOT the resource class
        tasks approve-android-trial JOB_ID   # EXPERIMENTAL build-only; trusts local source/host config
@@ -66,6 +70,10 @@ fn run() -> Result<()> {
             return open_ui(Some(std::path::PathBuf::from(&args[2])));
         }
         Some("daemon") if args.len() == 1 => return daemon::run(),
+        Some("peer-forward") => {
+            std::process::exit(tinline_task_manager::peer::bridge::run(&args[1..]));
+        }
+        Some("peer") => return peer_command(&args[1..]),
         Some("catalog") if args.len() == 1 => {
             println!(
                 "{}",
@@ -172,7 +180,14 @@ fn run() -> Result<()> {
                 argv: args[split + 1..].to_vec(),
                 resource,
             };
-            Action::Submit(recipe.spec(owner, std::env::current_dir()?)?)
+            match &parsed.peer {
+                None => Action::Submit(recipe.spec(owner, std::env::current_dir()?)?),
+                Some(peer) => Action::Submit(forward_spec(
+                    peer,
+                    &parsed.fetch,
+                    recipe.unchecked_spec(owner, std::env::current_dir()?)?,
+                )?),
+            }
         }
         Some("android-submit") => {
             // Submission only; approve-android-trial and start-worker stay separate.
@@ -319,6 +334,197 @@ fn run() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `tasks run --peer NAME`: checks that this machine's daemon has a peer runtime that knows
+/// NAME as a worker, then wraps the command into the local forwarding job (the seam
+/// `peer_link::forwarded_spec`).
+fn forward_spec(peer: &str, fetch: &[String], inner: JobSpec) -> Result<JobSpec> {
+    let socket = state_dir().join("taskd.sock");
+    ensure_daemon(&socket)?;
+    let report = tinline_task_manager::peer_link::request_peers(&socket, Duration::from_secs(30))?;
+    if !report.enabled {
+        return Err(format!(
+            "peer forwarding is not enabled in this machine's daemon ({}; config {}). Set it up \
+             with `tasks peer init --bind IP:PORT`, add the peer, then restart the daemon when it \
+             is idle",
+            report.error.unwrap_or_default(),
+            report.config.unwrap_or_default()
+        )
+        .into());
+    }
+    match report.peers.iter().find(|p| p.name == peer) {
+        None => {
+            return Err(format!(
+                "unknown peer {peer:?}; configured: {}",
+                report
+                    .peers
+                    .iter()
+                    .map(|p| format!("{} ({})", p.name, p.role))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+            .into());
+        }
+        Some(p) if !matches!(p.role.as_str(), "worker" | "both") => {
+            return Err(format!(
+                "peer {peer} has role {}; only a worker/both peer runs forwarded jobs",
+                p.role
+            )
+            .into());
+        }
+        Some(_) => {}
+    }
+    tinline_task_manager::peer_link::forwarded_spec(
+        &inner,
+        peer,
+        fetch,
+        &fs::canonicalize(state_dir())?,
+        &std::env::current_exe()?,
+    )
+}
+
+/// `tasks peer ...`: set-up and inspection of the peer link.
+fn peer_command(args: &[String]) -> Result<()> {
+    use tinline_task_manager::peer::net::{PeerConfig, config};
+    let default_config = || -> Result<std::path::PathBuf> {
+        PeerConfig::default_path().ok_or_else(|| "HOME is not set".into())
+    };
+    match args.first().map(String::as_str) {
+        Some("init") => {
+            let (mut bind, mut path) = (None, None);
+            let mut it = args[1..].iter();
+            while let Some(flag) = it.next() {
+                let value = it.next().ok_or(format!("{flag} needs a value"))?.clone();
+                match flag.as_str() {
+                    "--bind" => bind = Some(value),
+                    "--config" => path = Some(std::path::PathBuf::from(value)),
+                    other => return Err(format!("unknown option {other}").into()),
+                }
+            }
+            let path = match path {
+                Some(p) => p,
+                None => default_config()?,
+            };
+            if path.exists() {
+                let c = PeerConfig::load(&path)?;
+                println!("{}", c.secret_key()?.public());
+                eprintln!("tasks: {} already exists; endpoint id printed above", path.display());
+                return Ok(());
+            }
+            let bind = bind.ok_or("tasks peer init needs --bind IP:PORT (this machine's LAN address and a UDP port, e.g. 192.168.1.10:7842)")?;
+            bind.parse::<std::net::SocketAddr>()
+                .map_err(|e| format!("--bind {bind}: {e}"))?;
+            let dir = path.parent().ok_or("config path has no directory")?;
+            fs::create_dir_all(dir)?;
+            let key_path = dir.join("peer.key");
+            let key = if key_path.exists() {
+                config::load_secret_key(&key_path)?
+            } else {
+                config::create_secret_key(&key_path)?
+            };
+            let text = format!(
+                r#"# tasks peer link (iroh, LAN only). Restart an idle daemon to apply changes.
+secret_key = "peer.key"
+bind = "{bind}"
+# checkouts = "~/offload/checkouts"
+# reattach_timeout_s = 3600
+
+# [[peer]]
+# name = "worker"
+# endpoint_id = "<its `tasks peer id`>"
+# addr = "192.168.1.7:7842"
+# role = "worker"   # worker | host | both | observer
+# approve = "auto"  # for a host peer: auto | manual
+"#
+            );
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)?
+                .write_all(text.as_bytes())?;
+            println!("{}", key.public());
+            eprintln!(
+                "tasks: wrote {} and {}; endpoint id printed above (give it to the other machine's [[peer]] entry)",
+                path.display(),
+                key_path.display()
+            );
+            Ok(())
+        }
+        Some("id") if args.len() == 1 => {
+            let c = PeerConfig::load(&default_config()?)?;
+            println!("{}", c.secret_key()?.public());
+            Ok(())
+        }
+        Some("list") if args.len() <= 2 => {
+            let socket = state_dir().join("taskd.sock");
+            ensure_daemon(&socket)?;
+            let report =
+                tinline_task_manager::peer_link::request_peers(&socket, Duration::from_secs(30))?;
+            if args.get(1).is_some_and(|a| a == "--json") {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+                return Ok(());
+            }
+            println!(
+                "peer link: {}{}",
+                if report.enabled { "enabled" } else { "disabled" },
+                report
+                    .error
+                    .as_deref()
+                    .map(|e| format!(" ({e})"))
+                    .unwrap_or_default()
+            );
+            if let Some(id) = &report.endpoint_id {
+                println!("endpoint {id} on {}", report.bind.as_deref().unwrap_or("?"));
+            }
+            for p in &report.peers {
+                println!(
+                    "  {:<16} {:<8} {} {}",
+                    p.name,
+                    p.role,
+                    p.addr.as_deref().unwrap_or("-"),
+                    p.endpoint_id
+                );
+            }
+            for l in report.forwarded.iter().rev().take(10) {
+                println!(
+                    "  job {} -> {} #{} {} {}",
+                    l["local_job_id"],
+                    l["peer"].as_str().unwrap_or("?"),
+                    l["remote_job_id"],
+                    l["stage"].as_str().unwrap_or("?"),
+                    l["remote_state"].as_str().unwrap_or("")
+                );
+            }
+            Ok(())
+        }
+        Some("status-watch") if args.len() == 2 => {
+            use std::io::{BufRead, BufReader, Write};
+            let sock = state_dir().join("peer.sock");
+            let mut stream = UnixStream::connect(&sock)
+                .map_err(|e| format!("{}: {e} (is the peer link enabled? tasks peer list)", sock.display()))?;
+            let request = serde_json::json!({"op": "watch", "peer": args[1]});
+            stream.write_all(format!("{request}
+").as_bytes())?;
+            let mut out = std::io::stdout().lock();
+            for line in BufReader::new(stream).lines() {
+                let event: serde_json::Value = serde_json::from_str(&line?)?;
+                match event["event"].as_str() {
+                    Some("line") => {
+                        writeln!(out, "{}", event["value"])?;
+                        out.flush()?;
+                    }
+                    Some("error") => return Err(event["message"].to_string().into()),
+                    _ => {}
+                }
+            }
+            Ok(())
+        }
+        _ => Err("usage: tasks peer init --bind IP:PORT [--config PATH] | id | list [--json] | status-watch NAME".into()),
+    }
 }
 
 fn call(socket: &Path, action: Action) -> Result<tinline_task_manager::Response> {
@@ -719,13 +925,30 @@ pub(crate) fn ensure_daemon(socket: &Path) -> Result<()> {
         .create(true)
         .append(true)
         .open(state.join("taskd.log"))?;
-    let mut child = Command::new(std::env::current_exe()?)
+    let mut command = Command::new(std::env::current_exe()?);
+    command
         .arg("daemon")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(log)
-        .process_group(0)
-        .spawn()?;
+        .process_group(0);
+    // A client running inside an admitted job holds that job's slot lock descriptors (they
+    // are deliberately inherited by the job's processes). A daemon it autostarts outlives the
+    // job and must not keep them: mark every inherited descriptor above stdio close-on-exec.
+    // SAFETY: only an async-signal-safe syscall between fork and exec; failure (kernels
+    // before 5.11) leaves the previous behaviour.
+    unsafe {
+        command.pre_exec(|| {
+            libc::syscall(
+                libc::SYS_close_range,
+                3u32,
+                u32::MAX,
+                libc::CLOSE_RANGE_CLOEXEC,
+            );
+            Ok(())
+        });
+    }
+    let mut child = command.spawn()?;
     // Reap it if it exits while this process (e.g. the window) is still running.
     std::thread::spawn(move || child.wait());
     let deadline = Instant::now() + Duration::from_secs(3);

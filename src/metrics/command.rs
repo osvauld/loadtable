@@ -109,7 +109,8 @@ fn words(argv: &[String]) -> Vec<String> {
     let Some(first) = rest.first() else {
         return vec![];
     };
-    if is_offload_client(first) {
+    // A forwarded job (`tasks peer-forward ... -- CMD`) reads like an offload client.
+    if is_offload_client(first) || crate::peer_link::is_forward_argv(rest) {
         let inner = rest
             .iter()
             .position(|a| a == "--")
@@ -227,7 +228,10 @@ pub fn cargo_invocation(argv: &[String]) -> Option<CargoInvocation> {
         rest = &rest[1..];
     }
     let first = rest.first()?;
-    if is_offload_client(first) || first.ends_with("offload-portable-desktop.sh") {
+    if is_offload_client(first)
+        || first.ends_with("offload-portable-desktop.sh")
+        || crate::peer_link::is_forward_argv(rest)
+    {
         return None;
     }
     let prog = program(first);
@@ -340,13 +344,15 @@ pub fn is_cargo(argv: &[String]) -> bool {
     cargo_invocation(argv).is_some()
 }
 
-/// True for an offload client (`tasks-offload`, `offload-portable-desktop.sh`).
+/// True for an offload client (`tasks-offload`, `offload-portable-desktop.sh`) or a job
+/// forwarded to a peer (`tasks peer-forward`).
 pub fn is_offload(argv: &[String]) -> bool {
-    strip_env(argv).first().is_some_and(|a| {
-        Path::new(a).file_name().is_some_and(|n| {
-            crate::local_command::OFFLOAD_CLIENTS
-                .iter()
-                .any(|client| n == *client)
+    crate::peer_link::is_forward_argv(strip_env(argv))
+        || strip_env(argv).first().is_some_and(|a| {
+            Path::new(a).file_name().is_some_and(|n| {
+                crate::local_command::OFFLOAD_CLIENTS
+                    .iter()
+                    .any(|client| n == *client)
+            })
         })
-    })
 }
