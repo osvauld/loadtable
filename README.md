@@ -75,6 +75,17 @@ only add serials (`TASKS_DENIED_DEVICES`, `~/.config/tasks/denied-devices`).
 the adb server for them without lock descriptors. A test phone on the LAN worker:
 deploy/worker/README.md "Test phone on the worker".
 
+## Window
+
+`tasks` (or `tasks ui`) opens a live dashboard of both machines: machine cards,
+then Running / Queued / Recent tables with the agent (owner up to `@`) on every
+row; click a row for details. The job form and devices are on their own tabs.
+The worker card reads snapshots from the command in `TASKS_UI_REMOTE_CMD` (or the
+first line of `~/.config/tasks/ui-remote-cmd`), e.g. `lan-peer status-watch …`;
+without it the card says "not configured". `tasks ui --fixtures DIR` replays
+snapshot files (e.g. `tests/fixtures/snapshot/ui-busy`) and contacts nothing.
+Contract: docs/design/cluster-snapshot.md.
+
 ## Development
 
 This is an independent Cargo workspace. No app checkout or workspace dependency

@@ -6,6 +6,9 @@ mod follow;
 mod log_view;
 mod options;
 mod ui;
+mod ui_legacy;
+mod ui_model;
+mod ui_source;
 
 use std::fs;
 use std::os::unix::{fs::PermissionsExt, net::UnixStream, process::CommandExt};
@@ -16,7 +19,7 @@ use tinline_task_manager::{
     Action, JobSpec, Result, RuntimeSample, request_with_reconnect, state_dir,
 };
 
-const USAGE: &str = "usage: tasks [ui]
+const USAGE: &str = "usage: tasks [ui [--fixtures DIR]]  # DIR: cluster snapshot files; demo, contacts nothing
        tasks list  # full JSON response (unchanged, for scripts)
        tasks list [--who OWNER] [--active] [--limit N] [--json | --table | --brief]
          # with any option: compact table by default (--active adds live lock holders); --json = filtered JSON
@@ -56,7 +59,10 @@ fn run() -> Result<()> {
     let plain_logs = args.first().is_some_and(|s| s == "logs") && args.len() == 2;
     let mut output = options::Output::Full;
     let action = match args.first().map(String::as_str) {
-        None | Some("ui") if args.len() <= 1 => return open_ui(),
+        None | Some("ui") if args.len() <= 1 => return open_ui(None),
+        Some("ui") if args.len() == 3 && args[1] == "--fixtures" => {
+            return open_ui(Some(std::path::PathBuf::from(&args[2])));
+        }
         Some("daemon") if args.len() == 1 => return daemon::run(),
         Some("catalog") if args.len() == 1 => {
             println!(
@@ -666,13 +672,16 @@ fn list(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn open_ui() -> Result<()> {
+fn open_ui(fixtures: Option<std::path::PathBuf>) -> Result<()> {
     let socket = state_dir().join("taskd.sock");
     // The window keeps retrying if this fails, and shows why in its status line.
-    if let Err(error) = ensure_daemon(&socket) {
+    // A fixture demo contacts nothing, not even the daemon.
+    if fixtures.is_none()
+        && let Err(error) = ensure_daemon(&socket)
+    {
         eprintln!("tasks: {error}");
     }
-    ui::run(socket).map_err(|e| e.to_string().into())
+    ui::run(socket, fixtures).map_err(|e| e.into())
 }
 
 /// Starts `tasks daemon` detached (own process group, so closing a terminal or window
