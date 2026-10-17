@@ -353,6 +353,25 @@ class OffloadTests(unittest.TestCase):
         self.assertEqual(s['remote_phase'], 'cancelled')
         self.assertEqual(s['cancel_requested'], True)
 
+    def test_second_offload_of_same_checkout_waits_for_the_first(self):
+        # A second sync would rewrite the worker copy under the first job's build.
+        argv = [sys.executable, '-B', str(CLIENT), '--worker', 'tester@worker.invalid',
+                '--who', 'offload-test', '--', 'sleep', '1']
+        first = subprocess.Popen(argv, cwd=self.repo, env=self.env, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True)
+        state = self.remote_home / 'fake-tasks'
+        deadline = time.monotonic() + 30
+        while not (state / 'started-41').exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue((state / 'started-41').exists())
+        self.write('src/lib.rs', 'pub fn b() {}\n')
+        second = self.offload('true', check_exit=0)
+        first.communicate(timeout=60)
+        self.assertEqual(first.returncode, 0)
+        self.assertIn('waiting for another offload of this checkout', second.stderr)
+        self.assertLessEqual((state / 'finished-41').stat().st_mtime_ns,
+                             (state / 'started-42').stat().st_mtime_ns)
+
     def test_cargo_fetch_runs_remotely_before_job_and_failure_stops(self):
         fake_cargo = self.bin / 'cargo'
         fake_cargo.write_text('#!/bin/sh\nprintf "%s\\n" "$PWD" "$@" > "$HOME/cargo-call"\n'

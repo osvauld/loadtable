@@ -22,6 +22,7 @@ failure or UNCERTAIN remote state (summary `remote_state` disambiguates);
 """
 import argparse
 from dataclasses import dataclass
+import fcntl
 import hashlib
 import json
 import os
@@ -188,6 +189,21 @@ def safe_relpath(value, what):
             or any(ord(c) < 32 for c in value)):
         raise OffloadError(f'{what} must be a normalized relative path: {value!r}')
     return value
+
+
+def lock_checkout(cid):
+    """Serialize offloads of one checkout: a second sync would rewrite the
+    worker copy under the first job's build. Held until this process exits."""
+    lock_dir = Path(os.environ.get('XDG_STATE_HOME') or Path.home() / '.local/state')
+    lock_dir = lock_dir / 'tasks-offload/locks'
+    lock_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(lock_dir / f'{cid}.lock', os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        log('waiting for another offload of this checkout to finish (its worker copy is in use)')
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
 
 
 def _inside(child, parent):
@@ -455,6 +471,7 @@ def main(argv=None):
             summary['remote_state'] = 'dry_run'
             return finish(0)
 
+        checkout_lock = lock_checkout(cid)  # noqa: F841  (held until exit)
         # Sync: install helper, bind dir, rsync, prune + verify.
         t = time.monotonic()
         agent = install_agent(transport, args.remote_python)

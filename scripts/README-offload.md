@@ -66,6 +66,11 @@ line: 0 passed, 130 cancelled, else the stage exit); 2 usage/source refusal;
    (`--max-files`, `--max-bytes`). Each file is SHA-256 hashed streaming (no
    contents held in memory) into a manifest of path, type, size, mode, exec bit.
 2. **Sync.** Remote dir `~/offload/checkouts/<sha256(hostname NUL toplevel)[:16]>/`.
+   Offloads of one checkout are serialized by an exclusive `flock` on
+   `${XDG_STATE_HOME:-~/.local/state}/tasks-offload/locks/<id>.lock`, held
+   from sync until the client exits, so a second sync never rewrites the
+   worker copy under a running job; the waiter logs `waiting for another
+   offload of this checkout`.
    The client installs `~/.local/lib/tasks-offload/agent.py` (from
    `scripts/offload_agent.py`) and a copy of `worker_source.py` beside it,
    only when their SHA-256 differs. `agent prepare` creates the dir and binds it
