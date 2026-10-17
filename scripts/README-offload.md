@@ -5,8 +5,9 @@ local Git checkout. Stdlib-only Python 3.11+; needs `git`, `ssh` and `rsync`
 locally and `python3`, `rsync`, `sha256sum` and an installed
 `~/.local/bin/tasks` on the worker.
 
-Status: built and tested against a synthetic fake worker only (see Validation).
-No real worker has been contacted. The first real run needs explicit permission.
+Status: in use against the real NixOS worker (192.168.1.7): p2pcore tests,
+portable desktop builds and Android APKs (worker jobs 42, 45, 55). The
+synthetic fake-worker suite below still covers the transport and edge cases.
 
 ## Usage
 
@@ -233,8 +234,8 @@ installed client's `run`/`cancel` output and exit codes (format taken from
   0 skipped.
 
 A `--dry-run` against this checkout (worker `abe@example.invalid`) selected
-97 files and ran no ssh. No real worker, real remote `tasks` daemon, NixOS
-host, real ssh/known_hosts or Cargo build was exercised.
+97 files and ran no ssh. That suite exercises no real worker; real runs since
+then are listed under Status and in the iroh validation below.
 
 ### iroh transport validation (owner `osv-blobs`)
 
