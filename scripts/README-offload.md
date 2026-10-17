@@ -25,6 +25,9 @@ tasks-offload --worker USER@HOST [--ssh-key PATH] --who OWNER
               [--remote-run] [--checksum] [--dry-run]
               [--ssh-program P] [--rsync-program P] [--remote-python P]
               [--max-files N] [--max-bytes N] [--cancel-wait SECONDS]
+              [--transport ssh|iroh] [--lan-peer PATH] [--iroh-data-dir DIR]
+              [--iroh-allow FILE] [--iroh-addr IP:PORT] [--iroh-bind IP:PORT]
+              [--iroh-store DIR]
               -- CMD [ARGS...]
 ```
 
@@ -38,13 +41,24 @@ tasks-offload --worker USER@HOST [--ssh-key PATH] --who OWNER
 | `--checksum` | rsync `--checksum` instead of size+mtime quick check. |
 | `--dry-run` | Build the manifest and print the plan; runs no ssh/rsync at all. |
 | `--ssh-program`, `--rsync-program` | Transport seam for tests; also env `TASKS_OFFLOAD_SSH`, `TASKS_OFFLOAD_RSYNC`. |
+| `--transport iroh` | Experimental: move files with `lan-peer` (iroh blobs) instead of rsync; the command still runs over ssh. See "iroh transport" below. Default `ssh`. |
+| `--lan-peer PATH` | `lan-peer` binary (iroh); also env `TASKS_OFFLOAD_LAN_PEER`. Default `lan-peer` on `PATH`. |
+| `--iroh-data-dir DIR` | This host's `lan-peer` installation (from `lan-peer init`). |
+| `--iroh-allow FILE` | The worker's `attestation.json`. Its `endpoint_id` is the peer that is dialed; `lan-peer` verifies the attestation before dialing. |
+| `--iroh-addr IP:PORT` | The worker's `lan-peer serve --bind` address, e.g. `192.168.1.7:7842`. |
+| `--iroh-bind IP:PORT` | This host's LAN address, e.g. `192.168.1.25:0`. Required unless `--iroh-addr` is loopback. |
+| `--iroh-store DIR` | Local iroh-blobs store for `--fetch`. Default `~/build-cache/offload/.iroh-store`. |
 
 Last stdout line is a one-line JSON summary: `worker`, `remote_dir`,
 `remote_cwd`, `remote_job_id`, `remote_phase`, `remote_state`
 (`terminal`/`uncertain`/`not_submitted`/`dry_run`), `exit`, `synced_files`,
 `synced_bytes`, `excluded_files`, `deleted_tracked`, `pruned` (first 200),
 `pruned_count`, `fetched`, `fetch_dest`, `cancel_requested`, `dry_run`,
-`durations` (`scan_s`, `sync_s`, `cargo_fetch_s`, `run_s`, `fetch_s`, `total_s`).
+`durations` (`scan_s`, `sync_s`, `cargo_fetch_s`, `run_s`, `fetch_s`, `total_s`),
+`transport`, and with `--transport iroh` also `iroh`: `peer`, `addr`, `sync`
+(`files`, `blobs_sent`, `bytes_sent`, `created`, `unchanged`, `written`,
+`mode_fixed`, `deleted`, `kept_non_source`) and `fetch` (`files`,
+`blobs_received`, `bytes_received`, `skipped`).
 
 Exit status: the remote job's exit (from the remote `job N PHASE (exit C)`
 line: 0 passed, 130 cancelled, else the stage exit); 2 usage/source refusal;
@@ -101,6 +115,57 @@ line: 0 passed, 130 cancelled, else the stage exit); 2 usage/source refusal;
    exits 255 and **never resubmits**.
 6. **Fetch.** After a passed job only, each `--fetch` path is rsync'd from the
    remote checkout into the destination. Never into the local checkout.
+
+## iroh transport (experimental, phase 2b)
+
+`--transport iroh` replaces rsync, the helper install and the prune/verify
+helper with content-addressed transfer through `lan-peer`
+(`experiments/osvauld-foundation`). Selection, path rules, the checkout id, the
+per-checkout client lock, the ssh `tasks run`, cancellation and uncertainty
+handling are unchanged.
+
+1. **Selection** is the same (`git ls-files` + `worker_source` rules). In-tree
+   symlinks are refused with this transport (its manifest carries regular files
+   only); use `--transport ssh` for such checkouts.
+2. **Hashing.** The selected files are listed (NUL-separated) and hashed by
+   `lan-peer manifest` (BLAKE3 = iroh-blobs raw hash). The result is merged into
+   a `worker_source` manifest with `attach_iroh_blobs_hashes`, which refuses any
+   difference in path, size, exec bit or SHA-256 from the client's own scan
+   ("checkout changed while hashing").
+3. **Sync.** `lan-peer sync-push --checkout <id>` sends only the blobs the
+   worker's store lacks, then the worker updates its stable checkout
+   `<checkouts>/<id>` in place under a per-checkout lock: unchanged files (same
+   BLAKE3, size and exec bit) are not rewritten, so their mtime is kept and
+   Cargo stays incremental; changed files are replaced atomically (no-follow
+   temp + fsync + rename); files absent from the manifest are pruned with the
+   same rules as `offload_agent.py` (`target/`, marker-adjacent outputs,
+   excluded names and cache links are never deleted). Every file is verified
+   after writing. The worker's signed reply names the checkout's absolute path;
+   the ssh command `cd`s there (it must end in `/<id>`).
+4. **Run** over ssh exactly as v0 (`tasks run` on the worker). No command is
+   executed over iroh: there is no authority model for it yet.
+5. **Fetch** after a passed job: `lan-peer fetch --checkout <id> --path REL...
+   --store STORE --dest DEST`. The worker validates the paths (inside the
+   checkout, no symlinks; symlinks inside requested directories are skipped and
+   listed), imports them into its store and answers with a signed manifest; this
+   host requests only hashes missing from `--iroh-store`, BLAKE3-verifies each,
+   and materializes into `DEST`, which **must not exist** (default
+   `~/build-cache/offload/OWNER/REMOTE_JOB_ID`, as v0). An unchanged artifact
+   fetched again moves zero blob bytes.
+
+Worker side: `lan-peer serve --bind LAN_IP:7842 --data-dir DIR --allow
+CLIENT_attestation.json --store ~/offload/iroh-store --checkouts
+~/offload/checkouts` (template unit: `deploy/worker/lan-peer.service`). Using
+`~/offload/checkouts` makes the iroh-synced checkout the same directory, with the
+same warm `target/`, as v0's rsync checkout. UDP 7842 must be open on the LAN
+interface (`nix/taskworker-host.nix`).
+
+Differences from v0: no `<id>.identity` binding is written (that is done by the
+ssh helper, which this transport does not install); a 64-bit checkout-id
+collision is not detected. The account is the experiment's SYNTHETIC public
+test-vector account; attestations expire after 7 days. Limits are the
+experiment's (20 000 files, 64 MiB per file, 512 MiB total), smaller than v0's,
+and whole blobs are held in memory.
 
 ## Security model: SSH v0 vs. the iroh plan
 
@@ -170,3 +235,30 @@ installed client's `run`/`cancel` output and exit codes (format taken from
 A `--dry-run` against this checkout (worker `abe@example.invalid`) selected
 97 files and ran no ssh. No real worker, real remote `tasks` daemon, NixOS
 host, real ssh/known_hosts or Cargo build was exercised.
+
+### iroh transport validation (owner `osv-blobs`)
+
+Synthetic tests: Python red job 234, green job 243 (66 tests, 0 skipped,
+including a real `lan-peer` loopback offload). Experiment crate: jobs 226/237
+(sync red/green), 237/241 (artifacts red/green), 241/242 (CLI red/green; 28
+tests and warnings-denied all-target clippy).
+
+**Two real machines** (2026-10-17): client 192.168.1.25 (Arch) and worker
+192.168.1.7 (NixOS, Wi-Fi, UDP 7842 open on wlo1). Release `lan-peer` built by
+host job 244, copied to the worker's `~/.local/bin`. Synthetic installations
+`~/lan-peer-client` and `~/lan-peer-worker`; `serve` ran as a temporary
+`nohup` process and was stopped afterwards. This repository's checkout was
+126 files / 1.64 MB.
+
+| Step (host job / worker job) | Sync | Blobs / bytes sent | Run | Fetch |
+|---|---|---|---|---|
+| First offload, `--cargo-fetch`, `cargo test --locked -j 8` (247/47) | 1.91 s | 126 / 1 636 646 | 186.2 s (cold build) | — |
+| No change, same test (248/48) | 0.47 s | 0 / 0 (126 unchanged) | 5.2 s (no rebuild: mtimes kept) | — |
+| One-file edit, test + all-target clippy (249/49) | 0.40 s | 1 / 15 148 | 21.6 s | — |
+| Revert edit, `--fetch` 31.9 MB test binary (250/50) | 0.43 s | 0 / 0 (1 written from store) | 0.9 s | 7.40 s, 1 blob / 31 927 720 B |
+| Same fetch again (251/51) | 0.34 s | 0 / 0 | 1.0 s | 0.71 s, 0 blobs / 0 B |
+| v0 ssh/rsync, no change, same checkout (252/52, 253/53) | 1.17–1.19 s | rsync | 1.0 s | — |
+
+Both fetched copies and the worker file have the same SHA-256. The `tasks`
+binary (196 MB) cannot be fetched: it exceeds the experiment's 64 MiB per-file
+limit.

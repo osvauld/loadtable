@@ -78,6 +78,8 @@ pub enum SourceError {
     MissingBlob(String),
     HashMismatch(String),
     Exists(String),
+    /// Another sync of the same stable checkout holds its lock.
+    Busy(String),
     Io(String),
 }
 
@@ -87,7 +89,7 @@ impl std::fmt::Display for SourceError {
     }
 }
 
-fn io_err(context: &str) -> impl Fn(io::Error) -> SourceError + '_ {
+pub(crate) fn io_err(context: &str) -> impl Fn(io::Error) -> SourceError + '_ {
     move |e| SourceError::Io(format!("{context}: {e}"))
 }
 
@@ -113,7 +115,7 @@ pub struct Manifest {
     pub files: Vec<ManifestFile>,
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     crate::hex(&Sha256::digest(bytes))
 }
 
@@ -310,11 +312,11 @@ pub fn parse_files0(bytes: &[u8]) -> Result<Vec<String>, SourceError> {
 // ---------------------------------------------------------------------------------------------
 // No-follow filesystem primitives (Linux)
 
-fn cstr(name: &str) -> Result<CString, SourceError> {
+pub(crate) fn cstr(name: &str) -> Result<CString, SourceError> {
     CString::new(name).map_err(|_| SourceError::UnsafePath(format!("NUL in {name:?}")))
 }
 
-fn cvt(ret: libc::c_int) -> io::Result<libc::c_int> {
+pub(crate) fn cvt(ret: libc::c_int) -> io::Result<libc::c_int> {
     if ret < 0 {
         Err(io::Error::last_os_error())
     } else {
@@ -322,33 +324,33 @@ fn cvt(ret: libc::c_int) -> io::Result<libc::c_int> {
     }
 }
 
-fn open_dir_at(dir: RawFd, name: &CStr) -> io::Result<OwnedFd> {
+pub(crate) fn open_dir_at(dir: RawFd, name: &CStr) -> io::Result<OwnedFd> {
     let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
     // SAFETY: valid NUL-terminated name; the returned fd is owned exactly once.
     let fd = cvt(unsafe { libc::openat(dir, name.as_ptr(), flags) })?;
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-fn open_file_at(dir: RawFd, name: &CStr) -> io::Result<File> {
+pub(crate) fn open_file_at(dir: RawFd, name: &CStr) -> io::Result<File> {
     let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
     // SAFETY: as above.
     let fd = cvt(unsafe { libc::openat(dir, name.as_ptr(), flags) })?;
     Ok(File::from(unsafe { OwnedFd::from_raw_fd(fd) }))
 }
 
-fn create_file_at(dir: RawFd, name: &CStr) -> io::Result<File> {
+pub(crate) fn create_file_at(dir: RawFd, name: &CStr) -> io::Result<File> {
     let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
     // SAFETY: as above; mode is passed as the variadic third argument.
     let fd = cvt(unsafe { libc::openat(dir, name.as_ptr(), flags, 0o600 as libc::c_uint) })?;
     Ok(File::from(unsafe { OwnedFd::from_raw_fd(fd) }))
 }
 
-fn mkdir_at(dir: RawFd, name: &CStr, mode: libc::mode_t) -> io::Result<()> {
+pub(crate) fn mkdir_at(dir: RawFd, name: &CStr, mode: libc::mode_t) -> io::Result<()> {
     // SAFETY: valid NUL-terminated name.
     cvt(unsafe { libc::mkdirat(dir, name.as_ptr(), mode) }).map(drop)
 }
 
-fn exists_nofollow(dir: RawFd, name: &CStr) -> io::Result<bool> {
+pub(crate) fn exists_nofollow(dir: RawFd, name: &CStr) -> io::Result<bool> {
     let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
     // SAFETY: st is written by the kernel on success and not read otherwise.
     let ret = unsafe {
@@ -364,6 +366,61 @@ fn exists_nofollow(dir: RawFd, name: &CStr) -> io::Result<bool> {
         Err(e) if e.raw_os_error() == Some(libc::ENOENT) => Ok(false),
         Err(e) => Err(e),
     }
+}
+
+/// `fstatat(AT_SYMLINK_NOFOLLOW)`.
+pub(crate) fn stat_at(dir: RawFd, name: &CStr) -> io::Result<libc::stat> {
+    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: st is written by the kernel on success and only read then.
+    cvt(unsafe {
+        libc::fstatat(
+            dir,
+            name.as_ptr(),
+            st.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    })?;
+    Ok(unsafe { st.assume_init() })
+}
+
+/// Names in an open directory (without `.`/`..`), read through a private duplicate fd.
+pub(crate) fn read_dir_names(dir: RawFd) -> io::Result<Vec<CString>> {
+    // SAFETY: F_DUPFD_CLOEXEC returns a new fd owned by the DIR stream below.
+    let dup = cvt(unsafe { libc::fcntl(dir, libc::F_DUPFD_CLOEXEC, 0) })?;
+    // SAFETY: dup is a valid directory fd; on success the stream owns it.
+    let stream = unsafe { libc::fdopendir(dup) };
+    if stream.is_null() {
+        let e = io::Error::last_os_error();
+        // SAFETY: fdopendir failed, so dup is still ours to close.
+        unsafe { libc::close(dup) };
+        return Err(e);
+    }
+    // The duplicate shares the file offset with `dir`: start from the beginning.
+    // SAFETY: stream is a valid DIR*.
+    unsafe { libc::rewinddir(stream) };
+    let mut out = Vec::new();
+    let result = loop {
+        // SAFETY: errno is thread-local; reset to tell end-of-stream from an error.
+        unsafe { *libc::__errno_location() = 0 };
+        // SAFETY: stream is valid until closedir below.
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            let e = io::Error::last_os_error();
+            break if e.raw_os_error().unwrap_or(0) == 0 {
+                Ok(())
+            } else {
+                Err(e)
+            };
+        }
+        // SAFETY: d_name is NUL-terminated within the returned dirent.
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if name.to_bytes() != b"." && name.to_bytes() != b".." {
+            out.push(name.to_owned());
+        }
+    };
+    // SAFETY: closes the stream and dup exactly once.
+    unsafe { libc::closedir(stream) };
+    result.map(|_| out)
 }
 
 fn rename_noreplace(dir: RawFd, from: &CStr, to: &CStr) -> io::Result<()> {
@@ -387,7 +444,7 @@ fn rename_noreplace(dir: RawFd, from: &CStr, to: &CStr) -> io::Result<()> {
 
 /// Opens a caller-given root directory (the root itself may be reached through symlinks; its
 /// contents are always traversed no-follow).
-fn open_root(path: &Path) -> Result<OwnedFd, SourceError> {
+pub(crate) fn open_root(path: &Path) -> Result<OwnedFd, SourceError> {
     let file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
@@ -397,7 +454,11 @@ fn open_root(path: &Path) -> Result<OwnedFd, SourceError> {
 }
 
 /// No-follow descent to the parent directory of `parts`, optionally creating directories.
-fn descend(root: &OwnedFd, parts: &[&str], create: bool) -> Result<OwnedFd, SourceError> {
+pub(crate) fn descend(
+    root: &OwnedFd,
+    parts: &[&str],
+    create: bool,
+) -> Result<OwnedFd, SourceError> {
     let mut cur = root.try_clone().map_err(io_err("dup"))?;
     for part in &parts[..parts.len() - 1] {
         let name = cstr(part)?;
@@ -419,7 +480,7 @@ fn descend(root: &OwnedFd, parts: &[&str], create: bool) -> Result<OwnedFd, Sour
 }
 
 /// Reads one source file no-follow: regular, single-link, bounded. Returns (bytes, executable).
-fn read_source_file(
+pub(crate) fn read_source_file(
     root: &OwnedFd,
     path: &str,
     limits: &Limits,
@@ -518,13 +579,23 @@ pub async fn import_verified(
     expected: Hash,
     bytes: Vec<u8>,
 ) -> Result<(), SourceError> {
+    import_verified_tagged(store, expected, bytes, TAG_PREFIX).await
+}
+
+/// [`import_verified`] under another named-tag prefix (e.g. artifacts).
+pub async fn import_verified_tagged(
+    store: &Store,
+    expected: Hash,
+    bytes: Vec<u8>,
+    tag_prefix: &str,
+) -> Result<(), SourceError> {
     if Hash::new(&bytes) != expected {
         return Err(SourceError::HashMismatch(expected.to_hex()));
     }
     let stored = store
         .blobs()
         .add_bytes(bytes)
-        .with_named_tag(format!("{TAG_PREFIX}{}", expected.to_hex()))
+        .with_named_tag(format!("{tag_prefix}{}", expected.to_hex()))
         .await
         .map_err(|e| SourceError::Io(format!("store import: {e}")))?;
     if stored.hash != expected {
@@ -543,7 +614,7 @@ pub fn checkout_available(checkout_root: &Path, name: &str) -> Result<(), Source
     Ok(())
 }
 
-fn mode_of(executable: bool) -> u32 {
+pub(crate) fn mode_of(executable: bool) -> u32 {
     if executable { 0o755 } else { 0o644 }
 }
 
@@ -566,7 +637,11 @@ fn write_tree(
     Ok(())
 }
 
-fn verify_tree(root: &OwnedFd, manifest: &Manifest, limits: &Limits) -> Result<(), SourceError> {
+pub(crate) fn verify_tree(
+    root: &OwnedFd,
+    manifest: &Manifest,
+    limits: &Limits,
+) -> Result<(), SourceError> {
     for f in &manifest.files {
         let parts = check_path(&f.path, limits)?;
         let parent = descend(root, &parts, false)?;
@@ -670,10 +745,30 @@ pub async fn materialize(
 // ---------------------------------------------------------------------------------------------
 // Protocol
 
+/// What the receiver does with a validated manifest.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SourceMode {
+    /// Materialize a NEW immutable checkout; an existing name is refused (phase 2).
+    #[default]
+    Immutable,
+    /// Update the stable checkout of that name in place ([`crate::sync`], phase 2b).
+    Sync,
+}
+
+impl SourceMode {
+    fn is_immutable(&self) -> bool {
+        *self == SourceMode::Immutable
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceRequest {
     pub checkout: String,
     pub manifest: Manifest,
+    /// Omitted on the wire for immutable requests, so phase-2 request bodies are unchanged.
+    #[serde(default, skip_serializing_if = "SourceMode::is_immutable")]
+    pub mode: SourceMode,
 }
 
 fn signed_message(
@@ -724,6 +819,11 @@ pub enum SourceOutcome {
         checkout: PathBuf,
         files: usize,
         blobs_requested: usize,
+        blobs_received: usize,
+        bytes_received: u64,
+    },
+    Synced {
+        report: crate::sync::SyncReport,
         blobs_received: usize,
         bytes_received: u64,
     },
@@ -782,8 +882,14 @@ pub async fn handle_source(
                 )));
             }
         };
-        let checked = validate_manifest(&request.manifest, limits)
-            .and_then(|blobs| checkout_available(checkout_root, &request.checkout).map(|_| blobs));
+        let checked = match request.mode {
+            SourceMode::Immutable => {
+                validate_manifest(&request.manifest, limits).and_then(|blobs| {
+                    checkout_available(checkout_root, &request.checkout).map(|_| blobs)
+                })
+            }
+            SourceMode::Sync => crate::sync::precheck(&request.manifest, &request.checkout, limits),
+        };
         let sizes = match checked {
             Ok(sizes) => sizes,
             Err(e) => return Ok(SourceOutcome::Rejected(format!("{e:?}"))),
@@ -822,25 +928,72 @@ pub async fn handle_source(
             }
             bytes_received += size;
         }
-        let checkout = match materialize(
-            store,
-            checkout_root,
-            &request.checkout,
-            &request.manifest,
-            limits,
-        )
-        .await
-        {
-            Ok(path) => path,
-            Err(e) => return Ok(SourceOutcome::Rejected(format!("{e:?}"))),
+        let (response, outcome) = match request.mode {
+            SourceMode::Immutable => {
+                let checkout = match materialize(
+                    store,
+                    checkout_root,
+                    &request.checkout,
+                    &request.manifest,
+                    limits,
+                )
+                .await
+                {
+                    Ok(path) => path,
+                    Err(e) => return Ok(SourceOutcome::Rejected(format!("{e:?}"))),
+                };
+                let response = serde_json::json!({
+                    "checkout": checkout,
+                    "files": request.manifest.files.len(),
+                    "blobs_received": wanted.len(),
+                    "bytes_received": bytes_received,
+                });
+                let outcome = SourceOutcome::Materialized {
+                    checkout,
+                    files: request.manifest.files.len(),
+                    blobs_requested: wanted.len(),
+                    blobs_received: wanted.len(),
+                    bytes_received,
+                };
+                (response, outcome)
+            }
+            SourceMode::Sync => {
+                let report = match crate::sync::sync_checkout(
+                    store,
+                    checkout_root,
+                    &request.checkout,
+                    &request.manifest,
+                    limits,
+                )
+                .await
+                {
+                    Ok(report) => report,
+                    Err(e) => return Ok(SourceOutcome::Rejected(format!("{e:?}"))),
+                };
+                let response = serde_json::json!({
+                    "mode": "sync",
+                    "checkout": report.checkout,
+                    "created": report.created,
+                    "files": report.files,
+                    "unchanged": report.unchanged,
+                    "written": report.written,
+                    "written_bytes": report.written_bytes,
+                    "mode_fixed": report.mode_fixed,
+                    "deleted": report.deleted.len(),
+                    "deleted_paths": report.deleted.iter().take(200).collect::<Vec<_>>(),
+                    "kept_non_source": report.kept_non_source,
+                    "blobs_received": wanted.len(),
+                    "bytes_received": bytes_received,
+                });
+                let outcome = SourceOutcome::Synced {
+                    report,
+                    blobs_received: wanted.len(),
+                    bytes_received,
+                };
+                (response, outcome)
+            }
         };
-        let response = serde_json::to_vec(&serde_json::json!({
-            "checkout": checkout,
-            "files": request.manifest.files.len(),
-            "blobs_received": wanted.len(),
-            "bytes_received": bytes_received,
-        }))
-        .map_err(|e| e.to_string())?;
+        let response = serde_json::to_vec(&response).map_err(|e| e.to_string())?;
         let sig = ep
             .secret_key()
             .sign(&response_message(
@@ -860,13 +1013,7 @@ pub async fn handle_source(
             },
         )
         .await?;
-        Ok(SourceOutcome::Materialized {
-            checkout,
-            files: request.manifest.files.len(),
-            blobs_requested: wanted.len(),
-            blobs_received: wanted.len(),
-            bytes_received,
-        })
+        Ok(outcome)
     }
     .await?;
     if let SourceOutcome::Rejected(reason) = &outcome {
@@ -923,6 +1070,31 @@ pub async fn push_source(
     checkout: &str,
     mode: PushMode,
 ) -> Result<PushReport, String> {
+    push_source_as(
+        ep,
+        to,
+        attestation,
+        source_root,
+        manifest,
+        checkout,
+        mode,
+        SourceMode::Immutable,
+    )
+    .await
+}
+
+/// [`push_source`] with an explicit receiver mode (`Sync` updates a stable checkout in place).
+#[allow(clippy::too_many_arguments)]
+pub async fn push_source_as(
+    ep: &Endpoint,
+    to: EndpointAddr,
+    attestation: Option<Token>,
+    source_root: &Path,
+    manifest: &Manifest,
+    checkout: &str,
+    mode: PushMode,
+    kind: SourceMode,
+) -> Result<PushReport, String> {
     let limits = Limits::default();
     let root = open_root(source_root).map_err(|e| format!("source: {e}"))?;
     let receiver = to.id;
@@ -941,6 +1113,7 @@ pub async fn push_source(
         let body = serde_json::to_vec(&SourceRequest {
             checkout: checkout.to_owned(),
             manifest: manifest.clone(),
+            mode: kind,
         })
         .map_err(|e| e.to_string())?;
         let sig = ep

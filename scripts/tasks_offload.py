@@ -5,7 +5,10 @@ Usage (from inside a Git checkout; HEAD may be unborn):
 
   tasks-offload --worker USER@HOST [--ssh-key PATH] --who OWNER
                 [--fetch RELPATH]... [--fetch-dest DIR] [--cargo-fetch]
-                [--remote-run] [--checksum] [--dry-run] -- CMD [ARGS...]
+                [--remote-run] [--checksum] [--dry-run]
+                [--transport ssh|iroh [--iroh-data-dir DIR --iroh-allow FILE
+                 --iroh-addr IP:PORT [--iroh-bind IP:PORT] [--iroh-store DIR]
+                 [--lan-peer PATH]]] -- CMD [ARGS...]
 
 Steps: select the checkout's permitted files (git ls-files -c -o
 --exclude-standard, filtered by worker_source path rules), rsync them to
@@ -13,8 +16,13 @@ Steps: select the checkout's permitted files (git ls-files -c -o
 installed helper, then `tasks run --who OWNER@<local-host> -- CMD` on the
 worker. Prints a one-line JSON summary as the last stdout line.
 
-Transport v0 is ssh + rsync only (key-only, BatchMode). The seam is the
-Transport class; iroh replaces it later. See scripts/README-offload.md.
+Transport v0 is ssh + rsync only (key-only, BatchMode). `--transport iroh`
+(experimental, phase 2b) replaces only the file movement: the same selected files
+are BLAKE3-hashed by `lan-peer manifest`, pushed as content-addressed blobs (only
+the ones the worker lacks) into the same stable checkout id with `lan-peer
+sync-push`, and `--fetch` returns artifacts with `lan-peer fetch` into a NEW
+directory. The command itself still runs over ssh with the worker's `tasks run`;
+iroh never executes anything. See scripts/README-offload.md.
 
 Exit status: the remote job's exit code; 2 usage/source refusal; 255 transport
 failure or UNCERTAIN remote state (summary `remote_state` disambiguates);
@@ -52,6 +60,7 @@ FINAL_RE = re.compile(r'^job (\d+) ([a-z_]+) \(exit (-?\d+)\) owner=')
 OWNER_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
 WORKER_RE = re.compile(r'^([A-Za-z0-9._-]+@)?[A-Za-z0-9._:-]+$')
 EXIT_USAGE, EXIT_TRANSPORT, EXIT_FETCH = 2, 255, 1
+ENDPOINT_RE = re.compile(r'^[0-9a-z]{52,64}$')
 
 
 class OffloadError(Exception):
@@ -295,6 +304,103 @@ def rsync_files(transport, top, paths, remote_rel, checksum):
 
 
 # --------------------------------------------------------------------------
+# iroh transport (experimental): lan-peer moves files, ssh still runs the job
+# --------------------------------------------------------------------------
+
+class IrohPeer:
+    """Arguments for `lan-peer` subcommands that dial the worker.
+
+    The worker endpoint id is read from its attestation file, which lan-peer
+    itself verifies (account DID, expiry, endpoint binding) before dialing.
+    """
+
+    def __init__(self, args):
+        missing = [flag for flag, value in (('--iroh-data-dir', args.iroh_data_dir),
+                                            ('--iroh-allow', args.iroh_allow),
+                                            ('--iroh-addr', args.iroh_addr)) if not value]
+        if missing:
+            raise OffloadError('--transport iroh needs ' + ', '.join(missing))
+        try:
+            with open(args.iroh_allow, encoding='utf-8') as f:
+                peer = json.load(f).get('endpoint_id')
+        except (OSError, ValueError, AttributeError) as error:
+            raise OffloadError(f'--iroh-allow {args.iroh_allow}: {error}') from None
+        if not isinstance(peer, str) or not ENDPOINT_RE.match(peer):
+            raise OffloadError(f'--iroh-allow {args.iroh_allow}: no valid endpoint_id')
+        self.program = args.lan_peer
+        self.peer = peer
+        self.addr = args.iroh_addr
+        self.dial = ['--peer', peer, '--addr', args.iroh_addr,
+                     '--data-dir', args.iroh_data_dir, '--allow', args.iroh_allow]
+        if args.iroh_bind:
+            self.dial += ['--bind', args.iroh_bind]
+        self.store = args.iroh_store or str(Path.home() / 'build-cache/offload/.iroh-store')
+
+    def call(self, argv, what):
+        """Runs lan-peer; returns its last-line JSON or raises OffloadError."""
+        try:
+            result = subprocess.run([self.program, *argv], stdin=subprocess.DEVNULL,
+                                    capture_output=True)
+        except OSError as error:
+            raise OffloadError(f'{what}: cannot run lan-peer ({self.program}): {error}',
+                               EXIT_TRANSPORT) from None
+        try:
+            reply = json.loads(result.stdout.decode().strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            detail = result.stderr.decode(errors='replace').strip()[-400:]
+            raise OffloadError(f'{what}: lan-peer exit {result.returncode}: {detail}',
+                               EXIT_TRANSPORT) from None
+        if result.returncode != 0:
+            stage = reply.get('stage')
+            reason = reply.get('reason') or reply.get('error')
+            code = EXIT_USAGE if stage in ('usage', 'source') else EXIT_TRANSPORT
+            raise OffloadError(f'{what} failed (lan-peer exit {result.returncode}, stage '
+                               f'{stage}): {reason}', code)
+        return reply
+
+
+def source_manifest(entries):
+    """worker_source schema (SHA-256 receipt) for the selected regular files."""
+    files = sorted(({'path': e['path'], 'size': e['size'], 'executable': e['executable'],
+                     'sha256': e['sha256'], 'iroh_blobs_hash': None} for e in entries),
+                   key=lambda f: f['path'].encode('utf-8'))
+    digest = hashlib.sha256(worker_source.DOMAIN)
+    for f in files:
+        path = f['path'].encode('utf-8')
+        digest.update(len(path).to_bytes(8, 'little'))
+        digest.update(path)
+        digest.update(bytes([f['executable']]))
+        digest.update(f['size'].to_bytes(8, 'little'))
+        digest.update(bytes.fromhex(f['sha256']))
+    return {'schema': worker_source.SCHEMA, 'hash_algorithm': 'sha256',
+            'receipt': digest.hexdigest(), 'iroh_blobs_hash': None, 'files': files}
+
+
+def iroh_sync(peer, top, manifest, cid, workdir):
+    """BLAKE3-hash the selection with `lan-peer manifest`, check it describes exactly the
+    bytes we scanned, then `lan-peer sync-push` into the stable checkout `cid`."""
+    listing = Path(workdir) / 'files0'
+    listing.write_bytes(b''.join(f['path'].encode('utf-8') + b'\0' for f in manifest['files']))
+    hashed = peer.call(['manifest', top, '--files-from0', str(listing)], 'lan-peer manifest')
+    try:
+        merged = worker_source.attach_iroh_blobs_hashes(source_manifest(manifest['files']),
+                                                       hashed)
+    except ValueError as error:
+        raise OffloadError(f'checkout changed while hashing ({error}); keep it stable and '
+                           'retry') from None
+    manifest_path = Path(workdir) / 'manifest.json'
+    manifest_path.write_text(json.dumps(merged))
+    reply = peer.call(['sync-push', *peer.dial, '--source', top, '--manifest',
+                       str(manifest_path), '--checkout', cid], 'iroh sync')
+    checkout = (reply.get('receiver') or {}).get('checkout')
+    if (not isinstance(checkout, str) or not checkout.startswith('/')
+            or os.path.basename(checkout) != cid or any(ord(c) < 32 for c in checkout)):
+        raise OffloadError(f'iroh sync: worker reported an unexpected checkout {checkout!r}',
+                           EXIT_TRANSPORT)
+    return reply
+
+
+# --------------------------------------------------------------------------
 # Remote run with live output, cancel and uncertainty reporting
 # --------------------------------------------------------------------------
 
@@ -394,6 +500,19 @@ def parse_args(argv):
     parser.add_argument('--max-bytes', type=int, default=Bounds.max_bytes)
     parser.add_argument('--cancel-wait', type=float, default=120.0,
                         help='seconds to wait for the remote job to finish cancelling')
+    parser.add_argument('--transport', choices=('ssh', 'iroh'), default='ssh',
+                        help='file movement: ssh+rsync (default) or iroh blobs via lan-peer; '
+                             'the command always runs over ssh')
+    parser.add_argument('--lan-peer', default=os.environ.get('TASKS_OFFLOAD_LAN_PEER',
+                                                             'lan-peer'),
+                        help='lan-peer binary (iroh transport)')
+    parser.add_argument('--iroh-data-dir', help='local lan-peer installation dir (iroh)')
+    parser.add_argument('--iroh-allow', help="worker's attestation.json (iroh); its "
+                                             'endpoint_id is the dialed peer')
+    parser.add_argument('--iroh-addr', help='worker lan-peer serve address IP:PORT (iroh)')
+    parser.add_argument('--iroh-bind', help='local LAN IP:0 to bind (required off loopback)')
+    parser.add_argument('--iroh-store', help='local blob store for --fetch '
+                                             '(default ~/build-cache/offload/.iroh-store)')
     if '--' not in argv:
         parser.error('-- CMD [ARGS...] is required')
     split = argv.index('--')
@@ -408,7 +527,7 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     started = time.monotonic()
     args = parse_args(argv)
-    summary = {'worker': args.worker, 'remote_dir': None, 'remote_cwd': None,
+    summary = {'worker': args.worker, 'transport': args.transport, 'remote_dir': None, 'remote_cwd': None,
                'remote_job_id': None, 'remote_phase': None, 'remote_state': None,
                'exit': None, 'synced_files': 0, 'synced_bytes': 0, 'excluded_files': 0,
                'deleted_tracked': 0, 'pruned': [], 'fetched': [], 'fetch_dest': None,
@@ -437,6 +556,10 @@ def main(argv=None):
             sub = ''
         if args.fetch_dest and _inside(args.fetch_dest, top):
             raise OffloadError('--fetch-dest must be outside the local checkout')
+        peer = IrohPeer(args) if args.transport == 'iroh' else None
+        if peer and fetches and args.fetch_dest and os.path.lexists(args.fetch_dest):
+            raise OffloadError('--fetch-dest must not exist with --transport iroh '
+                               '(artifacts are materialized into a new directory)')
         default_dest_root = Path.home() / 'build-cache/offload' / args.who
         if _inside(default_dest_root, top):
             raise OffloadError('default fetch destination would be inside the checkout')
@@ -446,6 +569,13 @@ def main(argv=None):
         manifest = build_manifest(top, bounds)
         durations['scan_s'] = round(time.monotonic() - t, 3)
         paths = [f['path'] for f in manifest['files']]
+        if peer:
+            links = [f['path'] for f in manifest['files'] if f['type'] != 'file']
+            if links:
+                raise OffloadError(f'{links[0]}: in-tree symlinks are not supported by '
+                                   '--transport iroh (its manifest carries regular files '
+                                   'only); use --transport ssh')
+            summary['iroh'] = {'peer': peer.peer, 'addr': peer.addr}
         summary.update(synced_files=len(paths), synced_bytes=manifest['bytes'],
                        excluded_files=len(manifest['excluded']),
                        deleted_tracked=manifest['deleted_tracked'])
@@ -461,6 +591,9 @@ def main(argv=None):
         transport = Transport(args.worker, args.ssh_program, args.rsync_program, args.ssh_key)
 
         if args.dry_run:
+            if peer:
+                log(f'dry run: {len(paths)} files / {manifest["bytes"]} bytes would sync over '
+                    f'iroh to {peer.peer[:12]}... at {peer.addr}, checkout {cid}')
             log(f'dry run: {len(paths)} files / {manifest["bytes"]} bytes would sync to '
                 f'{args.worker}:~/{remote_rel}/ ({len(manifest["excluded"])} excluded)')
             for p in manifest['excluded'][:20]:
@@ -472,29 +605,36 @@ def main(argv=None):
             return finish(0)
 
         checkout_lock = lock_checkout(cid)  # noqa: F841  (held until exit)
-        # Sync: install helper, bind dir, rsync, prune + verify.
         t = time.monotonic()
-        agent = install_agent(transport, args.remote_python)
-        identity = json.dumps({'host': hostname, 'toplevel': top}, sort_keys=True)
-        agent_call(transport, agent, ['prepare', '--dir', remote_rel, '--identity', identity])
-        rsync_files(transport, top, paths, remote_rel, args.checksum)
-        wire = json.dumps({'files': manifest['files']}).encode()
-        applied = agent_call(transport, agent, ['apply', '--dir', remote_rel], input=wire)
-        if applied['mismatched']:
-            log(f'{len(applied["mismatched"])} files differ after sync; retrying them once '
-                'with --checksum')
-            rsync_files(transport, top, applied['mismatched'], remote_rel, True)
-            applied = agent_call(transport, agent, ['apply', '--dir', remote_rel], input=wire)
-            if applied['mismatched']:
-                raise OffloadError('worker copy does not match the manifest (checkout changed '
-                                   'during sync?): ' + ', '.join(applied['mismatched'][:10]))
-        summary['pruned'] = applied['pruned'][:200]
-        summary['pruned_count'] = len(applied['pruned'])
-        durations['sync_s'] = round(time.monotonic() - t, 3)
+        if peer:
+            # Content-addressed sync; the worker locks, prunes and verifies the checkout.
+            with tempfile.TemporaryDirectory(prefix='tasks-offload-iroh-') as workdir:
+                reply = iroh_sync(peer, top, manifest, cid, workdir)
+            receiver = reply['receiver']
+            remote_abs = receiver['checkout']
+            remote_cwd_abs = f'{remote_abs}/{sub}' if sub else remote_abs
+            summary['remote_dir'] = remote_abs
+            summary['remote_cwd'] = remote_cwd_abs
+            summary['pruned'] = list(receiver.get('deleted_paths') or [])[:200]
+            summary['pruned_count'] = receiver.get('deleted', 0)
+            summary['iroh']['sync'] = {
+                'files': reply.get('files'), 'blobs_sent': reply.get('blobs_sent'),
+                'bytes_sent': reply.get('bytes_sent'),
+                **{k: receiver.get(k) for k in ('created', 'unchanged', 'written',
+                                                'mode_fixed', 'deleted', 'kept_non_source')}}
+            q = shlex.quote(remote_cwd_abs)
+            run_cmd = (f'mkdir -p {q} && cd {q} && exec {REMOTE_TASKS} run --who '
+                       f'{shlex.quote(remote_owner)} {resource}-- {shlex.join(args.command)}')
+            remote_cwd_shell = q
+            durations['sync_s'] = round(time.monotonic() - t, 3)
+        else:
+            remote_cwd_shell = remote_path(remote_cwd_rel)
+            sync_over_ssh(transport, args, hostname, top, paths, manifest, remote_rel, summary)
+            durations['sync_s'] = round(time.monotonic() - t, 3)
 
         if args.cargo_fetch:
             t = time.monotonic()
-            rc = subprocess.run(transport.ssh(f'cd {remote_path(remote_cwd_rel)} && '
+            rc = subprocess.run(transport.ssh(f'cd {remote_cwd_shell} && '
                                               'exec cargo fetch --locked'),
                                 stdin=subprocess.DEVNULL).returncode
             durations['cargo_fetch_s'] = round(time.monotonic() - t, 3)
@@ -509,7 +649,32 @@ def main(argv=None):
         log('interrupted before remote submission; nothing was submitted')
         summary['remote_state'] = 'not_submitted'
         return finish(130)
+    return run_and_fetch(args, transport, run_cmd, summary, durations, finish, fetches,
+                         default_dest_root, remote_rel, peer, remote_owner)
 
+
+def sync_over_ssh(transport, args, hostname, top, paths, manifest, remote_rel, summary):
+    """v0: install helper, bind dir, rsync, prune + verify."""
+    agent = install_agent(transport, args.remote_python)
+    identity = json.dumps({'host': hostname, 'toplevel': top}, sort_keys=True)
+    agent_call(transport, agent, ['prepare', '--dir', remote_rel, '--identity', identity])
+    rsync_files(transport, top, paths, remote_rel, args.checksum)
+    wire = json.dumps({'files': manifest['files']}).encode()
+    applied = agent_call(transport, agent, ['apply', '--dir', remote_rel], input=wire)
+    if applied['mismatched']:
+        log(f'{len(applied["mismatched"])} files differ after sync; retrying them once '
+            'with --checksum')
+        rsync_files(transport, top, applied['mismatched'], remote_rel, True)
+        applied = agent_call(transport, agent, ['apply', '--dir', remote_rel], input=wire)
+        if applied['mismatched']:
+            raise OffloadError('worker copy does not match the manifest (checkout changed '
+                               'during sync?): ' + ', '.join(applied['mismatched'][:10]))
+    summary['pruned'] = applied['pruned'][:200]
+    summary['pruned_count'] = len(applied['pruned'])
+
+
+def run_and_fetch(args, transport, run_cmd, summary, durations, finish, fetches,
+                  default_dest_root, remote_rel, peer, remote_owner):
     # Run.
     signals = []
     run = None
@@ -558,7 +723,27 @@ def main(argv=None):
         return finish(rc)
 
     # Fetch (only after a passed job).
-    if fetches and code == 0:
+    if fetches and code == 0 and peer:
+        t = time.monotonic()
+        dest = Path(args.fetch_dest) if args.fetch_dest else default_dest_root / str(run.job_id)
+        summary['fetch_dest'] = str(dest)
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            Path(peer.store).mkdir(parents=True, exist_ok=True)
+            argv = ['fetch', *peer.dial, '--checkout', os.path.basename(summary['remote_dir']),
+                    '--store', peer.store, '--dest', str(dest)]
+            for rel in fetches:
+                argv += ['--path', rel]
+            reply = peer.call(argv, 'iroh fetch')
+            summary['fetched'] = list(fetches)
+            summary['iroh']['fetch'] = {k: reply.get(k) for k in (
+                'files', 'blobs_received', 'bytes_received', 'skipped')}
+        except (OffloadError, OSError) as error:
+            log(f'error: {error}')
+            durations['fetch_s'] = round(time.monotonic() - t, 3)
+            return finish(EXIT_FETCH)
+        durations['fetch_s'] = round(time.monotonic() - t, 3)
+    elif fetches and code == 0:
         t = time.monotonic()
         dest = Path(args.fetch_dest) if args.fetch_dest else default_dest_root / str(run.job_id)
         summary['fetch_dest'] = str(dest)
