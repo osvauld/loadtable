@@ -264,6 +264,7 @@ mod tests {
             min_available_memory_bytes: crate::admission::MIN_MEMORY,
             min_cache_free_bytes: 3 * 1024 * 1024 * 1024,
             min_state_free_bytes: 64 * 1024 * 1024,
+            ..Default::default()
         };
         let cache = cache_space_with(&missing, &custom).unwrap();
         assert_eq!(cache.reserve_bytes, 3 * 1024 * 1024 * 1024);

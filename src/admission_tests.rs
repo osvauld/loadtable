@@ -552,3 +552,90 @@ fn status_reports_effective_thresholds_and_blocker() {
     assert_eq!(json["thresholds"]["cpu_some_avg10_max"], 40.0);
     assert_eq!(json["thresholds"]["io_full_avg10_max"], 10.0);
 }
+// ---- Configurable Cargo jobs cap (dedicated compute worker) ----
+#[test]
+fn max_cargo_jobs_defaults_to_two_and_is_strictly_parsed() {
+    assert_eq!(MAX_CARGO_JOBS_ENV, "TASKS_MAX_CARGO_JOBS");
+    assert_eq!(DEFAULT_MAX_CARGO_JOBS, 2);
+    assert_eq!(Thresholds::default().max_cargo_jobs, 2);
+    assert_eq!(
+        Thresholds::from_lookup(lookup(&[])).unwrap().max_cargo_jobs,
+        2
+    );
+    for (value, expected) in [("1", 1), ("8", 8), ("64", 64)] {
+        let t = Thresholds::from_lookup(lookup(&[(MAX_CARGO_JOBS_ENV, value)])).unwrap();
+        assert_eq!(t.max_cargo_jobs, expected);
+        // Only the cap changes; the memory/disk reserves keep their defaults.
+        assert_eq!(
+            Thresholds {
+                max_cargo_jobs: DEFAULT_MAX_CARGO_JOBS,
+                ..t
+            },
+            Thresholds::default()
+        );
+    }
+    assert!(Thresholds::overridden(lookup(&[(MAX_CARGO_JOBS_ENV, "8")])));
+    for value in [
+        "",
+        "0",
+        "65",
+        "garbage",
+        "8 ",
+        " 8",
+        "+8",
+        "-8",
+        "8.0",
+        "0x8",
+        "1e1",
+        "99999999999999999999999",
+    ] {
+        let error = Thresholds::from_lookup(lookup(&[(MAX_CARGO_JOBS_ENV, value)]))
+            .expect_err(&format!("{value:?} must be rejected"))
+            .to_string();
+        assert!(error.contains(MAX_CARGO_JOBS_ENV), "{error}");
+    }
+}
+#[test]
+fn max_cargo_jobs_is_recorded_reported_and_old_records_default_to_two() {
+    let f = Fixture::new();
+    let eight = Thresholds::from_lookup(lookup(&[(MAX_CARGO_JOBS_ENV, "8")])).unwrap();
+    record_worker_thresholds(&f.0, &eight).unwrap();
+    let (report, warnings) = report_thresholds(&f.0, Ok(Thresholds::default()), false).unwrap();
+    assert_eq!(report.source, "worker-record");
+    assert_eq!(report.effective.max_cargo_jobs, 8);
+    assert!(warnings.is_empty());
+    let json = serde_json::to_value(&report).unwrap();
+    assert_eq!(json["max_cargo_jobs"], 8);
+    // A shell whose own cap differs from the worker's is flagged.
+    let (_, warnings) = report_thresholds(&f.0, Ok(Thresholds::default()), true).unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains(MAX_CARGO_JOBS_ENV), "{warnings:?}");
+    // A tampered out-of-range cap is rejected like a tampered reserve.
+    let mut tampered = eight;
+    tampered.max_cargo_jobs = 65;
+    record_worker_thresholds(&f.0, &tampered).unwrap();
+    let (report, warnings) = report_thresholds(&f.0, Ok(Thresholds::default()), false).unwrap();
+    assert_eq!(report.source, "default");
+    assert_eq!(warnings.len(), 1);
+    // Records written by earlier releases lack the field: they mean the default.
+    let d = Thresholds::default();
+    fs::write(
+        f.0.join(THRESHOLD_RECORD),
+        serde_json::to_vec(&serde_json::json!({
+            "schema": 1,
+            "pid": 1,
+            "recorded_at": 1,
+            "thresholds": {
+                "min_available_memory_bytes": d.min_available_memory_bytes,
+                "min_cache_free_bytes": d.min_cache_free_bytes,
+                "min_state_free_bytes": d.min_state_free_bytes,
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let (report, warnings) = report_thresholds(&f.0, Ok(d), false).unwrap();
+    assert_eq!(report.source, "worker-record");
+    assert_eq!(report.effective.max_cargo_jobs, 2);
+    assert!(warnings.is_empty());
+}

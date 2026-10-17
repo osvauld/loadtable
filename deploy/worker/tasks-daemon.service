@@ -25,6 +25,10 @@ Environment=PATH=%h/.cargo/bin:%h/.local/bin:%h/.nix-profile/bin:/etc/profiles/p
 Environment=TASKS_MIN_AVAILABLE_MEMORY_MIB=3072
 #Environment=TASKS_MIN_CACHE_FREE_GIB=20
 #Environment=TASKS_MIN_STATE_FREE_MIB=256
+# Largest explicit Cargo -j/--jobs/CARGO_BUILD_JOBS a command may request
+# (1..=64, default 2). Commands without -j still get CARGO_BUILD_JOBS=2.
+# Only for a dedicated compute worker with RAM/cores to spare.
+#Environment=TASKS_MAX_CARGO_JOBS=8
 # Leave TASK_MANAGER_STATE_DIR unset: the default (~/.local/state/
 # tinline-task-manager-native) is what SSH clients use too.
 #

@@ -44,6 +44,20 @@ cannot resolve its configuration fails closed.
 | `TASKS_MIN_AVAILABLE_MEMORY_MIB` | MiB of MemAvailable | 8192 (8 GiB) | 1024 – 1048576 |
 | `TASKS_MIN_CACHE_FREE_GIB` | GiB free on cache/target disks | 20 | 1 – 65536 |
 | `TASKS_MIN_STATE_FREE_MIB` | MiB free on the state disk | 256 | 64 – 1048576 |
+| `TASKS_MAX_CARGO_JOBS` | largest explicit Cargo jobs | 2 | 1 – 64 |
+
+`TASKS_MAX_CARGO_JOBS` only widens what a command may request explicitly
+(`-j N`, `-jN`, `--jobs N`, `--jobs=N`, or `env CARGO_BUILD_JOBS=N cargo ...`).
+Commands that do not ask still get the injected `CARGO_BUILD_JOBS=2` on every
+host, so raising the cap never changes default behaviour. Unset, a request
+above 2 is refused with `trial safety: Cargo jobs must be 1 or 2 (default 2)`;
+with e.g. 8, above 8 is refused with
+`trial safety: Cargo jobs must be 1..=8 (TASKS_MAX_CARGO_JOBS)`. Set it in the
+unit, like the reserves: the daemon checks it at approval and the worker at
+execution, each from its own environment. The submitting client checks early
+against the worker's recorded value (see below), so the first `-j` above 2 on
+a fresh host is accepted only after a worker has started once with the unit's
+setting. Shell scripts (`sh -c ...`) are not parsed and are not capped.
 
 PSI gates are fixed and not configurable: CPU some ≤ 40%, memory some/full ≤
 1%/0.5%, I/O some/full ≤ 20%/10% (avg10). Swap does not count toward
@@ -53,7 +67,8 @@ Each worker records its effective values in `<state>/admission-thresholds.json`
 when it starts. `tasks admission` reports `thresholds` (with `source`:
 `worker-record`, `environment` or `default`) and computes `pressure_blocker`
 with them, so a client shell without the variables still sees what the worker
-applies. If the shell's own `TASKS_MIN_*` differ, a warning is listed. The
+applies (including `max_cargo_jobs`). If the shell's own `TASKS_MIN_*` or
+`TASKS_MAX_CARGO_JOBS` differ, a warning is listed. The
 record reflects the **last** worker start; a changed unit applies only after the
 worker restarts (it exits by itself when idle).
 

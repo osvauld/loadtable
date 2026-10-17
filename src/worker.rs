@@ -946,6 +946,7 @@ fn drain<R: Read + Send + 'static>(mut reader: R, dir: PathBuf) -> std::thread::
     })
 }
 
+const DEFAULT_CARGO_BUILD_JOBS: &str = "2";
 fn sanitized(program: &Path) -> Command {
     let mut command = Command::new(program);
     command.env_clear();
@@ -963,7 +964,9 @@ fn sanitized(program: &Path) -> Command {
     }
     // One admitted Cargo process can otherwise launch many simultaneous linkers.
     // This is a cooperative default, not a limit on arbitrary trusted scripts.
-    command.env("CARGO_BUILD_JOBS", "2");
+    // Deliberately NOT TASKS_MAX_CARGO_JOBS: a raised cap only permits larger
+    // explicit -j/--jobs/CARGO_BUILD_JOBS; default behaviour is the same on every host.
+    command.env("CARGO_BUILD_JOBS", DEFAULT_CARGO_BUILD_JOBS);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1466,6 +1469,9 @@ mod tests {
                 .1,
             Some(std::ffi::OsStr::new("2"))
         );
+        // A raised TASKS_MAX_CARGO_JOBS only permits larger explicit -j; the
+        // injected default is fixed and never read from the cap.
+        assert_eq!(DEFAULT_CARGO_BUILD_JOBS, "2");
     }
     #[test]
     fn proc_identity_detects_pid_reuse_without_signalling_it() {

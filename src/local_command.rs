@@ -18,7 +18,17 @@ pub struct Recipe {
     pub resource: Resource,
 }
 impl Recipe {
+    /// Validates against this process's own `TASKS_MAX_CARGO_JOBS` (daemon
+    /// approval and worker execution). Invalid configuration fails closed.
     pub fn validate(&self) -> Result<()> {
+        self.check(|| Ok(crate::admission::thresholds()?.max_cargo_jobs))
+    }
+    /// Validates with an explicit Cargo jobs cap (1..=64).
+    pub fn validate_with_max(&self, max_cargo_jobs: u64) -> Result<()> {
+        self.check(|| Ok(max_cargo_jobs))
+    }
+    // The cap is resolved only for Cargo commands.
+    fn check(&self, max_cargo_jobs: impl FnOnce() -> Result<u64>) -> Result<()> {
         if self.argv.is_empty()
             || self.argv.len() > 256
             || self.argv[0].is_empty()
@@ -39,9 +49,11 @@ impl Recipe {
             );
         }
         if let Some(index) = self.cargo_index() {
+            let max = max_cargo_jobs()?;
+            let jobs = |value: &str| validate_jobs(value, max);
             for assignment in &self.argv[..index] {
                 if let Some(value) = assignment.strip_prefix("CARGO_BUILD_JOBS=") {
-                    validate_jobs(value)?;
+                    jobs(value)?;
                 }
             }
             let mut args = self.argv[index + 1..].iter();
@@ -50,12 +62,12 @@ impl Recipe {
                     break;
                 }
                 if arg == "-j" || arg == "--jobs" {
-                    validate_jobs(args.next().ok_or("Cargo jobs requires a value")?)?;
+                    jobs(args.next().ok_or("Cargo jobs requires a value")?)?;
                 } else if let Some(value) = arg
                     .strip_prefix("--jobs=")
                     .or_else(|| arg.strip_prefix("-j"))
                 {
-                    validate_jobs(value)?;
+                    jobs(value)?;
                 }
             }
         }
@@ -81,8 +93,11 @@ impl Recipe {
         r.validate()?;
         Ok(r)
     }
+    /// Client-side submission check. A client shell's environment is not
+    /// forwarded, so the cap is the last worker's recorded value (else this
+    /// process's own); daemon approval and the worker re-check their own.
     pub fn spec(&self, owner: String, cwd: PathBuf) -> Result<JobSpec> {
-        self.validate()?;
+        self.check(crate::admission::submission_max_cargo_jobs)?;
         Ok(JobSpec {
             suite: SUITE.into(),
             configuration: serde_json::to_string(self)?,
@@ -179,10 +194,17 @@ impl Recipe {
         Some(out)
     }
 }
-fn validate_jobs(value: &str) -> Result<()> {
-    match value.parse::<u32>() {
-        Ok(1 | 2) => Ok(()),
-        _ => Err("trial safety: Cargo jobs must be 1 or 2 (default 2)".into()),
+fn validate_jobs(value: &str, max: u64) -> Result<()> {
+    match value.parse::<u64>() {
+        Ok(jobs) if (1..=max).contains(&jobs) => Ok(()),
+        _ if max == crate::admission::DEFAULT_MAX_CARGO_JOBS => {
+            Err("trial safety: Cargo jobs must be 1 or 2 (default 2)".into())
+        }
+        _ => Err(format!(
+            "trial safety: Cargo jobs must be 1..={max} ({})",
+            crate::admission::MAX_CARGO_JOBS_ENV
+        )
+        .into()),
     }
 }
 /// Output links handled by one placement call. Existing entries are never
@@ -403,6 +425,63 @@ mod tests {
         };
         shell.validate().unwrap();
         assert_eq!(shell.stages(), vec!["build"]);
+    }
+    fn cargo(flags: &[&str]) -> Recipe {
+        Recipe {
+            argv: ["cargo", "test"]
+                .iter()
+                .chain(flags)
+                .map(|s| s.to_string())
+                .collect(),
+            resource: Resource::Compile,
+        }
+    }
+    #[test]
+    fn default_cargo_jobs_cap_rejects_three_with_the_historical_text() {
+        let error = cargo(&["-j", "3"])
+            .validate_with_max(crate::admission::DEFAULT_MAX_CARGO_JOBS)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "trial safety: Cargo jobs must be 1 or 2 (default 2)");
+        // The process-environment path (TASKS_MAX_CARGO_JOBS unset in tests).
+        assert_eq!(
+            cargo(&["-j", "3"]).validate().unwrap_err().to_string(),
+            "trial safety: Cargo jobs must be 1 or 2 (default 2)"
+        );
+        cargo(&["-j", "2"]).validate().unwrap();
+    }
+    #[test]
+    fn raised_cargo_jobs_cap_accepts_up_to_max_in_every_form() {
+        for (prefix, flags) in [
+            (vec![], vec!["-j", "8"]),
+            (vec![], vec!["-j8"]),
+            (vec![], vec!["--jobs", "8"]),
+            (vec![], vec!["--jobs=8"]),
+            (vec!["env", "CARGO_BUILD_JOBS=8"], vec![]),
+        ] {
+            let mut ok = cargo(&flags);
+            ok.argv.splice(0..0, prefix.iter().map(|s| s.to_string()));
+            ok.validate_with_max(8).unwrap();
+            let mut too_many = ok.clone();
+            for arg in &mut too_many.argv {
+                *arg = arg.replace('8', "9");
+            }
+            assert_eq!(
+                too_many.validate_with_max(8).unwrap_err().to_string(),
+                "trial safety: Cargo jobs must be 1..=8 (TASKS_MAX_CARGO_JOBS)"
+            );
+        }
+        for bad in ["0", "-1", "garbage", ""] {
+            assert!(cargo(&["--jobs", bad]).validate_with_max(64).is_err());
+        }
+        assert!(cargo(&["-j", "65"]).validate_with_max(64).is_err());
+        // Non-Cargo commands never consult the cap.
+        Recipe {
+            argv: vec!["make".into(), "-j".into(), "64".into()],
+            resource: Resource::Compile,
+        }
+        .validate_with_max(2)
+        .unwrap();
     }
     #[test]
     fn explicit_command_approval_is_required_and_completion_has_no_snapshot_claim() {

@@ -29,6 +29,10 @@ pub const MEMORY_ENV: &str = "TASKS_MIN_AVAILABLE_MEMORY_MIB";
 pub const CACHE_FREE_ENV: &str = "TASKS_MIN_CACHE_FREE_GIB";
 /// Whole MiB of free space kept on the state disk, 64..=1048576. Default 256.
 pub const STATE_FREE_ENV: &str = "TASKS_MIN_STATE_FREE_MIB";
+/// Largest explicit Cargo `-j`/`--jobs`/`CARGO_BUILD_JOBS` a live command may
+/// request, 1..=64. Default 2. Raising it never changes the injected default of 2.
+pub const MAX_CARGO_JOBS_ENV: &str = "TASKS_MAX_CARGO_JOBS";
+pub const DEFAULT_MAX_CARGO_JOBS: u64 = 2;
 /// Written by each worker at start so `tasks admission` in another shell reports
 /// what the worker actually applies, not that shell's own environment.
 pub const THRESHOLD_RECORD: &str = "admission-thresholds.json";
@@ -67,6 +71,13 @@ const STATE_LIMIT: Limit = Limit {
     floor: 64,
     max: 1024 * 1024,
 };
+const CARGO_JOBS_LIMIT: Limit = Limit {
+    env: MAX_CARGO_JOBS_ENV,
+    unit: 1,
+    unit_name: "jobs",
+    floor: 1,
+    max: 64,
+};
 impl Limit {
     fn parse(&self, raw: Option<OsString>, default: u64) -> Result<u64> {
         let Some(raw) = raw else {
@@ -101,6 +112,12 @@ pub struct Thresholds {
     pub min_available_memory_bytes: u64,
     pub min_cache_free_bytes: u64,
     pub min_state_free_bytes: u64,
+    /// Records from earlier releases lack this field and mean the default.
+    #[serde(default = "default_max_cargo_jobs")]
+    pub max_cargo_jobs: u64,
+}
+fn default_max_cargo_jobs() -> u64 {
+    DEFAULT_MAX_CARGO_JOBS
 }
 impl Default for Thresholds {
     fn default() -> Self {
@@ -108,6 +125,7 @@ impl Default for Thresholds {
             min_available_memory_bytes: MIN_MEMORY,
             min_cache_free_bytes: crate::cache::MIN_FREE_BYTES,
             min_state_free_bytes: crate::cache::MIN_STATE_FREE_BYTES,
+            max_cargo_jobs: DEFAULT_MAX_CARGO_JOBS,
         }
     }
 }
@@ -119,21 +137,28 @@ impl Thresholds {
                 .parse(get(MEMORY_ENV), d.min_available_memory_bytes)?,
             min_cache_free_bytes: CACHE_LIMIT.parse(get(CACHE_FREE_ENV), d.min_cache_free_bytes)?,
             min_state_free_bytes: STATE_LIMIT.parse(get(STATE_FREE_ENV), d.min_state_free_bytes)?,
+            max_cargo_jobs: CARGO_JOBS_LIMIT.parse(get(MAX_CARGO_JOBS_ENV), d.max_cargo_jobs)?,
         })
     }
     pub fn from_env() -> Result<Self> {
         Self::from_lookup(|name| std::env::var_os(name))
     }
     pub fn overridden(get: impl Fn(&str) -> Option<OsString>) -> bool {
-        [MEMORY_ENV, CACHE_FREE_ENV, STATE_FREE_ENV]
-            .iter()
-            .any(|name| get(name).is_some())
+        [
+            MEMORY_ENV,
+            CACHE_FREE_ENV,
+            STATE_FREE_ENV,
+            MAX_CARGO_JOBS_ENV,
+        ]
+        .iter()
+        .any(|name| get(name).is_some())
     }
     /// Same bounds as the environment, so a tampered record cannot lower a floor.
     fn valid(&self) -> bool {
         MEMORY_LIMIT.admits(self.min_available_memory_bytes)
             && CACHE_LIMIT.admits(self.min_cache_free_bytes)
             && STATE_LIMIT.admits(self.min_state_free_bytes)
+            && CARGO_JOBS_LIMIT.admits(self.max_cargo_jobs)
     }
 }
 static ACTIVE: OnceLock<std::result::Result<Thresholds, String>> = OnceLock::new();
@@ -143,6 +168,17 @@ pub fn thresholds() -> Result<Thresholds> {
         .get_or_init(|| Thresholds::from_env().map_err(|e| e.to_string()))
         .clone()
         .map_err(Into::into)
+}
+/// Client-side early check only, so a client shell reports what the worker
+/// applies: the last worker's valid record, else this process's own value.
+/// Not authority: daemon approval and the worker re-validate with their own.
+pub fn submission_max_cargo_jobs() -> Result<u64> {
+    let (report, _) = report_thresholds(
+        &crate::state_dir(),
+        thresholds(),
+        Thresholds::overridden(|name| std::env::var_os(name)),
+    )?;
+    Ok(report.effective.max_cargo_jobs)
 }
 fn memory_text(bytes: u64) -> String {
     if bytes.is_multiple_of(GIB) {
@@ -240,7 +276,7 @@ pub fn report_thresholds(
         Ok(Some(record)) => {
             match &own {
                 Ok(t) if own_overridden && *t != record.thresholds => warnings.push(
-                    "this shell's TASKS_MIN_* settings differ from the worker's recorded thresholds; the worker applies its own environment".into(),
+                    "this shell's TASKS_MIN_*/TASKS_MAX_CARGO_JOBS settings differ from the worker's recorded thresholds; the worker applies its own environment".into(),
                 ),
                 Err(e) => warnings.push(format!("this shell's threshold environment is invalid: {e}")),
                 _ => (),
