@@ -1,9 +1,10 @@
 # Trial feedback: daemon-to-daemon iroh link (peer-iroh)
 
 - Agent/session: peer-iroh (branch `feature/peer-iroh`, worktree `task-manager-worktrees/peer-iroh`).
-- Job ID(s): 386, 393-399, 400, 402-404, 409-414 (all `--who peer-iroh`, compile class, laptop
-  queue, `-j 2`, offline). Final: 413 `cargo test --offline --locked -j 2 --workspace` passed;
-  414 `cargo clippy --offline --locked -j 2 --workspace --all-targets -- -D warnings` passed.
+- Job ID(s): 386, 393-399, 400, 402-404, 409-416 (all `--who peer-iroh`, compile class, laptop
+  queue, `-j 2`, offline). Final, after the last source change: 415 `cargo clippy --offline
+  --locked -j 2 --workspace --all-targets -- -D warnings` passed; 416 `cargo test --offline
+  --locked -j 2 --workspace` passed (same tests also passed in 413/414 before a small client fix).
 - Outcome: one **defect found and fixed** (lock-descriptor leak through an autostarted daemon,
   self-inflicted by my fixtures), otherwise friction only.
 - Redacted command, cwd type, resource class: `tasks run --who peer-iroh -- cargo
@@ -27,7 +28,7 @@
   `TASK_MANAGER_STATE_DIR`); job 404 then started. Fixes: `ensure_daemon` marks inherited
   descriptors above stdio close-on-exec (`close_range(3, ~0, CLOSE_RANGE_CLOEXEC)`); the test
   fixtures do the same for every process they spawn and reap all processes of their state dir
-  on drop. Jobs 409-414 left no fixture process behind (checked with `pgrep`).
+  on drop. Jobs 409-416 left no fixture process behind (checked with `pgrep`).
 - Impact: other agents' run-class jobs were blocked during that window (I saw no other run job
   queued, but cannot rule it out).
 - Acceptance test: a job whose command runs `tasks list` against a stopped daemon (autostart),
@@ -41,7 +42,7 @@
   my docs only for my own commands).
 - Real-worker tests: the existing ones are `#[ignore]`d because of PSI gates. The new two-daemon
   tests run in `cargo test` with isolated lock dirs and relaxed reserves (memory 1 GiB, disks,
-  run-slot CPU), memory/IO PSI unchanged; they passed in 31-32 s in jobs 402/404/409/413 and
+  run-slot CPU), memory/IO PSI unchanged; they passed in 31-43 s in jobs 402/404/409/413/416 and
   would queue, not fail, under real memory/IO pressure.
 - First runs failed on my own test bugs (job 398/400: log lines also appear inside the logged
   argv, so `contains("started")` matched too early; job 403: a lost update of `cancel_sent`

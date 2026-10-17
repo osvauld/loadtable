@@ -342,7 +342,14 @@ fn run() -> Result<()> {
 fn forward_spec(peer: &str, fetch: &[String], inner: JobSpec) -> Result<JobSpec> {
     let socket = state_dir().join("taskd.sock");
     ensure_daemon(&socket)?;
-    let report = tinline_task_manager::peer_link::request_peers(&socket, Duration::from_secs(30))?;
+    let mut report =
+        tinline_task_manager::peer_link::request_peers(&socket, Duration::from_secs(30))?;
+    // A daemon that just started may still be binding its endpoint (enabled=false, no error).
+    let end = Instant::now() + Duration::from_secs(10);
+    while !report.enabled && report.error.is_none() && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(100));
+        report = tinline_task_manager::peer_link::request_peers(&socket, Duration::from_secs(30))?;
+    }
     if !report.enabled {
         return Err(format!(
             "peer forwarding is not enabled in this machine's daemon ({}; config {}). Set it up \
@@ -470,7 +477,13 @@ bind = "{bind}"
             }
             println!(
                 "peer link: {}{}",
-                if report.enabled { "enabled" } else { "disabled" },
+                if report.enabled {
+                    "enabled"
+                } else if report.error.is_none() {
+                    "starting"
+                } else {
+                    "disabled"
+                },
                 report
                     .error
                     .as_deref()
