@@ -447,6 +447,70 @@ fn plan_links(root: &Path, rels: &[&str], plan: &mut OutputPlan) -> Result<()> {
     }
     Ok(())
 }
+/// Gradle commands (`gradlew`/`gradle`, directly or after transparent `env`
+/// assignments) in an `android/` Gradle project lacking the git-ignored
+/// `local.properties`: create it with `sdk.dir` from this worker's
+/// ANDROID_HOME/ANDROID_SDK_ROOT when one names an existing directory, else
+/// fail (before admission) naming the file. Commands run with a sanitized
+/// environment, so Gradle cannot find the SDK any other way. An existing file
+/// is never touched; nothing is copied from another checkout.
+pub fn ensure_android_local_properties(
+    argv: &[String],
+    cwd: &Path,
+    env: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Result<Option<String>> {
+    if tool_index(argv, &["gradlew", "gradle"]).is_none() {
+        return Ok(None);
+    }
+    let Some(project) = cwd.ancestors().find(|dir| {
+        dir.file_name().is_some_and(|n| n == "android")
+            && (dir.join("settings.gradle").is_file() || dir.join("settings.gradle.kts").is_file())
+    }) else {
+        return Ok(None);
+    };
+    let properties = project.join("local.properties");
+    if std::fs::symlink_metadata(&properties).is_ok() {
+        return Ok(None);
+    }
+    for name in ["ANDROID_HOME", "ANDROID_SDK_ROOT"] {
+        let Some(sdk) = env(name).map(PathBuf::from) else {
+            continue;
+        };
+        // Properties files are Latin-1 with backslash escapes; keep to plain ASCII.
+        let Some(text) = sdk.to_str().filter(|s| {
+            sdk.is_absolute() && sdk.is_dir() && s.bytes().all(|b| (b' '..=b'~').contains(&b))
+        }) else {
+            continue;
+        };
+        let body = format!(
+            "# Created by tasks from the worker's {name}; git-ignored per-checkout file.\nsdk.dir={}\n",
+            text.replace('\\', "\\\\")
+        );
+        use std::io::Write;
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&properties)
+        {
+            Ok(mut file) => file.write_all(body.as_bytes())?,
+            // Created concurrently (e.g. by the user): theirs is kept.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(None),
+            Err(e) => return Err(e.into()),
+        }
+        return Ok(Some(format!(
+            "created {} with sdk.dir={text} from the worker's {name}\n",
+            properties.display()
+        )));
+    }
+    Err(format!(
+        "Gradle project {} has no local.properties (it is git-ignored, so a fresh worktree lacks it) \
+         and neither ANDROID_HOME nor ANDROID_SDK_ROOT names an existing SDK directory in the task \
+         worker's environment; create {} containing `sdk.dir=/absolute/path/to/Android/Sdk` and resubmit",
+        project.display(),
+        properties.display()
+    )
+    .into())
+}
 /// Index of `names` as the program, directly or after transparent `env`
 /// assignments. Only these are understood; shell text is never parsed.
 fn tool_index(argv: &[String], names: &[&str]) -> Option<usize> {
@@ -1166,6 +1230,80 @@ mod tests {
                 error.contains("live cwd is not an existing directory"),
                 "{error}"
             );
+        }
+        // ---- Android local.properties in a fresh worktree ----
+        fn android_project(f: &Fixture) -> PathBuf {
+            let root = f.checkout("fresh-worktree");
+            let android = root.join("android");
+            f.put(android.join("settings.gradle.kts"), "// synthetic\n");
+            fs::create_dir_all(android.join("app")).unwrap();
+            android
+        }
+        fn argv(args: &[&str]) -> Vec<String> {
+            args.iter().map(|s| s.to_string()).collect()
+        }
+        #[test]
+        fn gradle_in_a_fresh_worktree_gets_local_properties_from_the_sdk_env() {
+            let f = Fixture::new();
+            let android = android_project(&f);
+            let sdk = f.base.join("Sdk");
+            fs::create_dir(&sdk).unwrap();
+            let env =
+                |name: &str| (name == "ANDROID_SDK_ROOT").then(|| sdk.clone().into_os_string());
+            let note = ensure_android_local_properties(
+                &argv(&["./gradlew", ":app:compileDebugKotlin"]),
+                &android.join("app"),
+                env,
+            )
+            .unwrap()
+            .unwrap();
+            assert!(note.contains("local.properties") && note.contains("ANDROID_SDK_ROOT"));
+            let text = fs::read_to_string(android.join("local.properties")).unwrap();
+            assert!(
+                text.ends_with(&format!("\nsdk.dir={}\n", sdk.display())),
+                "{text}"
+            );
+            // Existing files are never rewritten.
+            fs::write(android.join("local.properties"), "sdk.dir=/user/choice\n").unwrap();
+            assert_eq!(
+                ensure_android_local_properties(&argv(&["gradle", "build"]), &android, env)
+                    .unwrap(),
+                None
+            );
+            assert_eq!(
+                fs::read_to_string(android.join("local.properties")).unwrap(),
+                "sdk.dir=/user/choice\n"
+            );
+        }
+        #[test]
+        fn gradle_without_an_sdk_fails_naming_local_properties() {
+            let f = Fixture::new();
+            let android = android_project(&f);
+            // ANDROID_HOME pointing at a missing directory is not used.
+            let missing = f.base.join("no-sdk").into_os_string();
+            for env_argv in [
+                argv(&["./gradlew", ":app:compileDebugKotlin"]),
+                argv(&["env", "JAVA_OPTS=-Xmx1g", "/opt/gradle/bin/gradle", "build"]),
+            ] {
+                let error = ensure_android_local_properties(&env_argv, &android, |name| {
+                    (name == "ANDROID_HOME").then(|| missing.clone())
+                })
+                .unwrap_err()
+                .to_string();
+                assert!(error.contains("local.properties"), "{error}");
+                assert!(error.contains("sdk.dir="), "{error}");
+            }
+            assert!(fs::symlink_metadata(android.join("local.properties")).is_err());
+            // Non-Gradle commands, and Gradle outside an android/ project, are untouched.
+            for (args, cwd) in [
+                (argv(&["cargo", "test", "-j", "2"]), android.clone()),
+                (argv(&["./gradlew", "build"]), f.base.clone()),
+            ] {
+                assert_eq!(
+                    ensure_android_local_properties(&args, &cwd, |_| None).unwrap(),
+                    None
+                );
+            }
         }
         #[test]
         fn outside_git_or_without_manifests_nothing_is_placed() {

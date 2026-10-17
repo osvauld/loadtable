@@ -472,8 +472,9 @@ fn execute_local(
 }
 
 const DISK_WAIT_LOG_INTERVAL: Duration = Duration::from_secs(60);
-/// Runs in the worker BEFORE any shared compile/run/device admission: places
-/// cache output links under the disk reserves.
+/// Runs in the worker BEFORE any shared compile/run/device admission: creates
+/// the git-ignored Android `local.properties` a fresh worktree lacks (or fails
+/// naming it), then places cache output links under the disk reserves.
 /// A reserve shortfall WAITS here, logged and cancellable, like the snapshot
 /// path's `wait_for_target`. No shared slot is held while waiting, so jobs that
 /// need no new space (existing links, run-only work) are never blocked behind
@@ -484,10 +485,15 @@ fn prepare_local_outputs(
     state: &Path,
     dir: &Path,
     job: &crate::Job,
-    _recipe: &crate::local_command::Recipe,
+    recipe: &crate::local_command::Recipe,
 ) -> Result<bool> {
     use crate::local_command::{self as local, Placed};
     let cwd = Path::new(&job.spec.source);
+    if let Some(note) =
+        local::ensure_android_local_properties(&recipe.argv, cwd, |name| std::env::var_os(name))?
+    {
+        append_log(dir, note.as_bytes());
+    }
     let mut waited_on: Option<PathBuf> = None;
     let mut logged = Instant::now();
     let placement = local::wait_for_placement(
