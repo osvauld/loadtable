@@ -15,10 +15,17 @@
 //! checkout over the `task-manager/artifact/0` ALPN into a NEW local directory, asking only for
 //! blobs missing from a local store.
 //!
+//! Status stream: `serve --status` publishes the output of one fixed command (default
+//! `~/.local/bin/tasks status --json`) on the read-only `task-manager/status/0` ALPN, and
+//! `status-watch` prints one JSON snapshot per line, with offline markers and reconnects
+//! (see `status.rs`).
+//!
 //! ```text
 //! lan-peer init        --data-dir DIR
 //! lan-peer serve       --bind IP:PORT --data-dir DIR [--allow FILE]... [--max-connections N]
 //!                      [--store DIR --checkouts DIR]
+//!                      [--status [--status-cmd CMD] [--status-interval SECS]
+//!                       [--status-max-bytes N]]
 //! lan-peer connect     --peer ENDPOINT_ID --addr IP:PORT --data-dir DIR --allow FILE [--bind IP:PORT]
 //! lan-peer manifest    SOURCE_DIR --files-from0 FILE
 //! lan-peer push-source --peer ENDPOINT_ID --addr IP:PORT --data-dir DIR --allow FILE
@@ -27,6 +34,9 @@
 //! lan-peer fetch       --peer ENDPOINT_ID --addr IP:PORT --data-dir DIR --allow FILE
 //!                      --checkout NAME --path REL [--path REL]... --store DIR --dest NEW_DIR
 //!                      [--bind IP:PORT]
+//! lan-peer status-watch --peer ENDPOINT_ID --addr IP:PORT --data-dir DIR --allow FILE
+//!                      [--bind IP:PORT] [--machine-id ID] [--count N] [--max-bytes N]
+//!                      [--stall-timeout SECS] [--backoff-max SECS]
 //! ```
 //! Exit codes: 0 ok, 2 usage/config/local error (nothing sent), 3 rejected/verification
 //! failure, 4 transport/timeout.
@@ -34,6 +44,7 @@
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
@@ -43,6 +54,10 @@ use serde_json::json;
 use task_manager_osvauld_foundation::artifact::{self, ARTIFACT_ALPN, ArtifactOutcome};
 use task_manager_osvauld_foundation::source::{
     self, Limits, Manifest, PushMode, SOURCE_ALPN, SourceMode, SourceOutcome,
+};
+use task_manager_osvauld_foundation::status::{
+    self, DEFAULT_INTERVAL, DEFAULT_STATUS_CMD, MAX_SNAPSHOT_BYTES, MIN_INTERVAL, STATUS_ALPN,
+    StatusConfig, StatusEvent, StatusHub, StatusOutcome, WatchOptions,
 };
 use task_manager_osvauld_foundation::{
     ALPN, AttestationFile, LanReport, Mode, Outcome, Policy, accept_one, attest_endpoint, handle,
@@ -65,6 +80,7 @@ const USAGE: &str = "usage:
   lan-peer init        --data-dir DIR
   lan-peer serve       --bind IP:PORT --data-dir DIR [--allow FILE]... [--max-connections N]
                        [--store DIR --checkouts DIR]
+                       [--status [--status-cmd CMD] [--status-interval SECS] [--status-max-bytes N]]
   lan-peer connect     --peer ENDPOINT_ID --addr IP:PORT --data-dir DIR --allow FILE [--bind IP:PORT]
   lan-peer manifest    SOURCE_DIR --files-from0 FILE
   lan-peer push-source --peer ENDPOINT_ID --addr IP:PORT --data-dir DIR --allow FILE
@@ -73,6 +89,9 @@ const USAGE: &str = "usage:
   lan-peer fetch       --peer ENDPOINT_ID --addr IP:PORT --data-dir DIR --allow FILE
                        --checkout NAME --path REL [--path REL]... --store DIR --dest NEW_DIR
                        [--bind IP:PORT]
+  lan-peer status-watch --peer ENDPOINT_ID --addr IP:PORT --data-dir DIR --allow FILE
+                       [--bind IP:PORT] [--machine-id ID] [--count N] [--max-bytes N]
+                       [--stall-timeout SECS] [--backoff-max SECS]
 SYNTHETIC test account only (public test mnemonic). No relays, discovery or 0.0.0.0 binds.";
 
 enum Fail {
@@ -109,6 +128,10 @@ impl Args {
         self.one(flag)?.ok_or_else(|| format!("missing {flag}"))
     }
 
+    fn flag(&self, flag: &str) -> bool {
+        self.0.iter().any(|a| a == flag)
+    }
+
     fn many(&self, flag: &str) -> Vec<String> {
         self.0
             .windows(2)
@@ -118,8 +141,17 @@ impl Args {
     }
 
     fn check_known(&self, known: &[&str]) -> Result<(), String> {
+        self.check_known_flags(known, &[])
+    }
+
+    /// Like [`Args::check_known`], plus valueless boolean `flags`.
+    fn check_known_flags(&self, known: &[&str], flags: &[&str]) -> Result<(), String> {
         let mut i = 0;
         while i < self.0.len() {
+            if flags.contains(&self.0[i].as_str()) {
+                i += 1;
+                continue;
+            }
             if !known.contains(&self.0[i].as_str()) {
                 return Err(format!("unknown argument {}", self.0[i]));
             }
@@ -217,15 +249,81 @@ fn emit(value: &serde_json::Value) {
     println!("{value}");
 }
 
+fn parse_secs(flag: &str, value: &str) -> Result<Duration, String> {
+    let secs: f64 = value
+        .parse()
+        .map_err(|e| format!("{flag} {value}: expected seconds ({e})"))?;
+    if !secs.is_finite() || secs <= 0.0 || secs > 86_400.0 {
+        return Err(format!("{flag} {value}: out of range"));
+    }
+    Ok(Duration::from_secs_f64(secs))
+}
+
+fn parse_max_bytes(flag: &str, value: Option<String>) -> Result<usize, String> {
+    let Some(value) = value else {
+        return Ok(MAX_SNAPSHOT_BYTES);
+    };
+    match value.parse::<usize>() {
+        Ok(n) if (1..=MAX_SNAPSHOT_BYTES).contains(&n) => Ok(n),
+        _ => Err(format!("{flag} {value}: expected 1..={MAX_SNAPSHOT_BYTES}")),
+    }
+}
+
+/// `serve --status ...`: the fixed command, interval and bound. Read once at start.
+fn status_config(args: &Args) -> Result<Option<StatusConfig>, String> {
+    let given = ["--status-cmd", "--status-interval", "--status-max-bytes"]
+        .iter()
+        .any(|f| args.one(f).ok().flatten().is_some());
+    if !args.flag("--status") {
+        if given {
+            return Err("--status-cmd/--status-interval/--status-max-bytes need --status".into());
+        }
+        return Ok(None);
+    }
+    let home = std::env::var("HOME").ok();
+    let cmd = args
+        .one("--status-cmd")?
+        .unwrap_or_else(|| DEFAULT_STATUS_CMD.to_owned());
+    let argv = status::parse_status_cmd(&cmd, home.as_deref())?;
+    let interval = match args.one("--status-interval")? {
+        Some(v) => parse_secs("--status-interval", &v)?,
+        None => DEFAULT_INTERVAL,
+    };
+    if interval < MIN_INTERVAL {
+        return Err(format!(
+            "--status-interval: minimum is {}s",
+            MIN_INTERVAL.as_secs()
+        ));
+    }
+    let max_bytes = parse_max_bytes("--status-max-bytes", args.one("--status-max-bytes")?)?;
+    StatusConfig::new(argv, interval, max_bytes).map(Some)
+}
+
+/// A per-connection copy of the server policy (same account, allowlist and revocations).
+fn policy_snapshot(policy: &Policy) -> Policy {
+    Policy {
+        account_did: policy.account_did.clone(),
+        now_s: now_secs(),
+        revoked: policy.revoked.clone(),
+        allow: policy.allow.clone(),
+    }
+}
+
 async fn cmd_serve(args: &Args) -> Result<serde_json::Value, Fail> {
-    args.check_known(&[
-        "--bind",
-        "--data-dir",
-        "--allow",
-        "--max-connections",
-        "--store",
-        "--checkouts",
-    ])?;
+    args.check_known_flags(
+        &[
+            "--bind",
+            "--data-dir",
+            "--allow",
+            "--max-connections",
+            "--store",
+            "--checkouts",
+            "--status-cmd",
+            "--status-interval",
+            "--status-max-bytes",
+        ],
+        &["--status"],
+    )?;
     let bind = parse_bind(&args.required("--bind")?)?;
     let max = match args.one("--max-connections")? {
         Some(n) => Some(
@@ -265,10 +363,14 @@ async fn cmd_serve(args: &Args) -> Result<serde_json::Value, Fail> {
         }
         _ => return Err(Fail::Usage("--store and --checkouts go together".into())),
     };
+    let status_hub = status_config(args)?.map(StatusHub::new);
     let mut alpns = vec![ALPN.to_vec()];
     if source.is_some() {
         alpns.push(SOURCE_ALPN.to_vec());
         alpns.push(ARTIFACT_ALPN.to_vec());
+    }
+    if status_hub.is_some() {
+        alpns.push(STATUS_ALPN.to_vec());
     }
 
     let ep = lan_endpoint(inst.key.clone(), bind, alpns).await?;
@@ -283,6 +385,14 @@ async fn cmd_serve(args: &Args) -> Result<serde_json::Value, Fail> {
     ready["allowed_endpoints"] = json!(allowed);
     ready["source_transfer"] = json!(source.is_some());
     ready["artifact_return"] = json!(source.is_some());
+    ready["status_stream"] = match &status_hub {
+        Some(hub) => json!({
+            "argv": hub.config().argv,
+            "interval_s": hub.config().interval.as_secs_f64(),
+            "max_bytes": hub.config().max_bytes,
+        }),
+        None => json!(null),
+    };
     ready["lan"] = json!(lan);
     emit(&ready);
 
@@ -300,6 +410,36 @@ async fn cmd_serve(args: &Args) -> Result<serde_json::Value, Fail> {
         };
         let remote = conn.remote_id().to_string();
         policy.now_s = now_secs();
+        if conn.alpn() == STATUS_ALPN
+            && let Some(hub) = &status_hub
+        {
+            // Long-lived and read-only: each stream runs in its own task so it never blocks the
+            // accept loop or the source/artifact sessions.
+            let (ep, hub, policy) = (ep.clone(), Arc::clone(hub), policy_snapshot(&policy));
+            tokio::spawn(async move {
+                let event = match status::handle_status(&ep, conn, &policy, &hub).await {
+                    Ok(StatusOutcome::Ended {
+                        snapshots_sent,
+                        errors_sent,
+                        reason,
+                    }) => json!({
+                        "event": "status_ended",
+                        "remote": remote,
+                        "snapshots_sent": snapshots_sent,
+                        "errors_sent": errors_sent,
+                        "reason": reason,
+                    }),
+                    Ok(StatusOutcome::Rejected(reason)) => {
+                        json!({"event": "rejected", "alpn": "status", "remote": remote, "reason": reason})
+                    }
+                    Err(error) => {
+                        json!({"event": "error", "alpn": "status", "remote": remote, "error": error})
+                    }
+                };
+                emit(&event);
+            });
+            continue;
+        }
         if conn.alpn() == SOURCE_ALPN
             && let Some((store, checkouts)) = &source
         {
@@ -771,6 +911,124 @@ async fn cmd_fetch(args: &Args) -> Result<serde_json::Value, Fail> {
     result
 }
 
+/// `status-watch`: one JSON line per snapshot on stdout, forever (or `--count` lines). On any
+/// failure it prints an offline marker (`machine.online = false`) and reconnects with
+/// exponential backoff (1 s doubling up to `--backoff-max`, reset by a received snapshot).
+async fn cmd_status_watch(args: &Args) -> Result<serde_json::Value, Fail> {
+    args.check_known(&[
+        "--peer",
+        "--addr",
+        "--data-dir",
+        "--allow",
+        "--bind",
+        "--machine-id",
+        "--count",
+        "--max-bytes",
+        "--stall-timeout",
+        "--backoff-max",
+    ])?;
+    let count = match args.one("--count")? {
+        Some(n) => Some(
+            n.parse::<u64>()
+                .ok()
+                .filter(|n| *n > 0)
+                .ok_or(format!("--count {n}: expected a positive integer"))?,
+        ),
+        None => None,
+    };
+    let max_bytes = parse_max_bytes("--max-bytes", args.one("--max-bytes")?)?;
+    let stall_override = match args.one("--stall-timeout")? {
+        Some(v) => Some(parse_secs("--stall-timeout", &v)?),
+        None => None,
+    };
+    let backoff_max = match args.one("--backoff-max")? {
+        Some(v) => parse_secs("--backoff-max", &v)?,
+        None => Duration::from_secs(30),
+    };
+    let mut machine_id = args.one("--machine-id")?;
+    let Dial {
+        peer,
+        addr,
+        bind,
+        inst,
+        ..
+    } = dial_setup(args)?;
+    let peer_text = peer.to_string();
+    let ep = lan_endpoint(inst.key.clone(), bind, vec![]).await?;
+
+    let mut printed = 0u64;
+    let mut backoff = Duration::from_secs(1);
+    let options = WatchOptions {
+        max_bytes,
+        handshake_timeout: CONNECT_BUDGET,
+        stall: stall_override,
+    };
+    let id_fallback = addr.ip().to_string();
+    let done = loop {
+        let to = EndpointAddr::new(peer).with_ip_addr(addr);
+        let mut got_snapshot = false;
+        let mut reached_count = false;
+        let attempt = status::watch_status(
+            &ep,
+            to,
+            Some(inst.attestation.attestation.clone()),
+            options,
+            |event| {
+                let line = match event {
+                    StatusEvent::Snapshot { seq, value } => {
+                        if let Some(id) = value["machine"]["id"].as_str() {
+                            machine_id = Some(id.to_owned());
+                        }
+                        got_snapshot = true;
+                        status::annotate_live(value, "iroh", &peer_text, seq, status::now_f64())
+                    }
+                    StatusEvent::Error { error, .. } => status::marker(
+                        "status_error",
+                        machine_id.as_deref().unwrap_or(&id_fallback),
+                        "iroh",
+                        &peer_text,
+                        &error,
+                        None,
+                        status::now_f64(),
+                    ),
+                };
+                emit(&line);
+                printed += 1;
+                reached_count = count.is_some_and(|c| printed >= c);
+                !reached_count
+            },
+        )
+        .await;
+        if reached_count {
+            break printed;
+        }
+        let error = match attempt {
+            Ok(_) => "stream ended".to_string(),
+            Err(e) => e,
+        };
+        if got_snapshot {
+            backoff = Duration::from_secs(1);
+        }
+        emit(&status::marker(
+            "offline",
+            machine_id.as_deref().unwrap_or(&id_fallback),
+            "iroh",
+            &peer_text,
+            &error,
+            Some(backoff.as_secs_f64()),
+            status::now_f64(),
+        ));
+        printed += 1;
+        if count.is_some_and(|c| printed >= c) {
+            break printed;
+        }
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(backoff_max);
+    };
+    let _ = timeout(CLOSE_BUDGET, ep.close()).await;
+    Ok(json!({"event": "stopped", "lines": done}))
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let mut argv: Vec<String> = std::env::args().skip(1).collect();
@@ -789,6 +1047,7 @@ async fn main() -> ExitCode {
         "sync-push" => cmd_push_source(&args, SourceMode::Sync).await,
         "fetch" => cmd_fetch(&args).await,
         "serve" => cmd_serve(&args).await,
+        "status-watch" => cmd_status_watch(&args).await,
         "connect" => cmd_connect(&args).await,
         other => Err(Fail::Usage(format!("unknown command {other}"))),
     };

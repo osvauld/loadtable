@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "taken_at": 1792216000.25,
+  "machine": {
+    "id": "synthetic-worker",
+    "role": "worker",
+    "logical_cpus": 12,
+    "cpu_busy_cores": 1.5,
+    "mem_total_bytes": 8000000000,
+    "mem_available_bytes": 5000000000,
+    "swap_total_bytes": 0,
+    "swap_used_bytes": 0,
+    "pressure": {"cpu_some_avg10": 0.0, "memory_some_avg10": 0.0,
+                 "memory_full_avg10": 0.0, "io_some_avg10": 0.0},
+    "blocker": null,
+    "slots": [{"kind": "compile", "name": "p2p-build", "busy": true,
+               "holder_job": 7, "holder_who": "synthetic-agent@synthetic-host"}],
+    "history": {"interval_s": 2.0, "cpu_busy_cores": [1.0, 1.5], "mem_used_bytes": [1, 2]}
+  },
+  "jobs": [
+    {"id": 7, "owner": "synthetic-agent@synthetic-host", "phase": "building",
+     "resource": "compile", "device": null, "checkout": "/synthetic/checkout",
+     "checkout_name": "checkout", "command": "cargo test", "kind_key": "cargo test",
+     "argv": ["cargo", "test", "--locked"], "submitted_at": 1792215990.0,
+     "started_at": 1792215991.0, "finished_at": null,
+     "queue": {"position": null, "waiting_for": null}, "live": null, "progress": null,
+     "warmth": "unknown", "warmth_reason": null, "estimate": null, "result": null,
+     "offload": null}
+  ]
+}
