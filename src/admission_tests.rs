@@ -726,3 +726,22 @@ fn cancel_grace_defaults_to_300ms_and_parses_strictly() {
         );
     }
 }
+#[test]
+fn denylisted_device_lock_is_never_taken() {
+    let f = Fixture::new();
+    for serial in ["ZD22257P6G", "zd22257p6g"] {
+        let error = acquire_at(
+            &f.0,
+            Kind::Device(serial.into()),
+            "model",
+            "test",
+            free,
+            || false,
+        )
+        .map(|_| ())
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("denylisted device"), "{error}");
+        assert!(!f.0.join(format!("p2p-device-{serial}.lock")).exists());
+    }
+}

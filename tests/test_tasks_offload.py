@@ -234,6 +234,8 @@ class OffloadFixture(unittest.TestCase):
                         FAKE_REMOTE_HOME=str(self.remote_home), FAKE_SSH_LOG=str(self.ssh_log),
                         TASKS_OFFLOAD_SSH=str(shim), GIT_CONFIG_NOSYSTEM='1',
                         GIT_CONFIG_GLOBAL=os.devnull, PYTHONDONTWRITEBYTECODE='1')
+        self.env.pop('TASKS_DENIED_DEVICES', None)
+        self.env.pop('XDG_CONFIG_HOME', None)
         self.git('init', '-q')
         self.write('Cargo.toml', '[package]\nname = "fixture"\n')
         self.write('src/lib.rs', 'pub fn a() {}\n')
@@ -387,6 +389,90 @@ class OffloadTests(OffloadFixture):
         rec = self.job_record(self.summary(r)['remote_job_id'])
         self.assertIn('--run', rec['opts'])
         self.assertRegex(rec['who'], r'^offload-test@[^@]+$')
+
+    def test_device_uses_remote_device_slot_not_compile_or_run(self):
+        # The fake worker `tasks` executes argv on THIS host, so every command
+        # here is inert (`echo ...`): a red run must never reach a real adb/device.
+        r = self.offload('echo', 'adb', '-s', '9BWAY1LSDC', 'devices', '-l',
+                         opts=('--device', '9BWAY1LSDC'), check_exit=0)
+        s = self.summary(r)
+        rec = self.job_record(s['remote_job_id'])
+        self.assertEqual(rec['opts'][rec['opts'].index('--device') + 1], '9BWAY1LSDC')
+        self.assertNotIn('--run', rec['opts'])
+        self.assertEqual(rec['argv'], ['echo', 'adb', '-s', '9BWAY1LSDC', 'devices', '-l'])
+        self.assertEqual(s['device'], '9BWAY1LSDC')
+        # Wireless host:port serials pass through; the worker's tasks maps the lock name.
+        r = self.offload('true', opts=('--device', '192.168.1.3:5555'), check_exit=0)
+        rec = self.job_record(self.summary(r)['remote_job_id'])
+        self.assertIn('192.168.1.3:5555', rec['opts'])
+
+    def test_device_dry_run_shows_device_submission(self):
+        r = self.offload('true', opts=('--device', 'SYNTHPHONE1', '--dry-run'), check_exit=0)
+        self.assertIn('run --who', r.stderr)
+        self.assertIn('--device SYNTHPHONE1 --', r.stderr)
+        self.assertFalse(self.ssh_log.exists())
+
+    def test_device_conflicts_with_remote_run_and_bad_serials(self):
+        r = self.offload('true', opts=('--device', 'SYNTHPHONE1', '--remote-run'), check_exit=2)
+        self.assertIn('--device', r.stderr)
+        for bad in ('', 'a b', '-x', 'x/y', 'x;y', 'A' * 129, '../d'):
+            r = self.offload('true', opts=(f'--device={bad}',), check_exit=2)
+            self.assertIn('invalid device serial', r.stderr)
+        self.assertFalse(self.ssh_log.exists())
+
+    def test_builtin_denylisted_device_is_refused_before_contacting_anything(self):
+        for serial in ('ZD22257P6G', 'zd22257p6g'):
+            for extra in ((), ('--dry-run',)):
+                r = self.offload('true', opts=('--device', serial, *extra), check_exit=2)
+                self.assertIn('denylisted device ZD22257P6G (built-in)', r.stderr)
+                self.assertEqual(self.summary(r)['remote_state'], 'not_submitted')
+        self.assertFalse(self.ssh_log.exists())
+
+    def test_command_naming_denylisted_device_is_refused_without_device_flag(self):
+        # Inert commands (see above): only their text names the device.
+        for cmd in (('echo', 'adb', '-s', 'ZD22257P6G', 'logcat', '-d'),
+                    ('env', 'ANDROID_SERIAL=zd22257p6g', 'echo', 'adb', 'shell'),
+                    ('sh', '-c', 'echo adb -s ZD22257P6G install -r app.apk')):
+            r = self.offload(*cmd, check_exit=2)
+            self.assertIn('names denylisted device ZD22257P6G', r.stderr)
+        self.offload('echo', 'adb', '-s', 'ZD22257P6G', 'devices',
+                     opts=('--device', 'SYNTHPHONE1'), check_exit=2)
+        self.assertFalse(self.ssh_log.exists())
+
+    def test_env_and_config_file_extend_but_never_shrink_the_denylist(self):
+        config = Path(self.tmp.name) / 'xdg-config'
+        (config / 'tasks').mkdir(parents=True)
+        (config / 'tasks/denied-devices').write_text('# synthetic\nFILESERIAL1  # bench\n')
+        self.env.update(XDG_CONFIG_HOME=str(config), TASKS_DENIED_DEVICES='ENVSERIAL1, ENVSERIAL2')
+        for serial, source in (('ENVSERIAL2', 'TASKS_DENIED_DEVICES'),
+                               ('FILESERIAL1', 'denied-devices'),
+                               ('ZD22257P6G', 'built-in')):
+            r = self.offload('true', opts=('--device', serial), check_exit=2)
+            self.assertIn(f'denylisted device {serial}', r.stderr)
+            self.assertIn(source, r.stderr)
+        self.env['TASKS_DENIED_DEVICES'] = ''
+        (config / 'tasks/denied-devices').write_text('')
+        self.offload('true', opts=('--device', 'ZD22257P6G'), check_exit=2)
+        self.offload('true', opts=('--device', 'FILESERIAL1'), check_exit=0)
+        # A malformed configuration fails closed.
+        (config / 'tasks/denied-devices').write_text('not a serial!\n')
+        r = self.offload('true', check_exit=2)
+        self.assertIn('denied device serial', r.stderr)
+
+    def test_apk_built_by_one_offload_survives_the_next_sync_for_a_device_install(self):
+        # p2p_chat layout: android/settings.gradle.kts + android/app/build.gradle.kts.
+        self.write('android/settings.gradle.kts', 'include(":app")\n')
+        self.write('android/app/build.gradle.kts', '// synthetic\n')
+        self.write('android/app/src/Main.kt', 'fun main() {}\n')
+        self.git('add', 'android')
+        apk = 'app/build/outputs/apk/debug/app-debug.apk'
+        self.offload('sh', '-c', f'mkdir -p {os.path.dirname(apk)} && echo synthetic-apk > {apk}',
+                     cwd=self.repo / 'android', check_exit=0)
+        self.write('android/app/src/Main.kt', 'fun main() { println() }\n')  # a later edit
+        r = self.offload('cat', apk, opts=('--device', 'SYNTHPHONE1'),
+                         cwd=self.repo / 'android', check_exit=0)
+        self.assertIn('synthetic-apk', r.stdout)
+        self.assertEqual(self.summary(r)['pruned'], [])
 
     def test_fetch_into_default_destination(self):
         r = self.offload('sh', '-c', 'mkdir -p target/release && echo artifact > target/release/foo',

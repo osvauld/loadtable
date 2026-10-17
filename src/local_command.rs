@@ -104,6 +104,12 @@ impl Recipe {
         {
             return Err("invalid device serial".into());
         }
+        // Never-use devices (built-in personal phone plus additive config of
+        // the checking process): the device slot and any argv that names one.
+        if let Resource::Device(s) = &self.resource {
+            crate::device_denylist::refuse_device(s)?;
+        }
+        crate::device_denylist::refuse_argv(&self.argv)?;
         Ok(())
     }
     pub fn from_spec(spec: &JobSpec) -> Result<Self> {
@@ -797,6 +803,65 @@ mod tests {
             ["cargo", "+1.99.0", "test", "-p", "core", "--no-run"]
         );
         assert_eq!(r.argv_for("run").unwrap(), r.argv);
+    }
+    #[test]
+    fn denylisted_devices_are_refused_by_resource_and_by_argv() {
+        let recipe = |argv: &[&str], resource: Resource| Recipe {
+            argv: argv.iter().map(|s| s.to_string()).collect(),
+            resource,
+        };
+        // Device slot for the built-in denylisted serial, in any case: submit,
+        // approval (from_spec/validate) and execution all go through check().
+        for serial in ["ZD22257P6G", "zd22257p6g"] {
+            let r = recipe(&["adb", "devices"], Resource::Device(serial.into()));
+            let error = r.validate().unwrap_err().to_string();
+            assert!(error.contains("denylisted device ZD22257P6G"), "{error}");
+            assert!(error.contains("built-in"), "{error}");
+            assert!(r.spec("synthetic".into(), "/tmp".into()).is_err());
+        }
+        // Any resource: a command that names the serial is refused.
+        for (argv, resource) in [
+            (
+                &["adb", "-s", "ZD22257P6G", "logcat", "-d"][..],
+                Resource::Run,
+            ),
+            (
+                &["env", "ANDROID_SERIAL=ZD22257P6G", "adb", "shell"][..],
+                Resource::Run,
+            ),
+            (
+                &["sh", "-c", "adb -s zd22257p6g install -r a.apk"][..],
+                Resource::Compile,
+            ),
+            (
+                &["adb", "-s", "ZD22257P6G", "devices"][..],
+                Resource::Device("SYNTHPHONE1".into()),
+            ),
+            (
+                &["tasks-offload", "--device", "ZD22257P6G", "--", "true"][..],
+                Resource::Offload,
+            ),
+        ] {
+            let error = recipe(argv, resource).validate().unwrap_err().to_string();
+            assert!(
+                error.contains("names denylisted device ZD22257P6G"),
+                "{error}"
+            );
+        }
+        // Other serials are unaffected.
+        recipe(
+            &["adb", "-s", "SYNTHPHONE1", "logcat", "-d"],
+            Resource::Device("SYNTHPHONE1".into()),
+        )
+        .validate()
+        .unwrap();
+        // A stored job that names it fails approval-time parsing too.
+        let mut spec = recipe(&["true"], Resource::Run)
+            .spec("synthetic".into(), "/tmp".into())
+            .unwrap();
+        spec.configuration =
+            r#"{"argv":["adb","-s","ZD22257P6G","shell"],"resource":"run"}"#.into();
+        assert!(Recipe::from_spec(&spec).is_err());
     }
     #[test]
     fn recipes_reject_invalid_argv_and_do_not_claim_source_revision() {

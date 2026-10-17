@@ -28,6 +28,11 @@ Environment=PKG_CONFIG_PATH=/run/current-system/sw/lib/pkgconfig
 # NixOS module links /etc/taskworker/jdk21.
 #Environment=ANDROID_HOME=%h/Android/Sdk
 #Environment=JAVA_HOME=/etc/taskworker/jdk21
+# Test phone (README "Test phone on the worker"): device jobs use the SDK's adb as
+# "$ANDROID_HOME"/platform-tools/adb. To let commands call plain `adb`, append
+# %h/Android/Sdk/platform-tools to PATH above. Don't install a second adb
+# (android-tools): two adb versions kill each other's server on port 5037.
+# The daemon needs the adbusers group: restart the user manager after adding it.
 # Admission thresholds (validated; invalid values make start-worker fail).
 # Defaults when unset: 8192 MiB memory, 20 GiB cache disk, 256 MiB state disk.
 # Example for a ~7.6 GiB RAM laptop; choose deliberately for your host.

@@ -10,6 +10,7 @@ pub mod cache;
 pub mod catalog;
 #[cfg(target_os = "linux")]
 pub mod device;
+pub mod device_denylist;
 pub mod execution;
 pub mod ledger;
 pub mod local_command;

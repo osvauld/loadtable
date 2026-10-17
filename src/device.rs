@@ -84,6 +84,86 @@ pub fn lock_serial(serial: &str) -> Result<String> {
     Ok(lock)
 }
 
+/// adb serial for a device lock name. `lock_serial` maps `:` to `_` only, so
+/// an IPv4 `host_port` lock is a wireless `host:port` serial; any other name
+/// is the serial itself (mDNS serials have underscores but never a colon).
+pub fn adb_serial_for_lock(lock: &str) -> String {
+    if let Some((host, port)) = lock.rsplit_once('_')
+        && !port.is_empty()
+        && port.bytes().all(|b| b.is_ascii_digit())
+        && host.split('.').count() == 4
+        && host
+            .split('.')
+            .all(|o| !o.is_empty() && o.len() <= 3 && o.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return format!("{host}:{port}");
+    }
+    lock.into()
+}
+
+/// Marks every descriptor above stderr close-on-exec in the child, so a helper
+/// that daemonizes (the adb server calls setsid and outlives the job) cannot
+/// keep an inherited admission lease (lock descriptor) held after the job.
+pub fn without_inherited_fds(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: only async-signal-safe syscalls (close_range, getrlimit, fcntl).
+    unsafe {
+        cmd.pre_exec(|| {
+            const CLOSE_RANGE_CLOEXEC: libc::c_uint = 1 << 2;
+            if libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, CLOSE_RANGE_CLOEXEC) == 0 {
+                return Ok(());
+            }
+            let mut limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            let max = if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0 {
+                limit.rlim_cur.min(1 << 16) as i32
+            } else {
+                1024
+            };
+            for fd in 3..max {
+                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+            }
+            Ok(())
+        });
+    }
+}
+
+/// Starts (or finds) the adb server for a device job without lending it the
+/// job's admission descriptors. The server detaches into its own session, so
+/// it is shared by later device jobs and is not stopped by job cancellation;
+/// it never holds a device or run lock. Bounded; the outcome is reported.
+pub fn start_adb_server(env: &[(&str, std::ffi::OsString)], out: &Path) -> Result<String> {
+    let log = std::fs::File::create(out)?;
+    let mut cmd = Command::new(adb());
+    cmd.arg("start-server")
+        .env_clear()
+        .envs(env.iter().map(|(k, v)| (k, v)))
+        .stdin(Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log);
+    without_inherited_fds(&mut cmd);
+    let mut child = cmd.spawn().map_err(|e| format!("adb unavailable: {e}"))?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("adb start-server timed out after 30 s".into());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let text = std::fs::read_to_string(out).unwrap_or_default();
+    if !status.success() {
+        return Err(format!("adb start-server failed ({status}): {}", text.trim()).into());
+    }
+    Ok(text)
+}
+
 /// Bounded so a wedged adb server cannot hang `tasks devices` or the window.
 fn adb_output(args: &[&str], timeout: Duration) -> Result<String> {
     let mut child = Command::new(adb())
@@ -194,6 +274,10 @@ pub fn list() -> Result<Vec<Device>> {
 
 /// `--device` given: that device. Otherwise exactly one ready phone.
 pub fn select_phone(devices: &[Device], serial: Option<&str>) -> Result<Device> {
+    let denylist = crate::device_denylist::Denylist::load()?;
+    if let Some(s) = serial {
+        crate::device_denylist::refuse_device(s)?;
+    }
     let device = match serial {
         Some(s) => devices
             .iter()
@@ -202,7 +286,7 @@ pub fn select_phone(devices: &[Device], serial: Option<&str>) -> Result<Device> 
         None => {
             let phones: Vec<_> = devices
                 .iter()
-                .filter(|d| d.kind == "phone" && d.ready())
+                .filter(|d| d.kind == "phone" && d.ready() && denylist.denied(&d.serial).is_none())
                 .collect();
             match phones.as_slice() {
                 [one] => *one,
@@ -264,6 +348,7 @@ fn adb_step(args: &[&str]) -> Result<()> {
 /// Runs inside a device-locked job. Rechecks readiness, then installs keeping app
 /// data and opens the launcher activity. Never uninstalls, downgrades or clears data.
 pub fn install_and_launch(serial: &str, apk: &Path) -> Result<()> {
+    crate::device_denylist::refuse_device(serial)?;
     let text = adb_output(&["devices", "-l"], Duration::from_secs(10))?;
     let (serial, state, model) = parse_devices(&text)
         .into_iter()
@@ -347,17 +432,17 @@ mod tests {
     #[test]
     fn phone_selection_needs_one_ready_arm64_phone() {
         let phone = device(
-            "ZD22257P6G",
+            "SYNTHPHONE1",
             "device",
             "phone",
             &["arm64-v8a", "armeabi-v7a"],
         );
         let emulator = device("emulator-5554", "device", "emulator", &["x86_64"]);
-        let locked = device("9BWAY1LSDC", "unauthorized", "phone", &[]);
+        let locked = device("SYNTHLOCKED", "unauthorized", "phone", &[]);
         let all = [phone.clone(), emulator.clone(), locked.clone()];
         assert_eq!(select_phone(&all, None).unwrap(), phone);
-        assert_eq!(select_phone(&all, Some("ZD22257P6G")).unwrap(), phone);
-        assert!(select_phone(&all, Some("9BWAY1LSDC")).is_err());
+        assert_eq!(select_phone(&all, Some("SYNTHPHONE1")).unwrap(), phone);
+        assert!(select_phone(&all, Some("SYNTHLOCKED")).is_err());
         assert!(select_phone(&all, Some("emulator-5554")).is_err());
         assert!(select_phone(&all, Some("missing")).is_err());
         assert!(select_phone(std::slice::from_ref(&emulator), None).is_err());
@@ -368,8 +453,67 @@ mod tests {
             second
         );
         // A busy lock is not a refusal: the install job queues for it.
-        let mut busy = device("ZD22257P6G", "device", "phone", &["arm64-v8a"]);
+        let mut busy = device("SYNTHPHONE1", "device", "phone", &["arm64-v8a"]);
         busy.busy = true;
         assert!(select_phone(&[busy], None).is_ok());
+    }
+
+    #[test]
+    fn denylisted_phone_is_never_selected() {
+        let personal = device("ZD22257P6G", "device", "phone", &["arm64-v8a"]);
+        let test = device("SYNTHPHONE1", "device", "phone", &["arm64-v8a"]);
+        // Explicit selection is refused with the denylist reason.
+        let error = select_phone(&[personal.clone(), test.clone()], Some("ZD22257P6G"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("denylisted device ZD22257P6G"), "{error}");
+        // Auto-selection ignores it: the only other ready phone is chosen ...
+        assert_eq!(
+            select_phone(&[personal.clone(), test.clone()], None).unwrap(),
+            test
+        );
+        // ... and with only the denylisted phone there is no candidate.
+        let error = select_phone(&[personal], None).unwrap_err().to_string();
+        assert!(error.contains("no ready phone"), "{error}");
+    }
+
+    #[test]
+    fn adb_serial_is_recovered_from_the_lock_name() {
+        assert_eq!(adb_serial_for_lock("SYNTHPHONE1"), "SYNTHPHONE1");
+        assert_eq!(adb_serial_for_lock("emulator-5554"), "emulator-5554");
+        assert_eq!(
+            adb_serial_for_lock("192.168.1.3_42917"),
+            "192.168.1.3:42917"
+        );
+        // mDNS-style serials keep their underscores (they never had a colon).
+        assert_eq!(
+            adb_serial_for_lock("adb-SYNTH-abc._adb-tls-connect._tcp"),
+            "adb-SYNTH-abc._adb-tls-connect._tcp"
+        );
+        assert_eq!(adb_serial_for_lock("1.2.3_x"), "1.2.3_x");
+    }
+
+    #[test]
+    fn helper_processes_do_not_inherit_lease_descriptors() {
+        use std::os::fd::AsRawFd;
+        // A lease-like descriptor deliberately left inheritable, like an
+        // admission lock after Lease::inherit().
+        let file = std::fs::File::open("/proc/self/status").unwrap();
+        let fd = file.as_raw_fd();
+        assert!(unsafe { libc::fcntl(fd, libc::F_SETFD, 0) } == 0);
+        let probe = |detach: bool| {
+            let mut cmd = Command::new("sh");
+            cmd.args([
+                "-c",
+                &format!("test -e /proc/self/fd/{fd} && echo inherited || echo closed"),
+            ]);
+            if detach {
+                without_inherited_fds(&mut cmd);
+            }
+            String::from_utf8(cmd.output().unwrap().stdout).unwrap()
+        };
+        assert_eq!(probe(false).trim(), "inherited");
+        assert_eq!(probe(true).trim(), "closed");
+        drop(file);
     }
 }

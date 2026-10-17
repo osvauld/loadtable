@@ -5,7 +5,7 @@ Usage (from inside a Git checkout; HEAD may be unborn):
 
   tasks-offload --worker USER@HOST [--ssh-key PATH] --who OWNER
                 [--fetch RELPATH]... [--fetch-dest DIR] [--cargo-fetch]
-                [--remote-run] [--checksum] [--dry-run]
+                [--remote-run | --device SERIAL] [--checksum] [--dry-run]
                 [--transport ssh|iroh [--iroh-data-dir DIR --iroh-allow FILE
                  --iroh-addr IP:PORT [--iroh-bind IP:PORT] [--iroh-store DIR]
                  [--lan-peer PATH]]] -- CMD [ARGS...]
@@ -61,6 +61,14 @@ OWNER_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
 WORKER_RE = re.compile(r'^([A-Za-z0-9._-]+@)?[A-Za-z0-9._:-]+$')
 EXIT_USAGE, EXIT_TRANSPORT, EXIT_FETCH = 2, 255, 1
 ENDPOINT_RE = re.compile(r'^[0-9a-z]{52,64}$')
+# Device serial as the worker's `tasks run --device` accepts it (`:` maps to `_`).
+DEVICE_RE = re.compile(r'^[A-Za-z0-9._-]{1,128}$')
+# Devices agents must never use, mirrored from src/device_denylist.rs. The
+# built-in entries cannot be removed; TASKS_DENIED_DEVICES and
+# $XDG_CONFIG_HOME/tasks/denied-devices only add entries.
+DENIED_DEVICES_BUILTIN = ('ZD22257P6G',)  # the user's personal phone (moto g52)
+DENIED_DEVICES_ENV = 'TASKS_DENIED_DEVICES'
+DENIED_ENTRY_RE = re.compile(r'^[A-Za-z0-9._:-]{6,128}$')
 
 
 class OffloadError(Exception):
@@ -186,6 +194,65 @@ def build_manifest(top, bounds=Bounds()):
         os.close(root_fd)
     return {'schema': 'tasks-offload-manifest-v0', 'files': files, 'excluded': excluded,
             'deleted_tracked': deleted, 'bytes': total}
+
+
+def _device_key(serial):
+    return serial.replace(':', '_').upper()
+
+
+def denied_devices_config_path():
+    xdg = os.environ.get('XDG_CONFIG_HOME')
+    base = Path(xdg) if xdg and os.path.isabs(xdg) else Path.home() / '.config'
+    return base / 'tasks/denied-devices'
+
+
+def load_denylist():
+    """[(serial, source)]: built-in first, then env, then the config file. Fails closed."""
+    entries = [(s, 'built-in') for s in DENIED_DEVICES_BUILTIN]
+
+    def add(serial, source):
+        if not DENIED_ENTRY_RE.match(serial):
+            raise OffloadError(f'{source}: invalid denied device serial {serial!r} (6-128 '
+                               'characters of A-Z a-z 0-9 . _ - :); fix the device denylist')
+        entries.append((serial, source))
+
+    for serial in re.split(r'[,\s]+', os.environ.get(DENIED_DEVICES_ENV, '')):
+        if serial:
+            add(serial, DENIED_DEVICES_ENV)
+    path = denied_devices_config_path()
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        text = ''
+    except OSError as error:
+        raise OffloadError(f'device denylist {path}: {error}')
+    for line in text.splitlines():
+        serial = line.split('#', 1)[0].strip()
+        if serial:
+            add(serial, str(path))
+    return entries
+
+
+def _refusal(what, serial, source):
+    return OffloadError(f'{what} denylisted device {serial} ({source}): agents must never '
+                        'use it on any host. Use a dedicated test device (see '
+                        'deploy/worker/README.md, "Test phone on the worker")')
+
+
+def check_devices(device, command):
+    """Refuse a denylisted --device and any argv element naming a denylisted serial."""
+    if device is not None and (not DEVICE_RE.match(device.replace(':', '_'))
+                               or device.startswith('-')):
+        raise OffloadError(f'invalid device serial {device!r} for --device')
+    entries = load_denylist()
+    if device is not None:
+        for serial, source in entries:
+            if _device_key(serial) == _device_key(device):
+                raise _refusal('refusing', serial, source)
+    keys = [_device_key(a) for a in command]
+    for serial, source in entries:
+        if any(_device_key(serial) in a for a in keys):
+            raise _refusal('refusing a command that names', serial, source)
 
 
 def checkout_id(hostname, top):
@@ -490,6 +557,9 @@ def parse_args(argv):
                         help='run `cargo fetch --locked` on the worker (online) first')
     parser.add_argument('--remote-run', action='store_true',
                         help='submit with `tasks run --run` (run-only slot, must not compile)')
+    parser.add_argument('--device', metavar='SERIAL',
+                        help='submit with `tasks run --device SERIAL` on the worker (that '
+                             "device's exclusive slot in the worker ledger)")
     parser.add_argument('--checksum', action='store_true', help='rsync --checksum')
     parser.add_argument('--dry-run', action='store_true',
                         help='build the manifest and print the plan; contact nothing')
@@ -531,7 +601,8 @@ def main(argv=None):
                'remote_job_id': None, 'remote_phase': None, 'remote_state': None,
                'exit': None, 'synced_files': 0, 'synced_bytes': 0, 'excluded_files': 0,
                'deleted_tracked': 0, 'pruned': [], 'fetched': [], 'fetch_dest': None,
-               'cancel_requested': False, 'dry_run': args.dry_run, 'durations': {}}
+               'cancel_requested': False, 'dry_run': args.dry_run, 'durations': {},
+               'device': args.device}
     durations = summary['durations']
 
     def finish(code):
@@ -546,6 +617,11 @@ def main(argv=None):
             raise OffloadError('--who must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}')
         if not WORKER_RE.match(args.worker) or args.worker.startswith('-'):
             raise OffloadError('--worker must be USER@HOST')
+        if args.device is not None and args.remote_run:
+            raise OffloadError('--device and --remote-run conflict: --device already selects '
+                               "the worker's device slot (no compile slot)")
+        check_devices(args.device, args.command)
+        summary['device'] = args.device
         fetches = [safe_relpath(f, '--fetch') for f in args.fetch]
         hostname = socket.gethostname()
         remote_owner = f'{args.who}@{hostname}'
@@ -584,7 +660,10 @@ def main(argv=None):
         remote_cwd_rel = f'{remote_rel}/{sub}' if sub else remote_rel
         summary['remote_dir'] = f'~/{remote_rel}'
         summary['remote_cwd'] = f'~/{remote_cwd_rel}'
-        resource = '--run ' if args.remote_run else ''
+        if args.device is not None:
+            resource = f'--device {shlex.quote(args.device)} '
+        else:
+            resource = '--run ' if args.remote_run else ''
         run_cmd = (f'mkdir -p {remote_path(remote_cwd_rel)} && '
                    f'cd {remote_path(remote_cwd_rel)} && exec {REMOTE_TASKS} run --who '
                    f'{shlex.quote(remote_owner)} {resource}-- {shlex.join(args.command)}')
