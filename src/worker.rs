@@ -1141,22 +1141,30 @@ fn drain<R: Read + Send + 'static>(mut reader: R, dir: PathBuf) -> std::thread::
 }
 
 const DEFAULT_CARGO_BUILD_JOBS: &str = "2";
+/// The only daemon environment variables an admitted command inherits.
+const PASSTHROUGH_ENV: [&str; 12] = [
+    "HOME",
+    "PATH",
+    "RUSTUP_HOME",
+    "CARGO_HOME",
+    "XDG_RUNTIME_DIR",
+    "LANG",
+    // Host toolchain wiring set by the daemon's own environment (e.g. the
+    // NixOS worker unit); absent on hosts that don't set them.
+    "PKG_CONFIG_PATH",
+    "NIX_LD",
+    "NIX_LD_LIBRARY_PATH",
+    // Android/Gradle wiring from the worker unit: Gradle finds the SDK through
+    // ANDROID_HOME (or the deprecated ANDROID_SDK_ROOT) when local.properties
+    // has no sdk.dir, and the JDK through JAVA_HOME. Paths, not credentials.
+    "ANDROID_HOME",
+    "ANDROID_SDK_ROOT",
+    "JAVA_HOME",
+];
 fn sanitized(program: &Path) -> Command {
     let mut command = Command::new(program);
     command.env_clear();
-    for name in [
-        "HOME",
-        "PATH",
-        "RUSTUP_HOME",
-        "CARGO_HOME",
-        "XDG_RUNTIME_DIR",
-        "LANG",
-        // Host toolchain wiring set by the daemon's own environment (e.g. the
-        // NixOS worker unit); absent on hosts that don't set them.
-        "PKG_CONFIG_PATH",
-        "NIX_LD",
-        "NIX_LD_LIBRARY_PATH",
-    ] {
+    for name in PASSTHROUGH_ENV {
         if let Some(value) = std::env::var_os(name) {
             command.env(name, value);
         }
@@ -1675,11 +1683,42 @@ mod tests {
                 "PKG_CONFIG_PATH",
                 "NIX_LD",
                 "NIX_LD_LIBRARY_PATH",
+                "ANDROID_HOME",
+                "ANDROID_SDK_ROOT",
+                "JAVA_HOME",
                 "CARGO_BUILD_JOBS"
             ]
             .contains(&key.to_str().unwrap())),
             "{names:?}"
         );
+    }
+    #[test]
+    fn sanitized_commands_pass_android_sdk_and_jdk_locations_through() {
+        // A worker unit's ANDROID_HOME/JAVA_HOME must reach Gradle, whose cwd
+        // may lack local.properties; secrets-looking names stay out.
+        for name in ["ANDROID_HOME", "ANDROID_SDK_ROOT", "JAVA_HOME"] {
+            assert!(PASSTHROUGH_ENV.contains(&name), "{name}");
+        }
+        for name in PASSTHROUGH_ENV {
+            let upper = name.to_ascii_uppercase();
+            assert!(
+                !["TOKEN", "SECRET", "PASSWORD", "KEY", "SSH_AUTH_SOCK"]
+                    .iter()
+                    .any(|bad| upper.contains(bad)),
+                "{name}"
+            );
+        }
+        let cmd = sanitized(Path::new("./gradlew"));
+        for (key, value) in cmd.get_envs() {
+            let key = key.to_str().unwrap();
+            assert!(
+                key == "CARGO_BUILD_JOBS" || PASSTHROUGH_ENV.contains(&key),
+                "{key}"
+            );
+            if PASSTHROUGH_ENV.contains(&key) {
+                assert_eq!(value, std::env::var_os(key).as_deref(), "{key}");
+            }
+        }
     }
     #[test]
     fn sanitized_commands_default_to_two_cargo_jobs_not_cpu_count() {

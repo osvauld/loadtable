@@ -22,6 +22,12 @@ Environment=PATH=%h/.cargo/bin:%h/.local/bin:%h/.nix-profile/bin:/etc/profiles/p
 # NixOS: system .pc files (nix/taskworker-host.nix links /lib/pkgconfig). Harmless elsewhere:
 # pkg-config still searches its built-in system directories.
 Environment=PKG_CONFIG_PATH=/run/current-system/sw/lib/pkgconfig
+# Android/Gradle (passed through to admitted commands): the SDK for Gradle and for the
+# local.properties auto-create, and the JDK. Enable only where these paths exist: the SDK
+# is installed with Google's sdkmanager into ~/Android/Sdk (as on the main host), and the
+# NixOS module links /etc/taskworker/jdk21.
+#Environment=ANDROID_HOME=%h/Android/Sdk
+#Environment=JAVA_HOME=/etc/taskworker/jdk21
 # Admission thresholds (validated; invalid values make start-worker fail).
 # Defaults when unset: 8192 MiB memory, 20 GiB cache disk, 256 MiB state disk.
 # Example for a ~7.6 GiB RAM laptop; choose deliberately for your host.
