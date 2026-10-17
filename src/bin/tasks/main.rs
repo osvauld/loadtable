@@ -342,8 +342,25 @@ fn wait_job(
         streaming: output != Output::Full,
         at_line_start: true,
     };
+    // `Job(id)` returns one job; a daemon older than it answers "unknown variant".
+    let mut single = true;
     loop {
-        let r = call(socket, Action::List)?;
+        let mut r = call(
+            socket,
+            if single {
+                Action::Job(id)
+            } else {
+                Action::List
+            },
+        )?;
+        if single
+            && r.error
+                .as_deref()
+                .is_some_and(|e| e.contains("unknown variant"))
+        {
+            single = false;
+            r = call(socket, Action::List)?;
+        }
         if let Some(e) = r.error {
             return Err(format!("job {id}: {e}").into());
         }

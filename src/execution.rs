@@ -135,9 +135,8 @@ impl Phase {
 
 impl Store {
     pub fn job(&self, id: i64) -> Result<Job> {
-        self.jobs()?
-            .into_iter()
-            .find(|j| j.id == id)
+        self.select_jobs(Some(id))?
+            .pop()
             .ok_or_else(|| "job not found".into())
     }
     pub fn execution(&self, id: i64) -> Result<Option<Execution>> {

@@ -202,27 +202,35 @@ impl Store {
         })
     }
     pub fn jobs(&self) -> Result<Vec<Job>> {
-        let mut statement = self
-            .0
-            .prepare("SELECT id, spec, phase, submitted_at FROM jobs ORDER BY id ASC")?;
-        let rows = statement.query_map([], |row| {
+        self.select_jobs(None)
+    }
+    /// All jobs, or the one with `only`; executions come from the same query
+    /// instead of one lookup per job.
+    pub(crate) fn select_jobs(&self, only: Option<i64>) -> Result<Vec<Job>> {
+        let mut statement = self.0.prepare(
+            "SELECT j.id, j.spec, j.phase, j.submitted_at, e.data FROM jobs j \
+             LEFT JOIN executions e ON e.job_id = j.id \
+             WHERE ?1 IS NULL OR j.id = ?1 ORDER BY j.id ASC",
+        )?;
+        let rows = statement.query_map([only], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, i64>(3)?,
+                row.get::<_, Option<String>>(4)?,
             ))
         })?;
         let mut jobs = Vec::new();
         for row in rows {
-            let (id, spec, phase, submitted_at) = row?;
+            let (id, spec, phase, submitted_at, execution) = row?;
             let phase = Phase::from_db(&phase)?;
             jobs.push(Job {
                 id,
                 spec: serde_json::from_str(&spec)?,
                 phase,
                 submitted_at,
-                execution: self.execution(id)?,
+                execution: execution.map(|v| serde_json::from_str(&v)).transpose()?,
             });
         }
         Ok(jobs)
@@ -323,6 +331,10 @@ pub struct Request {
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Action {
     List,
+    /// One job, without the full listing or estimates: what a waiting `tasks run`
+    /// polls. Daemons older than this reject it as an unknown variant; clients then
+    /// fall back to `List`.
+    Job(i64),
     Submit(JobSpec),
     Cancel(i64),
     Approve(i64),
@@ -353,6 +365,18 @@ pub fn handle(store: &mut Store, request: Request) -> Response {
     } else {
         match request.action {
             Action::List => Ok(()),
+            Action::Job(id) => {
+                let job = store.job(id);
+                return Response {
+                    version: PROTOCOL_VERSION,
+                    execution_enabled: false,
+                    submitted_id: None,
+                    error: job.as_ref().err().map(|e| e.to_string()),
+                    jobs: job.into_iter().collect(),
+                    estimates: Vec::new(),
+                    log: None,
+                };
+            }
             Action::Submit(spec) => store.submit(&spec).map(|j| {
                 submitted_id = Some(j.id);
             }),
@@ -534,7 +558,11 @@ pub fn request_with_reconnect_timeouts(
         let resend =
             busy && matches!(
                 action,
-                Action::List | Action::Logs(_) | Action::StartWorker | Action::Submit(_)
+                Action::List
+                    | Action::Job(_)
+                    | Action::Logs(_)
+                    | Action::StartWorker
+                    | Action::Submit(_)
             ) && Instant::now() + backoff < deadline;
         if !resend {
             return Ok(response);
@@ -550,7 +578,7 @@ pub fn request_with_reconnect_timeouts(
     let waited = || began.elapsed().as_secs();
     match &action {
         // Read-only or idempotent: safe to send again.
-        Action::List | Action::Logs(_) | Action::StartWorker => {
+        Action::List | Action::Job(_) | Action::Logs(_) | Action::StartWorker => {
             let mut last = lost;
             let mut backoff = Duration::from_millis(250);
             while Instant::now() < deadline {
@@ -809,3 +837,7 @@ pub fn print_hint_on_detach(id: i64) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "job_poll_tests.rs"]
+mod job_poll_tests;
