@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -623,6 +624,97 @@ class OffloadTests(OffloadFixture):
         r = self.offload('true', cwd=outside, check_exit=2)
         self.assertIn('git', r.stderr.lower())
         self.assertFalse(self.ssh_log.exists())
+
+
+class JobSidecarTests(OffloadFixture):
+    """tasks-offload's per-local-job sidecar for the cluster snapshot's `offload` field."""
+
+    def setUp(self):
+        super().setUp()
+        self.env.pop('XDG_STATE_HOME', None)
+        self.env.pop('TASKS_JOB_ID', None)
+
+    def sidecar(self, job='91', state=None):
+        base = Path(state) if state else self.local_home / '.local/state'
+        return base / 'tasks-offload/jobs' / f'{job}.json'
+
+    def test_no_job_id_no_sidecar(self):
+        self.env.pop('TASKS_JOB_ID', None)
+        s = self.summary(self.offload('true', check_exit=0))
+        self.assertIsNone(s['sidecar'])
+        self.assertFalse((self.local_home / '.local/state/tasks-offload/jobs').exists())
+
+    def test_final_record_has_remote_id_transport_and_durations(self):
+        self.env['TASKS_JOB_ID'] = '91'
+        self.write('build.sh', '#!/bin/sh\nmkdir -p target && printf x > target/out\n',
+                   mode=0o755)
+        r = self.offload('./build.sh', opts=('--fetch', 'target/out'), check_exit=0)
+        s = self.summary(r)
+        path = self.sidecar()
+        self.assertEqual(s['sidecar'], str(path))
+        record = json.loads(path.read_text())
+        self.assertEqual(record['version'], 1)
+        self.assertEqual(record['local_job_id'], 91)
+        self.assertEqual(record['stage'], 'done')
+        self.assertEqual(record['worker'], 'tester@worker.invalid')
+        self.assertEqual(record['transport'], 'ssh')
+        self.assertEqual(record['remote_job_id'], s['remote_job_id'])
+        self.assertEqual(record['remote_phase'], 'passed')
+        self.assertEqual(record['exit'], 0)
+        for key in ('sync_s', 'run_s', 'fetch_s'):
+            self.assertIsInstance(record[key], float, key)
+        self.assertEqual(record['durations'], s['durations'])
+        self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+        self.assertEqual([p.name for p in path.parent.iterdir()], ['91.json'],
+                         'no temp files left behind')
+
+    def test_remote_job_id_is_published_while_the_job_runs(self):
+        self.env['TASKS_JOB_ID'] = '92'
+        gate = Path(self.tmp.name) / 'release'
+        argv = [sys.executable, '-B', str(CLIENT), '--worker', 'tester@worker.invalid',
+                '--who', 'offload-test', '--', 'sh', '-c',
+                f'while [ ! -e {gate} ]; do sleep 0.05; done']
+        proc = subprocess.Popen(argv, cwd=self.repo, env=self.env, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+        path = self.sidecar('92')
+        deadline = time.monotonic() + 60
+        record = {}
+        while time.monotonic() < deadline:
+            if path.exists():
+                record = json.loads(path.read_text())
+                if record.get('stage') == 'running':
+                    break
+            time.sleep(0.05)
+        self.assertEqual(record.get('stage'), 'running', record)
+        self.assertIsInstance(record['remote_job_id'], int)
+        self.assertIsInstance(record['sync_s'], float)
+        self.assertIsNone(record['exit'])
+        self.assertIsNone(record['fetch_s'])
+        gate.touch()
+        out, err = proc.communicate(timeout=60)
+        self.assertEqual(proc.returncode, 0, out + err)
+        final = json.loads(path.read_text())
+        self.assertEqual((final['stage'], final['remote_job_id']),
+                         ('done', record['remote_job_id']))
+
+    def test_xdg_state_home_and_failed_submission(self):
+        state = Path(self.tmp.name) / 'xdg-state'
+        self.env.update(TASKS_JOB_ID='93', XDG_STATE_HOME=str(state))
+        self.offload('false', check_exit=1)
+        record = json.loads(self.sidecar('93', state).read_text())
+        self.assertEqual((record['stage'], record['remote_phase'], record['exit']),
+                         ('done', 'failed', 1))
+
+    def test_malformed_job_id_and_dry_run_write_nothing(self):
+        self.env['TASKS_JOB_ID'] = '../x'
+        r = self.offload('true', check_exit=0)
+        self.assertIn('ignoring malformed TASKS_JOB_ID', r.stderr)
+        self.assertIsNone(self.summary(r)['sidecar'])
+        self.env['TASKS_JOB_ID'] = '94'
+        r = self.offload('true', opts=('--dry-run',), check_exit=0)
+        self.assertIsNone(self.summary(r)['sidecar'])
+        self.assertFalse((self.local_home / '.local/state/tasks-offload/jobs').exists())
 
 
 class IrohTransportTests(OffloadFixture):

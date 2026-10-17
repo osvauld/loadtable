@@ -24,6 +24,11 @@ sync-push`, and `--fetch` returns artifacts with `lan-peer fetch` into a NEW
 directory. The command itself still runs over ssh with the worker's `tasks run`;
 iroh never executes anything. See scripts/README-offload.md.
 
+Job sidecar: when the local `tasks` job id is in $TASKS_JOB_ID, a small JSON
+record of this offload (worker, transport, remote job id, durations) is kept at
+${XDG_STATE_HOME:-~/.local/state}/tasks-offload/jobs/<id>.json for the cluster
+snapshot's `offload` field (docs/design/cluster-snapshot.md).
+
 Exit status: the remote job's exit code; 2 usage/source refusal; 255 transport
 failure or UNCERTAIN remote state (summary `remote_state` disambiguates);
 130/143 after cancelling the remote job on SIGINT/SIGTERM; 1 fetch failure.
@@ -270,8 +275,7 @@ def safe_relpath(value, what):
 def lock_checkout(cid):
     """Serialize offloads of one checkout: a second sync would rewrite the
     worker copy under the first job's build. Held until this process exits."""
-    lock_dir = Path(os.environ.get('XDG_STATE_HOME') or Path.home() / '.local/state')
-    lock_dir = lock_dir / 'tasks-offload/locks'
+    lock_dir = state_home() / 'tasks-offload/locks'
     lock_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(lock_dir / f'{cid}.lock', os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
     try:
@@ -280,6 +284,62 @@ def lock_checkout(cid):
         log('waiting for another offload of this checkout to finish (its worker copy is in use)')
         fcntl.flock(fd, fcntl.LOCK_EX)
     return fd
+
+
+JOB_ID_ENV = 'TASKS_JOB_ID'
+JOB_ID_RE = re.compile(r'^[1-9][0-9]{0,18}$')
+
+
+def state_home():
+    return Path(os.environ.get('XDG_STATE_HOME') or Path.home() / '.local/state')
+
+
+class JobSidecar:
+    """`<state>/tasks-offload/jobs/<local job id>.json`: what the laptop knows about this
+    offload, for the cluster snapshot's `offload` field. Rewritten atomically (temp file +
+    rename) at each stage; never fails the offload. Inactive without $TASKS_JOB_ID."""
+
+    def __init__(self, summary):
+        self.summary = summary
+        self.path = None
+        self.job_id = None
+        self.started_at = time.time()
+        self.lock = threading.Lock()
+        raw = os.environ.get(JOB_ID_ENV)
+        if raw and JOB_ID_RE.match(raw):
+            self.job_id = int(raw)
+            self.path = state_home() / 'tasks-offload/jobs' / f'{self.job_id}.json'
+        elif raw:
+            log(f'ignoring malformed {JOB_ID_ENV}={raw!r}; no job sidecar')
+
+    def record(self, stage):
+        s, d = self.summary, self.summary['durations']
+        return {'version': 1, 'local_job_id': self.job_id, 'pid': os.getpid(),
+                'stage': stage, 'started_at': self.started_at, 'updated_at': time.time(),
+                'worker': s['worker'], 'transport': s['transport'], 'device': s.get('device'),
+                'remote_job_id': s['remote_job_id'], 'remote_phase': s['remote_phase'],
+                'remote_state': s['remote_state'], 'exit': s['exit'],
+                'sync_s': d.get('sync_s'), 'run_s': d.get('run_s'), 'fetch_s': d.get('fetch_s'),
+                'durations': dict(d)}
+
+    def write(self, stage):
+        if self.path is None:
+            return
+        with self.lock:
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix='.tmp-',
+                                           suffix='.json')
+                try:
+                    with os.fdopen(fd, 'w') as f:
+                        json.dump(self.record(stage), f, sort_keys=True)
+                        f.write('\n')
+                    os.replace(tmp, self.path)
+                except BaseException:
+                    os.unlink(tmp)
+                    raise
+            except OSError as error:
+                log(f'cannot write job sidecar {self.path}: {error}')
 
 
 def _inside(child, parent):
@@ -472,8 +532,9 @@ def iroh_sync(peer, top, manifest, cid, workdir):
 # --------------------------------------------------------------------------
 
 class RemoteRun:
-    def __init__(self, transport, command):
+    def __init__(self, transport, command, on_submitted=None):
         self.transport = transport
+        self.on_submitted = on_submitted
         self.job_id = None
         self.final = None  # (job, phase, exit)
         self.submitted = threading.Event()
@@ -499,6 +560,8 @@ class RemoteRun:
             if (m := SUBMITTED_RE.match(text)) and self.job_id is None:
                 self.job_id = int(m.group(1))
                 self.submitted.set()
+                if self.on_submitted is not None:
+                    self.on_submitted(self.job_id)
                 if self.cancel_wanted:
                     self.start_cancel()
             elif m := FINAL_RE.match(text):
@@ -602,12 +665,16 @@ def main(argv=None):
                'exit': None, 'synced_files': 0, 'synced_bytes': 0, 'excluded_files': 0,
                'deleted_tracked': 0, 'pruned': [], 'fetched': [], 'fetch_dest': None,
                'cancel_requested': False, 'dry_run': args.dry_run, 'durations': {},
-               'device': args.device}
+               'device': args.device, 'sidecar': None}
     durations = summary['durations']
+    sidecar = JobSidecar(summary)
 
     def finish(code):
         summary['exit'] = code
         durations['total_s'] = round(time.monotonic() - started, 3)
+        if not args.dry_run and sidecar.path is not None:
+            sidecar.write('done')
+            summary['sidecar'] = str(sidecar.path)
         sys.stdout.flush()
         print(json.dumps(summary, sort_keys=True), flush=True)
         return code
@@ -684,6 +751,7 @@ def main(argv=None):
             return finish(0)
 
         checkout_lock = lock_checkout(cid)  # noqa: F841  (held until exit)
+        sidecar.write('syncing')
         t = time.monotonic()
         if peer:
             # Content-addressed sync; the worker locks, prunes and verifies the checkout.
@@ -729,7 +797,7 @@ def main(argv=None):
         summary['remote_state'] = 'not_submitted'
         return finish(130)
     return run_and_fetch(args, transport, run_cmd, summary, durations, finish, fetches,
-                         default_dest_root, remote_rel, peer, remote_owner)
+                         default_dest_root, remote_rel, peer, remote_owner, sidecar)
 
 
 def sync_over_ssh(transport, args, hostname, top, paths, manifest, remote_rel, summary):
@@ -753,7 +821,7 @@ def sync_over_ssh(transport, args, hostname, top, paths, manifest, remote_rel, s
 
 
 def run_and_fetch(args, transport, run_cmd, summary, durations, finish, fetches,
-                  default_dest_root, remote_rel, peer, remote_owner):
+                  default_dest_root, remote_rel, peer, remote_owner, sidecar):
     # Run.
     signals = []
     run = None
@@ -764,8 +832,13 @@ def run_and_fetch(args, transport, run_cmd, summary, durations, finish, fetches,
             run.start_cancel()
 
     previous = {s: signal.signal(s, on_signal) for s in (signal.SIGINT, signal.SIGTERM)}
+    def on_submitted(job_id):
+        summary['remote_job_id'] = job_id
+        sidecar.write('running')
+
+    sidecar.write('submitting')
     t = time.monotonic()
-    run = RemoteRun(transport, run_cmd)
+    run = RemoteRun(transport, run_cmd, on_submitted)
     if signals:
         run.start_cancel()
     rc = None
@@ -802,6 +875,8 @@ def run_and_fetch(args, transport, run_cmd, summary, durations, finish, fetches,
         return finish(rc)
 
     # Fetch (only after a passed job).
+    if fetches and code == 0:
+        sidecar.write('fetching')
     if fetches and code == 0 and peer:
         t = time.monotonic()
         dest = Path(args.fetch_dest) if args.fetch_dest else default_dest_root / str(run.job_id)
