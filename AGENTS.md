@@ -29,3 +29,27 @@ copies or changing the running service/state. Read README.md and TRIAL.md fully.
 
 Repository is local, initially uncommitted, no remote. Do not manufacture an
 initial commit just to give source-capsule tests a Git HEAD; request permission.
+
+## LAN worker offload (NixOS worker 192.168.1.7)
+
+Heavy Cargo/Gradle work can run on the worker's own `tasks` ledger through the
+installed `~/.local/bin/tasks-offload` (docs: `scripts/README-offload.md`,
+`deploy/worker/README.md`). Run it under a LOCAL run slot, from a checkout no
+other agent is editing (the worker copy is keyed by host+path; same-checkout
+offloads queue on a client flock):
+`tasks run --run --who OWNER -- tasks-offload --worker abe@192.168.1.7
+--ssh-key ~/.ssh/id_ed25519_nixos_worker --who OWNER [--fetch REL]... -- CMD`.
+- Git-visible files (incl. uncommitted) are synced; `.gitignore`d files such as
+  `gradle.properties`, local env files and secrets are not. Pass needed
+  non-secret inputs as `env NAME=value`/`-P` flags; never put secrets in argv.
+- Worker Cargo may use `-j` up to 8 (the laptop cap of 2 doesn't apply there).
+  The worker env is an allowlist (`PASSTHROUGH_ENV` in `src/worker.rs`).
+- Worker-built binaries link against `/nix/store`; they do not run on the
+  laptop. For p2p_chat desktop use `scripts/offload-portable-desktop.sh`.
+  Android APKs are re-signed locally with `~/.android/debug.keystore`; the
+  keystore never leaves the laptop. Device installs stay local.
+- `--transport iroh` is experimental (content-addressed sync/fetch via
+  `lan-peer`); execution still uses SSH.
+- Worker root/NixOS changes (`nix/taskworker-host.nix`), licence acceptance,
+  `tasks` upgrades on either machine and unit edits are the user's steps: hand
+  them a script, don't work around a denied remote write.
