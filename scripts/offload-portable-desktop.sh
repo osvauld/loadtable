@@ -11,7 +11,7 @@
 #   --who OWNER        tasks/tasks-offload owner (required except with --check-only)
 #   --worker U@H       default abe@192.168.1.7
 #   --ssh-key PATH     default ~/.ssh/id_ed25519_nixos_worker
-#   --jobs N           cargo/cmake jobs on the worker, 1..8 (default 4; `sh -c` is not capped)
+#   --jobs N           cargo/cmake jobs on the worker, 1..8 (default 8; `sh -c` is not capped)
 #   --preflight        only probe the worker's build deps (remote run slot, no compile) and
 #                      name every missing tool/library; exit 1 if anything is missing
 #   --check-only BIN   skip the build; only run the local portability checks on BIN
@@ -21,7 +21,7 @@
 # resolve every imported symbol first, so a missing library or symbol version fails here.
 set -euo pipefail
 
-who="" worker="abe@192.168.1.7" key="$HOME/.ssh/id_ed25519_nixos_worker" jobs=4
+who="" worker="abe@192.168.1.7" key="$HOME/.ssh/id_ed25519_nixos_worker" jobs=8
 check_only="" preflight=""
 while (($#)); do
   case "$1" in
