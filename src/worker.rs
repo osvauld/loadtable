@@ -1,6 +1,7 @@
 //! Explicit Linux local worker. The stage supervisor retains worker.lock while cleaning up
 //! its own process group, even if the worker dies. No source is a security sandbox.
 use crate::execution::{LogTail, ProcessIdentity, StageTiming, now};
+use crate::ledger::{self, CancelProbe, CancelState};
 use crate::{
     Phase, Result, Store, admission, android, android_build, cache, catalog, retention, snapshot,
     state_dir, workspace_snapshot,
@@ -210,6 +211,12 @@ pub fn run() -> Result<()> {
     admission::Pressure::read()?;
     let thresholds = admission::thresholds()?;
     eprintln!("worker: effective admission thresholds {thresholds:?}");
+    // Fail closed on an invalid TASKS_CANCEL_GRACE_MS before claiming any job.
+    let grace = admission::cancel_grace()?;
+    eprintln!(
+        "worker: cancel grace {} ms (SIGTERM to SIGKILL)",
+        grace.as_millis()
+    );
     // Diagnostic only: lets `tasks admission` in other shells report these values.
     if let Err(error) = admission::record_worker_thresholds(&state, &thresholds) {
         eprintln!("worker: could not record admission thresholds: {error}");
@@ -261,7 +268,10 @@ pub fn run() -> Result<()> {
                             } else {
                                 Phase::Failed
                             };
-                            store.finish(job.id, phase, &error.to_string())?;
+                            let detail = error.to_string();
+                            with_ledger(&state, job.id, "final failure record", || {
+                                store.finish(job.id, phase.clone(), &detail)
+                            })?;
                             return Err(error);
                         }
                         Ok(())
@@ -269,6 +279,11 @@ pub fn run() -> Result<()> {
                     continue;
                 }
                 Ok(None) => (),
+                // A busy ledger is not a worker failure: try the claim again later.
+                Err(e) if ledger::is_transient(e.as_ref()) => {
+                    eprintln!("worker: ledger busy while claiming ({e}); retrying");
+                    std::thread::sleep(Duration::from_millis(500));
+                }
                 Err(e) => {
                     failure = Some(e.to_string());
                 }
@@ -434,34 +449,42 @@ fn execute_local(
             );
         }
         let result = supervise(state, lock, &lease, store, job.id, stage, worker)?;
-        let mut e = store.execution(job.id)?.ok_or("missing execution")?;
-        e.supervisor = None;
-        e.stages.push(result.timing.clone());
-        store.update_execution(
-            job.id,
-            if stage == "build" {
-                Phase::Building
-            } else {
-                Phase::Running
-            },
-            e,
-        )?;
-        if cancelled(store, job.id)? || STOP.load(Ordering::SeqCst) {
-            return store.finish(
+        with_ledger(state, job.id, "stage result", || {
+            let mut e = store.execution(job.id)?.ok_or("missing execution")?;
+            e.supervisor = None;
+            e.stages.push(result.timing.clone());
+            store.update_execution(
                 job.id,
-                Phase::Cancelled,
-                "Cancelled local command; owned group stopped",
-            );
+                if stage == "build" {
+                    Phase::Building
+                } else {
+                    Phase::Running
+                },
+                e,
+            )
+        })?;
+        if cancelled(store, job.id)? || STOP.load(Ordering::SeqCst) {
+            return with_ledger(state, job.id, "cancel record", || {
+                store.finish(
+                    job.id,
+                    Phase::Cancelled,
+                    "Cancelled local command; owned group stopped",
+                )
+            });
         }
         if result.timing.exit_code != Some(0) {
-            return store.finish(
-                job.id,
-                Phase::Failed,
-                "Local command failed; inspect retained log",
-            );
+            return with_ledger(state, job.id, "failure record", || {
+                store.finish(
+                    job.id,
+                    Phase::Failed,
+                    "Local command failed; inspect retained log",
+                )
+            });
         }
     }
-    store.complete_success(job.id)
+    with_ledger(state, job.id, "completion", || {
+        store.complete_success(job.id)
+    })
 }
 
 fn execute_android(
@@ -613,8 +636,26 @@ fn wait_for_target(
     }
 }
 
+/// Worker-thread cancellation check. A busy ledger is retried (the stage keeps
+/// running in its own supervisor meanwhile); only a committed cancel returns true.
+/// Past the ledger deadline this fails with `LedgerUnavailable`, never "cancelled".
 fn cancelled(store: &Store, id: i64) -> Result<bool> {
-    Ok(store.execution(id)?.is_some_and(|e| e.cancel_requested))
+    let state = state()?;
+    with_ledger(&state, id, "cancellation check", || {
+        ledger::cancel_requested(store, id)
+    })
+}
+
+/// Retries busy/locked ledger calls up to `ledger::LEDGER_UNAVAILABLE_DEADLINE`,
+/// noting the wait in the job log. Other errors return at once.
+fn with_ledger<T>(state: &Path, id: i64, what: &str, f: impl FnMut() -> Result<T>) -> Result<T> {
+    let dir = job_dir(state, id);
+    ledger::retry(
+        what,
+        ledger::LEDGER_UNAVAILABLE_DEADLINE,
+        &mut |note| append_log(&dir, format!("worker: {note}").as_bytes()),
+        f,
+    )
 }
 
 fn supervise(
@@ -672,22 +713,24 @@ fn supervise(
     let mut admitted = None;
     loop {
         if STOP.load(Ordering::SeqCst) {
-            store.cancel(id)?;
+            with_ledger(state, id, "stop request", || store.cancel(id))?;
         }
         if admitted.is_none() && dir.join(format!("{stage}-admitted.json")).exists() {
             let marker: Admitted = load(&dir.join(format!("{stage}-admitted.json")))?;
             admitted = Some(marker.wait_seconds);
-            let mut e = store.execution(id)?.ok_or("missing execution")?;
-            e.detail = format!("Shared admission granted; {stage} executing");
-            store.update_execution(
-                id,
-                if stage == "build" {
-                    Phase::Building
-                } else {
-                    Phase::Running
-                },
-                e,
-            )?;
+            with_ledger(state, id, "admission detail", || {
+                let mut e = store.execution(id)?.ok_or("missing execution")?;
+                e.detail = format!("Shared admission granted; {stage} executing");
+                store.update_execution(
+                    id,
+                    if stage == "build" {
+                        Phase::Building
+                    } else {
+                        Phase::Running
+                    },
+                    e,
+                )
+            })?;
         }
         if let Some(status) = child.try_wait()? {
             let path = dir.join(format!("{stage}-result.json"));
@@ -714,8 +757,10 @@ pub fn stage(id: i64, stage: &str, worker: ProcessIdentity) -> Result<()> {
     }
     let state = state()?;
     let dir = job_dir(&state, id);
+    // Fail closed before launching anything if the grace setting is invalid.
+    let grace = admission::cancel_grace()?;
     let store = database(&state)?;
-    let job = store.job(id)?;
+    let job = with_ledger(&state, id, "stage job read", || store.job(id))?;
     catalog::validate_claimed(&job)?;
     if stage == "run" && job.spec.suite == catalog::ANDROID_SUITE {
         return Err("Android is build-only; no run admission allowed".into());
@@ -770,16 +815,39 @@ pub fn stage(id: i64, stage: &str, worker: ProcessIdentity) -> Result<()> {
     let group = identity(child.id())?;
     let err = drain(child.stderr.take().ok_or("missing stderr")?, dir.clone());
     let mut stopped = false;
+    // A failed ledger read is "unknown": the stage keeps running and the read is
+    // retried. Only a committed cancel, a stop signal, worker loss, or a ledger
+    // unreadable past its deadline stops the group.
+    let mut probe = CancelProbe::default();
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
         }
-        if STOP.load(Ordering::SeqCst) || !alive(&worker) || cancelled(&store, id).unwrap_or(true) {
+        let reason = if STOP.load(Ordering::SeqCst) {
+            Some("stop signal".to_string())
+        } else if !alive(&worker) {
+            Some("worker gone".to_string())
+        } else {
+            match probe.poll(|| ledger::cancel_requested(&store, id), &mut |note| {
+                append_log(&dir, format!("supervisor: {note}").as_bytes())
+            }) {
+                CancelState::Continue => None,
+                CancelState::Cancelled => Some("cancel requested".to_string()),
+                CancelState::LedgerUnavailable(why) => {
+                    Some(format!("ledger unavailable, NOT a cancellation: {why}"))
+                }
+            }
+        };
+        if let Some(reason) = reason {
             append_log(
                 &dir,
-                b"supervisor: stopping owned stage group (cancel/worker gone)\n",
+                format!(
+                    "supervisor: stopping owned stage group ({reason}); SIGTERM, SIGKILL after {} ms\n",
+                    grace.as_millis()
+                )
+                .as_bytes(),
             );
-            terminate_group(&mut child, &group)?;
+            terminate_group(&mut child, &group, grace)?;
             stopped = true;
             break child.wait()?;
         }
@@ -820,8 +888,33 @@ pub fn admit(id: i64, stage: &str, supervisor: ProcessIdentity) -> Result<()> {
     }
     let state = state()?;
     let store = database(&state)?;
-    let job = store.job(id)?;
+    let job = with_ledger(&state, id, "admission job read", || store.job(id))?;
     catalog::validate_claimed(&job)?;
+    // Admission may wait a long time; a busy ledger during that wait is retried,
+    // never read as a cancel. This process's stderr is the job log.
+    let probe = std::cell::RefCell::new(CancelProbe::default());
+    let unavailable = std::cell::RefCell::new(None::<String>);
+    let stop_waiting = || {
+        let state = probe
+            .borrow_mut()
+            .poll(|| ledger::cancel_requested(&store, id), &mut |note| {
+                eprint!("admission: {note}")
+            });
+        match state {
+            CancelState::Continue => false,
+            CancelState::Cancelled => true,
+            CancelState::LedgerUnavailable(why) => {
+                *unavailable.borrow_mut() = Some(why);
+                true
+            }
+        }
+    };
+    let not_admitted = |what: &str| -> Box<dyn std::error::Error + Send + Sync> {
+        match unavailable.borrow().as_ref() {
+            Some(why) => ledger::LedgerUnavailable(format!("{what} abandoned: {why}")).into(),
+            None => format!("{what} cancelled or owner disappeared").into(),
+        }
+    };
     let e = job.execution.as_ref().ok_or("missing execution")?;
     let worker = e.worker.as_ref().ok_or("missing worker")?;
     if !job.phase.active()
@@ -843,11 +936,11 @@ pub fn admit(id: i64, stage: &str, supervisor: ProcessIdentity) -> Result<()> {
                     STOP.load(Ordering::SeqCst)
                         || !alive(&supervisor)
                         || !alive(worker)
-                        || cancelled(&store, id).unwrap_or(true)
+                        || stop_waiting()
                 },
             )?
             else {
-                return Err("device admission cancelled".into());
+                return Err(not_admitted("device admission"));
             };
             d.inherit()?;
             Some(d)
@@ -869,15 +962,10 @@ pub fn admit(id: i64, stage: &str, supervisor: ProcessIdentity) -> Result<()> {
             "{} __command {id} {stage} {} {}",
             job.spec.suite, supervisor.pid, supervisor.start_ticks
         ),
-        || {
-            STOP.load(Ordering::SeqCst)
-                || !alive(&supervisor)
-                || !alive(worker)
-                || cancelled(&store, id).unwrap_or(true)
-        },
+        || STOP.load(Ordering::SeqCst) || !alive(&supervisor) || !alive(worker) || stop_waiting(),
     )?
     else {
-        return Err("native admission cancelled or owner disappeared".into());
+        return Err(not_admitted("native admission"));
     };
     lease.inherit()?;
     append_log(
@@ -906,7 +994,15 @@ pub fn admit(id: i64, stage: &str, supervisor: ProcessIdentity) -> Result<()> {
     }
     let status = cmd.status()?;
     if !status.success() {
-        return Err(format!("native admitted command failed: {status}").into());
+        // The command's own exit status was already logged once by __command and
+        // is the job's recorded exit code; this is only the internal wrapper's.
+        let wrapper = status
+            .code()
+            .map_or_else(|| status.to_string(), |c| format!("exit {c}"));
+        return Err(format!(
+            "{stage} stage did not succeed (internal __command wrapper: {wrapper}; this is not the command's exit status)"
+        )
+        .into());
     }
     Ok(())
 }
@@ -926,13 +1022,32 @@ fn signal_group(group: &ProcessIdentity, sig: i32) -> Result<()> {
     }
     Ok(())
 }
-fn terminate_group(child: &mut Child, group: &ProcessIdentity) -> Result<()> {
+/// SIGTERM, then SIGKILL after `grace` (TASKS_CANCEL_GRACE_MS) or as soon as the
+/// group leader has exited, whichever is first; the SIGKILL still reaches any
+/// remaining group members.
+fn terminate_group(child: &mut Child, group: &ProcessIdentity, grace: Duration) -> Result<()> {
     // Keep the group leader unreaped until escalation, preventing PID/group reuse.
     signal_group(group, libc::SIGTERM)?;
-    std::thread::sleep(Duration::from_millis(300));
+    let deadline = Instant::now() + grace;
+    while Instant::now() < deadline && !leader_exited(child) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
     signal_group(group, libc::SIGKILL)?;
     let _ = child.wait()?;
     Ok(())
+}
+/// True once the child has exited, WITHOUT reaping it (WNOWAIT).
+fn leader_exited(child: &Child) -> bool {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let rc = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            child.id() as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    rc == 0 && unsafe { info.si_pid() } != 0
 }
 fn drain<R: Read + Send + 'static>(mut reader: R, dir: PathBuf) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
@@ -985,7 +1100,7 @@ pub fn command(id: i64, stage: &str, supervisor: ProcessIdentity) -> Result<()> 
     let state = state()?;
     let dir = job_dir(&state, id);
     let store = database(&state)?;
-    let job = store.job(id)?;
+    let job = with_ledger(&state, id, "command job read", || store.job(id))?;
     catalog::validate_claimed(&job)?;
     if !job.phase.active() {
         return Err("command requires active claimed job".into());
@@ -1087,7 +1202,9 @@ fn run_command(state: &Path, dir: &Path, job: &crate::Job, stage: &str) -> Resul
             },
         )?;
         if !status.success() {
-            return Err(format!("local command exited: {status}").into());
+            return Err(
+                format!("command failed: {status} (recorded as the job's exit status)").into(),
+            );
         }
         return Ok(());
     }
@@ -1515,8 +1632,49 @@ mod tests {
             .spawn()
             .unwrap();
         let group = identity(child.id()).unwrap();
-        terminate_group(&mut child, &group).unwrap();
+        terminate_group(&mut child, &group, Duration::from_millis(300)).unwrap();
         assert!(!alive(&group));
         assert!(alive(&identity(std::process::id()).unwrap()));
+    }
+    /// A group whose leader traps SIGTERM and needs ~0.6 s to clean up.
+    fn slow_cleanup_group() -> (Child, ProcessIdentity) {
+        let mut child = Command::new("sh")
+            .args([
+                "-c",
+                "trap 'sleep 0.6; exit 7' TERM; echo ready; sleep 30 & wait",
+            ])
+            .stdout(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        // Wait until the trap is installed before signalling.
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let group = identity(child.id()).unwrap();
+        (child, group)
+    }
+    #[test]
+    fn default_grace_kills_a_slow_sigterm_handler() {
+        let (mut child, group) = slow_cleanup_group();
+        terminate_group(&mut child, &group, Duration::from_millis(300)).unwrap();
+        let status = child.wait().unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}");
+    }
+    #[test]
+    fn longer_grace_lets_the_sigterm_handler_finish_and_returns_early() {
+        let (mut child, group) = slow_cleanup_group();
+        let start = Instant::now();
+        terminate_group(&mut child, &group, Duration::from_secs(5)).unwrap();
+        let status = child.wait().unwrap();
+        assert_eq!(status.code(), Some(7), "{status:?}");
+        // Escalation happens once the leader exits, not after the full grace.
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            start.elapsed()
+        );
+        assert!(!alive(&group));
     }
 }

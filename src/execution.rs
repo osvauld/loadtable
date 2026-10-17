@@ -650,7 +650,7 @@ mod tests {
                 [serde_json::to_string(&spec()).unwrap()],
             )
             .unwrap();
-        let mut store = Store::init(connection).unwrap();
+        let mut store = Store::init(connection, crate::STORE_BUSY_TIMEOUT).unwrap();
         assert_eq!(store.jobs().unwrap()[0].phase, Phase::Queued);
         assert!(store.jobs().unwrap()[0].execution.is_none());
         assert!(

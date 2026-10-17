@@ -11,6 +11,7 @@ pub mod catalog;
 #[cfg(target_os = "linux")]
 pub mod device;
 pub mod execution;
+pub mod ledger;
 pub mod local_command;
 #[cfg(target_os = "linux")]
 pub mod retention;
@@ -22,7 +23,7 @@ pub mod workspace_snapshot;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 pub const PROTOCOL_VERSION: u32 = 2;
@@ -139,16 +140,25 @@ fn check_field(value: &str) -> Result<()> {
     Ok(())
 }
 
+/// How long one ledger statement waits for another connection's lock before
+/// failing with SQLITE_BUSY. Was 5 s; workers additionally retry busy errors
+/// (see `ledger`), and clients wait well beyond this (see `ClientTimeouts`).
+pub const STORE_BUSY_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub struct Store(pub(crate) Connection);
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
-        Self::init(Connection::open(path)?)
+        Self::open_with_busy_timeout(path, STORE_BUSY_TIMEOUT)
+    }
+    /// Tests use a short timeout to model a busy ledger quickly.
+    pub fn open_with_busy_timeout(path: &Path, busy: Duration) -> Result<Self> {
+        Self::init(Connection::open(path)?, busy)
     }
     pub fn memory() -> Result<Self> {
-        Self::init(Connection::open_in_memory()?)
+        Self::init(Connection::open_in_memory()?, STORE_BUSY_TIMEOUT)
     }
-    fn init(conn: Connection) -> Result<Self> {
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    fn init(conn: Connection, busy: Duration) -> Result<Self> {
+        conn.busy_timeout(busy)?;
         conn.execute_batch(
             "PRAGMA foreign_keys=ON;
             CREATE TABLE IF NOT EXISTS jobs (
