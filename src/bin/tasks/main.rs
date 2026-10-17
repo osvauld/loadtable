@@ -474,8 +474,14 @@ fn print_devices(devices: &[tinline_task_manager::device::Device]) {
         "{:<22} {:<9} {:<13} {:<12} {:<18} AVAILABILITY",
         "SERIAL", "KIND", "STATE", "ABI", "MODEL"
     );
+    let denylist = tinline_task_manager::device_denylist::Denylist::load();
     for d in devices {
+        let denied = match &denylist {
+            Ok(list) => list.denied(&d.serial).is_some(),
+            Err(_) => true,
+        };
         let availability = match (&d.holder, d.busy) {
+            _ if denied => "DENIED: agents must never use this device".into(),
             (Some(who), _) => format!("busy: {who}"),
             (None, true) => "busy".into(),
             (None, false) => "free".into(),

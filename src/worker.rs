@@ -1193,6 +1193,33 @@ fn sanitized(program: &Path) -> Command {
     command
 }
 
+/// Device commands: `ANDROID_SERIAL` names the locked device, so adb, Gradle
+/// install tasks and ddmlib target it even without `-s` (an explicit `-s` or a
+/// job's own `env ANDROID_SERIAL=` still overrides; denylisted serials in argv
+/// are refused at validation). The adb server is started here, before the
+/// command, with no inherited descriptors: adb daemonizes into its own session
+/// (outside the owned process group), and a server first spawned by the command
+/// itself would keep this job's device and run lock descriptors held forever.
+/// Failure to start it is logged, not fatal (the command reports its own error).
+fn prepare_device_command(cmd: &mut Command, dir: &Path, lock: &str) {
+    cmd.env("ANDROID_SERIAL", crate::device::adb_serial_for_lock(lock));
+    let env: Vec<(&str, std::ffi::OsString)> = PASSTHROUGH_ENV
+        .iter()
+        .filter_map(|name| std::env::var_os(name).map(|v| (*name, v)))
+        .collect();
+    let note = match crate::device::start_adb_server(&env, &dir.join("adb-start-server.log")) {
+        Ok(text) if text.trim().is_empty() => "tasks: adb server already running\n".to_string(),
+        Ok(text) => format!(
+            "tasks: adb start-server (detached, no lock descriptors): {}\n",
+            text.trim()
+        ),
+        Err(e) => format!(
+            "tasks: warning: {e}; the command's own adb calls may start a server that holds this job's locks\n"
+        ),
+    };
+    append_log(dir, note.as_bytes());
+}
+
 /// Admitted command runner. No arbitrary command/spec arguments are accepted.
 /// If its supervisor dies it kills its own dedicated group, not another agent's group.
 pub fn command(id: i64, stage: &str, supervisor: ProcessIdentity) -> Result<()> {
@@ -1279,6 +1306,9 @@ fn run_command(state: &Path, dir: &Path, job: &crate::Job, stage: &str) -> Resul
             if let Some(v) = std::env::var_os(name) {
                 cmd.env(name, v);
             }
+        }
+        if let crate::local_command::Resource::Device(lock) = &recipe.resource {
+            prepare_device_command(&mut cmd, dir, lock);
         }
         let start = Instant::now();
         let mut child = cmd.spawn()?;

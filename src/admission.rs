@@ -422,6 +422,7 @@ impl Kind {
                 {
                     return Err("invalid device serial".into());
                 }
+                crate::device_denylist::refuse_device(s)?;
                 vec![format!("p2p-device-{s}.lock")]
             }
         })
