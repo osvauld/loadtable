@@ -38,6 +38,7 @@ const USAGE: &str = "usage: tasks [ui]
        tasks devices [--json]  # read-only: connected phones/emulators, ABI, ready, lock free/busy
        tasks phone-test [--who OWNER] SOURCE [--device SERIAL] [--follow | --full-log | --tail N]
          # build phone APK, install -r, launch; default: step progress, then the last 40 log lines
+       tasks tmp-usage [--json] [PATH...]  # read-only bounded /tmp+cache inventory; never deletes
        tasks record SUITE CONFIG STAGE SECONDS
        tasks daemon";
 
@@ -113,6 +114,7 @@ fn run() -> Result<()> {
             return Ok(());
         }
         Some("phone-test") => return phone_test(&args[1..]),
+        Some("tmp-usage") => return tinline_task_manager::tmp_usage::cli(&args[1..]),
         Some("__phone-install") if args.len() == 3 => {
             return tinline_task_manager::device::install_and_launch(&args[1], Path::new(&args[2]));
         }

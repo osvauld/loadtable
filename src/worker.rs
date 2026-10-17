@@ -82,6 +82,8 @@ pub fn start_detached() -> Result<()> {
     let state = state()?;
     // Report invalid TASKS_MIN_* configuration to the requesting client now.
     admission::thresholds()?;
+    // Likewise an invalid TASKS_LOCK_DIR (fails closed; default /tmp/claude-$UID).
+    admission::root()?;
     let lease = worker_lock(&state)?;
     if lease.try_lock().is_ok() {
         lease.unlock()?;
@@ -213,6 +215,11 @@ pub fn run() -> Result<()> {
     // Diagnostic only: lets `tasks admission` in other shells report these values.
     if let Err(error) = admission::record_worker_thresholds(&state, &thresholds) {
         eprintln!("worker: could not record admission thresholds: {error}");
+    }
+    let lock_dir = admission::root()?;
+    eprintln!("worker: admission lock directory {}", lock_dir.display());
+    if let Err(error) = admission::record_worker_lock_dir(&state, &lock_dir) {
+        eprintln!("worker: could not record admission lock directory: {error}");
     }
     let worker = identity(std::process::id())?;
     let mut store = database(&state)?;

@@ -33,10 +33,15 @@ pub const STATE_FREE_ENV: &str = "TASKS_MIN_STATE_FREE_MIB";
 /// request, 1..=64. Default 2. Raising it never changes the injected default of 2.
 pub const MAX_CARGO_JOBS_ENV: &str = "TASKS_MAX_CARGO_JOBS";
 pub const DEFAULT_MAX_CARGO_JOBS: u64 = 2;
+/// Opt-in, more lenient CPU PSI some avg10 limit (whole percent, 40..=100) for
+/// RUN slots only. Default 40, the shared CPU gate. It can never tighten below
+/// 40 and never relaxes memory, memory/I/O PSI or compile admission.
+pub const RUN_CPU_ENV: &str = "TASKS_RUN_CPU_SOME_MAX_PCT";
 /// Written by each worker at start so `tasks admission` in another shell reports
 /// what the worker actually applies, not that shell's own environment.
 pub const THRESHOLD_RECORD: &str = "admission-thresholds.json";
-// PSI gates are fixed policy; only reported, never configurable here.
+// PSI gates are fixed policy, except the opt-in run-slot CPU limit (RUN_CPU_ENV),
+// which may only be raised above CPU_SOME_MAX for run slots.
 const CPU_SOME_MAX: f64 = 40.0;
 const MEMORY_SOME_MAX: f64 = 1.0;
 const MEMORY_FULL_MAX: f64 = 0.5;
@@ -70,6 +75,13 @@ const STATE_LIMIT: Limit = Limit {
     unit_name: "MiB",
     floor: 64,
     max: 1024 * 1024,
+};
+const RUN_CPU_LIMIT: Limit = Limit {
+    env: RUN_CPU_ENV,
+    unit: 1,
+    unit_name: "percent",
+    floor: 40,
+    max: 100,
 };
 const CARGO_JOBS_LIMIT: Limit = Limit {
     env: MAX_CARGO_JOBS_ENV,
@@ -115,9 +127,15 @@ pub struct Thresholds {
     /// Records from earlier releases lack this field and mean the default.
     #[serde(default = "default_max_cargo_jobs")]
     pub max_cargo_jobs: u64,
+    /// Records from earlier releases lack this field and mean the default (40).
+    #[serde(default = "default_run_cpu")]
+    pub run_cpu_some_avg10_max_pct: u64,
 }
 fn default_max_cargo_jobs() -> u64 {
     DEFAULT_MAX_CARGO_JOBS
+}
+fn default_run_cpu() -> u64 {
+    CPU_SOME_MAX as u64
 }
 impl Default for Thresholds {
     fn default() -> Self {
@@ -126,6 +144,7 @@ impl Default for Thresholds {
             min_cache_free_bytes: crate::cache::MIN_FREE_BYTES,
             min_state_free_bytes: crate::cache::MIN_STATE_FREE_BYTES,
             max_cargo_jobs: DEFAULT_MAX_CARGO_JOBS,
+            run_cpu_some_avg10_max_pct: default_run_cpu(),
         }
     }
 }
@@ -138,6 +157,8 @@ impl Thresholds {
             min_cache_free_bytes: CACHE_LIMIT.parse(get(CACHE_FREE_ENV), d.min_cache_free_bytes)?,
             min_state_free_bytes: STATE_LIMIT.parse(get(STATE_FREE_ENV), d.min_state_free_bytes)?,
             max_cargo_jobs: CARGO_JOBS_LIMIT.parse(get(MAX_CARGO_JOBS_ENV), d.max_cargo_jobs)?,
+            run_cpu_some_avg10_max_pct: RUN_CPU_LIMIT
+                .parse(get(RUN_CPU_ENV), d.run_cpu_some_avg10_max_pct)?,
         })
     }
     pub fn from_env() -> Result<Self> {
@@ -149,6 +170,7 @@ impl Thresholds {
             CACHE_FREE_ENV,
             STATE_FREE_ENV,
             MAX_CARGO_JOBS_ENV,
+            RUN_CPU_ENV,
         ]
         .iter()
         .any(|name| get(name).is_some())
@@ -159,6 +181,7 @@ impl Thresholds {
             && CACHE_LIMIT.admits(self.min_cache_free_bytes)
             && STATE_LIMIT.admits(self.min_state_free_bytes)
             && CARGO_JOBS_LIMIT.admits(self.max_cargo_jobs)
+            && RUN_CPU_LIMIT.admits(self.run_cpu_some_avg10_max_pct)
     }
 }
 static ACTIVE: OnceLock<std::result::Result<Thresholds, String>> = OnceLock::new();
@@ -276,7 +299,7 @@ pub fn report_thresholds(
         Ok(Some(record)) => {
             match &own {
                 Ok(t) if own_overridden && *t != record.thresholds => warnings.push(
-                    "this shell's TASKS_MIN_*/TASKS_MAX_CARGO_JOBS settings differ from the worker's recorded thresholds; the worker applies its own environment".into(),
+                    "this shell's TASKS_MIN_*/TASKS_MAX_CARGO_JOBS/TASKS_RUN_CPU_SOME_MAX_PCT settings differ from the worker's recorded thresholds; the worker applies its own environment".into(),
                 ),
                 Err(e) => warnings.push(format!("this shell's threshold environment is invalid: {e}")),
                 _ => (),
@@ -341,11 +364,32 @@ pub struct Pressure {
 }
 impl Pressure {
     pub fn read() -> Result<Self> {
+        Self::read_from(Path::new("/proc"))
+    }
+    /// Fails closed. A missing/unreadable PSI file is named exactly, with the
+    /// kernel requirement, instead of a bare "No such file or directory".
+    fn read_from(proc: &Path) -> Result<Self> {
+        let read = |rel: &str| -> Result<String> {
+            let path = proc.join(rel);
+            fs::read_to_string(&path).map_err(|e| {
+                if rel.starts_with("pressure/") {
+                    format!(
+                        "{}: {e}. Admission requires kernel pressure stall information (PSI): \
+                         a kernel with CONFIG_PSI=y, booted with psi=1 if it was built with \
+                         CONFIG_PSI_DEFAULT_DISABLED=y. Admission fails closed without it",
+                        path.display()
+                    )
+                } else {
+                    format!("{}: {e}", path.display())
+                }
+                .into()
+            })
+        };
         Self::parse(
-            &fs::read_to_string("/proc/meminfo")?,
-            &fs::read_to_string("/proc/pressure/cpu")?,
-            &fs::read_to_string("/proc/pressure/memory")?,
-            &fs::read_to_string("/proc/pressure/io")?,
+            &read("meminfo")?,
+            &read("pressure/cpu")?,
+            &read("pressure/memory")?,
+            &read("pressure/io")?,
         )
     }
     fn parse(memory: &str, cpu: &str, memory_psi: &str, io_psi: &str) -> Result<Self> {
@@ -378,17 +422,43 @@ impl Pressure {
             io_full_avg10: psi(io_psi, "full")?,
         })
     }
+    #[cfg(test)]
     fn permits(&self) -> bool {
-        self.blocker().is_none()
+        self.permits_for(&Kind::Compile)
     }
-    fn blocker(&self) -> Option<String> {
+    fn permits_for(&self, kind: &Kind) -> bool {
+        self.blocker_for_kind(kind).is_none()
+    }
+    fn blocker_for_kind(&self, kind: &Kind) -> Option<String> {
         match thresholds() {
-            Ok(t) => self.blocker_with(&t),
+            Ok(t) => self.blocker_for(&t, kind),
             Err(e) => Some(format!("invalid admission threshold configuration: {e}")),
         }
     }
-    /// Names the effective memory threshold; PSI gates are unchanged policy.
+    /// Shared (compile) gate. Names the effective memory threshold.
     pub fn blocker_with(&self, thresholds: &Thresholds) -> Option<String> {
+        self.blocker_for(thresholds, &Kind::Compile)
+    }
+    /// Run slots may use the opt-in RUN_CPU_ENV CPU limit; every other gate,
+    /// and every gate for compile/device stages, is unchanged policy.
+    pub fn blocker_for(&self, thresholds: &Thresholds, kind: &Kind) -> Option<String> {
+        let run_cpu = thresholds.run_cpu_some_avg10_max_pct;
+        if matches!(kind, Kind::Run) && run_cpu as f64 > CPU_SOME_MAX {
+            self.blocker_at(thresholds, run_cpu as f64, || {
+                format!("CPU PSI some avg10 above {run_cpu}% (run slots, {RUN_CPU_ENV})")
+            })
+        } else {
+            self.blocker_at(thresholds, CPU_SOME_MAX, || {
+                "CPU PSI some avg10 above 40%".into()
+            })
+        }
+    }
+    fn blocker_at(
+        &self,
+        thresholds: &Thresholds,
+        cpu_max: f64,
+        cpu_text: impl FnOnce() -> String,
+    ) -> Option<String> {
         if [
             self.cpu_some_avg10,
             self.memory_some_avg10,
@@ -405,8 +475,8 @@ impl Pressure {
                 "available memory below {}",
                 memory_text(thresholds.min_available_memory_bytes)
             ))
-        } else if self.cpu_some_avg10 > CPU_SOME_MAX {
-            Some("CPU PSI some avg10 above 40%".into())
+        } else if self.cpu_some_avg10 > cpu_max {
+            Some(cpu_text())
         } else if self.memory_some_avg10 > MEMORY_SOME_MAX {
             Some("memory PSI some avg10 above 1%".into())
         } else if self.memory_full_avg10 > MEMORY_FULL_MAX {
@@ -449,6 +519,10 @@ pub struct Status {
     pub backend: &'static str,
     pub pressure: Pressure,
     pub pressure_blocker: Option<String>,
+    /// Same gates for run slots, with the opt-in TASKS_RUN_CPU_SOME_MAX_PCT.
+    pub run_pressure_blocker: Option<String>,
+    /// The inspected lock directory and where it came from (worker record/env/default).
+    pub lock_dir: Option<LockDirReport>,
     pub thresholds: ThresholdReport,
     /// Live cache-disk space (`~/build-cache`) against the effective reserve.
     pub cache_disk: Option<crate::cache::DiskSpace>,
@@ -460,16 +534,12 @@ pub struct Status {
     pub waiting: Vec<Note>,
     pub warnings: Vec<String>,
 }
-pub fn root() -> PathBuf {
-    PathBuf::from(format!("/tmp/claude-{}", unsafe { libc::geteuid() }))
+/// This process's admission lock directory: TASKS_LOCK_DIR, else exactly
+/// `/tmp/claude-$EUID` (see admission_lock_dir.rs). Invalid values fail closed.
+pub fn root() -> Result<PathBuf> {
+    lock_dir::root()
 }
-fn check_root(root: &Path) -> Result<()> {
-    let m = fs::symlink_metadata(root)?;
-    if !m.is_dir() || m.uid() != unsafe { libc::geteuid() } {
-        return Err("admission directory must be real and user-owned".into());
-    }
-    Ok(())
-}
+use lock_dir::check_root;
 fn open_lock(path: &Path, create: bool) -> Result<File> {
     let f = OpenOptions::new()
         .read(true)
@@ -594,7 +664,7 @@ fn older_waiter(root: &Path, me: &Wait, slot: &str) -> Result<bool> {
     Ok(false)
 }
 pub fn acquire(kind: Kind, who: &str, cmd: &str, stop: impl Fn() -> bool) -> Result<Option<Lease>> {
-    acquire_at(&root(), kind, who, cmd, Pressure::read, stop)
+    acquire_at(&root()?, kind, who, cmd, Pressure::read, stop)
 }
 fn acquire_at(
     root: &Path,
@@ -604,8 +674,7 @@ fn acquire_at(
     pressure: impl Fn() -> Result<Pressure>,
     stop: impl Fn() -> bool,
 ) -> Result<Option<Lease>> {
-    fs::create_dir_all(root)?;
-    check_root(root)?;
+    lock_dir::prepare_root(root)?;
     let names = kind.names()?;
     let files = names
         .iter()
@@ -629,7 +698,7 @@ fn acquire_at(
         let gated = !matches!(kind, Kind::Device(_));
         let ready = if gated {
             let p = pressure()?;
-            let blocker = p.blocker();
+            let blocker = p.blocker_for_kind(&kind);
             let permits = blocker.is_none();
             if blocker != previous_blocker {
                 if let Some(reason) = &blocker {
@@ -646,7 +715,7 @@ fn acquire_at(
                 if !take(f)? {
                     continue;
                 }
-                if gated && !pressure()?.permits() {
+                if gated && !pressure()?.permits_for(&kind) {
                     unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_UN) };
                     continue;
                 }
@@ -681,7 +750,11 @@ pub fn status() -> Result<Status> {
         Thresholds::overridden(|name| std::env::var_os(name)),
     )?;
     let state = crate::state_dir();
-    let mut status = status_with(&root(), Pressure::read()?, report, warnings)?;
+    let (lock_dir, lock_warnings) =
+        report_lock_dir(&state, root(), std::env::var_os(LOCK_DIR_ENV).is_some())?;
+    let mut status = status_with(&lock_dir.path, Pressure::read()?, report, warnings)?;
+    status.warnings.extend(lock_warnings);
+    status.lock_dir = Some(lock_dir);
     let t = status.thresholds.effective;
     let cache_disk =
         crate::cache::cache_root().and_then(|cache| crate::cache::cache_space_with(&cache, &t));
@@ -728,6 +801,8 @@ fn status_with(
     let mut status = Status {
         backend: "rust-flock-v1",
         pressure_blocker: pressure.blocker_with(&thresholds.effective),
+        run_pressure_blocker: pressure.blocker_for(&thresholds.effective, &Kind::Run),
+        lock_dir: None,
         pressure,
         thresholds,
         cache_disk: None,
@@ -773,3 +848,13 @@ fn status_with(
 #[cfg(test)]
 #[path = "admission_tests.rs"]
 mod tests;
+// ---- Fresh-host portability and run-slot PSI (feedback #27/#29) ----
+#[path = "admission_lock_dir.rs"]
+mod lock_dir;
+pub use lock_dir::{
+    LOCK_DIR_ENV, LOCK_DIR_RECORD, LockDirRecord, LockDirReport, default_root,
+    record_worker_lock_dir, report_lock_dir, root_from,
+};
+#[cfg(test)]
+#[path = "admission_ops_tests.rs"]
+mod ops_tests;

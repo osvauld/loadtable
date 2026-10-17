@@ -32,6 +32,13 @@ Environment=TASKS_MIN_AVAILABLE_MEMORY_MIB=3072
 # (1..=64, default 2). Commands without -j still get CARGO_BUILD_JOBS=2.
 # Only for a dedicated compute worker with RAM/cores to spare.
 #Environment=TASKS_MAX_CARGO_JOBS=8
+# Opt-in: let RUN slots admit up to this CPU PSI some avg10 (40..=100, default
+# 40 = unchanged). Never relaxes compile, memory or I/O gates.
+#Environment=TASKS_RUN_CPU_SOME_MAX_PCT=80
+# Admission lock directory. Default /tmp/claude-$UID (shared with legacy
+# clients). Override only if /tmp is age-cleaned and cannot be excluded; then
+# legacy default-path clients are NOT coordinated. See README.md.
+#Environment=TASKS_LOCK_DIR=%h/.local/state/tasks-locks
 # Leave TASK_MANAGER_STATE_DIR unset: the default (~/.local/state/
 # tinline-task-manager-native) is what SSH clients use too.
 #

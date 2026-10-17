@@ -17,6 +17,9 @@ import tempfile
 import time
 from wait_budget import WaitBudget
 
+# Same rule as admission::root(): TASKS_LOCK_DIR, else exactly /tmp/claude-$EUID.
+LOCK_DIR = Path(os.environ.get('TASKS_LOCK_DIR') or f'/tmp/claude-{os.geteuid()}')
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
@@ -124,7 +127,7 @@ def main():
     def remember_admission(current):
         supervisor = current['execution']['supervisor']
         suffix = f"__command {current['id']} run {supervisor['pid']} {supervisor['start_ticks']}"
-        for note in Path('/tmp/claude-1000').glob('p2p-run-*.holder'):
+        for note in LOCK_DIR.glob('p2p-run-*.holder'):
             try:
                 holder = json.loads(note.read_text())
                 if suffix in holder.get('cmd', ''):
@@ -219,7 +222,7 @@ def main():
         print('PASS: failing test result and exit status retained', flush=True)
 
         # Hold the real compile admission lock (no heavy work), ensuring waiting is observable.
-        lock_path = Path('/tmp/claude-1000/p2p-build.lock')
+        lock_path = LOCK_DIR / 'p2p-build.lock'
         lease = lock_path.open('a+')
         deadline = time.monotonic() + args.queue_timeout if args.queue_timeout else None
         while True:
