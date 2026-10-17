@@ -18,6 +18,9 @@
     };
   };
   networking.firewall.interfaces.wlo1.allowedTCPPorts = [ 22 2222 ];
+  # iroh QUIC for the lan-peer source/artifact transfer (LAN interface only;
+  # admission is the account attestation + allowlist, not the port).
+  networking.firewall.interfaces.wlo1.allowedUDPPorts = [ 7842 ];
 
   users.users.abe = {
     openssh.authorizedKeys.keys = [
