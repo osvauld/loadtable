@@ -957,6 +957,11 @@ fn sanitized(program: &Path) -> Command {
         "CARGO_HOME",
         "XDG_RUNTIME_DIR",
         "LANG",
+        // Host toolchain wiring set by the daemon's own environment (e.g. the
+        // NixOS worker unit); absent on hosts that don't set them.
+        "PKG_CONFIG_PATH",
+        "NIX_LD",
+        "NIX_LD_LIBRARY_PATH",
     ] {
         if let Some(value) = std::env::var_os(name) {
             command.env(name, value);
@@ -1459,6 +1464,27 @@ fn run_android(state: &Path, dir: &Path, job: &crate::Job, stage: &str) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sanitized_commands_keep_only_allowlisted_toolchain_env() {
+        let cmd = sanitized(Path::new("cargo"));
+        let names: Vec<_> = cmd.get_envs().map(|(key, _)| key.to_owned()).collect();
+        assert!(
+            names.iter().all(|key| [
+                "HOME",
+                "PATH",
+                "RUSTUP_HOME",
+                "CARGO_HOME",
+                "XDG_RUNTIME_DIR",
+                "LANG",
+                "PKG_CONFIG_PATH",
+                "NIX_LD",
+                "NIX_LD_LIBRARY_PATH",
+                "CARGO_BUILD_JOBS"
+            ]
+            .contains(&key.to_str().unwrap())),
+            "{names:?}"
+        );
+    }
     #[test]
     fn sanitized_commands_default_to_two_cargo_jobs_not_cpu_count() {
         let cmd = sanitized(Path::new("cargo"));
