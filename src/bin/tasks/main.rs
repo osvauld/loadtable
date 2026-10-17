@@ -4,6 +4,7 @@ mod daemon;
 mod display;
 mod follow;
 mod log_view;
+mod mcp;
 mod options;
 mod status;
 mod ui;
@@ -50,7 +51,8 @@ const USAGE: &str = "usage: tasks [ui [--fixtures DIR]]  # DIR: cluster snapshot
        tasks status [--json]  # this machine: CPU/memory/PSI, slots, jobs with live use, progress, ETA
        tasks tmp-usage [--json] [PATH...]  # read-only bounded /tmp+cache inventory; never deletes
        tasks record SUITE CONFIG STAGE SECONDS
-       tasks daemon";
+       tasks daemon
+       tasks mcp [--no-start-daemon]  # MCP server for agents (stdio JSON-RPC)";
 
 fn main() {
     if let Err(error) = run() {
@@ -74,6 +76,7 @@ fn run() -> Result<()> {
             std::process::exit(tinline_task_manager::peer::bridge::run(&args[1..]));
         }
         Some("peer") => return peer_command(&args[1..]),
+        Some("mcp") => return mcp::run(&args[1..]),
         Some("catalog") if args.len() == 1 => {
             println!(
                 "{}",
