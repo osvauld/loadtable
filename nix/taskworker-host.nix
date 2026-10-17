@@ -49,13 +49,13 @@
   # rustup toolchains (rust-toolchain.toml) and prebuilt tools need a dynamic loader.
   programs.nix-ld.enable = true;
   # Shared libraries that offloaded test binaries (rustup-built, nix-ld loader) load at runtime.
-  programs.nix-ld.libraries = with pkgs; [ libaom libvpx openssl ];
+  programs.nix-ld.libraries = with pkgs; [ libaom libvpx libvmaf openssl ];
 
   environment.systemPackages = with pkgs; [
     git rsync python3 rustup gcc clang cmake ninja gnumake pkg-config
     openssl openssl.dev perl protobuf
     # p2p_chat video crate: pkg-config aom/vpx, nasm for rav1e asm.
-    nasm libaom libaom.dev libvpx libvpx.dev
+    nasm libaom libaom.dev libvpx libvpx.dev libvmaf libvmaf.dev
   ];
   # Expose the .pc files above at /run/current-system/sw/lib/pkgconfig; the tasks
   # daemon unit points PKG_CONFIG_PATH there.
