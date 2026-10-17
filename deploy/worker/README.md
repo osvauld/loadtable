@@ -260,3 +260,211 @@ GLIBCXX ≤ 3.4.30, and the smoke start passed. `strings` still shows some
 `/nix/store` paths: the old RUNPATH text stays unreferenced in `.dynstr`, and some
 C++ header paths remain in assertions. These are not load paths. Not validated:
 opening the GUI, audio, camera, calls, or any other distro than this Arch host.
+
+## Test phone on the worker
+
+Goal: an Android test phone plugged into the worker's USB, driven by agents
+through the worker's own `tasks` ledger: build, install and logcat all run on
+the worker, and each device job holds that phone's exclusive device slot
+(`p2p-device-SERIAL.lock`) there. The test phone is a **Pixel 3a, serial
+`9BWAY1LSDC`**.
+
+Status: designed and unit-tested **without a phone**. On the worker only
+`adb version`/`adb devices` (empty list) and the adb server lifetime were
+exercised (worker jobs 76, 77, 81, 82). USB access, authorization, install and
+logcat on a real phone are unverified until the phone is plugged in there.
+
+### Never-use devices (denylist)
+
+`tasks` refuses the user's personal phone, moto g52 `ZD22257P6G`, on every
+host. The entry is built in (`src/device_denylist.rs`) and cannot be removed.
+More serials can only be **added**: `TASKS_DENIED_DEVICES` (comma/space
+separated, in the environment of the `tasks` process that checks: the unit's
+`Environment=` for the daemon/worker, your shell for the client) and
+`~/.config/tasks/denied-devices` (`$XDG_CONFIG_HOME/tasks/denied-devices`;
+one serial per line, `#` comments). A malformed entry fails closed: every
+command validation reports it until it is fixed. Matching ignores case and
+treats `:` like `_` (the lock-name form).
+
+Where it is enforced:
+
+- `tasks run|enqueue --device SERIAL` (client submission), daemon approval
+  (`approve-command`), worker claim, admission and execution (each re-parses the
+  recipe), and the device lock itself (`admission::Kind::Device`);
+- any live command whose argv **mentions** a denied serial, whatever its
+  resource: `adb -s ZD22257P6G ...`, `-sZD22257P6G`, `ANDROID_SERIAL=...`, or the
+  serial inside `sh -c` text;
+- `tasks phone-test` (explicit `--device` refused; automatic selection skips
+  denied phones) and the internal install step; `tasks devices` shows them as
+  `DENIED`;
+- `tasks-offload --device SERIAL` and `tasks-offload ... -- CMD` (same list,
+  checked on the client before anything is synced or submitted).
+
+The job's own environment never reaches these checks: they run in the client,
+daemon and worker before the command exists.
+
+Limit: the denylist sees text, not intent. `adb` without `-s` (or a script that
+reads a serial from a file, or Gradle's `installDebug`, which installs on
+**every** connected device) can still reach a phone it does not name. So:
+always pass `-s SERIAL`, use `--device SERIAL` for anything that talks to a
+device, and never run adb or Gradle install tasks under `--run` or the compile
+slot. Device jobs set `ANDROID_SERIAL` to their locked device (below), which
+covers adb, ddmlib and Gradle install tasks that are not given a serial.
+
+### adb on the worker
+
+- **Binary:** the SDK's `~/Android/Sdk/platform-tools/adb` (runs through
+  nix-ld), not nixpkgs' `android-tools`. It is the same release as the
+  laptop's (1.0.41, 37.0.1-15733141). Two adb builds on one host fight over the
+  server on port 5037 ("adb server version doesn't match this client;
+  killing..."): a second binary would kill the server under another device job.
+  The daemon's `PATH` has no platform-tools, so commands call
+  `"$ANDROID_HOME"/platform-tools/adb` (`ANDROID_HOME` is passed through from the
+  unit). Optionally add `%h/Android/Sdk/platform-tools` to the unit's `PATH`
+  (template `tasks-daemon.service`) so plain `adb` works; the commands below do
+  not rely on it.
+- **USB permission:** systemd ≥ 258 tags adb/fastboot interfaces
+  `ID_DEBUG_APPLIANCE=android` and grants access only via `uaccess`, i.e. to the
+  user of an active **seat** session. This worker is headless (`loginctl`: no
+  seat) and the tasks daemon is a lingering user service, so uaccess never
+  applies. nixpkgs 26.05 removed `programs.adb` and `android-udev-rules` for
+  that reason. `nix/taskworker-host.nix` therefore adds a group `adbusers`, puts
+  `abe` in it and gives USB device nodes `GROUP="adbusers", MODE="0660"` for any
+  `ID_DEBUG_APPLIANCE=="android"` device plus vendors 18d1 (Google/Pixel) and 22b8
+  (Motorola). A group, not `OWNER="abe"`, so another worker user can be added
+  later without editing rules.
+- **The daemon must have the group.** Supplementary groups are fixed when abe's
+  systemd user manager starts (at boot, through lingering), and `tasks-daemon`
+  and every job inherit them. After the switch the running daemon still lacks
+  `adbusers` until `user@1000.service` restarts (this also stops all user units
+  and their running jobs, so do it when `tasks list --active` is empty) or the
+  worker reboots. A daemon autostarted from a new ssh login would get the group
+  from that login, but the unit owns the daemon normally. Check:
+  `grep Groups /proc/$(systemctl --user show -p MainPID --value tasks-daemon)/status`.
+- **Authorization:** the phone must trust the worker's adb key
+  (`~/.android/adbkey` on the worker, created by the first adb server start).
+  On first connection the phone shows "Allow USB debugging?": accept it on the
+  phone with "Always allow from this computer". Until then `adb devices` lists
+  it as `unauthorized`.
+
+### adb server lifetime under `tasks`
+
+Observed on the worker (job 76): the first adb client forks the server
+(`adb -L tcp:5037 fork-server server`), which calls `setsid`, so it leaves the
+job's process group and session and is reparented to the user manager. Job
+cancellation (SIGTERM/SIGKILL to the owned group) therefore never stops it.
+Worse, it inherited the job's admission lock descriptor (fd 9 →
+`p2p-run-0.lock`) and kept `run-0` busy with no holder after the job had
+passed, until `adb kill-server` (job 77). In a device job it would hold the
+device lock the same way, blocking that phone for every later job.
+
+So the release with the denylist also changes `--device` jobs (`src/worker.rs`
+`prepare_device_command`):
+
+- before the command starts, the worker runs `adb start-server` itself, with
+  every descriptor above stderr close-on-exec (`device::without_inherited_fds`).
+  The server holds no lock and outlives the job, shared by later device jobs.
+  The job log notes `adb server already running` or the start-server output;
+  a failure is a logged warning, and the command then reports its own error.
+  Job 81 checked the same mechanism (`close_fds=True`) on the worker: the
+  server had its own session and 0 lock descriptors, and all run slots were free
+  after the job.
+- `ANDROID_SERIAL` is set to the locked device (wireless `host_port` lock names
+  are mapped back to `host:port`). `ANDROID_SERIAL` is deliberately NOT in
+  `PASSTHROUGH_ENV`: the client's environment is never forwarded, and a
+  daemon-wide value would be one host-wide default device that ignores each
+  job's lock.
+
+Rules for device jobs: don't run `adb kill-server`, `adb start-server`,
+`adb -a`, or `adb reconnect` in a job; a server that a job's own command
+restarts holds that job's locks again. To recover from a stray server (`tasks
+admission` shows a slot busy with no holder and `ls -l /proc/$(pgrep -f 'adb -L')/fd`
+shows a `.lock`), run `adb kill-server` in a `--device` job, and say so in your
+feedback. The laptop's long-running adb server was started outside `tasks` and
+holds no lock descriptors.
+
+### Setup (user, once)
+
+1. From the laptop, in this checkout: `deploy/worker/enable-test-phone.sh`.
+   It stages `nix/taskworker-host.nix` on the worker, shows the diff, then (on
+   your confirmation, with your sudo password on the ssh tty) backs up
+   `/etc/nixos/taskworker.nix` to `.pre-test-phone`, installs the module, runs
+   `sudo nixos-rebuild switch` and `udevadm trigger`, offers to restart the user
+   manager when the worker queue is idle, and verifies. The module also adds
+   `htop` and `kitty.terminfo` (TERM=xterm-kitty over ssh). Read-only checks:
+   `deploy/worker/enable-test-phone.sh --verify`. The module was evaluated in
+   the worker's real configuration without switching
+   (`deploy/worker/check-test-phone-module.sh`, worker job 85).
+2. Deploy the `tasks` release that contains the denylist and device-job
+   preparation on **both** machines (worker and laptop), and the matching
+   `tasks-offload` on the laptop. Until then `tasks run --device` on the worker
+   works but has no `ANDROID_SERIAL`/adb prestart, and only the new
+   `tasks-offload` refuses the denied serial.
+3. Plug in the Pixel 3a, enable USB debugging, run the check below and accept
+   the authorization prompt on the phone.
+
+### Agent commands
+
+Run from your OWN checkout (the worker copy is keyed by host+path, so the same
+checkout always maps to the same worker directory), under a local offload slot:
+
+```sh
+OFF="tasks-offload --worker abe@192.168.1.7 --ssh-key $HOME/.ssh/id_ed25519_nixos_worker --who OWNER"
+
+# Is the phone there, ready and authorized? (device slot, read-only)
+tasks run --offload --who OWNER -- $OFF --device 9BWAY1LSDC -- \
+  sh -c '"$ANDROID_HOME"/platform-tools/adb -s 9BWAY1LSDC devices -l'
+```
+
+Build and install from a p2p_chat checkout, preferably as two offloads from
+`android/`. The build holds the worker's compile slot and no device; the
+install holds only the device slot (plus a run slot) for seconds:
+
+```sh
+cd /path/to/your/p2p_chat/android
+tasks run --offload --who OWNER -- $OFF -- \
+  ./gradlew --no-daemon --console=plain :app:assembleDebug -Pabis=arm64-v8a \
+  "-Dorg.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8" -Pandroid.useAndroidX=true \
+  -Pandroid.nonTransitiveRClass=true -Pkotlin.code.style=official -PrustRelease=true
+tasks run --offload --who OWNER -- $OFF --device 9BWAY1LSDC -- \
+  sh -c '"$ANDROID_HOME"/platform-tools/adb -s 9BWAY1LSDC install -r app/build/outputs/apk/debug/app-debug.apk'
+```
+
+The APK stays in the worker checkout between the two offloads:
+`android/app/build` is never pruned by a sync (`offload_agent.py` `PRESERVED`
+plus the marker rule beside `build.gradle(.kts)`; synthetic test
+`test_apk_built_by_one_offload_survives_the_next_sync_for_a_device_install`).
+On the worker, the `app-debug.apk` built by job 45 is still in its checkout
+(no later sync of that checkout has happened yet). Don't
+edit the checkout between the two steps, or you install an APK of older source.
+Gradle on the worker signs with the laptop's debug key (copied to the worker's
+`~/.android/debug.keystore`, user-approved), so `install -r` updates an app
+installed from the laptop without a signature mismatch. No re-sign step is
+needed for APKs built on the worker from now on. APKs built there before the
+key was copied still need the old local re-sign with the laptop keystore.
+
+One-shot variant (simpler, but it holds the phone's device slot for the whole
+Gradle build, and a `--device` job is run-only, so the build takes a run slot
+instead of the worker's compile slot):
+
+```sh
+tasks run --offload --who OWNER -- $OFF --device 9BWAY1LSDC -- sh -c \
+  './gradlew --no-daemon --console=plain :app:assembleDebug -Pabis=arm64-v8a "-Dorg.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8" -Pandroid.useAndroidX=true -Pandroid.nonTransitiveRClass=true -Pkotlin.code.style=official -PrustRelease=true && "$ANDROID_HOME"/platform-tools/adb -s 9BWAY1LSDC install -r app/build/outputs/apk/debug/app-debug.apk'
+```
+
+Logcat comes back as the job's output (it also stays in the worker's bounded
+job log):
+
+```sh
+# Dump the current buffers and exit (add -t 2000 for the last 2000 lines).
+tasks run --offload --who OWNER -- $OFF --device 9BWAY1LSDC -- \
+  sh -c '"$ANDROID_HOME"/platform-tools/adb -s 9BWAY1LSDC logcat -d -v time'
+# Bounded live capture: 60 s, then exit 0 (timeout's 124 means "time is up").
+tasks run --offload --who OWNER -- $OFF --device 9BWAY1LSDC -- \
+  sh -c 'timeout 60 "$ANDROID_HOME"/platform-tools/adb -s 9BWAY1LSDC logcat -v time; rc=$?; [ $rc -eq 124 ] && rc=0; exit $rc'
+```
+
+The worker's `tasks run` prints the job log when the job ends, so the "live"
+capture arrives after its 60 s, not line by line. Don't clear logcat
+(`logcat -c`) or wipe/uninstall anything unless the user explicitly asked: a
+device slot is not permission to change data on the phone.

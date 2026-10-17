@@ -52,8 +52,22 @@ offloads queue on a client flock):
   The worker env is an allowlist (`PASSTHROUGH_ENV` in `src/worker.rs`).
 - Worker-built binaries link against `/nix/store`; they do not run on the
   laptop. For p2p_chat desktop use `scripts/offload-portable-desktop.sh`.
-  Android APKs are re-signed locally with `~/.android/debug.keystore`; the
-  keystore never leaves the laptop. Device installs stay local.
+  Worker Gradle signs APKs with the laptop's debug key (copied to the worker's
+  `~/.android/debug.keystore`, user-approved), so no re-sign step is needed;
+  only APKs built on the worker before that still need a local re-sign.
+- **Test phone on the worker** (Pixel 3a `9BWAY1LSDC`; setup and commands in
+  `deploy/worker/README.md` "Test phone on the worker"): add
+  `--device SERIAL` to `tasks-offload` to hold that phone's device slot in the
+  worker ledger. Build in one offload (compile slot), then install/logcat in a
+  `--device` offload from the same checkout (the APK in `android/app/build`
+  persists). Always pass `adb -s SERIAL`; never run adb or Gradle install
+  tasks without `--device`, and never `adb kill-server`/`start-server` in a job.
+  A device slot is not permission to wipe, uninstall or clear data.
+- **Never use the personal phone `ZD22257P6G`** (moto g52) on any host. `tasks`
+  and `tasks-offload` refuse it (`--device`, or any argv naming it) via a
+  built-in denylist that configuration can only extend
+  (`TASKS_DENIED_DEVICES`, `~/.config/tasks/denied-devices`). The denylist
+  sees text only: `adb` without `-s` can still reach whatever is plugged in.
 - `--transport iroh` is experimental (content-addressed sync/fetch via
   `lan-peer`); execution still uses SSH.
 - Worker root/NixOS changes (`nix/taskworker-host.nix`), licence acceptance,

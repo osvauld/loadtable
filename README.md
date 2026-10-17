@@ -67,6 +67,14 @@ install/launch on THAT device only. Without `--device` it needs exactly one read
 phone. Wireless `host:port` serials use the existing `host_port` lock names. The
 window's Devices panel shows the same view and a "Test on phone" button.
 
+Never-use devices: the user's personal phone `ZD22257P6G` is on a built-in
+denylist; `run`/`enqueue --device`, approval, execution, device locks,
+`phone-test` and any argv naming it are refused on every host. Configuration can
+only add serials (`TASKS_DENIED_DEVICES`, `~/.config/tasks/denied-devices`).
+`--device` jobs get `ANDROID_SERIAL` set to their device, and the worker starts
+the adb server for them without lock descriptors. A test phone on the LAN worker:
+deploy/worker/README.md "Test phone on the worker".
+
 ## Development
 
 This is an independent Cargo workspace. No app checkout or workspace dependency

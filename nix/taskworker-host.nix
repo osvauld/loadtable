@@ -29,7 +29,27 @@
     ];
     # Keep the worker's user-level tasks daemon running without a login session.
     linger = true;
+    # USB access to the test phone (udev rule below). Takes effect for the tasks
+    # daemon only after its user manager restarts (deploy/worker/README.md).
+    extraGroups = [ "adbusers" ];
   };
+
+  # Test phone on the worker (deploy/worker/README.md "Test phone on the worker").
+  # systemd >= 258 tags adb/fastboot interfaces ID_DEBUG_APPLIANCE=android and grants
+  # access only through "uaccess", i.e. to the user of an ACTIVE SEAT session. This
+  # worker is headless and the tasks daemon is a lingering user service with no seat,
+  # so uaccess never applies to it. nixpkgs 26.05 removed programs.adb and
+  # android-udev-rules for that reason; give the node to a group instead.
+  # USB device nodes only (DEVTYPE usb_device); 99-local.rules runs after systemd's
+  # 70-uaccess.rules, so ID_DEBUG_APPLIANCE is already set.
+  users.groups.adbusers = { };
+  services.udev.extraRules = ''
+    # Any adb/fastboot device (systemd's own classification).
+    SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ENV{ID_DEBUG_APPLIANCE}=="android", GROUP="adbusers", MODE="0660"
+    # Google/Pixel (18d1) and Motorola (22b8), also before USB debugging is enabled.
+    SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="18d1", GROUP="adbusers", MODE="0660"
+    SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="22b8", GROUP="adbusers", MODE="0660"
+  '';
 
   # A worker must not sleep: ignore lid/idle and disable suspend/hibernate.
   services.logind.settings.Login = {
@@ -67,6 +87,12 @@
     # installed per user with Google's sdkmanager into ~/Android/Sdk (deploy/worker/README.md);
     # unzip unpacks its cmdline-tools archive.
     jdk21 cargo-ndk unzip
+    # Operator convenience: htop, and kitty's terminfo so ncurses tools work over ssh
+    # from kitty (TERM=xterm-kitty).
+    htop kitty.terminfo
+    # No android-tools: device jobs use the SDK's platform-tools adb
+    # (~/Android/Sdk/platform-tools, run through nix-ld), the same adb release as the
+    # main host, so one adb server protocol/version is in use (README).
   ];
   # Stable JAVA_HOME for the tasks daemon unit (Environment=JAVA_HOME=/etc/taskworker/jdk21).
   environment.etc."taskworker/jdk21".source = pkgs.jdk21.home;
