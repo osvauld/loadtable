@@ -552,6 +552,63 @@ fn status_reports_effective_thresholds_and_blocker() {
     assert_eq!(json["thresholds"]["cpu_some_avg10_max"], 40.0);
     assert_eq!(json["thresholds"]["io_full_avg10_max"], 10.0);
 }
+#[test]
+fn status_reports_live_disks_and_disk_blocker_additively() {
+    let f = Fixture::new();
+    let pressure = free().unwrap();
+    let report = ThresholdReport::new("default", Thresholds::default(), None);
+    let mut status = status_with(&f.0.join("missing"), pressure, report, vec![]).unwrap();
+    let disk = |path: &str, available_bytes| crate::cache::DiskSpace {
+        path: path.into(),
+        available_bytes,
+        reserve_bytes: crate::cache::MIN_FREE_BYTES,
+    };
+    with_disks(
+        &mut status,
+        Ok(disk(
+            "/fixture/build-cache",
+            crate::cache::MIN_FREE_BYTES - 1,
+        )),
+        Err("synthetic statvfs failure".into()),
+    );
+    let json = serde_json::to_value(&status).unwrap();
+    assert_eq!(json["cache_disk"]["path"], "/fixture/build-cache");
+    assert_eq!(
+        json["cache_disk"]["available_bytes"],
+        crate::cache::MIN_FREE_BYTES - 1
+    );
+    assert!(json["state_disk"].is_null());
+    let blocker = json["disk_blocker"].as_str().unwrap();
+    assert!(blocker.contains("cache disk below reserve"), "{blocker}");
+    assert!(blocker.contains("/fixture/build-cache"), "{blocker}");
+    assert!(status.warnings.iter().any(|w| w.contains("state disk")));
+    // Existing fields are unchanged.
+    for field in [
+        "backend",
+        "pressure",
+        "pressure_blocker",
+        "thresholds",
+        "resources",
+        "waiting",
+        "warnings",
+    ] {
+        assert!(json.get(field).is_some(), "{field}");
+    }
+    let report = ThresholdReport::new("default", Thresholds::default(), None);
+    let mut ok = status_with(&f.0.join("missing"), free().unwrap(), report, vec![]).unwrap();
+    let state = crate::cache::DiskSpace {
+        path: "/fixture/state".into(),
+        available_bytes: crate::cache::MIN_STATE_FREE_BYTES,
+        reserve_bytes: crate::cache::MIN_STATE_FREE_BYTES,
+    };
+    with_disks(
+        &mut ok,
+        Ok(disk("/c", crate::cache::MIN_FREE_BYTES)),
+        Ok(state),
+    );
+    assert_eq!(ok.disk_blocker, None);
+    assert!(ok.warnings.is_empty());
+}
 // ---- Configurable Cargo jobs cap (dedicated compute worker) ----
 #[test]
 fn max_cargo_jobs_defaults_to_two_and_is_strictly_parsed() {
