@@ -6,6 +6,7 @@
 pub mod artifact;
 pub mod prune;
 pub mod source;
+pub mod status;
 pub mod sync;
 
 use std::collections::HashSet;
@@ -305,6 +306,8 @@ pub fn verify_sig(key: &PublicKey, message: &[u8], sig: &[u8]) -> bool {
 /// Length-prefixed JSON frames. `Missing` and `Blob` are used only on [`source::SOURCE_ALPN`]:
 /// `Missing` lists the lowercase-hex iroh-blobs hashes the receiver's store lacks, in the exact
 /// order it expects them; `Blob` heads exactly `size` raw bytes that follow on the stream.
+/// `Snapshot` (followed by exactly `size` bytes of JSON) and `StatusError` are used only on
+/// [`status::STATUS_ALPN`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Frame {
     Hello { attestation: Option<Token> },
@@ -314,6 +317,8 @@ pub enum Frame {
     Rejected { reason: String },
     Missing { hashes: Vec<String> },
     Blob { hash: String, size: u64 },
+    Snapshot { seq: u64, size: u64 },
+    StatusError { seq: u64, error: String },
 }
 
 pub async fn write_frame(send: &mut SendStream, frame: &Frame) -> Result<(), String> {
