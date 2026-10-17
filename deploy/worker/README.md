@@ -190,3 +190,70 @@ does not follow symlinks or cross mounts, and stops at `--max-files`
 (default 500000) or `--max-seconds` (default 20), marking results truncated.
 Hints are not ownership proof; confirm with the owner before removing anything,
 and never remove admission lock files. `--json` gives the full report.
+
+## Portable desktop builds from the worker
+
+A plain worker build does not run on another distro: its interpreter is
+`/nix/store/…-glibc-2.42/lib/ld-linux-x86-64.so.2` and its RUNPATH points into
+`/nix/store`. `scripts/offload-portable-desktop.sh` builds p2p_chat's
+`p2p-desktop` on the worker and makes it portable. Run it from the root of your own
+p2p_chat clone (`git clone --local`), never a checkout another agent is editing:
+
+```sh
+tasks run --run --who OWNER -- /path/to/task-manager/scripts/offload-portable-desktop.sh --who OWNER [--jobs 6]
+tasks run --run --who OWNER -- .../offload-portable-desktop.sh --who OWNER --preflight   # deps only, no compile
+.../offload-portable-desktop.sh --check-only BINARY                                        # local checks only
+```
+
+The recipe, one remote compile job (`sh -c`, so `-j` is not capped by the worker:
+`--jobs` allows 1..8):
+
+1. Static codecs, like release packaging: `scripts/build_libaom.py` and
+   `build_libvpx.py` (pinned, cached under `~/build-cache/p2p_chat/` on the worker),
+   then `AOM_DIR_<triple>`/`VPX_DIR_<triple>` with `AOM_STATIC_REQUIRED=1
+   VPX_STATIC_REQUIRED=1`. On NixOS libaom installs into `lib64/`, while
+   `crates/video/build.rs` wants `lib/`, so the recipe points it at a symlink shim in
+   `target/portable/aom-prefix`.
+2. `cargo build --locked --release -p desktop --target-dir target/distribution`, with
+   unchanged RUSTFLAGS. That keeps one build cache.
+3. Post-link, on a copy: `patchelf --set-interpreter /lib64/ld-linux-x86-64.so.2
+   --remove-rpath target/portable/p2p-desktop`, then a check that there is no
+   RPATH/RUNPATH and no dynamic aom/vpx. `--fetch target/portable/p2p-desktop` brings it
+   back to `~/build-cache/offload/OWNER/REMOTE_JOB/`.
+4. Local checks: the interpreter, no RPATH or `/nix/store` in the dynamic section, `ldd`
+   with no "not found" or `/nix/store`, the highest `GLIBC_`/`GLIBCXX_` version
+   needed is no newer than the host's, and a smoke start. The smoke start is
+   `LD_BIND_NOW=1 p2p-desktop --portable-smoke-not-an-option`, which must exit 1
+   with the usage line. It forces every symbol to resolve, and it exits before the
+   app makes a data dir, a window, a keyring or a network call.
+
+The worker's glibc is 2.42 and its gcc is 15.3, older than the Arch host's, so
+this is the safe direction. A binary built the other way round would not load.
+
+What the desktop crate needs **at build time** on Linux (also probed by
+`--preflight`): pkg-config `alsa` (alsa-sys, linked), `meson` + `ninja`
+(webrtc-audio-processing "bundled"; abseil is downloaded from its meson wrap and
+linked statically when pkg-config has no `absl_base`), libclang for bindgen
+(`LIBCLANG_PATH`; NixOS never has it on a search path), `cmake` (opusic-sys, libaom),
+`nasm` (rav1d, libaom), `cc`/`c++`, `python3`, plus `patchelf`. The worker module
+adds `alsa-lib alsa-lib.dev meson patchelf`. Until that rebuild, and always for
+libclang, the recipe gets them from the same channel with a user-level
+`nix-build '<nixpkgs>' -A …`, which needs no root.
+
+**At run time**, the binary links `libstdc++.so.6`, `libasound.so.2`,
+`libgcc_s.so.1`, `libm`, `libc` and the loader. X11/xcb, xkbcommon, wayland,
+EGL/GL and Vulkan are dlopened by soname (x11-dl, tiny-xlib, x11rb `dl-libxcb`,
+wayland-sys `dlopen`, xkbcommon-dl, khronos-egl/ash `libloading`). D-Bus (tray,
+keyring, notifications, portal) is pure Rust. Don't install X11/xkbcommon `.pc` files on
+the worker: x11-dl and tiny-xlib would embed their `/nix/store` libdir as a
+fallback dlopen path. That is harmless, because bare sonames are tried first,
+but it isn't needed. (The laptop's own dev build also links `libaom.so.3` and
+`libabsl_strings.so` from Arch. The portable build does not.)
+
+Validated: host job 233 / worker job 42, p2p_chat 66566cb, `--jobs 6`, 392 s
+remote run. That run took meson/alsa/patchelf from the `nix-build` fallback.
+`ldd` resolved everything to `/usr/lib`, the binary needs GLIBC ≤ 2.39 and
+GLIBCXX ≤ 3.4.30, and the smoke start passed. `strings` still shows some
+`/nix/store` paths: the old RUNPATH text stays unreferenced in `.dynstr`, and some
+C++ header paths remain in assertions. These are not load paths. Not validated:
+opening the GUI, audio, camera, calls, or any other distro than this Arch host.
