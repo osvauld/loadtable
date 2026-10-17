@@ -235,3 +235,30 @@ installed client's `run`/`cancel` output and exit codes (format taken from
 A `--dry-run` against this checkout (worker `abe@example.invalid`) selected
 97 files and ran no ssh. No real worker, real remote `tasks` daemon, NixOS
 host, real ssh/known_hosts or Cargo build was exercised.
+
+### iroh transport validation (owner `osv-blobs`)
+
+Synthetic tests: Python red job 234, green job 243 (66 tests, 0 skipped,
+including a real `lan-peer` loopback offload). Experiment crate: jobs 226/237
+(sync red/green), 237/241 (artifacts red/green), 241/242 (CLI red/green; 28
+tests and warnings-denied all-target clippy).
+
+**Two real machines** (2026-10-17): client 192.168.1.25 (Arch) and worker
+192.168.1.7 (NixOS, Wi-Fi, UDP 7842 open on wlo1). Release `lan-peer` built by
+host job 244, copied to the worker's `~/.local/bin`. Synthetic installations
+`~/lan-peer-client` and `~/lan-peer-worker`; `serve` ran as a temporary
+`nohup` process and was stopped afterwards. This repository's checkout was
+126 files / 1.64 MB.
+
+| Step (host job / worker job) | Sync | Blobs / bytes sent | Run | Fetch |
+|---|---|---|---|---|
+| First offload, `--cargo-fetch`, `cargo test --locked -j 8` (247/47) | 1.91 s | 126 / 1 636 646 | 186.2 s (cold build) | — |
+| No change, same test (248/48) | 0.47 s | 0 / 0 (126 unchanged) | 5.2 s (no rebuild: mtimes kept) | — |
+| One-file edit, test + all-target clippy (249/49) | 0.40 s | 1 / 15 148 | 21.6 s | — |
+| Revert edit, `--fetch` 31.9 MB test binary (250/50) | 0.43 s | 0 / 0 (1 written from store) | 0.9 s | 7.40 s, 1 blob / 31 927 720 B |
+| Same fetch again (251/51) | 0.34 s | 0 / 0 | 1.0 s | 0.71 s, 0 blobs / 0 B |
+| v0 ssh/rsync, no change, same checkout (252/52, 253/53) | 1.17–1.19 s | rsync | 1.0 s | — |
+
+Both fetched copies and the worker file have the same SHA-256. The `tasks`
+binary (196 MB) cannot be fetched: it exceeds the experiment's 64 MiB per-file
+limit.
