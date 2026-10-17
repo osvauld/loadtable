@@ -42,15 +42,22 @@
 
   # Dedicated compute node: boot headless so the desktop doesn't hold ~2 GB.
   # KDE stays installed; start it on demand with `sudo systemctl start display-manager`.
-  systemd.defaultUnit = "multi-user.target";
+  systemd.defaultUnit = lib.mkForce "multi-user.target";
 
   nix.settings.experimental-features = [ "nix-command" "flakes" ];
 
   # rustup toolchains (rust-toolchain.toml) and prebuilt tools need a dynamic loader.
   programs.nix-ld.enable = true;
+  # Shared libraries that offloaded test binaries (rustup-built, nix-ld loader) load at runtime.
+  programs.nix-ld.libraries = with pkgs; [ libaom libvpx openssl ];
 
   environment.systemPackages = with pkgs; [
     git rsync python3 rustup gcc clang cmake ninja gnumake pkg-config
     openssl openssl.dev perl protobuf
+    # p2p_chat video crate: pkg-config aom/vpx, nasm for rav1e asm.
+    nasm libaom libaom.dev libvpx libvpx.dev
   ];
+  # Expose the .pc files above at /run/current-system/sw/lib/pkgconfig; the tasks
+  # daemon unit points PKG_CONFIG_PATH there.
+  environment.pathsToLink = [ "/lib/pkgconfig" ];
 }
