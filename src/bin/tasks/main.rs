@@ -252,9 +252,21 @@ fn run() -> Result<()> {
         let id = response
             .submitted_id
             .ok_or("daemon did not return submitted_id; do not resubmit blindly")?;
-        eprintln!("tasks: submitted job {id}; Ctrl-C detaches, tasks cancel {id} cancels");
-        approve_and_start(&socket, Action::ApproveCommand(id), id)?;
-        std::process::exit(wait_job(&socket, id)?.1);
+        eprintln!(
+            "tasks: submitted job {id}; Ctrl-C detaches. If this client stops or times out, {}",
+            tinline_task_manager::live_job_hint(id)
+        );
+        tinline_task_manager::print_hint_on_detach(id);
+        let waited = approve_and_start(&socket, Action::ApproveCommand(id), id)
+            .and_then(|()| wait_job(&socket, id));
+        match waited {
+            Ok((_, code)) => std::process::exit(code),
+            Err(e) => {
+                return Err(
+                    format!("{e}\ntasks: {}", tinline_task_manager::live_job_hint(id)).into(),
+                );
+            }
+        }
     }
     Ok(())
 }
