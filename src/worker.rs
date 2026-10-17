@@ -454,6 +454,10 @@ fn execute_local(
         &dir,
         b"TRUSTED LIVE COMMAND: cwd is NOT snapshotted; no immutable-source/artifact guarantee\n",
     );
+    // Metrics: cold/unknown build state BEFORE output placement can create a
+    // target link. Diagnostic only; a failure to record it never fails the job.
+    let start = crate::metrics::warmth::at_start(&recipe.argv, Path::new(&job.spec.source));
+    let _ = save(&dir.join(crate::metrics::warmth::START_FILE), &start);
     if !prepare_local_outputs(store, state, &dir, job, &recipe)? {
         return store.finish(
             job.id,
@@ -1311,12 +1315,26 @@ fn run_command(state: &Path, dir: &Path, job: &crate::Job, stage: &str) -> Resul
             prepare_device_command(&mut cmd, dir, lock);
         }
         let start = Instant::now();
+        // This process has no other live children, so RUSAGE_CHILDREN around the
+        // wait is exactly this command's tree (all waited-for descendants).
+        let usage_before = crate::metrics::sampler::children_usage();
         let mut child = cmd.spawn()?;
         let out = drain(child.stdout.take().ok_or("missing stdout")?, dir.into());
         let err = drain(child.stderr.take().ok_or("missing stderr")?, dir.into());
         let status = child.wait()?;
         let _ = out.join();
         let _ = err.join();
+        let usage = crate::metrics::sampler::usage_delta(
+            &usage_before,
+            &crate::metrics::sampler::children_usage(),
+        );
+        let _ = save(
+            &dir.join(format!(
+                "{stage}{}",
+                crate::metrics::sampler::USAGE_SUFFIX
+            )),
+            &usage,
+        );
         save(
             &dir.join(format!("{stage}-result.json")),
             &StageResult {

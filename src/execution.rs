@@ -79,6 +79,10 @@ pub struct Execution {
     #[serde(default)]
     pub local_command: bool,
     pub detail: String,
+    /// Finished-job measurements (feature/metrics). Optional and additive:
+    /// older releases ignore it, rows without it read as unknown warmth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<crate::metrics::JobMetrics>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -182,6 +186,7 @@ impl Store {
             build_artifact: None,
             android_trial: trial,
             local_command: command,
+            metrics: None,
             detail: if command {
                 "Explicitly approved trusted local argv/live cwd; NOT a source snapshot or sandbox; command may write to workspace"
             } else if trial {
