@@ -430,6 +430,7 @@ mod tests {
                 android_trial: false,
                 local_command: true,
                 detail: String::new(),
+                metrics: None,
             }),
         }
     }

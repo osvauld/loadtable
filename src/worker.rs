@@ -1301,6 +1301,8 @@ fn run_command(state: &Path, dir: &Path, job: &crate::Job, stage: &str) -> Resul
         );
         let mut cmd = sanitized(Path::new(&argv[0]));
         cmd.args(&argv[1..]).current_dir(&job.spec.source);
+        // tasks-offload names its per-job sidecar after this (cluster-snapshot.md).
+        cmd.env("TASKS_JOB_ID", job.id.to_string());
         for name in [
             "RUSTC_WRAPPER",
             "SCCACHE_DIR",
