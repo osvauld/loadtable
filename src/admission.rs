@@ -251,6 +251,11 @@ pub struct ThresholdReport {
     pub memory_full_avg10_max: f64,
     pub io_some_avg10_max: f64,
     pub io_full_avg10_max: f64,
+    /// Offload slots' memory floor: min(configured reserve, OFFLOAD_MIN_MEMORY).
+    #[serde(default)]
+    pub offload_min_available_memory_bytes: u64,
+    #[serde(default)]
+    pub offload_slots: usize,
     pub recorded_by_pid: Option<u32>,
     pub recorded_at: Option<i64>,
 }
@@ -264,6 +269,8 @@ impl ThresholdReport {
             memory_full_avg10_max: MEMORY_FULL_MAX,
             io_some_avg10_max: IO_SOME_MAX,
             io_full_avg10_max: IO_FULL_MAX,
+            offload_min_available_memory_bytes: offload_min_memory(&effective),
+            offload_slots: OFFLOAD_SLOTS,
             recorded_by_pid: record.map(|r| r.pid),
             recorded_at: record.map(|r| r.recorded_at),
         }
@@ -355,6 +362,39 @@ pub enum Kind {
     Compile,
     Run,
     Device(String),
+    Offload,
+}
+/// Offload slots (`p2p-offload-N.lock`) hold only an offload CLIENT (`tasks-offload`
+/// or `offload-portable-desktop.sh`, enforced by `local_command`): Git scan,
+/// hashing, transfer and a waiting ssh. Four lets four agents/checkouts offload at
+/// once (each checkout is serialized by the client's own flock) and bounds local
+/// ssh/python clients; the worker's own admission queues the actual work.
+pub const OFFLOAD_SLOTS: usize = 4;
+/// Memory floor for offload clients: a small Python/ssh/rsync client, plus whole
+/// blobs held in memory by the experimental iroh transport (<= 512 MiB). The
+/// configured reserve still applies when it is lower than this.
+pub const OFFLOAD_MIN_MEMORY: u64 = 2 * GIB;
+pub fn offload_min_memory(t: &Thresholds) -> u64 {
+    t.min_available_memory_bytes.min(OFFLOAD_MIN_MEMORY)
+}
+/// Offload clients fetch artifacts into `~/build-cache/offload`, so they wait
+/// while the cache disk is below its reserve. Unmeasurable fails closed.
+pub fn offload_disk_blocker(cache: Result<crate::cache::DiskSpace>) -> Option<String> {
+    match cache {
+        Ok(space) if space.admitted() => None,
+        Ok(space) => Some(format!(
+            "cache disk below reserve, offload slots wait (fetched artifacts land there): {}",
+            space.detail()
+        )),
+        Err(e) => Some(format!("cache disk not measured, offload slots wait: {e}")),
+    }
+}
+fn live_offload_disk_blocker() -> Option<String> {
+    let cache = crate::cache::cache_root().and_then(|root| match thresholds() {
+        Ok(t) => crate::cache::cache_space_with(&root, &t),
+        Err(e) => Err(e),
+    });
+    offload_disk_blocker(cache)
 }
 impl Kind {
     fn label(&self) -> String {
@@ -362,12 +402,16 @@ impl Kind {
             Self::Compile => "compile".into(),
             Self::Run => "run".into(),
             Self::Device(s) => format!("device {s}"),
+            Self::Offload => "offload".into(),
         }
     }
     fn names(&self) -> Result<Vec<String>> {
         Ok(match self {
             Self::Compile => vec!["p2p-build.lock".into()],
             Self::Run => (0..4).map(|i| format!("p2p-run-{i}.lock")).collect(),
+            Self::Offload => (0..OFFLOAD_SLOTS)
+                .map(|i| format!("p2p-offload-{i}.lock"))
+                .collect(),
             Self::Device(s) => {
                 // Do not silently alias two device names to one sanitized identity.
                 if s.is_empty()
@@ -473,7 +517,9 @@ impl Pressure {
     /// and every gate for compile/device stages, is unchanged policy.
     pub fn blocker_for(&self, thresholds: &Thresholds, kind: &Kind) -> Option<String> {
         let run_cpu = thresholds.run_cpu_some_avg10_max_pct;
-        if matches!(kind, Kind::Run) && run_cpu as f64 > CPU_SOME_MAX {
+        if matches!(kind, Kind::Offload) {
+            self.offload_blocker(thresholds)
+        } else if matches!(kind, Kind::Run) && run_cpu as f64 > CPU_SOME_MAX {
             self.blocker_at(thresholds, run_cpu as f64, || {
                 format!("CPU PSI some avg10 above {run_cpu}% (run slots, {RUN_CPU_ENV})")
             })
@@ -483,13 +529,26 @@ impl Pressure {
             })
         }
     }
-    fn blocker_at(
-        &self,
-        thresholds: &Thresholds,
-        cpu_max: f64,
-        cpu_text: impl FnOnce() -> String,
-    ) -> Option<String> {
-        if [
+    /// Lightweight-client gate: no CPU, memory-some or I/O PSI (the client barely
+    /// uses them and offloading relieves them); keeps fail-closed metrics, a small
+    /// memory floor and memory PSI full (the host is thrashing).
+    fn offload_blocker(&self, thresholds: &Thresholds) -> Option<String> {
+        let floor = offload_min_memory(thresholds);
+        if self.invalid() {
+            Some("invalid pressure metric".into())
+        } else if self.available_bytes < floor {
+            Some(format!(
+                "available memory below {} (offload slots)",
+                memory_text(floor)
+            ))
+        } else if self.memory_full_avg10 > MEMORY_FULL_MAX {
+            Some("memory PSI full avg10 above 0.5%".into())
+        } else {
+            None
+        }
+    }
+    fn invalid(&self) -> bool {
+        [
             self.cpu_some_avg10,
             self.memory_some_avg10,
             self.memory_full_avg10,
@@ -498,7 +557,14 @@ impl Pressure {
         ]
         .iter()
         .any(|value| !value.is_finite() || !(0.0..=100.0).contains(value))
-        {
+    }
+    fn blocker_at(
+        &self,
+        thresholds: &Thresholds,
+        cpu_max: f64,
+        cpu_text: impl FnOnce() -> String,
+    ) -> Option<String> {
+        if self.invalid() {
             Some("invalid pressure metric".into())
         } else if self.available_bytes < thresholds.min_available_memory_bytes {
             Some(format!(
@@ -551,6 +617,9 @@ pub struct Status {
     pub pressure_blocker: Option<String>,
     /// Same gates for run slots, with the opt-in TASKS_RUN_CPU_SOME_MAX_PCT.
     pub run_pressure_blocker: Option<String>,
+    /// Offload slots: memory floor and memory PSI full only, plus the cache-disk
+    /// reserve (no CPU, memory-some or I/O PSI). Additive field.
+    pub offload_pressure_blocker: Option<String>,
     /// The inspected lock directory and where it came from (worker record/env/default).
     pub lock_dir: Option<LockDirReport>,
     pub thresholds: ThresholdReport,
@@ -694,14 +763,29 @@ fn older_waiter(root: &Path, me: &Wait, slot: &str) -> Result<bool> {
     Ok(false)
 }
 pub fn acquire(kind: Kind, who: &str, cmd: &str, stop: impl Fn() -> bool) -> Result<Option<Lease>> {
-    acquire_at(&root()?, kind, who, cmd, Pressure::read, stop)
+    let offload = matches!(kind, Kind::Offload);
+    let disk = move || offload.then(live_offload_disk_blocker).flatten();
+    acquire_gated(&root()?, kind, who, cmd, Pressure::read, disk, stop)
 }
+#[cfg(test)]
 fn acquire_at(
     root: &Path,
     kind: Kind,
     who: &str,
     cmd: &str,
     pressure: impl Fn() -> Result<Pressure>,
+    stop: impl Fn() -> bool,
+) -> Result<Option<Lease>> {
+    acquire_gated(root, kind, who, cmd, pressure, || None, stop)
+}
+/// `disk` is an extra wait condition (the offload cache-disk reserve); `None` admits.
+fn acquire_gated(
+    root: &Path,
+    kind: Kind,
+    who: &str,
+    cmd: &str,
+    pressure: impl Fn() -> Result<Pressure>,
+    disk: impl Fn() -> Option<String>,
     stop: impl Fn() -> bool,
 ) -> Result<Option<Lease>> {
     lock_dir::prepare_root(root)?;
@@ -728,7 +812,7 @@ fn acquire_at(
         let gated = !matches!(kind, Kind::Device(_));
         let ready = if gated {
             let p = pressure()?;
-            let blocker = p.blocker_for_kind(&kind);
+            let blocker = p.blocker_for_kind(&kind).or_else(&disk);
             let permits = blocker.is_none();
             if blocker != previous_blocker {
                 if let Some(reason) = &blocker {
@@ -745,7 +829,7 @@ fn acquire_at(
                 if !take(f)? {
                     continue;
                 }
-                if gated && !pressure()?.permits_for(&kind) {
+                if gated && (!pressure()?.permits_for(&kind) || disk().is_some()) {
                     unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_UN) };
                     continue;
                 }
@@ -807,9 +891,17 @@ fn with_disks(
             None
         }
     };
+    // Same fail-closed cache-disk condition that offload admission waits on.
+    let offload_disk = offload_disk_blocker(match &cache {
+        Ok(space) => Ok(space.clone()),
+        Err(e) => Err(e.to_string().into()),
+    });
     let cache = keep(cache, "cache");
     let state = keep(state, "state");
     status.disk_blocker = crate::cache::disk_blocker(cache.as_ref(), state.as_ref());
+    if status.offload_pressure_blocker.is_none() {
+        status.offload_pressure_blocker = offload_disk;
+    }
     status.cache_disk = cache;
     status.state_disk = state;
 }
@@ -832,6 +924,7 @@ fn status_with(
         backend: "rust-flock-v1",
         pressure_blocker: pressure.blocker_with(&thresholds.effective),
         run_pressure_blocker: pressure.blocker_for(&thresholds.effective, &Kind::Run),
+        offload_pressure_blocker: pressure.blocker_for(&thresholds.effective, &Kind::Offload),
         lock_dir: None,
         pressure,
         thresholds,
@@ -856,6 +949,7 @@ fn status_with(
             && name.ends_with(".lock")
             && (name == "p2p-build.lock"
                 || name.starts_with("p2p-run-")
+                || name.starts_with("p2p-offload-")
                 || name.starts_with("p2p-device-"))
         {
             let f = open_lock(&path, false)?;
@@ -885,6 +979,9 @@ pub use lock_dir::{
     LOCK_DIR_ENV, LOCK_DIR_RECORD, LockDirRecord, LockDirReport, default_root,
     record_worker_lock_dir, report_lock_dir, root_from,
 };
+#[cfg(test)]
+#[path = "admission_offload_tests.rs"]
+mod offload_tests;
 #[cfg(test)]
 #[path = "admission_ops_tests.rs"]
 mod ops_tests;

@@ -34,11 +34,17 @@ initial commit just to give source-capsule tests a Git HEAD; request permission.
 
 Heavy Cargo/Gradle work can run on the worker's own `tasks` ledger through the
 installed `~/.local/bin/tasks-offload` (docs: `scripts/README-offload.md`,
-`deploy/worker/README.md`). Run it under a LOCAL run slot, from a checkout no
-other agent is editing (the worker copy is keyed by host+path; same-checkout
+`deploy/worker/README.md`). Run it under a LOCAL offload slot, from a checkout
+no other agent is editing (the worker copy is keyed by host+path; same-checkout
 offloads queue on a client flock):
-`tasks run --run --who OWNER -- tasks-offload --worker abe@192.168.1.7
+`tasks run --offload --who OWNER -- tasks-offload --worker abe@192.168.1.7
 --ssh-key ~/.ssh/id_ed25519_nixos_worker --who OWNER [--fetch REL]... -- CMD`.
+- `--offload` uses its own four `p2p-offload-N.lock` slots, not compile/run
+  slots, and skips CPU, memory-some and I/O PSI (it keeps a 2 GiB memory floor,
+  memory PSI full and the cache-disk reserve), so it starts while the laptop
+  compiles. It only accepts `tasks-offload` or `offload-portable-desktop.sh`
+  as the command. If the installed `tasks` rejects `--offload` (older
+  release), use `--run` instead; `--run` keeps working for offloads.
 - Git-visible files (incl. uncommitted) are synced; `.gitignore`d files such as
   `gradle.properties`, local env files and secrets are not. Pass needed
   non-secret inputs as `env NAME=value`/`-P` flags; never put secrets in argv.

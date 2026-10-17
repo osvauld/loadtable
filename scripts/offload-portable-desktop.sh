@@ -4,8 +4,9 @@
 # fetch it and check that it loads on this host. See deploy/worker/README.md
 # ("Portable desktop builds from the worker").
 #
-# Run from a p2p_chat checkout root (one no other agent is editing), under a host run slot:
-#   tasks run --run --who OWNER -- /abs/path/scripts/offload-portable-desktop.sh --who OWNER
+# Run from a p2p_chat checkout root (one no other agent is editing), under a host offload slot
+# (own lock pool, no CPU PSI gate; use --run instead with a `tasks` that rejects --offload):
+#   tasks run --offload --who OWNER -- /abs/path/scripts/offload-portable-desktop.sh --who OWNER
 #
 #   --who OWNER        tasks/tasks-offload owner (required except with --check-only)
 #   --worker U@H       default abe@192.168.1.7

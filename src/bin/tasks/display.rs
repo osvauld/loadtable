@@ -90,6 +90,7 @@ pub fn resource_label(job: &Job) -> String {
     match recipe(job).map(|r| r.resource) {
         Some(Resource::Compile) => "compile".into(),
         Some(Resource::Run) => "run".into(),
+        Some(Resource::Offload) => "offload".into(),
         Some(Resource::Device(serial)) => format!("device:{serial}"),
         None if job.spec.suite == tinline_task_manager::catalog::ANDROID_SUITE => "android".into(),
         None => "suite".into(),

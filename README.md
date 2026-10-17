@@ -40,7 +40,9 @@ imported into this job ledger. No automatic job replay or backlog approval.
 Ctrl-C detaches, not cancels. For separate approval use enqueue, the returned
 submitted_id, approve-command ID, start-worker. Commands execute in a **live cwd**
 with the local user's rights, not a source snapshot/sandbox. Default compile slot;
---run is for already-built commands; --device requires separate device permission.
+--run is for already-built commands; --device requires separate device permission;
+--offload is only for a `tasks-offload`/`offload-portable-desktop.sh` client
+(own slots, no CPU PSI gate; scripts/README-offload.md).
 Don't nest internally admitted helpers or override machine cache policy.
 
 ## Phone and emulator targets
@@ -114,7 +116,8 @@ part of this trial.
 ## Limits and feedback
 
 One compile slot, four run slots, exclusive device slots; at most five in-flight
-worker jobs. Linux pressure/memory gates, cooperative native FIFO, stable leases,
+worker jobs, plus four offload-client slots with their own four-job budget.
+Linux pressure/memory gates, cooperative native FIFO, stable leases,
 owned process-group cancellation/recovery, bounded logs and atomic completion.
 No sandbox, hard quotas, global legacy FIFO, universal command classification,
 automatic cleanup, legacy history import or zero-downtime maintenance promise.

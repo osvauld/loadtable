@@ -235,13 +235,15 @@ pub fn run() -> Result<()> {
     let mut idle = Instant::now();
     // One compile + four run slots can be occupied without a long run blocking
     // another agent's compile. SQLite claims are serialized; executions are not.
-    let mut active: Vec<std::thread::JoinHandle<Result<()>>> = vec![];
+    // Offload clients have their own claim budget (one per offload slot), so
+    // waiting offloads never use up the general five and vice versa.
+    let mut active: Vec<(std::thread::JoinHandle<Result<()>>, bool)> = vec![];
     let mut failure: Option<String> = None;
     loop {
         let mut i = 0;
         while i < active.len() {
-            if active[i].is_finished() {
-                match active.swap_remove(i).join() {
+            if active[i].0.is_finished() {
+                match active.swap_remove(i).0.join() {
                     Ok(Ok(())) => (),
                     Ok(Err(e)) => {
                         failure.get_or_insert(e.to_string());
@@ -256,14 +258,18 @@ pub fn run() -> Result<()> {
                 i += 1;
             }
         }
-        if !STOP.load(Ordering::SeqCst) && failure.is_none() && active.len() < 5 {
-            match store.claim(worker.clone()) {
+        let offloads = active.iter().filter(|(_, offload)| *offload).count();
+        let general = active.len() - offloads < 5;
+        let offload = offloads < admission::OFFLOAD_SLOTS;
+        if !STOP.load(Ordering::SeqCst) && failure.is_none() && (general || offload) {
+            match store.claim_class(worker.clone(), general, offload) {
                 Ok(Some(job)) => {
+                    let is_offload = crate::local_command::is_offload(&job.spec);
                     idle = Instant::now();
                     let state = state.clone();
                     let lock = lock.try_clone()?;
                     let worker = worker.clone();
-                    active.push(std::thread::spawn(move || {
+                    let handle = std::thread::spawn(move || {
                         let mut store = database(&state)?;
                         if let Err(error) = execute(&state, &lock, &mut store, job.id, &worker) {
                             append_log(
@@ -282,7 +288,8 @@ pub fn run() -> Result<()> {
                             return Err(error);
                         }
                         Ok(())
-                    }));
+                    });
+                    active.push((handle, is_offload));
                     continue;
                 }
                 Ok(None) => (),
@@ -1003,9 +1010,11 @@ pub fn admit(id: i64, stage: &str, supervisor: ProcessIdentity) -> Result<()> {
     {
         return Err("native admission requires its owned supervisor/group and valid stage".into());
     }
+    let mut offload = false;
     let _device = if job.spec.suite == crate::local_command::SUITE {
         let recipe = crate::local_command::Recipe::from_spec(&job.spec)?;
         recipe.argv_for(stage)?;
+        offload = recipe.resource == crate::local_command::Resource::Offload;
         if let crate::local_command::Resource::Device(serial) = recipe.resource {
             let Some(d) = admission::acquire(
                 admission::Kind::Device(serial),
@@ -1031,6 +1040,9 @@ pub fn admit(id: i64, stage: &str, supervisor: ProcessIdentity) -> Result<()> {
     };
     let kind = if stage == "build" {
         admission::Kind::Compile
+    } else if offload {
+        // Validated recipe: only an allowlisted offload client, run stage only.
+        admission::Kind::Offload
     } else {
         admission::Kind::Run
     };

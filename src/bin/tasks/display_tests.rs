@@ -380,3 +380,17 @@ fn execution_enabled_is_explained_for_people() {
     let approved = job(23, "lead", "/w", Phase::Approved, &["true"], Resource::Run);
     assert!(job_status_line(&approved, false).starts_with("tasks: job 23 approved owner=lead;"));
 }
+
+#[test]
+fn offload_jobs_and_slots_are_labelled() {
+    let offload = job(
+        3,
+        "agent-o",
+        "/w",
+        Phase::Running,
+        &["tasks-offload", "--", "true"],
+        Resource::Offload,
+    );
+    assert_eq!(resource_label(&offload), "offload");
+    assert_eq!(slot_name("p2p-offload-1.lock"), "offload-1");
+}
