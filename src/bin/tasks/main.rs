@@ -29,6 +29,7 @@ const USAGE: &str = "usage: tasks [ui]
        # phone = arm64-v8a only, emulator = x86_64 only; SPEC.json config may use either
        tasks devices [--json]  # read-only: connected phones/emulators, ABI, ready, lock free/busy
        tasks phone-test [--who OWNER] SOURCE [--device SERIAL]  # build phone APK, install -r, launch
+       tasks tmp-usage [--json] [PATH...]  # read-only bounded /tmp+cache inventory; never deletes
        tasks record SUITE CONFIG STAGE SECONDS
        tasks daemon";
 
@@ -103,6 +104,7 @@ fn run() -> Result<()> {
             return Ok(());
         }
         Some("phone-test") => return phone_test(&args[1..]),
+        Some("tmp-usage") => return tinline_task_manager::tmp_usage::cli(&args[1..]),
         Some("__phone-install") if args.len() == 3 => {
             return tinline_task_manager::device::install_and_launch(&args[1], Path::new(&args[2]));
         }

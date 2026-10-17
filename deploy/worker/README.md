@@ -176,3 +176,17 @@ ssh worker 'cd /home/abe/src/project && ~/.local/bin/tasks run --who OWNER -- ca
 Do not run the unit with `PrivateTmp`, `ProtectHome` or a different
 `TASK_MANAGER_STATE_DIR`: clients would then see a different lock directory,
 socket or checkout than the daemon (see "Admission lock directory" above).
+
+## Finding what uses /tmp and cache space
+
+`tasks tmp-usage` is a read-only inventory of `/tmp`, `~/build-cache`,
+`~/.cache` and the task state (or the absolute paths you pass). It groups by
+top-level entry (expanding `/tmp/claude-$UID`, the per-checkout output cache
+and job directories), reports allocated size, file count, age, owner uid, the
+filesystem type (RAM-backed tmpfs is flagged), and hints: queue jobs whose cwd
+is inside, the checkout an output cache or scratch directory belongs to, and
+own processes whose cwd is inside. It never deletes, moves or writes anything,
+does not follow symlinks or cross mounts, and stops at `--max-files`
+(default 500000) or `--max-seconds` (default 20), marking results truncated.
+Hints are not ownership proof; confirm with the owner before removing anything,
+and never remove admission lock files. `--json` gives the full report.

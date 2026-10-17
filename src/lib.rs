@@ -16,6 +16,8 @@ pub mod local_command;
 pub mod retention;
 pub mod snapshot;
 #[cfg(target_os = "linux")]
+pub mod tmp_usage;
+#[cfg(target_os = "linux")]
 pub mod worker;
 #[cfg(target_os = "linux")]
 pub mod workspace_snapshot;
