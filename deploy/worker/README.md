@@ -16,7 +16,13 @@ flock slots). Admission on another machine never controls this host.
   nix-ld is enabled). Build it through the worker's own queue once one exists,
   or directly the first time, with `cargo build --offline --locked -j 2`.
 - Kernel PSI enabled: `/proc/pressure/{cpu,memory,io}` must exist. Without
-  them the worker refuses to start (admission fails closed).
+  them the worker refuses to start and `tasks start-worker`/`tasks run`/
+  `tasks admission` fail closed with the exact missing file, e.g.
+  `/proc/pressure/memory: No such file or directory (os error 2). Admission
+  requires kernel pressure stall information (PSI): a kernel with CONFIG_PSI=y,
+  booted with psi=1 if it was built with CONFIG_PSI_DEFAULT_DISABLED=y.` There
+  is no PSI-less mode. Check with `cat /proc/pressure/cpu`; on such kernels add
+  `psi=1` to the kernel command line (NixOS: `boot.kernelParams = [ "psi=1" ];`).
 - `git` on the daemon's `PATH`. Every live command runs
   `git rev-parse --show-toplevel` in its cwd to place cache-backed output
   links. A missing `git` currently fails the job (see the audit in
@@ -27,9 +33,65 @@ flock slots). Admission on another machine never controls this host.
 
 Created on first use, no manual setup needed: the state directory
 `~/.local/state/tinline-task-manager-native` (or `$XDG_STATE_HOME/...`), the
-admission lock directory `/tmp/claude-$UID`, and cache output roots under
+admission lock directory (below), and cache output roots under
 `~/build-cache/p2p_chat/tasks/checkouts/` for Cargo checkouts in a Git work tree.
 These names are retained compatibility namespaces, not Tinline dependencies.
+
+## Admission lock directory (`TASKS_LOCK_DIR`)
+
+The flock files (`p2p-build.lock`, `p2p-run-N.lock`, `p2p-device-*.lock`) live in
+`/tmp/claude-$UID` by default. That exact path, and so the same lock inodes, is
+shared with existing clients, scripts and the Tinline Python adapters
+(`buildlock.py` etc.), so the default never changes. `TASKS_LOCK_DIR=/abs/dir`
+moves it for one daemon/worker:
+
+- It must be an absolute path other than `/`, without `.`/`..` components. An
+  invalid value fails closed (`start-worker`, the worker and `tasks admission`
+  report it).
+- A missing directory is created with mode 0700 (only the last component; its
+  parent must exist). An existing one is used as is but refused if it is a
+  symlink, owned by another user or world-writable. Nothing chmods, moves or
+  deletes it or its lock files.
+- **Only processes that use the same directory are coordinated.** Legacy
+  clients that hard-code the default (Tinline's Python helpers) are not
+  coordinated with a worker that uses another directory. `tasks admission`
+  warns whenever the inspected directory is not the default.
+
+How SSH clients see the same directory as the daemon: clients never take these
+locks themselves; only the daemon's worker does, using the daemon's environment.
+Each worker records its directory in `<state>/admission-lock-dir.json` at start,
+and `tasks admission` in any shell inspects the recorded directory
+(`lock_dir.source = "worker-record"`). If the shell's own `TASKS_LOCK_DIR` (or
+the default, when unset) differs, it adds a warning, because a daemon
+**autostarted** from that shell would use the shell's value. So: set
+`TASKS_LOCK_DIR` in the unit, start the unit before clients connect, and either
+leave it unset everywhere or export the same value in the SSH environment.
+
+### /tmp cleaning and `PrivateTmp`
+
+- `systemd-tmpfiles` ages `/tmp` (the default `tmp.conf` uses 10 days).
+  An idle lock file (or the whole `/tmp/claude-$UID`) can be removed while no one
+  holds it. A later client recreates it, but a process still holding an old,
+  unlinked inode would no longer exclude a new one, which breaks the "stable
+  flock inode" guarantee. On a worker, either exclude the directory:
+
+  ```
+  # /etc/tmpfiles.d/tasks-locks.conf  (x = never age-clean this path or its contents)
+  x /tmp/claude-*
+  ```
+
+  or set `TASKS_LOCK_DIR` to a directory that is never cleaned, e.g.
+  `%h/.local/state/tasks-locks` in the unit (accepting that legacy default-path
+  clients on that host are then not coordinated). A tmpfs `/tmp` is also emptied
+  on reboot; that is harmless because no lock survives a reboot either.
+- `PrivateTmp=true` (and `ProtectHome`, `ProtectSystem=strict` or a mount
+  namespace) gives the daemon its own `/tmp`. Its workers would then lock a
+  different `/tmp/claude-$UID` than other daemons, legacy clients and
+  `tasks admission` in SSH shells, so admission would silently stop excluding
+  them. The template unit deliberately sets none of these. The draft
+  `nix/worker-module.nix` service sets `PrivateTmp = true` and must not be reused
+  for this daemon unless it also sets `TASKS_LOCK_DIR` outside `/tmp` (with the
+  legacy-client caveat above).
 
 ## Admission thresholds
 
@@ -45,6 +107,7 @@ cannot resolve its configuration fails closed.
 | `TASKS_MIN_CACHE_FREE_GIB` | GiB free on cache/target disks | 20 | 1 – 65536 |
 | `TASKS_MIN_STATE_FREE_MIB` | MiB free on the state disk | 256 | 64 – 1048576 |
 | `TASKS_MAX_CARGO_JOBS` | largest explicit Cargo jobs | 2 | 1 – 64 |
+| `TASKS_RUN_CPU_SOME_MAX_PCT` | CPU PSI some avg10 limit for **run** slots only | 40 | 40 – 100 |
 
 `TASKS_MAX_CARGO_JOBS` only widens what a command may request explicitly
 (`-j N`, `-jN`, `--jobs N`, `--jobs=N`, or `env CARGO_BUILD_JOBS=N cargo ...`).
@@ -59,16 +122,24 @@ against the worker's recorded value (see below), so the first `-j` above 2 on
 a fresh host is accepted only after a worker has started once with the unit's
 setting. Shell scripts (`sh -c ...`) are not parsed and are not capped.
 
-PSI gates are fixed and not configurable: CPU some ≤ 40%, memory some/full ≤
-1%/0.5%, I/O some/full ≤ 20%/10% (avg10). Swap does not count toward
-MemAvailable. These are trial heuristics, not reservations or quotas.
+PSI gates are fixed: CPU some ≤ 40%, memory some/full ≤ 1%/0.5%, I/O some/full
+≤ 20%/10% (avg10). Swap does not count toward MemAvailable. These are trial
+heuristics, not reservations or quotas. The only exception is the opt-in
+`TASKS_RUN_CPU_SOME_MAX_PCT`. It raises the CPU PSI limit for **run** slots
+(`--run`, the run stage of Cargo tests, and the run admission of `--device`
+commands) so light run-only jobs are not queued behind a CPU-bound compile.
+It cannot go below 40, never changes compile admission, and never relaxes the
+memory reserve, memory PSI or I/O PSI gates. Unset, behaviour is unchanged.
+`tasks admission` reports it in `thresholds` and the resulting run-slot gate as
+`run_pressure_blocker`. A blocked run slot names the raised limit, e.g.
+`CPU PSI some avg10 above 80% (run slots, TASKS_RUN_CPU_SOME_MAX_PCT)`.
 
 Each worker records its effective values in `<state>/admission-thresholds.json`
 when it starts. `tasks admission` reports `thresholds` (with `source`:
 `worker-record`, `environment` or `default`) and computes `pressure_blocker`
 with them, so a client shell without the variables still sees what the worker
-applies (including `max_cargo_jobs`). If the shell's own `TASKS_MIN_*` or
-`TASKS_MAX_CARGO_JOBS` differ, a warning is listed. The
+applies (including `max_cargo_jobs`). If the shell's own `TASKS_MIN_*`,
+`TASKS_MAX_CARGO_JOBS` or `TASKS_RUN_CPU_SOME_MAX_PCT` differ, a warning is listed. The
 record reflects the **last** worker start; a changed unit applies only after the
 worker restarts (it exits by itself when idle).
 
@@ -104,4 +175,4 @@ ssh worker 'cd /home/abe/src/project && ~/.local/bin/tasks run --who OWNER -- ca
 
 Do not run the unit with `PrivateTmp`, `ProtectHome` or a different
 `TASK_MANAGER_STATE_DIR`: clients would then see a different lock directory,
-socket or checkout than the daemon.
+socket or checkout than the daemon (see "Admission lock directory" above).
