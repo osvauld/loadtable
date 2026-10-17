@@ -129,17 +129,7 @@ impl Recipe {
     }
     // Only transparent env assignments are understood; never parse shell text.
     fn cargo_index(&self) -> Option<usize> {
-        let mut index = 0;
-        if Path::new(self.argv.first()?).file_name()?.to_str()? == "env" {
-            index = 1;
-            if self.argv.get(index)?.as_str() == "--" {
-                index += 1;
-            }
-            while self.argv.get(index)?.contains('=') {
-                index += 1;
-            }
-        }
-        (Path::new(self.argv.get(index)?).file_name()?.to_str()? == "cargo").then_some(index)
+        tool_index(&self.argv, &["cargo"])
     }
     fn compile_step(&self) -> Option<Vec<String>> {
         let index = self.cargo_index()?;
@@ -215,10 +205,16 @@ pub struct Placement {
     pub linked: Vec<PathBuf>,
     /// Existing non-link entries left untouched (NOT cache-backed).
     pub preserved: Vec<PathBuf>,
+    /// How the Git root was found when it was not by `git` itself, or why
+    /// placement was skipped. Never an error: links are only an optimization.
+    pub note: Option<String>,
 }
 impl Placement {
     pub fn detail(&self) -> String {
         let mut out = String::new();
+        if let Some(note) = &self.note {
+            out += &format!("output placement: {note}\n");
+        }
         for path in &self.linked {
             out += &format!("cache output link placed: {}\n", path.display());
         }
@@ -231,57 +227,199 @@ impl Placement {
         out
     }
 }
+/// What a placement would do, computed without creating anything.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OutputPlan {
+    cache: PathBuf,
+    /// (link in the checkout, cache-backed directory it will point to).
+    new_links: Vec<(PathBuf, PathBuf)>,
+    preserved: Vec<PathBuf>,
+    note: Option<String>,
+}
+impl OutputPlan {
+    /// The filesystems that will receive NEW output because of this job's
+    /// placement: the cache disk when a new cache-backed link is needed, and
+    /// each preserved local output directory (its own filesystem, which may
+    /// not be the cache disk). Already-placed links need no reserve.
+    pub fn reserve_paths(&self) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        if !self.new_links.is_empty() {
+            paths.push(self.cache.clone());
+        }
+        paths.extend(self.preserved.iter().cloned());
+        paths
+    }
+    /// Create the planned links. An entry that appeared meanwhile is kept as-is.
+    fn apply(self) -> Result<Placement> {
+        let mut placement = Placement {
+            preserved: self.preserved,
+            note: self.note,
+            ..Default::default()
+        };
+        for (link, real) in self.new_links {
+            std::fs::create_dir_all(&real)?;
+            match std::os::unix::fs::symlink(real, &link) {
+                Ok(()) => placement.linked.push(link),
+                // A concurrent placement won; its entry is kept as-is.
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(placement)
+    }
+}
+/// Result of one placement attempt under the disk reserve.
+#[derive(Debug, PartialEq)]
+pub enum Placed {
+    Done(Placement),
+    /// Nothing was created; this filesystem is below its reserve.
+    Blocked(crate::cache::DiskSpace),
+}
+/// One non-waiting attempt with this process's cache root, `git` from PATH and
+/// its effective cache reserve. Used by the worker's pre-admission wait.
+#[cfg(target_os = "linux")]
+pub fn try_place_outputs(cwd: &Path) -> Result<Placed> {
+    try_place_outputs_in(
+        cwd,
+        &crate::cache::cache_root()?,
+        "git".as_ref(),
+        crate::cache::disk_space,
+    )
+}
+/// Post-admission placement (normally a no-op: the worker already placed the
+/// outputs before queueing). A reserve shortfall here means space dropped while
+/// the job held/waited for its slot; it fails rather than wait while holding a
+/// shared slot that other jobs may be able to use.
+#[cfg(target_os = "linux")]
+pub fn place_outputs(cwd: &Path) -> Result<Placement> {
+    match try_place_outputs(cwd)? {
+        Placed::Done(placement) => Ok(placement),
+        Placed::Blocked(space) => Err(format!(
+            "insufficient disk space: {} (dropped below the reserve after queue admission; \
+             resubmit to wait for space before admission)",
+            space.detail()
+        )
+        .into()),
+    }
+}
+/// Plan, then require the reserve only on filesystems that receive new output
+/// (see [`OutputPlan::reserve_paths`]), then create the links.
+#[cfg(target_os = "linux")]
+pub fn try_place_outputs_in(
+    cwd: &Path,
+    cache: &Path,
+    git: &std::ffi::OsStr,
+    mut probe: impl FnMut(&Path) -> Result<crate::cache::DiskSpace>,
+) -> Result<Placed> {
+    let plan = plan_outputs(cwd, cache, git)?;
+    for path in plan.reserve_paths() {
+        let space = probe(&path)?;
+        if !space.admitted() {
+            return Ok(Placed::Blocked(space));
+        }
+    }
+    Ok(Placed::Done(plan.apply()?))
+}
+/// Repeat `attempt` until it places (Some) or `on_wait` declines to keep
+/// waiting (None, e.g. cancellation). `on_wait` owns logging and the sleep.
+pub fn wait_for_placement(
+    mut attempt: impl FnMut() -> Result<Placed>,
+    mut on_wait: impl FnMut(&crate::cache::DiskSpace) -> Result<bool>,
+) -> Result<Option<Placement>> {
+    loop {
+        match attempt()? {
+            Placed::Done(placement) => return Ok(Some(placement)),
+            Placed::Blocked(space) => {
+                if !on_wait(&space)? {
+                    return Ok(None);
+                }
+            }
+        }
+    }
+}
+/// The Git worktree root for `cwd`, by `git rev-parse --show-toplevel`. If git
+/// is not installed, falls back to the nearest ancestor holding a `.git` entry
+/// (directory, or file for linked worktrees/submodules), which is the same
+/// top level for ordinary checkouts. `Ok(None)` outside any Git checkout.
+#[cfg(target_os = "linux")]
+fn git_root(cwd: &Path, git: &std::ffi::OsStr) -> Result<(Option<PathBuf>, Option<String>)> {
+    // A missing cwd would otherwise surface as a bare ENOENT from the spawn.
+    if !cwd.is_dir() {
+        return Err(format!("live cwd is not an existing directory: {}", cwd.display()).into());
+    }
+    match std::process::Command::new(git)
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+    {
+        Ok(result) if result.status.success() => Ok((
+            Some(std::fs::canonicalize(
+                String::from_utf8(result.stdout)?.trim(),
+            )?),
+            None,
+        )),
+        Ok(_) => Ok((None, None)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let cwd = std::fs::canonicalize(cwd)?;
+            let root = cwd
+                .ancestors()
+                .find(|dir| std::fs::symlink_metadata(dir.join(".git")).is_ok())
+                .map(Path::to_path_buf);
+            let note = match &root {
+                Some(root) => format!(
+                    "git not found on the worker PATH; Git root taken from its .git entry: {}",
+                    root.display()
+                ),
+                None => "git not found on the worker PATH and no .git entry above the cwd; \
+                         placement skipped"
+                    .into(),
+            };
+            Ok((root, Some(note)))
+        }
+        Err(e) => Err(format!(
+            "output placement could not run `{} rev-parse` in {}: {e}",
+            git.to_string_lossy(),
+            cwd.display()
+        )
+        .into()),
+    }
+}
 /// Same non-destructive output placement as the old helper, but namespaced by
 /// full canonical checkout path to avoid colliding same-named worktrees.
 /// An independent Cargo workspace nested below the Git root (the cwd's own
 /// workspace root) additionally gets its own target link, keyed by its full
 /// canonical path. No environment (CARGO_TARGET_DIR etc.) is set or changed.
 #[cfg(target_os = "linux")]
-pub fn place_outputs(cwd: &Path) -> Result<Placement> {
-    place_outputs_in(cwd, || {
-        let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME required")?);
-        let cache = home.join("build-cache");
-        crate::cache::require_space(&[&cache])?;
-        Ok(cache)
-    })
-}
-#[cfg(target_os = "linux")]
-fn place_outputs_in(
-    cwd: &Path,
-    space_checked_cache: impl FnOnce() -> Result<PathBuf>,
-) -> Result<Placement> {
-    let mut placement = Placement::default();
-    let result = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(cwd)
-        .output()?;
-    if !result.status.success() {
-        return Ok(placement);
-    }
-    let root = std::fs::canonicalize(String::from_utf8(result.stdout)?.trim())?;
+fn plan_outputs(cwd: &Path, cache: &Path, git: &std::ffi::OsStr) -> Result<OutputPlan> {
+    let mut plan = OutputPlan {
+        cache: cache.to_path_buf(),
+        ..Default::default()
+    };
+    let (root, note) = git_root(cwd, git)?;
+    plan.note = note;
+    let Some(root) = root else {
+        return Ok(plan);
+    };
     let root_cargo = root.join("Cargo.toml").is_file();
     let nested = cargo_workspace_root(&std::fs::canonicalize(cwd)?, &root)
         .filter(|workspace| *workspace != root);
-    if !root_cargo && nested.is_none() {
-        return Ok(placement);
-    }
-    let cache = space_checked_cache()?;
     if root_cargo {
-        place_links(
+        plan_links(
             &root,
-            &cache,
             &["target", "android/build", "android/app/build"],
-            &mut placement,
+            &mut plan,
         )?;
     }
     if let Some(workspace) = nested {
         // Android outputs remain a Git-root convention; nested gets target only.
-        place_links(&workspace, &cache, &["target"], &mut placement)?;
+        plan_links(&workspace, &["target"], &mut plan)?;
     }
-    Ok(placement)
+    Ok(plan)
 }
 #[cfg(target_os = "linux")]
-fn place_links(root: &Path, cache: &Path, rels: &[&str], placement: &mut Placement) -> Result<()> {
+fn plan_links(root: &Path, rels: &[&str], plan: &mut OutputPlan) -> Result<()> {
     use sha2::{Digest, Sha256};
     let key = format!("{:x}", Sha256::digest(root.as_os_str().as_encoded_bytes()));
     for rel in rels {
@@ -290,7 +428,7 @@ fn place_links(root: &Path, cache: &Path, rels: &[&str], placement: &mut Placeme
             // Never replace, move or delete an existing entry.
             Ok(meta) => {
                 if !meta.file_type().is_symlink() {
-                    placement.preserved.push(link);
+                    plan.preserved.push(link);
                 }
                 continue;
             }
@@ -300,16 +438,31 @@ fn place_links(root: &Path, cache: &Path, rels: &[&str], placement: &mut Placeme
         if !link.parent().is_some_and(Path::is_dir) {
             continue;
         }
-        let real = cache.join("p2p_chat/tasks/checkouts").join(&key).join(rel);
-        std::fs::create_dir_all(&real)?;
-        match std::os::unix::fs::symlink(real, &link) {
-            Ok(()) => placement.linked.push(link),
-            // A concurrent placement won; its entry is kept as-is.
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),
-            Err(e) => return Err(e.into()),
-        }
+        let real = plan
+            .cache
+            .join("p2p_chat/tasks/checkouts")
+            .join(&key)
+            .join(rel);
+        plan.new_links.push((link, real));
     }
     Ok(())
+}
+/// Index of `names` as the program, directly or after transparent `env`
+/// assignments. Only these are understood; shell text is never parsed.
+fn tool_index(argv: &[String], names: &[&str]) -> Option<usize> {
+    let mut index = 0;
+    if Path::new(argv.first()?).file_name()?.to_str()? == "env" {
+        index = 1;
+        if argv.get(index)?.as_str() == "--" {
+            index += 1;
+        }
+        while argv.get(index)?.contains('=') {
+            index += 1;
+        }
+    }
+    names
+        .contains(&Path::new(argv.get(index)?).file_name()?.to_str()?)
+        .then_some(index)
 }
 #[cfg(target_os = "linux")]
 /// Conservative model of Cargo's workspace-root discovery for a canonical cwd,
@@ -626,7 +779,18 @@ mod tests {
                 path
             }
             fn place(&self, cwd: &Path) -> Placement {
-                place_outputs_in(cwd, || Ok(self.cache.clone())).unwrap()
+                match self.try_place(cwd, GIT, ample()).unwrap() {
+                    Placed::Done(placement) => placement,
+                    Placed::Blocked(space) => panic!("unexpected block: {space:?}"),
+                }
+            }
+            fn try_place(
+                &self,
+                cwd: &Path,
+                git: &str,
+                probe: impl FnMut(&Path) -> Result<crate::cache::DiskSpace>,
+            ) -> Result<Placed> {
+                try_place_outputs_in(cwd, &self.cache, git.as_ref(), probe)
             }
             fn cached(&self, root: &Path, rel: &str) -> PathBuf {
                 let key = format!("{:x}", Sha256::digest(root.as_os_str().as_encoded_bytes()));
@@ -639,6 +803,32 @@ mod tests {
         impl Drop for Fixture {
             fn drop(&mut self) {
                 let _ = fs::remove_dir_all(&self.base);
+            }
+        }
+        const GIT: &str = "git";
+        const MISSING_GIT: &str = "/nonexistent/tasks-test-bin/git";
+        const RESERVE: u64 = 20 * 1024 * 1024 * 1024;
+        /// Injectable space probe: every filesystem reports `available` bytes.
+        fn probe_with(
+            available: u64,
+            seen: &std::cell::RefCell<Vec<PathBuf>>,
+        ) -> impl FnMut(&Path) -> Result<crate::cache::DiskSpace> + '_ {
+            move |path: &Path| {
+                seen.borrow_mut().push(path.to_path_buf());
+                Ok(crate::cache::DiskSpace {
+                    path: path.to_path_buf(),
+                    available_bytes: available,
+                    reserve_bytes: RESERVE,
+                })
+            }
+        }
+        fn ample() -> impl FnMut(&Path) -> Result<crate::cache::DiskSpace> {
+            |path: &Path| {
+                Ok(crate::cache::DiskSpace {
+                    path: path.to_path_buf(),
+                    available_bytes: RESERVE,
+                    reserve_bytes: RESERVE,
+                })
             }
         }
         const WORKSPACE: &str = "[workspace]\n";
@@ -818,19 +1008,174 @@ mod tests {
             let unique: std::collections::BTreeSet<_> = targets.iter().collect();
             assert_eq!(unique.len(), 4);
         }
+        // ---- Disk reserve only for new output, on the receiving filesystem ----
+        #[test]
+        fn existing_links_with_low_disk_proceed_without_a_reserve_check() {
+            let f = Fixture::new();
+            let root = f.checkout("root");
+            f.put(root.join("Cargo.toml"), WORKSPACE);
+            assert_eq!(f.place(&root).linked, [root.join("target")]);
+            let seen = std::cell::RefCell::new(vec![]);
+            let placed = f.try_place(&root, GIT, probe_with(0, &seen)).unwrap();
+            assert_eq!(placed, Placed::Done(Placement::default()));
+            assert!(seen.borrow().is_empty(), "{:?}", seen.borrow());
+        }
+        #[test]
+        fn new_link_with_low_disk_waits_then_proceeds_once_space_appears() {
+            let f = Fixture::new();
+            let root = f.checkout("root");
+            f.put(root.join("Cargo.toml"), WORKSPACE);
+            let seen = std::cell::RefCell::new(vec![]);
+            let attempts = std::cell::Cell::new(0);
+            let mut waits = vec![];
+            let placed = wait_for_placement(
+                || {
+                    attempts.set(attempts.get() + 1);
+                    // Below the reserve for the first three probes.
+                    let available = if attempts.get() > 3 {
+                        RESERVE
+                    } else {
+                        RESERVE - 1
+                    };
+                    f.try_place(&root, GIT, probe_with(available, &seen))
+                },
+                |space| {
+                    // Nothing is created while waiting.
+                    assert!(fs::symlink_metadata(root.join("target")).is_err());
+                    assert!(!space.admitted());
+                    waits.push(space.detail());
+                    Ok(true)
+                },
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(waits.len(), 3);
+            assert!(waits[0].starts_with(&format!("{}: ", f.cache.display())));
+            assert!(waits[0].ends_with("20.0 GiB available, 20.0 GiB reserve"));
+            assert_eq!(placed.linked, [root.join("target")]);
+            assert_eq!(link(&root.join("target")), f.cached(&root, "target"));
+            // The cache filesystem is what is probed for a new cache-backed link.
+            assert!(seen.borrow().iter().all(|p| *p == f.cache));
+        }
+        #[test]
+        fn cancel_during_the_disk_wait_creates_nothing() {
+            let f = Fixture::new();
+            let root = f.checkout("root");
+            f.put(root.join("Cargo.toml"), WORKSPACE);
+            let seen = std::cell::RefCell::new(vec![]);
+            let mut polls = 0;
+            let outcome = wait_for_placement(
+                || f.try_place(&root, GIT, probe_with(0, &seen)),
+                |_| {
+                    polls += 1;
+                    Ok(polls < 2) // cancellation observed on the second poll
+                },
+            )
+            .unwrap();
+            assert_eq!(outcome, None);
+            assert_eq!(polls, 2);
+            assert!(fs::symlink_metadata(root.join("target")).is_err());
+            assert!(fs::read_dir(&f.cache).unwrap().next().is_none());
+        }
+        #[test]
+        fn preserved_local_output_is_checked_on_its_own_filesystem() {
+            let f = Fixture::new();
+            let root = f.checkout("root");
+            f.put(root.join("Cargo.toml"), WORKSPACE);
+            f.place(&root);
+            let nested = root.join("experiments/independent");
+            f.put(nested.join("Cargo.toml"), WORKSPACE);
+            f.put(nested.join("target/marker"), "synthetic output");
+            let seen = std::cell::RefCell::new(vec![]);
+            // Only the kept local target receives output; the cache is not probed.
+            let blocked = f.try_place(&nested, GIT, probe_with(0, &seen)).unwrap();
+            let Placed::Blocked(space) = blocked else {
+                panic!("expected a block, got {blocked:?}");
+            };
+            assert_eq!(space.path, nested.join("target"));
+            assert_eq!(*seen.borrow(), [nested.join("target")]);
+            seen.borrow_mut().clear();
+            let placed = f
+                .try_place(&nested, GIT, probe_with(RESERVE, &seen))
+                .unwrap();
+            let Placed::Done(placed) = placed else {
+                panic!("expected placement");
+            };
+            assert_eq!(placed.preserved, [nested.join("target")]);
+            assert!(placed.linked.is_empty());
+            // The real probe measures the filesystem holding that directory.
+            let real = crate::cache::disk_space(&nested.join("target")).unwrap();
+            assert!(real.available_bytes > 0);
+        }
+        // ---- Missing git ----
+        #[test]
+        fn missing_git_falls_back_to_the_dot_git_root_and_says_so() {
+            let f = Fixture::new();
+            let root = f.checkout("root");
+            f.put(root.join("Cargo.toml"), WORKSPACE);
+            fs::create_dir_all(root.join("src")).unwrap();
+            let Placed::Done(placed) = f
+                .try_place(&root.join("src"), MISSING_GIT, ample())
+                .unwrap()
+            else {
+                panic!("expected placement");
+            };
+            assert_eq!(placed.linked, [root.join("target")]);
+            assert_eq!(link(&root.join("target")), f.cached(&root, "target"));
+            assert!(placed.detail().contains("git not found on the worker PATH"));
+            // A linked worktree's `.git` is a file; it marks the root as well.
+            let worktree = f.base.join("worktree");
+            f.put(
+                worktree.join(".git"),
+                "gitdir: /synthetic/.git/worktrees/w\n",
+            );
+            f.put(worktree.join("Cargo.toml"), WORKSPACE);
+            let Placed::Done(placed) = f.try_place(&worktree, MISSING_GIT, ample()).unwrap() else {
+                panic!("expected placement");
+            };
+            assert_eq!(placed.linked, [worktree.join("target")]);
+        }
+        #[test]
+        fn missing_git_outside_a_checkout_skips_placement_without_error() {
+            let f = Fixture::new();
+            let plain = f.base.join("not-git");
+            f.put(plain.join("Cargo.toml"), WORKSPACE);
+            let Placed::Done(placed) = f.try_place(&plain, MISSING_GIT, ample()).unwrap() else {
+                panic!("expected no-op placement");
+            };
+            assert!(placed.linked.is_empty() && placed.preserved.is_empty());
+            assert!(
+                placed.detail().contains("placement skipped"),
+                "{}",
+                placed.detail()
+            );
+            assert!(fs::symlink_metadata(plain.join("target")).is_err());
+            // Other failures name git or the cwd instead of a bare ENOENT.
+            let not_executable = f.base.join("git-dir");
+            fs::create_dir(&not_executable).unwrap();
+            let error = f
+                .try_place(&plain, not_executable.to_str().unwrap(), ample())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("rev-parse"), "{error}");
+            let error = f
+                .try_place(&f.base.join("gone"), GIT, ample())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("live cwd is not an existing directory"),
+                "{error}"
+            );
+        }
         #[test]
         fn outside_git_or_without_manifests_nothing_is_placed() {
             let f = Fixture::new();
             let plain = f.base.join("not-git");
             f.put(plain.join("Cargo.toml"), WORKSPACE);
-            let mut checked = false;
-            let placed = place_outputs_in(&plain, || {
-                checked = true;
-                Ok(f.cache.clone())
-            })
-            .unwrap();
-            assert_eq!(placed, Placement::default());
-            assert!(!checked);
+            let seen = std::cell::RefCell::new(vec![]);
+            let placed = f.try_place(&plain, GIT, probe_with(0, &seen)).unwrap();
+            assert_eq!(placed, Placed::Done(Placement::default()));
+            assert!(seen.borrow().is_empty(), "no reserve without placement");
             let root = f.checkout("root");
             fs::create_dir_all(root.join("docs")).unwrap();
             assert_eq!(f.place(&root.join("docs")), Placement::default());

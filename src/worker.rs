@@ -425,6 +425,13 @@ fn execute_local(
         &dir,
         b"TRUSTED LIVE COMMAND: cwd is NOT snapshotted; no immutable-source/artifact guarantee\n",
     );
+    if !prepare_local_outputs(store, state, &dir, job, &recipe)? {
+        return store.finish(
+            job.id,
+            Phase::Cancelled,
+            "Cancelled while waiting for disk reserve",
+        );
+    }
     for stage in recipe.stages() {
         if cancelled(store, job.id)? || STOP.load(Ordering::SeqCst) {
             return store.finish(
@@ -462,6 +469,65 @@ fn execute_local(
         }
     }
     store.complete_success(job.id)
+}
+
+const DISK_WAIT_LOG_INTERVAL: Duration = Duration::from_secs(60);
+/// Runs in the worker BEFORE any shared compile/run/device admission: places
+/// cache output links under the disk reserves.
+/// A reserve shortfall WAITS here, logged and cancellable, like the snapshot
+/// path's `wait_for_target`. No shared slot is held while waiting, so jobs that
+/// need no new space (existing links, run-only work) are never blocked behind
+/// it. `run_command` re-places after admission; that is normally a no-op.
+/// Returns false if cancelled or stopping while waiting.
+fn prepare_local_outputs(
+    store: &mut Store,
+    state: &Path,
+    dir: &Path,
+    job: &crate::Job,
+    _recipe: &crate::local_command::Recipe,
+) -> Result<bool> {
+    use crate::local_command::{self as local, Placed};
+    let cwd = Path::new(&job.spec.source);
+    let mut waited_on: Option<PathBuf> = None;
+    let mut logged = Instant::now();
+    let placement = local::wait_for_placement(
+        || {
+            let state_space = cache::state_space(state)?;
+            if !state_space.admitted() {
+                return Ok(Placed::Blocked(state_space));
+            }
+            local::try_place_outputs(cwd)
+        },
+        |space| {
+            if cancelled(store, job.id)? || STOP.load(Ordering::SeqCst) {
+                return Ok(false);
+            }
+            // Log when the blocking filesystem changes, then once a minute.
+            if waited_on.as_ref() != Some(&space.path) || logged.elapsed() >= DISK_WAIT_LOG_INTERVAL
+            {
+                let detail = format!("Waiting for disk reserve: {}", space.detail());
+                let mut e = store.execution(job.id)?.ok_or("missing execution")?;
+                e.detail = detail.clone();
+                store.update_execution(job.id, Phase::Preparing, e)?;
+                append_log(dir, format!("{detail}\n").as_bytes());
+                waited_on = Some(space.path.clone());
+                logged = Instant::now();
+            }
+            std::thread::sleep(Duration::from_secs(1));
+            Ok(true)
+        },
+    )?;
+    let Some(placement) = placement else {
+        return Ok(false);
+    };
+    if waited_on.is_some() {
+        append_log(
+            dir,
+            b"Disk reserve available; continuing to shared admission\n",
+        );
+    }
+    append_log(dir, placement.detail().as_bytes());
+    Ok(true)
 }
 
 fn execute_android(
