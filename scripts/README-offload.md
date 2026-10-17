@@ -59,7 +59,7 @@ own admission class instead of a run slot:
 ```
 tasks-offload --worker USER@HOST [--ssh-key PATH] --who OWNER
               [--fetch RELPATH]... [--fetch-dest DIR] [--cargo-fetch]
-              [--remote-run] [--checksum] [--dry-run]
+              [--remote-run | --device SERIAL] [--checksum] [--dry-run]
               [--ssh-program P] [--rsync-program P] [--remote-python P]
               [--max-files N] [--max-bytes N] [--cancel-wait SECONDS]
               [--transport ssh|iroh] [--lan-peer PATH] [--iroh-data-dir DIR]
@@ -75,6 +75,7 @@ tasks-offload --worker USER@HOST [--ssh-key PATH] --who OWNER
 | `--fetch-dest DIR` | Default `~/build-cache/offload/OWNER/REMOTE_JOB_ID/`, keeping `REL`'s directories. Refused if inside the local checkout. |
 | `--cargo-fetch` | `cargo fetch --locked` on the worker first (online, outside the remote ledger) so `--offline` commands work. |
 | `--remote-run` | Submit with remote `tasks run --run` (run-only slot; the command must not compile). Default is the remote compile slot. |
+| `--device SERIAL` | Submit with remote `tasks run --device SERIAL`: that device's exclusive slot (plus a run slot) in the **worker's** ledger, for adb install/logcat on a phone plugged into the worker. Conflicts with `--remote-run`. The serial is validated like `tasks` does (`[A-Za-z0-9._-]`, `:` allowed for wireless, 1–128, no leading `-`). Denylisted serials (built-in `ZD22257P6G`, plus `TASKS_DENIED_DEVICES` and `~/.config/tasks/denied-devices`) are refused before anything is synced, also when only the command names one (`adb -s SERIAL`, `ANDROID_SERIAL=`). See deploy/worker/README.md "Test phone on the worker". |
 | `--checksum` | rsync `--checksum` instead of size+mtime quick check. |
 | `--dry-run` | Build the manifest and print the plan; runs no ssh/rsync at all. |
 | `--ssh-program`, `--rsync-program` | Transport seam for tests; also env `TASKS_OFFLOAD_SSH`, `TASKS_OFFLOAD_RSYNC`. |
@@ -87,7 +88,7 @@ tasks-offload --worker USER@HOST [--ssh-key PATH] --who OWNER
 | `--iroh-store DIR` | Local iroh-blobs store for `--fetch`. Default `~/build-cache/offload/.iroh-store`. |
 
 Last stdout line is a one-line JSON summary: `worker`, `remote_dir`,
-`remote_cwd`, `remote_job_id`, `remote_phase`, `remote_state`
+`remote_cwd`, `device` (the `--device` serial or null), `remote_job_id`, `remote_phase`, `remote_state`
 (`terminal`/`uncertain`/`not_submitted`/`dry_run`), `exit`, `synced_files`,
 `synced_bytes`, `excluded_files`, `deleted_tracked`, `pruned` (first 200),
 `pruned_count`, `fetched`, `fetch_dest`, `cancel_requested`, `dry_run`,
@@ -134,7 +135,7 @@ line: 0 passed, 130 cancelled, else the stage exit); 2 usage/source refusal;
    SHA-256). Mismatches are re-sent once with `--checksum`; a second mismatch
    refuses to run ("checkout changed during sync").
 3. **Run.** `ssh W 'cd "$HOME"/offload/checkouts/<id>/<subdir> && exec
-   "$HOME"/.local/bin/tasks run --who OWNER@host [--run] -- <shlex-quoted argv>'`.
+   "$HOME"/.local/bin/tasks run --who OWNER@host [--run | --device SERIAL] -- <shlex-quoted argv>'`.
    The local subdirectory of the toplevel is mapped to the same remote subdir.
    Output is streamed as the remote client emits it (note: installed `tasks run`
    prints phase changes live but the job log only at the end). The job id is
@@ -241,8 +242,9 @@ per-attempt materialization. None of that exists in v0.
   on the worker; check `excluded_files` and `--dry-run` output first.
 - **Submodules / nested repos unsupported** (`--recurse-submodules` cannot be
   combined with `-o`); they are refused with a clear error.
-- **Android/Gradle unsupported**: no SDK/NDK/Gradle provisioning, devices or
-  emulators on the worker. Rust cargo check/test/clippy/build is the target.
+- **Android/Gradle:** the worker has the SDK/NDK/JDK (installed per user, not
+  provisioned by this tool) and builds p2p_chat APKs. A test phone on the worker
+  is driven with `--device SERIAL` (deploy/worker/README.md). No emulators.
 - **Not a snapshot.** The checkout must stay stable during scan+sync; post-sync
   verification catches changes, but a live edit can still race the run itself.
   The remote dir is shared by consecutive offloads of the same checkout:
