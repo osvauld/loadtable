@@ -14,7 +14,7 @@ pub const MIN_FREE_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 pub const MIN_STATE_FREE_BYTES: u64 = 256 * 1024 * 1024;
 pub const SCCACHE_LIMIT: &str = "30G";
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DiskSpace {
     pub path: PathBuf,
     pub available_bytes: u64,
@@ -93,6 +93,31 @@ pub fn require_space(paths: &[&Path]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Root of per-checkout cache output links (`~/build-cache`); the reserve for
+/// new cache-backed output placement is measured here.
+pub fn cache_root() -> Result<PathBuf> {
+    let home = std::env::var_os("HOME").ok_or("HOME is required for cache policy")?;
+    Ok(PathBuf::from(home).join("build-cache"))
+}
+
+/// Why the disk reserves currently make jobs wait before admission, if they do.
+/// The state reserve gates every worker job; the cache reserve gates jobs that
+/// need NEW cache output (new placement links, snapshot/Android targets).
+pub fn disk_blocker(cache: Option<&DiskSpace>, state: Option<&DiskSpace>) -> Option<String> {
+    if let Some(state) = state.filter(|s| !s.admitted()) {
+        return Some(format!(
+            "state disk below reserve, every job waits before admission: {}",
+            state.detail()
+        ));
+    }
+    cache.filter(|c| !c.admitted()).map(|cache| {
+        format!(
+            "cache disk below reserve, jobs needing new cache output wait before admission: {}",
+            cache.detail()
+        )
+    })
 }
 
 pub fn target_path() -> Result<PathBuf> {
@@ -255,6 +280,24 @@ mod tests {
         assert!(!missing.exists());
         assert!(disk_space(Path::new("relative")).is_err());
         fs::remove_dir(path).unwrap();
+    }
+    #[test]
+    fn disk_blocker_names_the_disk_below_its_reserve() {
+        let disk = |path: &str, available_bytes| DiskSpace {
+            path: path.into(),
+            available_bytes,
+            reserve_bytes: 10,
+        };
+        let (ok_cache, ok_state) = (disk("/cache", 10), disk("/state", 10));
+        assert_eq!(disk_blocker(Some(&ok_cache), Some(&ok_state)), None);
+        assert_eq!(disk_blocker(None, None), None);
+        let low_cache = disk("/cache", 9);
+        let text = disk_blocker(Some(&low_cache), Some(&ok_state)).unwrap();
+        assert!(text.starts_with("cache disk below reserve"), "{text}");
+        assert!(text.contains("/cache: "), "{text}");
+        let low_state = disk("/state", 0);
+        let text = disk_blocker(Some(&low_cache), Some(&low_state)).unwrap();
+        assert!(text.starts_with("state disk below reserve"), "{text}");
     }
     #[test]
     fn configured_reserves_are_applied_and_reported() {

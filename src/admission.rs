@@ -450,6 +450,12 @@ pub struct Status {
     pub pressure: Pressure,
     pub pressure_blocker: Option<String>,
     pub thresholds: ThresholdReport,
+    /// Live cache-disk space (`~/build-cache`) against the effective reserve.
+    pub cache_disk: Option<crate::cache::DiskSpace>,
+    /// Live state-disk space against the effective reserve.
+    pub state_disk: Option<crate::cache::DiskSpace>,
+    /// Which disk reserve currently makes jobs wait before admission, if any.
+    pub disk_blocker: Option<String>,
     pub resources: Vec<ResourceStatus>,
     pub waiting: Vec<Note>,
     pub warnings: Vec<String>,
@@ -674,7 +680,35 @@ pub fn status() -> Result<Status> {
         thresholds(),
         Thresholds::overridden(|name| std::env::var_os(name)),
     )?;
-    status_with(&root(), Pressure::read()?, report, warnings)
+    let state = crate::state_dir();
+    let mut status = status_with(&root(), Pressure::read()?, report, warnings)?;
+    let t = status.thresholds.effective;
+    let cache_disk =
+        crate::cache::cache_root().and_then(|cache| crate::cache::cache_space_with(&cache, &t));
+    let state_disk = crate::cache::state_space_with(&state, &t);
+    with_disks(&mut status, cache_disk, state_disk);
+    Ok(status)
+}
+/// Additive disk fields; a measurement error becomes a warning, not a failure.
+fn with_disks(
+    status: &mut Status,
+    cache: Result<crate::cache::DiskSpace>,
+    state: Result<crate::cache::DiskSpace>,
+) {
+    let mut keep = |disk: Result<crate::cache::DiskSpace>, name: &str| match disk {
+        Ok(disk) => Some(disk),
+        Err(e) => {
+            status
+                .warnings
+                .push(format!("{name} disk not measured: {e}"));
+            None
+        }
+    };
+    let cache = keep(cache, "cache");
+    let state = keep(state, "state");
+    status.disk_blocker = crate::cache::disk_blocker(cache.as_ref(), state.as_ref());
+    status.cache_disk = cache;
+    status.state_disk = state;
 }
 #[cfg(test)]
 fn status_at(root: &Path, pressure: Pressure) -> Result<Status> {
@@ -696,6 +730,9 @@ fn status_with(
         pressure_blocker: pressure.blocker_with(&thresholds.effective),
         pressure,
         thresholds,
+        cache_disk: None,
+        state_disk: None,
+        disk_blocker: None,
         resources: vec![],
         waiting: vec![],
         warnings,
