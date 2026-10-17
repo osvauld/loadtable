@@ -184,6 +184,36 @@ impl Thresholds {
             && RUN_CPU_LIMIT.admits(self.run_cpu_some_avg10_max_pct)
     }
 }
+/// Milliseconds between SIGTERM and SIGKILL when a job's process group is
+/// stopped (cancel, worker loss), 100..=30000. Default 300. Read by the worker
+/// and its stage supervisors from their own environment, like the reserves.
+pub const CANCEL_GRACE_ENV: &str = "TASKS_CANCEL_GRACE_MS";
+pub const DEFAULT_CANCEL_GRACE_MS: u64 = 300;
+const CANCEL_GRACE_LIMIT: Limit = Limit {
+    env: CANCEL_GRACE_ENV,
+    unit: 1,
+    unit_name: "ms",
+    floor: 100,
+    max: 30_000,
+};
+pub fn cancel_grace_from_lookup(
+    get: impl Fn(&str) -> Option<OsString>,
+) -> Result<std::time::Duration> {
+    CANCEL_GRACE_LIMIT
+        .parse(get(CANCEL_GRACE_ENV), DEFAULT_CANCEL_GRACE_MS)
+        .map(std::time::Duration::from_millis)
+}
+static CANCEL_GRACE: OnceLock<std::result::Result<std::time::Duration, String>> = OnceLock::new();
+/// Resolved once per process. An invalid value fails closed: the worker refuses
+/// to start and a stage supervisor refuses to launch its command.
+pub fn cancel_grace() -> Result<std::time::Duration> {
+    CANCEL_GRACE
+        .get_or_init(|| {
+            cancel_grace_from_lookup(|name| std::env::var_os(name)).map_err(|e| e.to_string())
+        })
+        .clone()
+        .map_err(Into::into)
+}
 static ACTIVE: OnceLock<std::result::Result<Thresholds, String>> = OnceLock::new();
 /// Resolved once per process from its own environment. Invalid values fail closed.
 pub fn thresholds() -> Result<Thresholds> {

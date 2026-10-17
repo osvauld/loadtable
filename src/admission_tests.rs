@@ -696,3 +696,33 @@ fn max_cargo_jobs_is_recorded_reported_and_old_records_default_to_two() {
     assert_eq!(report.effective.max_cargo_jobs, 2);
     assert!(warnings.is_empty());
 }
+
+#[test]
+fn cancel_grace_defaults_to_300ms_and_parses_strictly() {
+    use std::time::Duration;
+    let lookup = |value: Option<&'static str>| {
+        move |name: &str| {
+            assert_eq!(name, CANCEL_GRACE_ENV);
+            value.map(OsString::from)
+        }
+    };
+    assert_eq!(
+        cancel_grace_from_lookup(lookup(None)).unwrap(),
+        Duration::from_millis(300)
+    );
+    for (raw, ms) in [("100", 100), ("5000", 5000), ("30000", 30_000)] {
+        assert_eq!(
+            cancel_grace_from_lookup(lookup(Some(raw))).unwrap(),
+            Duration::from_millis(ms)
+        );
+    }
+    for bad in [
+        "", "99", "30001", "0", "-5", "+300", " 300", "300ms", "1e3", "3.5",
+    ] {
+        let error = cancel_grace_from_lookup(lookup(Some(bad))).unwrap_err();
+        assert!(
+            error.to_string().contains(CANCEL_GRACE_ENV),
+            "{bad:?}: {error}"
+        );
+    }
+}

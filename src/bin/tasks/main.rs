@@ -287,8 +287,23 @@ fn run() -> Result<()> {
         let id = response
             .submitted_id
             .ok_or("daemon did not return submitted_id; do not resubmit blindly")?;
-        approve_and_start(&socket, Action::ApproveCommand(id), id)?;
-        std::process::exit(wait_job(&socket, id, output)?.1);
+        // The submit line above carries the scripts' `submitted job N;` prefix;
+        // this adds the never-resubmit guidance once, before any wait can fail.
+        eprintln!(
+            "tasks: if this client stops or times out, {}",
+            tinline_task_manager::live_job_hint(id)
+        );
+        tinline_task_manager::print_hint_on_detach(id);
+        let waited = approve_and_start(&socket, Action::ApproveCommand(id), id)
+            .and_then(|()| wait_job(&socket, id, output));
+        match waited {
+            Ok((_, code)) => std::process::exit(code),
+            Err(e) => {
+                return Err(
+                    format!("{e}\ntasks: {}", tinline_task_manager::live_job_hint(id)).into(),
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -366,7 +381,8 @@ fn wait_job(
                 }
             };
             print!("{text}");
-            if !text.is_empty() && !text.ends_with('\n') {
+            if !text.is_empty() && !text.ends_with('
+') {
                 println!();
             }
             if followed && !live.at_line_start {

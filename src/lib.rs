@@ -11,6 +11,7 @@ pub mod catalog;
 #[cfg(target_os = "linux")]
 pub mod device;
 pub mod execution;
+pub mod ledger;
 pub mod local_command;
 #[cfg(target_os = "linux")]
 pub mod retention;
@@ -24,7 +25,7 @@ pub mod workspace_snapshot;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 pub const PROTOCOL_VERSION: u32 = 2;
@@ -141,16 +142,25 @@ fn check_field(value: &str) -> Result<()> {
     Ok(())
 }
 
+/// How long one ledger statement waits for another connection's lock before
+/// failing with SQLITE_BUSY. Was 5 s; workers additionally retry busy errors
+/// (see `ledger`), and clients wait well beyond this (see `ClientTimeouts`).
+pub const STORE_BUSY_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub struct Store(pub(crate) Connection);
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
-        Self::init(Connection::open(path)?)
+        Self::open_with_busy_timeout(path, STORE_BUSY_TIMEOUT)
+    }
+    /// Tests use a short timeout to model a busy ledger quickly.
+    pub fn open_with_busy_timeout(path: &Path, busy: Duration) -> Result<Self> {
+        Self::init(Connection::open(path)?, busy)
     }
     pub fn memory() -> Result<Self> {
-        Self::init(Connection::open_in_memory()?)
+        Self::init(Connection::open_in_memory()?, STORE_BUSY_TIMEOUT)
     }
-    fn init(conn: Connection) -> Result<Self> {
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    fn init(conn: Connection, busy: Duration) -> Result<Self> {
+        conn.busy_timeout(busy)?;
         conn.execute_batch(
             "PRAGMA foreign_keys=ON;
             CREATE TABLE IF NOT EXISTS jobs (
@@ -398,56 +408,403 @@ pub fn request(path: &Path, action: Action) -> Result<Response> {
     request_on_stream(UnixStream::connect(path)?, action)
 }
 
+/// How long a client waits for the daemon. One reply can queue behind other
+/// requests on the daemon's store mutex, and each ledger statement may wait up
+/// to [`STORE_BUSY_TIMEOUT`], so `reply` is several busy timeouts long.
+/// `total` bounds all retries of one call (connect retries, read-only replays
+/// and lost-reply reconciliation).
+#[derive(Clone, Copy, Debug)]
+pub struct ClientTimeouts {
+    pub reply: Duration,
+    pub total: Duration,
+}
+impl Default for ClientTimeouts {
+    fn default() -> Self {
+        Self {
+            reply: Duration::from_secs(60),
+            total: Duration::from_secs(180),
+        }
+    }
+}
+
 /// Recover only when connecting failed, before any request was delivered.
-/// Write/read/protocol failures must not replay a possibly applied mutation.
+/// A delivered mutation whose reply is lost is never replayed: read-only and
+/// idempotent actions are retried, a submit is reconciled against the ledger.
 #[cfg(unix)]
 pub fn request_with_reconnect(
     path: &Path,
     action: Action,
     start: impl FnOnce() -> Result<()>,
 ) -> Result<Response> {
-    use std::io::ErrorKind;
-    use std::os::unix::net::UnixStream;
-    let stream = match UnixStream::connect(path) {
-        Ok(stream) => stream,
-        Err(error)
-            if matches!(
-                error.kind(),
-                ErrorKind::NotFound | ErrorKind::ConnectionRefused
-            ) =>
-        {
-            start()?;
-            UnixStream::connect(path)?
-        }
-        Err(error) => return Err(error.into()),
-    };
-    request_on_stream(stream, action)
+    request_with_reconnect_timeouts(path, action, start, ClientTimeouts::default())
 }
 
 #[cfg(unix)]
-fn request_on_stream(
-    mut stream: std::os::unix::net::UnixStream,
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// SQLITE_BUSY / SQLITE_LOCKED as reported in a daemon reply's error text.
+fn busy_error(error: &str) -> bool {
+    error.contains("database is locked")
+        || error.contains("database is busy")
+        || error.contains("database table is locked")
+}
+
+/// Connects, starting the daemon at most once when no socket answers, and
+/// retrying a busy listener (EAGAIN: backlog full) until `deadline`.
+#[cfg(unix)]
+fn connect(
+    path: &Path,
+    mut start: Option<Box<dyn FnOnce() -> Result<()> + '_>>,
+    deadline: Instant,
+) -> Result<std::os::unix::net::UnixStream> {
+    use std::io::ErrorKind;
+    let mut backoff = Duration::from_millis(50);
+    loop {
+        match std::os::unix::net::UnixStream::connect(path) {
+            Ok(stream) => return Ok(stream),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::NotFound | ErrorKind::ConnectionRefused
+                ) =>
+            {
+                match start.take() {
+                    Some(start) => start()?,
+                    None => return Err(error.into()),
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
+                ) && Instant::now() < deadline =>
+            {
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(Duration::from_secs(2));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+const MAX_REPLY: u64 = 4 * 1024 * 1024;
+
+/// Outcome of one delivered request.
+#[cfg(unix)]
+enum Attempt {
+    Answered(Response),
+    /// The request may have reached the daemon, but no complete reply arrived.
+    Lost(String),
+}
+
+#[cfg(unix)]
+pub fn request_with_reconnect_timeouts(
+    path: &Path,
     action: Action,
+    start: impl FnOnce() -> Result<()>,
+    timeouts: ClientTimeouts,
 ) -> Result<Response> {
-    use std::io::{BufRead, BufReader, Read, Write};
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
-    stream.set_write_timeout(Some(std::time::Duration::from_secs(5)))?;
-    serde_json::to_writer(
-        &mut stream,
-        &Request {
-            version: PROTOCOL_VERSION,
-            action,
+    let began = Instant::now();
+    let deadline = began + timeouts.total;
+    let since = unix_now();
+    let mut stream = connect(path, Some(Box::new(start)), deadline)?;
+    let mut backoff = Duration::from_millis(250);
+    let lost = loop {
+        let mut response = match exchange(stream, action.clone(), timeouts.reply)? {
+            Attempt::Answered(response) => response,
+            Attempt::Lost(why) => break why,
+        };
+        let busy = response.error.as_deref().is_some_and(busy_error);
+        if busy && let (Action::Submit(_), Some(id)) = (&action, response.submitted_id) {
+            // The insert committed; only the daemon's listing afterwards was busy.
+            eprintln!(
+                "tasks: job {id} was recorded; the daemon's job listing afterwards failed ({}), ignored",
+                response.error.take().unwrap_or_default()
+            );
+            return Ok(response);
+        }
+        // A busy reply to these was not applied (a failed submit insert commits
+        // nothing; the others are read-only or idempotent), so sending again is safe.
+        let resend =
+            busy && matches!(
+                action,
+                Action::List | Action::Logs(_) | Action::StartWorker | Action::Submit(_)
+            ) && Instant::now() + backoff < deadline;
+        if !resend {
+            return Ok(response);
+        }
+        eprintln!(
+            "tasks: ledger busy ({}); retrying",
+            response.error.unwrap_or_default()
+        );
+        std::thread::sleep(backoff);
+        backoff = (backoff * 2).min(Duration::from_secs(5));
+        stream = connect(path, None, deadline)?;
+    };
+    let waited = || began.elapsed().as_secs();
+    match &action {
+        // Read-only or idempotent: safe to send again.
+        Action::List | Action::Logs(_) | Action::StartWorker => {
+            let mut last = lost;
+            let mut backoff = Duration::from_millis(250);
+            while Instant::now() < deadline {
+                eprintln!("tasks: daemon slow ({last}); retrying read-only request");
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(Duration::from_secs(5));
+                let stream = connect(path, None, deadline)?;
+                match exchange(stream, action.clone(), timeouts.reply)? {
+                    Attempt::Answered(response) => return Ok(response),
+                    Attempt::Lost(why) => last = why,
+                }
+            }
+            Err(format!(
+                "daemon gave no reply for {}s ({last}); the ledger may be busy. Retry later; nothing was changed by this request",
+                waited()
+            )
+            .into())
+        }
+        Action::Submit(spec) => reconcile_submit(path, spec, since, &lost, deadline, timeouts),
+        Action::Approve(id) | Action::ApproveAndroidTrial(id) | Action::ApproveCommand(id) => {
+            reconcile_approve(path, *id, &lost, deadline, timeouts)
+        }
+        Action::Cancel(id) => Err(format!(
+            "cancel of job {id} was sent but no reply arrived ({lost}); it may have been applied. Check `tasks list` before retrying"
+        )
+        .into()),
+        Action::Record(_) => Err(format!(
+            "record was sent but no reply arrived ({lost}); it may have been applied. Do not resend blindly"
+        )
+        .into()),
+    }
+}
+
+/// Lists the ledger after a lost reply. Needs several clean listings before
+/// concluding "not there", because the lost request may still be queued on the
+/// daemon's store mutex ahead of (or behind) this listing.
+#[cfg(unix)]
+fn reconcile<T>(
+    path: &Path,
+    deadline: Instant,
+    timeouts: ClientTimeouts,
+    mut found: impl FnMut(&Response) -> Option<T>,
+) -> Result<Option<T>> {
+    let mut clean = 0;
+    let mut backoff = Duration::from_millis(250);
+    while clean < 3 && Instant::now() < deadline {
+        let stream = connect(path, None, deadline)?;
+        match exchange(stream, Action::List, timeouts.reply)? {
+            Attempt::Answered(response) if response.error.is_none() => {
+                if let Some(value) = found(&response) {
+                    return Ok(Some(value));
+                }
+                clean += 1;
+            }
+            _ => (),
+        }
+        std::thread::sleep(backoff);
+        backoff = (backoff * 2).min(Duration::from_secs(2));
+    }
+    Ok(None)
+}
+
+/// Jobs that this exact submit could have created: identical spec, recorded no
+/// earlier than the moment the client started sending.
+pub fn submit_candidates(jobs: &[Job], spec: &JobSpec, since: i64) -> Vec<i64> {
+    let wanted = serde_json::to_value(spec).ok();
+    jobs.iter()
+        .filter(|j| j.submitted_at >= since && serde_json::to_value(&j.spec).ok() == wanted)
+        .map(|j| j.id)
+        .collect()
+}
+
+#[cfg(unix)]
+fn reconcile_submit(
+    path: &Path,
+    spec: &JobSpec,
+    since: i64,
+    lost: &str,
+    deadline: Instant,
+    timeouts: ClientTimeouts,
+) -> Result<Response> {
+    let mut ambiguous = vec![];
+    let found = reconcile(
+        path,
+        deadline,
+        timeouts,
+        |response| match submit_candidates(&response.jobs, spec, since).as_slice() {
+            [] => None,
+            [id] => Some((*id, response.jobs.clone())),
+            many => {
+                ambiguous = many.to_vec();
+                None
+            }
         },
     )?;
-    stream.write_all(b"\n")?;
+    let hint = format!(
+        "owner={} cwd={} submitted at/after unix time {since}",
+        spec.owner, spec.source
+    );
+    match found {
+        Some((id, jobs)) => {
+            eprintln!(
+                "tasks: the daemon's reply to submit was lost ({lost}); found the submitted job {id} in the ledger by exact spec match ({hint}); not resubmitted"
+            );
+            Ok(Response {
+                version: PROTOCOL_VERSION,
+                execution_enabled: false,
+                submitted_id: Some(id),
+                jobs,
+                estimates: vec![],
+                error: None,
+                log: None,
+            })
+        }
+        None if !ambiguous.is_empty() => Err(format!(
+            "submit reply lost ({lost}) and several identical jobs match: {ambiguous:?} ({hint}). One is yours; inspect them with `tasks list` / `tasks logs ID`. Do NOT resubmit"
+        )
+        .into()),
+        None => Err(format!(
+            "submit was sent but no reply arrived ({lost}) and no matching job is listed yet; it may still be recorded. Do NOT resubmit: look in `tasks list` for {hint}"
+        )
+        .into()),
+    }
+}
+
+#[cfg(unix)]
+fn reconcile_approve(
+    path: &Path,
+    id: i64,
+    lost: &str,
+    deadline: Instant,
+    timeouts: ClientTimeouts,
+) -> Result<Response> {
+    let found = reconcile(path, deadline, timeouts, |response| {
+        response
+            .jobs
+            .iter()
+            .any(|j| j.id == id && j.phase != Phase::Queued && j.execution.is_some())
+            .then(|| response.jobs.clone())
+    })?;
+    match found {
+        Some(jobs) => {
+            eprintln!(
+                "tasks: the daemon's reply to approving job {id} was lost ({lost}); the ledger shows it approved"
+            );
+            Ok(Response {
+                version: PROTOCOL_VERSION,
+                execution_enabled: false,
+                submitted_id: None,
+                jobs,
+                estimates: vec![],
+                error: None,
+                log: None,
+            })
+        }
+        None => Err(format!(
+            "approval of job {id} was sent but not confirmed ({lost}). Check `tasks list`; if job {id} is still queued, approving it again is safe (only a queued job can be approved)"
+        )
+        .into()),
+    }
+}
+
+/// Sends one request. Connection-level failures after connecting are `Lost`:
+/// the daemon may have applied the request, so the caller must not replay a
+/// mutation. A malformed or mismatched reply is an ordinary error.
+#[cfg(unix)]
+fn exchange(
+    mut stream: std::os::unix::net::UnixStream,
+    action: Action,
+    reply: Duration,
+) -> Result<Attempt> {
+    use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
+    stream.set_read_timeout(Some(reply))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let request = serde_json::to_vec(&Request {
+        version: PROTOCOL_VERSION,
+        action,
+    })?;
+    if let Err(error) = stream
+        .write_all(&request)
+        .and_then(|()| stream.write_all(b"\n"))
+    {
+        return Ok(Attempt::Lost(format!("send failed: {error}")));
+    }
     let mut line = String::new();
-    BufReader::new(stream.take(4 * 1024 * 1024)).read_line(&mut line)?;
+    if let Err(error) = BufReader::new(stream.take(MAX_REPLY)).read_line(&mut line) {
+        return Ok(Attempt::Lost(match error.kind() {
+            ErrorKind::WouldBlock | ErrorKind::TimedOut => {
+                format!("no reply within {}s", reply.as_secs())
+            }
+            _ => format!("reply failed: {error}"),
+        }));
+    }
+    if line.is_empty() {
+        return Ok(Attempt::Lost(
+            "daemon closed the connection without a reply (incomplete response)".into(),
+        ));
+    }
     if !line.ends_with('\n') {
+        if line.len() < MAX_REPLY as usize {
+            return Ok(Attempt::Lost(
+                "truncated reply (incomplete response)".into(),
+            ));
+        }
         return Err("incomplete or oversized response".into());
     }
     let response: Response = serde_json::from_str(&line)?;
     if response.version != PROTOCOL_VERSION {
         return Err("unsupported response version; an older daemon may still own this state directory. Stop/restart it only after checking its active work, or choose a new TASK_MANAGER_STATE_DIR".into());
     }
-    Ok(response)
+    Ok(Attempt::Answered(response))
+}
+
+#[cfg(unix)]
+fn request_on_stream(stream: std::os::unix::net::UnixStream, action: Action) -> Result<Response> {
+    match exchange(stream, action, ClientTimeouts::default().reply)? {
+        Attempt::Answered(response) => Ok(response),
+        Attempt::Lost(why) => Err(why.into()),
+    }
+}
+
+/// What a caller must do when it stops waiting for a job it submitted.
+pub fn live_job_hint(id: i64) -> String {
+    format!(
+        "job {id} is still live; query with `tasks logs {id}` / `tasks list`; do not resubmit (`tasks cancel {id}` cancels)"
+    )
+}
+
+#[cfg(unix)]
+static DETACH_NOTICE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+
+#[cfg(unix)]
+extern "C" fn print_detach_notice(signal: i32) {
+    // Async-signal-safe: one write(2) of a prebuilt message, then _exit.
+    if let Some(text) = DETACH_NOTICE.get() {
+        unsafe {
+            libc::write(libc::STDERR_FILENO, text.as_ptr().cast(), text.len());
+        }
+    }
+    unsafe { libc::_exit(128 + signal) }
+}
+
+/// Once a job ID is known, an interrupt or an outer timeout (SIGINT, SIGTERM,
+/// SIGHUP) still detaches without cancelling, but first prints how to find the job.
+/// SIGKILL cannot be caught, which is why the same hint is printed at submission.
+#[cfg(unix)]
+pub fn print_hint_on_detach(id: i64) {
+    let _ =
+        DETACH_NOTICE.set(format!("\ntasks: client stopped; {}\n", live_job_hint(id)).into_bytes());
+    for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+        unsafe {
+            libc::signal(
+                signal,
+                print_detach_notice as *const () as libc::sighandler_t,
+            );
+        }
+    }
 }
