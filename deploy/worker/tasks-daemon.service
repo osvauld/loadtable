@@ -55,7 +55,8 @@ Environment=TASKS_MIN_AVAILABLE_MEMORY_MIB=3072
 #
 # Stopping the unit stops only the daemon. The worker and admitted jobs keep
 # their own process groups and leases, as with today's autostarted daemon.
-# Stopping is NOT cancellation; check `tasks list` first.
+# Stopping is NOT cancellation. Restart with: tasks drain && systemctl --user restart
+# tasks-daemon (drain pauses claims until the next daemon start; no admission window).
 KillMode=process
 # Restart after crashes/signals only. Errors (exit 2), e.g. "another daemon owns
 # this state directory", are not retried in a loop.

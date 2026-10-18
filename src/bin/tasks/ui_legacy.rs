@@ -220,13 +220,12 @@ fn estimate(job: &Job, history: &[&RuntimeEstimate], now: f64) -> Value {
 }
 
 fn exit_code(job: &Job) -> Option<i64> {
-    if job.phase == Phase::Passed {
-        return Some(0);
-    }
-    job.execution
-        .as_ref()
-        .and_then(|e| e.stages.last())
-        .and_then(|s| s.exit_code)
+    job.phase
+        .reported_exit_code(
+            job.execution
+                .as_ref()
+                .map_or(&[][..], |e| e.stages.as_slice()),
+        )
         .map(i64::from)
 }
 
@@ -432,6 +431,7 @@ mod tests {
                 detail: String::new(),
                 metrics: None,
                 peer: None,
+                remote_result: None,
             }),
         }
     }

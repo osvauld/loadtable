@@ -12,12 +12,16 @@ pub mod catalog;
 pub mod device;
 pub mod device_denylist;
 pub mod execution;
+#[cfg(target_os = "linux")]
+pub mod lease_audit;
 pub mod ledger;
 pub mod local_command;
 pub mod metrics;
 #[cfg(target_os = "linux")]
 pub mod peer;
 pub mod peer_link;
+#[cfg(target_os = "linux")]
+pub mod remote_reconcile;
 #[cfg(target_os = "linux")]
 pub mod retention;
 pub mod snapshot;
@@ -345,6 +349,13 @@ pub enum Action {
     ApproveAndroidTrial(i64),
     ApproveCommand(i64),
     StartWorker,
+    /// Persistently stops execution: the worker claims no new jobs (running ones finish) and
+    /// no daemon restarts it until `StartWorker`. Daemons older than it: "unknown variant".
+    StopWorker,
+    /// `Drain(true)`: stop claiming until the next daemon start (`tasks drain`), so a restart
+    /// after the drain cannot race a new admission; `Drain(false)` cancels it. Daemons older
+    /// than it answer "unknown variant".
+    Drain(bool),
     Logs(i64),
     Record(RuntimeSample),
     /// Local machine snapshot (cluster snapshot v1). Answered with a
@@ -394,9 +405,12 @@ pub fn handle(store: &mut Store, request: Request) -> Response {
             Action::Approve(id) => store.approve(id),
             Action::ApproveAndroidTrial(id) => store.approve_android_trial(id),
             Action::ApproveCommand(id) => store.approve_command(id),
-            Action::StartWorker | Action::Logs(_) | Action::Status | Action::Peers => {
-                Err("action requires local daemon".into())
-            }
+            Action::StartWorker
+            | Action::StopWorker
+            | Action::Drain(_)
+            | Action::Logs(_)
+            | Action::Status
+            | Action::Peers => Err("action requires local daemon".into()),
             Action::Record(sample) => {
                 if sample.stage.starts_with("worker.") {
                     Err("worker.* runtime stages are reserved for worker observations".into())
@@ -574,6 +588,8 @@ pub fn request_with_reconnect_timeouts(
                     | Action::Job(_)
                     | Action::Logs(_)
                     | Action::StartWorker
+                    | Action::StopWorker
+                    | Action::Drain(_)
                     | Action::Submit(_)
             ) && Instant::now() + backoff < deadline;
         if !resend {
@@ -590,7 +606,12 @@ pub fn request_with_reconnect_timeouts(
     let waited = || began.elapsed().as_secs();
     match &action {
         // Read-only or idempotent: safe to send again.
-        Action::List | Action::Job(_) | Action::Logs(_) | Action::StartWorker => {
+        Action::List
+        | Action::Job(_)
+        | Action::Logs(_)
+        | Action::StartWorker
+        | Action::StopWorker
+        | Action::Drain(_) => {
             let mut last = lost;
             let mut backoff = Duration::from_millis(250);
             while Instant::now() < deadline {

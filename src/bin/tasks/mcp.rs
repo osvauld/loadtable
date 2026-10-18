@@ -827,18 +827,13 @@ fn recipe(job: &Job) -> Option<Recipe> {
         .flatten()
 }
 
-/// Exit code of a finished job: 0 when passed, else the last stage's code.
+/// Exit code of a finished job (`Phase::reported_exit_code`): 0 only when passed.
 pub fn exit_code(job: &Job) -> Option<i32> {
-    if !job.phase.terminal() {
-        return None;
-    }
-    if job.phase == Phase::Passed {
-        return Some(0);
-    }
-    job.execution
-        .as_ref()
-        .and_then(|e| e.stages.last())
-        .and_then(|s| s.exit_code)
+    job.phase.reported_exit_code(
+        job.execution
+            .as_ref()
+            .map_or(&[][..], |e| e.stages.as_slice()),
+    )
 }
 
 /// The job as agents need it; the full ledger row stays available via `job`.
@@ -858,6 +853,9 @@ pub fn job_summary(job: &Job) -> Value {
         "started_at": execution.and_then(|e| e.started_at),
         "finished_at": execution.and_then(|e| e.finished_at),
         "stages": execution.map(|e| &e.stages),
+        // Only `passed` is success; an interrupted job is never one, whatever its stages say.
+        "passed": job.phase == Phase::Passed,
+        "remote_result": execution.and_then(|e| e.remote_result.as_ref()),
     })
 }
 
@@ -873,13 +871,14 @@ fn job_line(job: &Job) -> String {
         None => String::new(),
     };
     format!(
-        "job {} {}{exit} owner={} class={} cwd={}\n  age {age}, admission wait {wait}, run {run}\n  argv: {}",
+        "job {} {}{exit} owner={} class={} cwd={}\n  age {age}, admission wait {wait}, run {run}\n  argv: {}{}",
         job.id,
         phase_name(&job.phase),
         job.spec.owner,
         display::resource_label(job),
         job.spec.source,
         display::command_summary(job),
+        display::remote_note(job).replace("\ntasks: ", "\n  "),
     )
 }
 

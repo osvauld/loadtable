@@ -37,6 +37,15 @@ still apply. Legacy jobs interoperate via the same actual flock files but aren't
 imported into this job ledger. No automatic job replay or backlog approval.
 
 `tasks run` explicitly submits/approves/starts/waits and returns child exit status.
+`tasks start-worker` (also what `tasks run` does) enables execution and prints one line;
+`tasks stop-worker` stops claiming new jobs (running ones finish; nothing is cancelled).
+That intent is kept in the state dir (`execution-intent.json`): a daemon that starts
+after a reboot with execution enabled and approved jobs waiting starts the worker
+itself, and a stopped queue stays stopped until the next start (`--json` prints the
+full reply). Only `passed` ever shows exit 0: an `interrupted` job shows `-` even when
+an earlier stage succeeded. An offload job interrupted by a controller restart names its
+remote job, and the daemon records that job's result (`remote_result`) and log without
+re-running anything (scripts/README-offload.md "Controller restart").
 Ctrl-C detaches, not cancels. For separate approval use enqueue, the returned
 submitted_id, approve-command ID, start-worker. Commands execute in a **live cwd**
 with the local user's rights, not a source snapshot/sandbox. Default compile slot;

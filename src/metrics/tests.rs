@@ -585,6 +585,7 @@ pub(super) fn job(
             detail: String::new(),
             metrics,
             peer: None,
+            remote_result: None,
         }),
     }
 }

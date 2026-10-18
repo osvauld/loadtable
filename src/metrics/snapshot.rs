@@ -309,9 +309,10 @@ fn job_view(job: &Job, inputs: &Inputs, history: &History) -> JobView {
             }
         });
     let result = terminal.then(|| JobResult {
-        exit_code: execution
-            .and_then(|e| e.stages.last())
-            .and_then(|s| s.exit_code),
+        // 0 only for passed: an interrupted job's earlier successful stage is not its result.
+        exit_code: job
+            .phase
+            .reported_exit_code(execution.map_or(&[][..], |e| e.stages.as_slice())),
         wall_s: metrics
             .and_then(|m| m.wall_s)
             .or_else(|| history::exec_seconds(job)),

@@ -87,7 +87,54 @@ pub struct Execution {
     /// additive like `metrics`: written once the job is terminal, older releases ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer: Option<crate::peer_link::PeerLink>,
+    /// What the other machine reported for an offloaded or forwarded job that ended here
+    /// without its result (controller restart/worker loss). Never changes this job's phase.
+    /// Optional and additive like `metrics`; older releases ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_result: Option<RemoteResult>,
 }
+
+/// Reconciliation of the remote half of a job that was interrupted HERE (execution JSON key
+/// `remote_result`). The local phase stays `interrupted`: nothing is re-run or re-graded.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RemoteResult {
+    /// `ssh` (tasks-offload) or `iroh` (peer forward).
+    pub transport: String,
+    /// `USER@HOST` (ssh) or the peer name (iroh).
+    pub worker: String,
+    pub remote_job_id: Option<i64>,
+    /// The remote job's phase when last checked (`passed`, `failed`, `running`, ...).
+    pub remote_phase: Option<String>,
+    /// The remote job's exit code (0 only if it passed).
+    pub exit_code: Option<i32>,
+    /// `terminal` (final), `running` (checked again later), `unknown` (gave up or nothing
+    /// recorded to reconcile with).
+    pub state: String,
+    pub checked_at: i64,
+    pub detail: String,
+}
+
+impl RemoteResult {
+    pub fn settled(&self) -> bool {
+        matches!(self.state.as_str(), "terminal" | "unknown")
+    }
+    /// One line for people: `remote job 152 on abe@host passed (exit 0)`.
+    pub fn summary(&self) -> String {
+        let id = self.remote_job_id.map_or_else(
+            || "remote job ?".to_string(),
+            |id| format!("remote job {id}"),
+        );
+        let what = match (&self.remote_phase, self.exit_code) {
+            (Some(phase), Some(code)) => format!("{phase} (exit {code})"),
+            (Some(phase), None) => phase.clone(),
+            (None, _) => format!("result {}", self.state),
+        };
+        format!("{id} on {} {what}", self.worker)
+    }
+}
+
+/// Detail of a job found active with no live worker (worker/controller restart).
+pub const INTERRUPTED_DETAIL: &str = "Worker stopped before recording completion; not automatically retried. Inspect retained logs/artifacts before submitting again.";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LogTail {
@@ -117,6 +164,20 @@ impl Phase {
                 | Self::WaitingRun
                 | Self::Running
         )
+    }
+    /// Exit code a FINISHED job reports everywhere (list, logs, status, MCP, peers).
+    /// Only `passed` reports 0. Any other terminal phase reports its last stage's code only
+    /// when that code is nonzero, so an interrupted job whose earlier stage exited 0 (or
+    /// whose command was killed after printing success) never reads as `exit 0`.
+    pub fn reported_exit_code(&self, stages: &[StageTiming]) -> Option<i32> {
+        match self {
+            Self::Passed => Some(0),
+            phase if phase.terminal() => stages
+                .last()
+                .and_then(|s| s.exit_code)
+                .filter(|code| *code != 0),
+            _ => None,
+        }
     }
     pub fn terminal(&self) -> bool {
         matches!(
@@ -192,6 +253,7 @@ impl Store {
             local_command: command,
             metrics: None,
             peer: None,
+            remote_result: None,
             detail: if command {
                 "Explicitly approved trusted local argv/live cwd; NOT a source snapshot or sandbox; command may write to workspace"
             } else if trial {
@@ -486,16 +548,63 @@ impl Store {
     }
     pub fn reconcile_interrupted(&mut self) -> Result<usize> {
         // Call only while holding the exclusive worker lock. Never blindly replay a job.
-        let ids: Vec<_> = self
+        let jobs: Vec<_> = self
             .jobs()?
             .into_iter()
             .filter(|j| j.phase.active())
-            .map(|j| j.id)
             .collect();
-        for id in &ids {
-            self.finish(*id, Phase::Interrupted, "Worker stopped before recording completion; not automatically retried. Inspect retained logs/artifacts before submitting again.")?;
+        for job in &jobs {
+            let mut detail = String::from(INTERRUPTED_DETAIL);
+            // Offload/forward jobs: name the remote job so its result can be found (and is
+            // reconciled by the daemon); the remote job is never cancelled or re-run here.
+            #[cfg(target_os = "linux")]
+            let note = crate::remote_reconcile::interrupted_note(job);
+            #[cfg(not(target_os = "linux"))]
+            let note: Option<String> = None;
+            if let Some(note) = note {
+                detail.push_str(&note);
+            }
+            self.finish(job.id, Phase::Interrupted, &detail)?;
         }
-        Ok(ids.len())
+        Ok(jobs.len())
+    }
+    /// Records `remote_result` on a TERMINAL job (JSON-level merge, other keys untouched, so
+    /// rows written by any release keep their fields). Replaces only an unsettled earlier
+    /// record (`running`/`unreachable`), never a settled one. Returns whether it was written.
+    pub fn write_remote_result(&mut self, id: i64, result: &RemoteResult) -> Result<bool> {
+        let tx = self
+            .0
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let phase: Option<String> = tx
+            .query_row("SELECT phase FROM jobs WHERE id=?1", [id], |r| r.get(0))
+            .optional()?;
+        if !phase.is_some_and(|p| Phase::from_db(&p).is_ok_and(|p| p.terminal())) {
+            return Ok(false);
+        }
+        let data: Option<String> = tx
+            .query_row("SELECT data FROM executions WHERE job_id=?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        let Some(data) = data else { return Ok(false) };
+        let mut value: serde_json::Value = serde_json::from_str(&data)?;
+        let Some(object) = value.as_object_mut() else {
+            return Ok(false);
+        };
+        let previous: Option<RemoteResult> = object
+            .get("remote_result")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
+        if previous.as_ref().is_some_and(RemoteResult::settled) || previous.as_ref() == Some(result)
+        {
+            return Ok(false);
+        }
+        object.insert("remote_result".into(), serde_json::to_value(result)?);
+        tx.execute(
+            "UPDATE executions SET data=?2 WHERE job_id=?1",
+            params![id, serde_json::to_string(&value)?],
+        )?;
+        tx.commit()?;
+        Ok(true)
     }
 }
 
@@ -557,6 +666,78 @@ mod tests {
             .unwrap();
         assert_eq!(s.job(j.id).unwrap().phase, Phase::Cancelled);
         assert!(s.approve(j.id).is_err());
+    }
+    #[test]
+    fn only_passed_reports_exit_zero() {
+        let stage = |code| StageTiming {
+            stage: "build".into(),
+            exit_code: code,
+            ..Default::default()
+        };
+        let ok = [stage(Some(0))];
+        assert_eq!(Phase::Passed.reported_exit_code(&ok), Some(0));
+        for phase in [Phase::Interrupted, Phase::Cancelled, Phase::Failed] {
+            assert_eq!(phase.reported_exit_code(&ok), None, "{phase:?}");
+            assert_eq!(phase.reported_exit_code(&[]), None, "{phase:?}");
+        }
+        let failed = [stage(Some(0)), stage(Some(101))];
+        assert_eq!(Phase::Failed.reported_exit_code(&failed), Some(101));
+        assert_eq!(Phase::Interrupted.reported_exit_code(&failed), Some(101));
+        assert_eq!(Phase::Running.reported_exit_code(&ok), None);
+    }
+    #[test]
+    fn remote_result_merges_into_terminal_rows_only_and_keeps_other_keys() {
+        let mut s = Store::memory().unwrap();
+        let j = s.submit(&spec()).unwrap();
+        s.approve(j.id).unwrap();
+        let r = RemoteResult {
+            transport: "ssh".into(),
+            worker: "w".into(),
+            remote_job_id: Some(5),
+            remote_phase: Some("running".into()),
+            exit_code: None,
+            state: "running".into(),
+            checked_at: 1,
+            detail: String::new(),
+        };
+        assert!(!s.write_remote_result(j.id, &r).unwrap(), "not terminal");
+        s.claim(ProcessIdentity {
+            pid: 1,
+            start_ticks: 1,
+        })
+        .unwrap();
+        s.reconcile_interrupted().unwrap();
+        // A key some other release wrote must survive the merge.
+        s.0.execute(
+            "UPDATE executions SET data=json_set(data, '$.future_key', 7) WHERE job_id=?1",
+            [j.id],
+        )
+        .unwrap();
+        assert!(s.write_remote_result(j.id, &r).unwrap());
+        assert!(
+            !s.write_remote_result(j.id, &r).unwrap(),
+            "unchanged: no rewrite"
+        );
+        let settled = RemoteResult {
+            state: "terminal".into(),
+            remote_phase: Some("passed".into()),
+            exit_code: Some(0),
+            ..r.clone()
+        };
+        assert!(s.write_remote_result(j.id, &settled).unwrap());
+        assert!(
+            !s.write_remote_result(j.id, &r).unwrap(),
+            "settled is final"
+        );
+        let data: String =
+            s.0.query_row("SELECT data FROM executions WHERE job_id=?1", [j.id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(data.contains("future_key"), "{data}");
+        let job = s.job(j.id).unwrap();
+        assert_eq!(job.phase, Phase::Interrupted);
+        assert_eq!(job.execution.unwrap().remote_result, Some(settled));
     }
     #[test]
     fn worker_restart_marks_claimed_jobs_interrupted_not_queued() {

@@ -50,6 +50,7 @@ fn finished(mut j: Job, stages: &[(f64, f64, i32)]) -> Job {
         detail: String::new(),
         metrics: None,
         peer: None,
+        remote_result: None,
     });
     j
 }
@@ -395,4 +396,90 @@ fn offload_jobs_and_slots_are_labelled() {
     );
     assert_eq!(resource_label(&offload), "offload");
     assert_eq!(slot_name("p2p-offload-1.lock"), "offload-1");
+}
+
+#[test]
+fn interrupted_job_with_a_successful_earlier_stage_never_shows_exit_0() {
+    // Job 498 of 2026-10-17: build exited 0, the run stage was cut by the reboot.
+    let argv = ["cargo", "test", "-j", "2"];
+    let j = finished(
+        job(498, "a", "/w", Phase::Interrupted, &argv, Resource::Compile),
+        &[(1.0, 42.0, 0)],
+    );
+    assert_eq!(exit_label(&j), "-");
+    let table = job_table(std::slice::from_ref(&j), NOW, None);
+    let row = table.lines().nth(1).unwrap();
+    assert!(row.contains("interrupted   -"), "{row}");
+    assert!(job_status_line(&j, false).contains("interrupted (exit -)"));
+    let cancelled = finished(
+        job(2, "a", "/w", Phase::Cancelled, &argv, Resource::Compile),
+        &[(1.0, 2.0, 0)],
+    );
+    assert_eq!(exit_label(&cancelled), "-");
+    let failed = finished(
+        job(3, "a", "/w", Phase::Failed, &argv, Resource::Compile),
+        &[(1.0, 2.0, 0), (0.0, 1.0, 101)],
+    );
+    assert_eq!(exit_label(&failed), "101");
+    let passed = finished(
+        job(4, "a", "/w", Phase::Passed, &argv, Resource::Compile),
+        &[(1.0, 2.0, 0)],
+    );
+    assert_eq!(exit_label(&passed), "0");
+}
+
+#[test]
+fn reconciled_remote_result_is_shown_next_to_the_local_phase() {
+    let argv = [
+        "tasks-offload",
+        "--worker",
+        "w@h",
+        "--who",
+        "a",
+        "--",
+        "true",
+    ];
+    let mut j = finished(
+        job(507, "a", "/w", Phase::Interrupted, &argv, Resource::Offload),
+        &[],
+    );
+    j.execution.as_mut().unwrap().remote_result =
+        Some(tinline_task_manager::execution::RemoteResult {
+            transport: "ssh".into(),
+            worker: "w@h".into(),
+            remote_job_id: Some(152),
+            remote_phase: Some("passed".into()),
+            exit_code: Some(0),
+            state: "terminal".into(),
+            checked_at: NOW,
+            detail: String::new(),
+        });
+    let line = job_status_line(&j, false);
+    assert!(line.contains("job 507 interrupted (exit -)"), "{line}");
+    assert!(
+        line.contains("is interrupted here; its remote job 152 on w@h passed (exit 0) [terminal]"),
+        "{line}"
+    );
+}
+
+#[test]
+fn start_and_stop_worker_print_one_line_not_the_ledger() {
+    let argv = ["cargo", "check"];
+    let jobs = vec![
+        job(1, "a", "/w", Phase::Approved, &argv, Resource::Compile),
+        job(2, "a", "/w", Phase::Running, &argv, Resource::Compile),
+    ];
+    let start = worker_switch_line(true, true, &jobs);
+    assert!(
+        start.contains("execution enabled; worker running"),
+        "{start}"
+    );
+    assert!(
+        start.contains("1 approved job(s) waiting, 1 running"),
+        "{start}"
+    );
+    assert!(!start.contains('\n') && !start.contains('{'));
+    let stop = worker_switch_line(false, true, &jobs);
+    assert!(stop.contains("execution stopped"), "{stop}");
+    assert!(stop.contains("until tasks start-worker"), "{stop}");
 }

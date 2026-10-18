@@ -137,9 +137,15 @@ line: 0 passed, 130 cancelled, else the stage exit); 2 usage/source refusal;
 3. **Run.** `ssh W 'cd "$HOME"/offload/checkouts/<id>/<subdir> && exec
    "$HOME"/.local/bin/tasks run --who OWNER@host [--run | --device SERIAL] -- <shlex-quoted argv>'`.
    The local subdirectory of the toplevel is mapped to the same remote subdir.
-   Output is streamed as the remote client emits it (note: installed `tasks run`
-   prints phase changes live but the job log only at the end). The job id is
-   parsed from `tasks: submitted job N;` on stderr.
+   The remote `tasks run` gets `--follow`, so the remote job's whole log (the
+   worker's own 8 MiB cap) streams as it runs. This client forwards its first
+   `--log-head` bytes (4 MiB) and its last `--log-tail` bytes (2 MiB) with one
+   `[... tasks-offload: N bytes (M lines) of the remote log omitted here ...]`
+   marker between them, so the local job log (8 MiB cap) keeps both the start
+   (first warnings/errors) and the end (test result, panic). `--remote-log tail`
+   is the previous behaviour: the remote client prints only its log's last
+   32 KiB at the end (about 460 lines; job 522/536 lost a clippy result and a
+   panic that way). The job id is parsed from `tasks: submitted job N;` on stderr.
 4. **Cancel.** On SIGINT/SIGTERM the client immediately launches
    `ssh W '"$HOME"/.local/bin/tasks cancel N'` for its own job id only, in its
    own session, then waits (`--cancel-wait`, default 120 s) for the remote
@@ -153,6 +159,18 @@ line: 0 passed, 130 cancelled, else the stage exit); 2 usage/source refusal;
    exits 255 and **never resubmits**.
 6. **Fetch.** After a passed job only, each `--fetch` path is rsync'd from the
    remote checkout into the destination. Never into the local checkout.
+7. **Controller restart.** If the laptop (or its worker) goes down while the
+   client runs, the local job ends `interrupted` and its detail names the remote
+   job from the sidecar below. The laptop daemon then asks, read-only and at most
+   every 2 min for 24 h, `tasks-offload --reconcile-local-job ID <the job's own
+   approved arguments>`: the client reads the sidecar's `remote_job_id`, runs
+   `ssh W 'tasks logs N --json'`, checks the owner is `WHO@this host`, prints
+   that job's retained log and one `{"reconcile": {...}}` line (`terminal`,
+   `running`, `unreachable` or `unknown`). The daemon records it as the local
+   job's `execution.remote_result` (shown by `tasks logs`/MCP), appends the
+   remote log to the local job log, and leaves the local phase `interrupted`.
+   Nothing is resubmitted, cancelled or re-run. An older client without
+   `--reconcile-local-job` is recorded as `unknown` with the remote job id.
 
 ## iroh transport (experimental, phase 2b)
 

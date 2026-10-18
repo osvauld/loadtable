@@ -29,6 +29,19 @@ record of this offload (worker, transport, remote job id, durations) is kept at
 ${XDG_STATE_HOME:-~/.local/state}/tasks-offload/jobs/<id>.json for the cluster
 snapshot's `offload` field (docs/design/cluster-snapshot.md).
 
+Remote log: the worker's `tasks run --follow` streams the remote job's whole log (its own
+8 MiB cap) as it runs. Forwarded to this client's stdout are the first --log-head bytes and
+the last --log-tail bytes, with one marker line naming what was left out, so the local job
+log (8 MiB cap) keeps both the start and the result. `--remote-log tail` restores the old
+behaviour (the worker prints only its log's last 32 KiB at the end).
+
+Reconcile (read-only; run by the controller's daemon after this client's local job was
+interrupted, e.g. by a laptop restart): `tasks-offload --reconcile-local-job ID <the job's
+original arguments>` reads the job sidecar for the remote job id, asks the worker for that
+job (`tasks logs N --json`, owner checked), prints its retained log, then one JSON line
+{"reconcile": {remote_job_id, remote_phase, exit_code, state, detail}} with state
+`terminal`, `running`, `unreachable` or `unknown`. It never submits, cancels or re-runs.
+
 Exit status: the remote job's exit code; 2 usage/source refusal; 255 transport
 failure or UNCERTAIN remote state (summary `remote_state` disambiguates);
 130/143 after cancelling the remote job on SIGINT/SIGTERM; 1 fetch failure.
@@ -65,6 +78,10 @@ FINAL_RE = re.compile(r'^job (\d+) ([a-z_]+) \(exit (-?\d+)\) owner=')
 OWNER_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
 WORKER_RE = re.compile(r'^([A-Za-z0-9._-]+@)?[A-Za-z0-9._:-]+$')
 EXIT_USAGE, EXIT_TRANSPORT, EXIT_FETCH = 2, 255, 1
+TERMINAL_PHASES = ('passed', 'failed', 'interrupted', 'cancelled')
+# Forwarded remote log: head + tail with a marker, under the local 8 MiB job-log cap.
+LOG_HEAD_BYTES, LOG_TAIL_BYTES = 4 << 20, 2 << 20
+RECONCILE_LOG_MAX = 96 << 10
 ENDPOINT_RE = re.compile(r'^[0-9a-z]{52,64}$')
 # Device serial as the worker's `tasks run --device` accepts it (`:` maps to `_`).
 DEVICE_RE = re.compile(r'^[A-Za-z0-9._-]{1,128}$')
@@ -531,9 +548,50 @@ def iroh_sync(peer, top, manifest, cid, workdir):
 # Remote run with live output, cancel and uncertainty reporting
 # --------------------------------------------------------------------------
 
+class HeadTail:
+    """Writes the first `head` bytes of a line stream through, keeps the last `tail` bytes,
+    and on close() writes one marker line plus that tail. Whole lines only."""
+
+    def __init__(self, sink, head, tail):
+        self.sink, self.head, self.tail = sink, head, tail
+        self.written = 0
+        self.kept = []  # lines after the head, bounded to `tail` bytes
+        self.kept_bytes = 0
+        self.omitted = self.omitted_lines = 0
+        self.lock = threading.Lock()
+
+    def write(self, line):
+        with self.lock:
+            if self.written + len(line) <= self.head and not self.kept:
+                self.sink.buffer.write(line)
+                self.sink.flush()
+                self.written += len(line)
+                return
+            self.kept.append(line)
+            self.kept_bytes += len(line)
+            while self.kept_bytes > self.tail and len(self.kept) > 1:
+                dropped = self.kept.pop(0)
+                self.kept_bytes -= len(dropped)
+                self.omitted += len(dropped)
+                self.omitted_lines += 1
+
+    def close(self):
+        with self.lock:
+            if self.omitted:
+                self.sink.buffer.write(
+                    f'\n[... tasks-offload: {self.omitted} bytes ({self.omitted_lines} lines) of '
+                    'the remote log omitted here; the start and the end are shown. The full log '
+                    'stays on the worker: tasks logs REMOTE_ID there ...]\n\n'.encode())
+            for line in self.kept:
+                self.sink.buffer.write(line)
+            self.kept, self.kept_bytes = [], 0
+            self.sink.flush()
+
+
 class RemoteRun:
-    def __init__(self, transport, command, on_submitted=None):
+    def __init__(self, transport, command, on_submitted=None, head=None, tail=None):
         self.transport = transport
+        self.out = HeadTail(sys.stdout, head, tail) if head is not None else None
         self.on_submitted = on_submitted
         self.job_id = None
         self.final = None  # (job, phase, exit)
@@ -545,7 +603,8 @@ class RemoteRun:
         self.proc = subprocess.Popen(transport.ssh(command), stdin=subprocess.DEVNULL,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                      start_new_session=True)
-        self.threads = [threading.Thread(target=self._pump, args=(self.proc.stdout, sys.stdout),
+        self.threads = [threading.Thread(target=self._pump,
+                                         args=(self.proc.stdout, self.out or sys.stdout),
                                          daemon=True),
                         threading.Thread(target=self._pump, args=(self.proc.stderr, sys.stderr),
                                          daemon=True)]
@@ -554,8 +613,11 @@ class RemoteRun:
 
     def _pump(self, stream, sink):
         for line in iter(stream.readline, b''):
-            sink.buffer.write(line)
-            sink.flush()
+            if isinstance(sink, HeadTail):
+                sink.write(line)
+            else:
+                sink.buffer.write(line)
+                sink.flush()
             text = line.decode(errors='replace').rstrip('\n')
             if (m := SUBMITTED_RE.match(text)) and self.job_id is None:
                 self.job_id = int(m.group(1))
@@ -575,6 +637,8 @@ class RemoteRun:
             return None
         for t in self.threads:
             t.join(5)
+        if self.out is not None:
+            self.out.close()
         if self.final and self.job_id is None:
             self.job_id = self.final[0]
         elif self.final and self.final[0] != self.job_id:
@@ -646,6 +710,17 @@ def parse_args(argv):
     parser.add_argument('--iroh-bind', help='local LAN IP:0 to bind (required off loopback)')
     parser.add_argument('--iroh-store', help='local blob store for --fetch '
                                              '(default ~/build-cache/offload/.iroh-store)')
+    parser.add_argument('--remote-log', choices=('follow', 'tail'), default='follow',
+                        help="follow: stream the worker job's log (head+tail kept, default); "
+                             'tail: only its last 32 KiB at the end (older behaviour)')
+    parser.add_argument('--log-head', type=int, default=LOG_HEAD_BYTES,
+                        help='bytes of the streamed remote log kept from its start')
+    parser.add_argument('--log-tail', type=int, default=LOG_TAIL_BYTES,
+                        help='bytes of the streamed remote log kept from its end')
+    parser.add_argument('--reconcile-local-job', type=int, metavar='ID',
+                        help='read-only: report what became of local job ID\'s remote job '
+                             '(after a controller restart); never submits or cancels')
+    parser.add_argument('--reconcile-timeout', type=float, default=60.0)
     if '--' not in argv:
         parser.error('-- CMD [ARGS...] is required')
     split = argv.index('--')
@@ -653,6 +728,10 @@ def parse_args(argv):
     args.command = argv[split + 1:]
     if not args.command:
         parser.error('empty command')
+    if args.log_head < 0 or args.log_tail < 1:
+        parser.error('--log-head must be >= 0 and --log-tail >= 1')
+    if args.reconcile_local_job is not None and args.reconcile_local_job < 1:
+        parser.error('--reconcile-local-job must be a positive job id')
     return args
 
 
@@ -660,6 +739,8 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     started = time.monotonic()
     args = parse_args(argv)
+    if args.reconcile_local_job is not None:
+        return reconcile(args)
     summary = {'worker': args.worker, 'transport': args.transport, 'remote_dir': None, 'remote_cwd': None,
                'remote_job_id': None, 'remote_phase': None, 'remote_state': None,
                'exit': None, 'synced_files': 0, 'synced_bytes': 0, 'excluded_files': 0,
@@ -731,6 +812,8 @@ def main(argv=None):
             resource = f'--device {shlex.quote(args.device)} '
         else:
             resource = '--run ' if args.remote_run else ''
+        if args.remote_log == 'follow':
+            resource = f'--follow {resource}'
         run_cmd = (f'mkdir -p {remote_path(remote_cwd_rel)} && '
                    f'cd {remote_path(remote_cwd_rel)} && exec {REMOTE_TASKS} run --who '
                    f'{shlex.quote(remote_owner)} {resource}-- {shlex.join(args.command)}')
@@ -838,7 +921,10 @@ def run_and_fetch(args, transport, run_cmd, summary, durations, finish, fetches,
 
     sidecar.write('submitting')
     t = time.monotonic()
-    run = RemoteRun(transport, run_cmd, on_submitted)
+    bounded = args.remote_log == 'follow'
+    run = RemoteRun(transport, run_cmd, on_submitted,
+                    head=args.log_head if bounded else None,
+                    tail=args.log_tail if bounded else None)
     if signals:
         run.start_cancel()
     rc = None
@@ -961,6 +1047,96 @@ def report_uncertain(run, args, summary, rc, cancelled=False):
     log(f'UNCERTAIN: remote job {run.job_id}: {what}; it may still be queued or running. '
         f'Query it on the worker: ssh {args.worker} \'~/.local/bin/tasks logs {run.job_id}\' '
         '(or tasks list). Not resubmitting.')
+
+
+# --------------------------------------------------------------------------
+# Reconcile (read-only) after the local job was interrupted
+# --------------------------------------------------------------------------
+
+def remote_exit_code(job):
+    """0 only for passed; otherwise the last stage's nonzero code (never 0), else None."""
+    if job.get('phase') == 'passed':
+        return 0
+    stages = (job.get('execution') or {}).get('stages') or []
+    code = stages[-1].get('exit_code') if stages else None
+    return code if isinstance(code, int) and code != 0 else None
+
+
+def bounded_log(text, limit=RECONCILE_LOG_MAX):
+    data = text.encode(errors='replace')
+    if len(data) <= limit:
+        return text
+    half = limit // 2
+    return (data[:half].decode(errors='replace') +
+            f'\n[... tasks-offload: {len(data) - 2 * half} bytes omitted ...]\n' +
+            data[-half:].decode(errors='replace'))
+
+
+def reconcile(args, hostname=None):
+    local_id = args.reconcile_local_job
+    owner = f'{args.who}@{hostname or socket.gethostname()}'
+    result = {'local_job_id': local_id, 'worker': args.worker, 'remote_job_id': None,
+              'remote_phase': None, 'exit_code': None, 'state': 'unknown', 'detail': ''}
+
+    def done(detail, state=None):
+        result['detail'] = detail
+        if state:
+            result['state'] = state
+        sys.stdout.flush()
+        print(json.dumps({'reconcile': result}, sort_keys=True), flush=True)
+        return 0
+
+    path = state_home() / 'tasks-offload/jobs' / f'{local_id}.json'
+    try:
+        with open(path, 'rb') as f:
+            record = json.loads(f.read(1 << 16))
+    except (OSError, ValueError) as error:
+        return done(f'no readable job sidecar {path} ({error}); look on {args.worker} for '
+                    f'owner {owner}')
+    if record.get('version') != 1 or record.get('local_job_id') != local_id:
+        return done(f'sidecar {path} is not version 1 of local job {local_id}')
+    remote_id = record.get('remote_job_id')
+    if not isinstance(remote_id, int) or isinstance(remote_id, bool) or remote_id < 1:
+        return done(f'the client had not seen a remote job id (stage {record.get("stage")}); '
+                    f'a job may still exist: check tasks list on {args.worker} for owner {owner}')
+    result['remote_job_id'] = remote_id
+    transport = Transport(args.worker, args.ssh_program, args.rsync_program, args.ssh_key)
+    try:
+        proc = subprocess.run(transport.ssh(f'exec {REMOTE_TASKS} logs {remote_id} --json'),
+                              stdin=subprocess.DEVNULL, capture_output=True,
+                              timeout=args.reconcile_timeout)
+    except subprocess.TimeoutExpired:
+        return done(f'no answer from {args.worker} within {args.reconcile_timeout:.0f}s',
+                    'unreachable')
+    except OSError as error:
+        return done(f'cannot run ssh: {error}', 'unreachable')
+    stderr = proc.stderr.decode(errors='replace').strip()[-300:]
+    if proc.returncode == 255:
+        return done(f'ssh to {args.worker} failed: {stderr}', 'unreachable')
+    try:
+        response = json.loads(proc.stdout)
+    except ValueError:
+        return done(f'worker reply was not JSON (exit {proc.returncode}): {stderr}',
+                    'unreachable')
+    job = next((j for j in response.get('jobs') or [] if j.get('id') == remote_id), None)
+    if job is None:
+        return done(f'job {remote_id} not found on {args.worker}: {response.get("error")}')
+    remote_owner = (job.get('spec') or {}).get('owner')
+    if remote_owner != owner:
+        return done(f'remote job {remote_id} belongs to {remote_owner!r}, not {owner!r}; '
+                    'not reconciled')
+    phase = job.get('phase')
+    result['remote_phase'] = phase
+    result['exit_code'] = remote_exit_code(job)
+    if phase not in TERMINAL_PHASES:
+        return done(f'remote job {remote_id} is still {phase} on {args.worker}', 'running')
+    text = ((response.get('log') or {}).get('text') or '')
+    if text:
+        sys.stdout.write(bounded_log(text))
+        if not text.endswith('\n'):
+            sys.stdout.write('\n')
+    detail = (job.get('execution') or {}).get('detail') or ''
+    return done(f'remote job {remote_id} {phase} on {args.worker}: {detail[:200]}', 'terminal')
 
 
 if __name__ == '__main__':
