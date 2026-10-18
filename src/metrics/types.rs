@@ -70,6 +70,21 @@ pub struct Slot {
     pub busy: bool,
     pub holder_job: Option<i64>,
     pub holder_who: Option<String>,
+    /// Additive: when the slot is busy but no live holder note names it, the
+    /// process(es) that actually hold the flock (e.g. a detached compiler-cache
+    /// server that inherited a finished job's lease). Absent otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holder_processes: Vec<HolderProcess>,
+}
+
+/// A process found holding an admission flock without a live holder note.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HolderProcess {
+    pub pid: u32,
+    /// Bounded command line (argv joined by spaces), or `[comm]`.
+    pub cmd: String,
+    /// `TASKS_JOB_ID` from its environment: the job it was started under.
+    pub tasks_job: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

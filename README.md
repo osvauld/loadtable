@@ -152,6 +152,11 @@ One compile slot, four run slots, exclusive device slots; at most five in-flight
 worker jobs, plus four offload-client slots with their own four-job budget.
 Linux pressure/memory gates, cooperative native FIFO, stable leases,
 owned process-group cancellation/recovery, bounded logs and atomic completion.
+Job processes inherit their slot lease; a daemon that escapes the job keeps it.
+When RUSTC_WRAPPER is sccache the worker starts its server outside the job (no
+lease descriptors) first. Any other leaked holder is named (pid, command,
+originating job) in `tasks status`/`admission`/the waiting log; it is never
+stolen or killed: the slot frees when that process exits.
 No sandbox, hard quotas, global legacy FIFO, universal command classification,
 automatic cleanup, legacy history import or zero-downtime maintenance promise.
 

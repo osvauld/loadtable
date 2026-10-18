@@ -154,6 +154,23 @@ fn wanted_label(job: &Job, resource: &Resource, waiters: &[Waiter]) -> Option<St
     }
 }
 
+/// A slot held without a live holder note: name the real holder process(es)
+/// and say when one outlived (escaped) the job it was started under.
+fn untracked_holder(found: &[super::HolderProcess], jobs: &[Job]) -> String {
+    if found.is_empty() {
+        return "an untracked holder".into();
+    }
+    let one = |h: &super::HolderProcess| {
+        let text = crate::admission::holders::describe_text(h);
+        match h.tasks_job {
+            Some(j) if jobs.iter().any(|x| x.id == j && !x.phase.terminal()) => text,
+            Some(_) => format!("{text}, which has ended (the process outlived its job)"),
+            None => text,
+        }
+    };
+    found.iter().map(one).collect::<Vec<_>>().join(" and ")
+}
+
 fn queue(job: &Job, resource: &Resource, inputs: &Inputs) -> Option<Queue> {
     let id = job.id;
     let simple = |text: String| {
@@ -212,7 +229,7 @@ fn queue(job: &Job, resource: &Resource, inputs: &Inputs) -> Option<Queue> {
             .map(|s| match (s.holder_job, &s.holder_who) {
                 (Some(j), _) => format!("#{j}"),
                 (None, Some(who)) => who.clone(),
-                (None, None) => "an untracked holder".into(),
+                (None, None) => untracked_holder(&s.holder_processes, inputs.all_jobs),
             })
             .collect();
         Some(if slots.len() == 1 {

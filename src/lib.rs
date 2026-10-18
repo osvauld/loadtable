@@ -7,6 +7,8 @@ pub mod android;
 pub mod android_build;
 #[cfg(target_os = "linux")]
 pub mod cache;
+#[cfg(target_os = "linux")]
+pub mod cache_server;
 pub mod catalog;
 #[cfg(target_os = "linux")]
 pub mod device;

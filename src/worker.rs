@@ -1224,6 +1224,31 @@ fn prepare_device_command(cmd: &mut Command, dir: &Path, lock: &str) {
     append_log(dir, note.as_bytes());
 }
 
+/// When the command's RUSTC_WRAPPER is sccache, start (or touch) its server
+/// from here with no inherited descriptors and its own session, before the
+/// command runs: a server the command's first wrapper call autostarts would
+/// detach from the job, inherit its admission lease and keep the slot held
+/// until its idle timeout (cache_server.rs). The server gets the command's
+/// own environment (`cmd`, already sanitized) minus TASKS_JOB_ID. Logged,
+/// never fatal.
+fn prepare_compiler_cache_server(dir: &Path, cmd: &Command) {
+    let env: Vec<(std::ffi::OsString, std::ffi::OsString)> = cmd
+        .get_envs()
+        .filter(|(k, _)| *k != "TASKS_JOB_ID")
+        .filter_map(|(k, v)| v.map(|v| (k.to_owned(), v.to_owned())))
+        .collect();
+    let Some(wrapper) = env
+        .iter()
+        .find(|(k, _)| k == "RUSTC_WRAPPER")
+        .map(|(_, v)| v.clone())
+        .filter(|w| crate::cache_server::is_server_wrapper(w))
+    else {
+        return;
+    };
+    let outcome = crate::cache_server::ensure(&wrapper, &env, dir);
+    append_log(dir, outcome.note().as_bytes());
+}
+
 /// Admitted command runner. No arbitrary command/spec arguments are accepted.
 /// If its supervisor dies it kills its own dedicated group, not another agent's group.
 pub fn command(id: i64, stage: &str, supervisor: ProcessIdentity) -> Result<()> {
@@ -1316,6 +1341,11 @@ fn run_command(state: &Path, dir: &Path, job: &crate::Job, stage: &str) -> Resul
         if let crate::local_command::Resource::Device(lock) = &recipe.resource {
             prepare_device_command(&mut cmd, dir, lock);
         }
+        // An offload client compiles nothing here; every other stage may run
+        // the wrapper and so must find a server that holds no lease.
+        if recipe.resource != crate::local_command::Resource::Offload {
+            prepare_compiler_cache_server(dir, &cmd);
+        }
         let start = Instant::now();
         // This process has no other live children, so RUSAGE_CHILDREN around the
         // wait is exactly this command's tree (all waited-for descendants).
@@ -1389,6 +1419,7 @@ fn run_command(state: &Path, dir: &Path, job: &crate::Job, stage: &str) -> Resul
             }
             let mut cmd = sanitized(Path::new("cargo"));
             compile_cache.apply(&mut cmd);
+            prepare_compiler_cache_server(dir, &cmd);
             cmd.current_dir(dir.join("snapshot"))
                 .env("CARGO_TARGET_DIR", &target)
                 .args([
@@ -1627,6 +1658,7 @@ fn run_android(state: &Path, dir: &Path, job: &crate::Job, stage: &str) -> Resul
     let start = Instant::now();
     let mut steps = Vec::new();
     let mut rustc = android_command(&host.rust.join("bin/rustc"), &host, &layout)?;
+    prepare_compiler_cache_server(dir, &rustc);
     rustc.arg("-vV");
     android_step(dir, "rustc-identity", rustc, &mut steps)?;
     let mut java = android_command(&host.java.join("bin/java"), &host, &layout)?;

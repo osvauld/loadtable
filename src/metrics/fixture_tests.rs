@@ -119,6 +119,7 @@ fn slot(kind: SlotKind, name: &str, holder: Option<(i64, &str)>) -> Slot {
         busy: holder.is_some(),
         holder_job: holder.map(|h| h.0),
         holder_who: holder.map(|h| h.1.to_string()),
+        holder_processes: vec![],
     }
 }
 
@@ -850,4 +851,55 @@ fn worker_snapshot_names_the_pressure_blocker_and_queue_order() {
     let eta = run.estimate.as_ref().unwrap();
     assert_eq!(eta.total_s, 90.5);
     assert_eq!(eta.remaining_s, 5.25);
+}
+
+/// Feedback lease-leak: a slot held by a process that outlived its job (a
+/// detached sccache server with the compile lease) is named, not "untracked".
+#[test]
+fn leaked_compile_holder_is_named_with_pid_command_and_origin_job() {
+    let mut s = laptop_busy();
+    let holder = |job| HolderProcess {
+        pid: 2298,
+        cmd: "/nix/store/x-sccache-0.15.0/bin/sccache".into(),
+        tasks_job: job,
+    };
+    let compile = |found: Vec<HolderProcess>| Slot {
+        holder_processes: found,
+        ..slot(SlotKind::Compile, "p2p-build", None)
+    };
+    // #284 is a finished job of this scenario; #301 is live.
+    s.machine.slots[0] = Slot {
+        busy: true,
+        ..compile(vec![holder(Some(284))])
+    };
+    let waiting = |s: &Scenario| {
+        build(s)
+            .jobs
+            .into_iter()
+            .find(|j| j.id == 302)
+            .unwrap()
+            .queue
+            .unwrap()
+            .waiting_for
+            .unwrap()
+    };
+    assert_eq!(
+        waiting(&s),
+        "compile slot held by pid 2298 (/nix/store/x-sccache-0.15.0/bin/sccache) from job \
+         #284, which has ended (the process outlived its job)"
+    );
+    s.machine.slots[0].holder_processes = vec![holder(Some(301))];
+    assert_eq!(
+        waiting(&s),
+        "compile slot held by pid 2298 (/nix/store/x-sccache-0.15.0/bin/sccache) from job #301"
+    );
+    s.machine.slots[0].holder_processes = vec![holder(None)];
+    assert!(waiting(&s).ends_with("not started by a tasks job"));
+    s.machine.slots[0].holder_processes = vec![];
+    assert_eq!(waiting(&s), "compile slot held by an untracked holder");
+    // Additive wire field: present only when found, round-trips.
+    s.machine.slots[0].holder_processes = vec![holder(Some(284))];
+    let v = serde_json::to_value(&s.machine.slots[0]).unwrap();
+    assert_eq!(v["holder_processes"][0]["tasks_job"], 284);
+    assert!(serde_json::to_value(&s.machine.slots[1]).unwrap()["holder_processes"].is_null());
 }

@@ -211,6 +211,14 @@ Machine.
   sampler never probes a lock, so it cannot steal a slot even briefly);
   `holder_job`/`holder_who` from the native holder note `OWNER:job-ID` when its
   process is alive (legacy holders: `holder_job` null, `holder_who` their text).
+  Additive `holder_processes` (omitted when empty): when a slot is busy and no
+  live note names its holder, the processes that really hold the flock, as
+  `[{ "pid": 2298, "cmd": "sccache", "tasks_job": 154 | null }]` (bounded
+  `/proc/PID/fdinfo` scan; `tasks_job` is the `TASKS_JOB_ID` in its
+  environment, i.e. the job that started it). A waiting job's
+  `queue.waiting_for` then reads e.g. `compile slot held by pid 2298 (sccache)
+  from job #154, which has ended (the process outlived its job)` instead of
+  `an untracked holder`, which remains only when no holder is visible.
 
 Jobs.
 - Order: by id ascending; all non-terminal jobs (including unapproved

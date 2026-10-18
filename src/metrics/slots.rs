@@ -115,12 +115,20 @@ pub fn scan(root: &Path, held: &HashSet<(u32, u32, u64)>) -> Scan {
             }
             None => (None, None),
         };
+        // Busy with no live note: name whoever really holds it (bounded /proc
+        // scan, only in this rare case, never a probing flock).
+        let holder_processes = if busy && holder_who.is_none() {
+            crate::admission::holders::holders(&path)
+        } else {
+            vec![]
+        };
         slots.push(Slot {
             kind,
             name: name.trim_end_matches(".lock").to_string(),
             busy,
             holder_job,
             holder_who,
+            holder_processes,
         });
     }
     Scan { slots, waiters }
