@@ -6,6 +6,7 @@ use std::os::unix::{
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use tinline_task_manager::health::monitor::Health;
 use tinline_task_manager::metrics::{StatusResponse, sampler::Sampler};
 use tinline_task_manager::peer_link::{PeersReport, PeersResponse};
 use tinline_task_manager::{
@@ -62,6 +63,10 @@ pub fn run() -> Result<()> {
     // Peer link (iroh) in its own thread/runtime, only when a peer config exists. It talks to
     // this daemon through the socket below like any client; nothing here waits for it.
     let peers = tinline_task_manager::peer::runtime::start(&state, &socket);
+    // Health checks and the bounded disk scan, on their own threads (never these socket
+    // threads); the latest result rides on every status snapshot as `health`.
+    let health =
+        tinline_task_manager::health::monitor::start(state.clone(), sampler.clone(), peers.clone());
     eprintln!(
         "taskd: socket={} (execution requires per-job approval and explicit local worker)",
         socket.display()
@@ -86,8 +91,9 @@ pub fn run() -> Result<()> {
         let active = active.clone();
         let sampler = sampler.clone();
         let peers = peers.clone();
+        let health = health.clone();
         std::thread::spawn(move || {
-            serve(stream, &store, &sampler, &peers);
+            serve(stream, &store, &sampler, &peers, &health);
             active.fetch_sub(1, Ordering::SeqCst);
         });
     }
@@ -100,6 +106,7 @@ fn serve(
     store: &Mutex<Store>,
     sampler: &Sampler,
     peers: &Mutex<PeersReport>,
+    health: &Health,
 ) {
     let response = (|| -> Result<Option<Response>> {
         stream.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
@@ -142,7 +149,12 @@ fn serve(
                 Ok(jobs) => StatusResponse {
                     version: PROTOCOL_VERSION,
                     error: None,
-                    status: Some(sampler.snapshot(&jobs)),
+                    status: Some({
+                        let mut snapshot = sampler.snapshot(&jobs);
+                        let summary = health.summary();
+                        snapshot.health = (summary.checked_at > 0.0).then_some(summary);
+                        snapshot
+                    }),
                 },
                 Err(error) => StatusResponse {
                     version: PROTOCOL_VERSION,

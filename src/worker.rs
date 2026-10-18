@@ -543,6 +543,10 @@ fn prepare_local_outputs(
             if !state_space.admitted() {
                 return Ok(Placed::Blocked(state_space));
             }
+            if recipe.resource == local::Resource::Offload {
+                // No local output; admission applies the offload disk gate.
+                return Ok(Placed::Done(local::offload_placement()));
+            }
             local::try_place_outputs(cwd)
         },
         |space| {
@@ -1015,10 +1019,12 @@ pub fn admit(id: i64, stage: &str, supervisor: ProcessIdentity) -> Result<()> {
         return Err("native admission requires its owned supervisor/group and valid stage".into());
     }
     let mut offload = false;
+    let mut fetches = true;
     let _device = if job.spec.suite == crate::local_command::SUITE {
         let recipe = crate::local_command::Recipe::from_spec(&job.spec)?;
         recipe.argv_for(stage)?;
         offload = recipe.resource == crate::local_command::Resource::Offload;
+        fetches = crate::local_command::offload_fetches(&recipe.argv);
         if let crate::local_command::Resource::Device(serial) = recipe.resource {
             let Some(d) = admission::acquire(
                 admission::Kind::Device(serial),
@@ -1050,8 +1056,9 @@ pub fn admit(id: i64, stage: &str, supervisor: ProcessIdentity) -> Result<()> {
     } else {
         admission::Kind::Run
     };
-    let Some(lease) = admission::acquire(
+    let Some(lease) = admission::acquire_offload(
         kind,
+        fetches,
         &format!("{}:job-{id}", job.spec.owner),
         &format!(
             "{} __command {id} {stage} {} {}",
@@ -1304,7 +1311,11 @@ fn run_command(state: &Path, dir: &Path, job: &crate::Job, stage: &str) -> Resul
             }
         }
         cache::require_state_space(state)?;
-        let placement = crate::local_command::place_outputs(Path::new(&job.spec.source))?;
+        let placement = if recipe.resource == crate::local_command::Resource::Offload {
+            crate::local_command::offload_placement()
+        } else {
+            crate::local_command::place_outputs(Path::new(&job.spec.source))?
+        };
         save(
             &dir.join(format!("{stage}-admitted.json")),
             &Admitted {

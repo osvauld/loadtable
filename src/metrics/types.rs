@@ -16,6 +16,10 @@ pub struct Snapshot {
     pub taken_at: f64,
     pub machine: Machine,
     pub jobs: Vec<JobView>,
+    /// This machine's health (alerts, disks, missing-capability marks); additive, absent
+    /// from daemons that predate health monitoring and before the first check pass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health: Option<crate::health::NodeHealth>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

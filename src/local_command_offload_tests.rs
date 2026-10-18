@@ -186,3 +186,31 @@ fn ledger_round_trip_and_class_aware_claims() {
     assert_eq!(store.claim(me.clone()).unwrap().unwrap().id, run);
     assert!(store.claim(me).unwrap().is_none());
 }
+
+#[test]
+fn offload_fetch_detection_and_skipped_placement() {
+    let words = |s: &str| s.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
+    assert!(offload_fetches(&words(
+        "tasks-offload --worker u@h --fetch target/release/app -- cargo build"
+    )));
+    assert!(offload_fetches(&words("tasks-offload --fetch=out -- make")));
+    assert!(offload_fetches(&words(
+        "/home/u/bin/offload-portable-desktop.sh u@h key"
+    )));
+    assert!(offload_fetches(&words(
+        "/tasks peer-forward --peer w --resource compile --fetch out/bin -- cargo build"
+    )));
+    assert!(!offload_fetches(&words(
+        "tasks-offload --worker u@h --cargo-fetch -- cargo test"
+    )));
+    assert!(!offload_fetches(&words(
+        "tasks peer-forward --peer w --resource compile -- cargo test"
+    )));
+    let p = offload_placement();
+    assert!(p.linked.is_empty() && p.preserved.is_empty());
+    assert!(
+        p.detail().contains("skipped for an offload-class job"),
+        "{}",
+        p.detail()
+    );
+}

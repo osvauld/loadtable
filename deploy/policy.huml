@@ -16,3 +16,16 @@
 # A `cargo test` without any filter (the deliberate full suite) is never affected.
 # Environment override (wins over this file): TASKS_BROAD_TEST=refuse|warn.
 broad_test: "refuse"
+
+# Health monitor thresholds (src/health/config.rs), read when the daemon starts. Every key
+# is optional and named after its environment variable without TASKS_HEALTH_, lowercased;
+# the variable wins over the key. Uncomment to set, e.g.:
+# health::
+#   interval_s: 30          # check pass interval (1..3600)
+#   slot_orphan_s: 120      # slot held with no live job -> slot-holder alert (10..86400)
+#   job_wait_min: 30        # job waiting this long -> alert (1..10080)
+#   time_to_full_h: 6       # disk estimated full within this -> alert (1..720)
+#   target_max_gib: 60      # one checkout's build output above this -> alert (1..65536)
+#   notify: "off"           # on | off | file:/ABS/PATH
+# Also: disk_scan_s, disk_scan_files, disk_scan_max_s, pressure_s, idle_peer_s, peer_s,
+# high_cpu_h, capability_ttl_h.

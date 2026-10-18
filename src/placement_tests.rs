@@ -538,3 +538,97 @@ fn peer_from_report_reads_the_runtime_view() {
             .contains("unreadable")
     );
 }
+
+// ---- feature/health-alerts: missing-capability marks ----
+
+fn libclang_mark(node: &str) -> crate::health::capability::CapabilityMark {
+    crate::health::capability::CapabilityMark {
+        node: node.into(),
+        capability: "libclang".into(),
+        family: "libclang".into(),
+        job: 456,
+        remote_job: Some(77),
+        kind_key: "cargo build -p media".into(),
+        line: "Unable to find libclang: \"couldn't find any valid shared libraries\"".into(),
+        marked_at: 1.0,
+        expires_at: f64::MAX,
+        source: "forwarded job log".into(),
+    }
+}
+
+#[test]
+fn anywhere_skips_a_peer_lacking_a_capability_the_command_needs_and_says_why() {
+    let host = laptop("metrics-laptop-busy");
+    let mut worker = peer(open_worker());
+    worker.missing = marks_for(
+        &worker,
+        &[libclang_mark("worker"), libclang_mark("elsewhere")],
+    );
+    assert_eq!(worker.missing.len(), 1, "only marks about this peer");
+    // Without the mark the busy laptop sends a Cargo build to the worker.
+    let clean = anywhere("cargo build -j 8", &host, &[peer(open_worker())]);
+    assert_eq!(clean.target, worker_target());
+    let d = anywhere("cargo build -j 8", &host, std::slice::from_ref(&worker));
+    assert_eq!(d.target, Target::Local, "{}", d.line());
+    assert_eq!(d.skipped.len(), 1);
+    assert!(
+        d.skipped[0].why.contains("lacks libclang (bindgen)"),
+        "{:?}",
+        d.skipped
+    );
+    assert!(
+        d.skipped[0].why.contains("job #456 (remote #77 on worker)"),
+        "{:?}",
+        d.skipped
+    );
+    assert!(
+        d.line().contains("worker skipped: lacks libclang"),
+        "{}",
+        d.line()
+    );
+    // A command that does not need libclang still goes there.
+    let d = anywhere("sh -c true", &host, std::slice::from_ref(&worker));
+    assert_eq!(d.target, worker_target(), "{}", d.line());
+    // retain_needed drops the mark for a non-Cargo command before deciding.
+    let mut peers = vec![worker.clone()];
+    retain_needed(&mut peers, &words("make all"), None);
+    assert!(peers[0].missing.is_empty());
+    // Named explicitly: forwarded anyway, with a note.
+    let d = decide(
+        &words("cargo build"),
+        &Class::Compile,
+        &Request::Peer("worker".into()),
+        &host,
+        2,
+        std::slice::from_ref(&worker),
+    )
+    .unwrap();
+    assert_eq!(d.target, worker_target());
+    assert!(
+        d.notes
+            .iter()
+            .any(|n| n.contains("lacks libclang") && n.contains("named")),
+        "{:?}",
+        d.notes
+    );
+}
+
+#[test]
+fn marks_for_reads_the_peers_own_published_marks_by_machine_id() {
+    let mut snapshot = open_worker();
+    let id = snapshot.machine.id.clone();
+    snapshot.health = Some(crate::health::NodeHealth {
+        node: id.clone(),
+        checked_at: 1.0,
+        capabilities: vec![libclang_mark(&id)],
+        ..Default::default()
+    });
+    let worker = peer(snapshot);
+    let marks = marks_for(&worker, &[]);
+    assert_eq!(marks.len(), 1);
+    assert_eq!(marks[0].node, id);
+    // The controller's own mark wins; one per capability.
+    let marks = marks_for(&worker, &[libclang_mark("worker")]);
+    assert_eq!(marks.len(), 1);
+    assert_eq!(marks[0].node, "worker");
+}

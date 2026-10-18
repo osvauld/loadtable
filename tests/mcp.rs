@@ -295,7 +295,8 @@ fn tools_list_matches_the_schemas() {
             "wait_job",
             "who_is_compiling",
             "search_logs",
-            "job_cost"
+            "job_cost",
+            "alerts"
         ]
     );
     for tool in tools.as_array().unwrap() {
@@ -884,4 +885,131 @@ fn real_daemon_submit_and_wait() {
             .unwrap()
             .contains("hello-from-mcp")
     );
+}
+
+/// feature/health-alerts: a real daemon whose fixture build-cache filesystem is below the
+/// cache reserve (raised to the maximum, so any real filesystem is below it) raises a
+/// critical `disk_reserve` alert; MCP `alerts` returns it, `cluster_status` includes it, and
+/// the injected file notifier (never notify-send) records it. Isolated HOME/state/locks.
+#[test]
+fn real_daemon_disk_below_reserve_alert_via_mcp() {
+    let dir = Dir::new("health");
+    let state = dir.0.join("state");
+    let home = dir.0.join("home");
+    std::fs::create_dir_all(home.join("build-cache")).unwrap();
+    let notify = dir.0.join("notify.jsonl");
+    let mut daemon = Command::new(env!("CARGO_BIN_EXE_tasks"))
+        .arg("daemon")
+        .env("TASK_MANAGER_STATE_DIR", &state)
+        .env("TASKS_LOCK_DIR", state.join("locks"))
+        .env("TASKS_PEER_CONFIG", state.join("no-peer-config.toml"))
+        .env("HOME", &home)
+        .env("TASKS_MIN_CACHE_FREE_GIB", "65536")
+        .env("TASKS_HEALTH_INTERVAL_S", "1")
+        .env("TASKS_HEALTH_DISK_SCAN_S", "10")
+        .env("TASKS_HEALTH_NOTIFY", format!("file:{}", notify.display()))
+        .env("TASKS_DECLARED_CAPABILITIES", "synthetic-missing-tool")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let end = Instant::now() + Duration::from_secs(10);
+    while !state.join("taskd.sock").exists() {
+        assert!(Instant::now() < end, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut client = Client::start(&state);
+    client.initialize();
+    let end = Instant::now() + Duration::from_secs(30);
+    let alert = loop {
+        let result = client.tool("alerts", json!({"severity": "critical"}));
+        assert_eq!(result["isError"], false, "{result}");
+        let found = result["structuredContent"]["alerts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["kind"] == "disk_reserve")
+            .cloned();
+        if let Some(a) = found {
+            assert!(
+                text(&result).contains("below its reserve"),
+                "{}",
+                text(&result)
+            );
+            let nodes = result["structuredContent"]["nodes"].as_array().unwrap();
+            assert!(
+                !nodes[0]["disks"].as_array().unwrap().is_empty(),
+                "{result}"
+            );
+            break a;
+        }
+        assert!(Instant::now() < end, "no disk_reserve alert: {result}");
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    assert_eq!(alert["severity"], "critical");
+    assert!(
+        alert["id"].as_str().unwrap().starts_with("disk_reserve:"),
+        "{alert}"
+    );
+    assert!(!alert["fix"].as_str().unwrap().is_empty());
+    assert_eq!(alert["reported_by"], "local");
+    // The node filter by a foreign name drops it; cluster_status carries it too.
+    let other = client.tool("alerts", json!({"node": "synthetic-nowhere"}));
+    assert!(
+        other["structuredContent"]["alerts"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let status = client.tool("cluster_status", json!({}));
+    assert!(
+        status["structuredContent"]["alerts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["kind"] == "disk_reserve"),
+        "{status}"
+    );
+    let end = Instant::now() + Duration::from_secs(10);
+    while !std::fs::read_to_string(&notify).is_ok_and(|t| t.contains("below its reserve")) {
+        assert!(Instant::now() < end, "notifier not called");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // Wait for the first bounded disk scan to be published.
+    let end = Instant::now() + Duration::from_secs(60);
+    loop {
+        let r = client.tool("alerts", json!({}));
+        if !r["structuredContent"]["nodes"][0]["scan"].is_null() {
+            let ids = r["structuredContent"]["alerts"].to_string();
+            assert!(ids.contains("declared_capability:"), "{r}");
+            break;
+        }
+        assert!(Instant::now() < end, "no disk scan summary: {r}");
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    // `tasks doctor` reports it with its fix and exits 1; a declared, missing capability fails.
+    let doctor = Command::new(env!("CARGO_BIN_EXE_tasks"))
+        .arg("doctor")
+        .env("TASK_MANAGER_STATE_DIR", &state)
+        .env("TASKS_LOCK_DIR", state.join("locks"))
+        .env("TASKS_PEER_CONFIG", state.join("no-peer-config.toml"))
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&doctor.stdout);
+    assert_eq!(doctor.status.code(), Some(1), "{out}");
+    assert!(out.contains("capabilities (daemon environment"), "{out}");
+    assert!(
+        out.contains("below its reserve") && out.contains("fix:"),
+        "{out}"
+    );
+    assert!(out.contains("disk scan: bounded to"), "{out}");
+    assert!(out.contains("doctor: NOT healthy"), "{out}");
+    assert!(
+        out.contains("FAIL synthetic-missing-tool [declared]"),
+        "{out}"
+    );
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+    assert!(client.close().success());
 }

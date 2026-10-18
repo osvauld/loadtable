@@ -63,6 +63,13 @@ impl BroadTest {
 pub struct Policy {
     #[serde(default)]
     pub broad_test: BroadTest,
+    /// Health monitor thresholds (`health::` section; `health::config`). Each
+    /// `TASKS_HEALTH_*` environment variable wins over its key. Read when the daemon starts.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::health::config::HealthPolicy::is_empty"
+    )]
+    pub health: crate::health::config::HealthPolicy,
 }
 
 /// The policy in force and where each value came from (what `tasks admission` shows).
@@ -91,6 +98,13 @@ impl Effective {
             self.path.display(),
             self.source
         );
+        if !self.policy.health.is_empty() {
+            // Compact JSON of the keys the file sets (TASKS_HEALTH_* variables still win).
+            let set = serde_json::to_string(&self.policy.health).unwrap_or_default();
+            out.push_str(&format!(
+                "policy: health {set} (from file; TASKS_HEALTH_* variables win)\n"
+            ));
+        }
         for e in &self.errors {
             out.push_str(&format!("policy ERROR: {e}\n"));
         }
@@ -294,6 +308,20 @@ mod tests {
     fn the_committed_sample_parses() {
         let text = include_str!("../deploy/policy.huml");
         assert_eq!(parse(text).unwrap().broad_test, BroadTest::Refuse);
+    }
+
+    #[test]
+    fn the_health_section_parses_strictly() {
+        let p = parse(
+            "%HUML v0.2.0\nbroad_test: \"warn\"\nhealth::\n  slot_orphan_s: 300\n  notify: \"off\"\n",
+        )
+        .unwrap();
+        assert_eq!(p.broad_test, BroadTest::Warn);
+        assert_eq!(p.health.slot_orphan_s, Some(300));
+        assert_eq!(p.health.notify.as_deref(), Some("off"));
+        assert_eq!(p.health.interval_s, None);
+        let typo = parse("%HUML v0.2.0\nhealth::\n  slot_orphan: 300\n").unwrap_err();
+        assert!(typo.contains("slot_orphan"), "{typo}");
     }
 
     #[test]

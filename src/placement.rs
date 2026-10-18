@@ -17,7 +17,10 @@
 //!   guess everywhere, so the wait decides.
 //!
 //! Ties and fully unknown cases go to a worker peer (keeping this machine free). Offline,
-//! never reached and stale peers are skipped (with a note). The device class always stays
+//! never reached and stale peers are skipped (with a note), and so is a peer with a
+//! missing-capability mark the command needs (`health::capability`: e.g. a Cargo command
+//! with `bindgen` in its lock file on a peer whose earlier job failed with "Unable to find
+//! libclang"); a named peer still gets the job, with a note. The device class always stays
 //! local; the run class stays local unless a peer is named. Advisory only: admission on the
 //! chosen machine still applies every lock and gate, and the receiving peer re-validates the
 //! command (its own Cargo jobs cap and device denylist).
@@ -96,6 +99,41 @@ pub struct Peer {
     pub snapshot: Option<Snapshot>,
     /// Why the snapshot could not be read, if it could not.
     pub unreadable: Option<String>,
+    /// Missing-capability marks about this peer ([`marks_for`]); advisory, see the module doc.
+    pub missing: Vec<crate::health::capability::CapabilityMark>,
+}
+
+/// The marks about `peer`: the controller's own (by the peer's configured name or machine
+/// id, from classified forwarded-job logs) plus those the peer publishes about itself in its
+/// snapshot's `health.capabilities`. One per capability (the controller's first).
+pub fn marks_for(
+    peer: &Peer,
+    local_marks: &[crate::health::capability::CapabilityMark],
+) -> Vec<crate::health::capability::CapabilityMark> {
+    let id = peer.snapshot.as_ref().map(|s| s.machine.id.as_str());
+    let own = peer
+        .snapshot
+        .as_ref()
+        .and_then(|s| s.health.as_ref())
+        .map(|h| h.capabilities.as_slice())
+        .unwrap_or_default();
+    let mut out: Vec<crate::health::capability::CapabilityMark> = vec![];
+    for m in local_marks.iter().chain(own) {
+        let about = m.node == peer.name || Some(m.node.as_str()) == id;
+        if about && !out.iter().any(|o| o.capability == m.capability) {
+            out.push(m.clone());
+        }
+    }
+    out
+}
+
+/// Keeps only the marks `argv` (run from `cwd`) needs, so [`decide`] (which has no cwd)
+/// skips only for capabilities this command uses (e.g. libclang only with `bindgen`).
+pub fn retain_needed(peers: &mut [Peer], argv: &[String], cwd: Option<&Path>) {
+    for p in peers {
+        p.missing
+            .retain(|m| crate::health::capability::needed(&m.family, argv, cwd));
+    }
 }
 
 impl Peer {
@@ -116,6 +154,7 @@ impl Peer {
             stale: s.stale,
             snapshot,
             unreadable,
+            missing: vec![],
         }
     }
     fn runs_jobs(&self) -> bool {
@@ -565,6 +604,13 @@ pub fn decide(
             decision.machine = name.clone();
             decision.machine_id = peer.snapshot.as_ref().map(|s| s.machine.id.clone());
             decision.reason = format!("peer {name} named explicitly");
+            if let Some(m) = crate::health::capability::blocking(&peer.missing, argv, None) {
+                decision.notes.push(format!(
+                    "{name} {} ({}); forwarding anyway because it was named",
+                    m.lacks(),
+                    m.evidence()
+                ));
+            }
             let cap = cap_of(peer);
             return Ok(finish(decision, cap));
         }
@@ -594,7 +640,9 @@ pub fn decide(
         jobs: Some(local_cap),
     }];
     for peer in peers {
-        match (peer.unusable(), &peer.snapshot) {
+        let lacks = crate::health::capability::blocking(&peer.missing, argv, None)
+            .map(|m| format!("{} ({}); this command needs it", m.lacks(), m.evidence()));
+        match (peer.unusable().or(lacks), &peer.snapshot) {
             (None, Some(snapshot)) => candidates.push(Candidate {
                 target: Target::Peer(peer.name.clone()),
                 machine: peer.name.clone(),
@@ -792,6 +840,10 @@ pub fn gather(socket: &Path, settle: std::time::Duration) -> crate::Result<Input
             },
         };
         inputs.peers.push(peer);
+    }
+    let local_marks = crate::health::capability::Marks::load(&crate::state_dir()).marks;
+    for peer in &mut inputs.peers {
+        peer.missing = marks_for(peer, &local_marks);
     }
     if inputs.peers.is_empty() {
         inputs.no_peers = Some("no worker/both peer configured".into());

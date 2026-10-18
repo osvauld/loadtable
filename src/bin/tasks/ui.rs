@@ -753,6 +753,7 @@ impl Dashboard {
             .show(ui, |ui| {
                 ui.label(RichText::new(&view.summary).strong());
                 ui.add_space(4.0);
+                alert_banner(ui, &view.alerts);
                 machine_cards(ui, &view.machines);
                 ui.add_space(8.0);
                 if self.demo.is_none() {
@@ -1403,6 +1404,28 @@ fn sparkline(
     response
 }
 
+/// Active health alerts (`tasks alerts` has evidence and fixes); at most five lines.
+fn alert_banner(ui: &mut egui::Ui, alerts: &[(String, String)]) {
+    if alerts.is_empty() {
+        return;
+    }
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        for (severity, line) in alerts.iter().take(5) {
+            let color = match severity.as_str() {
+                "critical" => RED,
+                "warn" => AMBER,
+                _ => ui.visuals().weak_text_color(),
+            };
+            ui.label(RichText::new(line).color(color));
+        }
+        if alerts.len() > 5 {
+            ui.label(RichText::new(format!("… {} more: tasks alerts", alerts.len() - 5)).weak());
+        }
+    });
+    ui.add_space(4.0);
+}
+
 fn machine_cards(ui: &mut egui::Ui, cards: &[MachineCard]) {
     if cards.is_empty() {
         return;
@@ -1451,6 +1474,11 @@ fn machine_card(ui: &mut egui::Ui, card: &MachineCard) {
                 let label = ui.label(RichText::new(text).color(color));
                 if !hover.is_empty() {
                     label.on_hover_text(hover);
+                }
+                if let Some(stale) = &card.stale {
+                    ui.label(RichText::new(stale).color(AMBER)).on_hover_text(
+                        "no new snapshot for over 3 sample intervals; numbers may be out of date",
+                    );
                 }
             });
         });

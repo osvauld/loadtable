@@ -87,6 +87,22 @@ let
   libclang = cfg.bindgen.llvmPackages.libclang;
   sccacheServer = cfg.enable && cfg.sccache.enable && cfg.sccache.server;
 
+  # What this declaration promises, for the daemon's health check (src/health/node.rs probes
+  # each name; a declared one that does not resolve raises declared_capability:NODE:NAME).
+  # Names: libclang, jdk, android-sdk, cargo-ndk, else a command looked up on the daemon's
+  # PATH (which includes /run/current-system/sw/bin, where operatorTools land).
+  toolName = p: p.meta.mainProgram or (lib.getName p);
+  hasToolchain = name: lib.any (p: lib.getName p == name) cfg.toolchains;
+  defaultDeclaredCapabilities = lib.unique (
+    optional cfg.bindgen.enable "libclang"
+    ++ optional (cfg.android.enable || hasToolchain "openjdk") "jdk"
+    # The SDK itself is installed per user with sdkmanager; declaring it makes a missing SDK
+    # a named alert instead of a job that fails later.
+    ++ optional cfg.android.enable "android-sdk"
+    ++ optional (hasToolchain "cargo-ndk") "cargo-ndk"
+    ++ map toolName cfg.operatorTools
+  );
+
   # What every live command needs regardless of the toolchain choice: the cache-link step
   # runs `git rev-parse --show-toplevel`.
   basePackages = with pkgs; [
@@ -122,6 +138,9 @@ let
     TASKS_MIN_AVAILABLE_MEMORY_MIB = toString cfg.minAvailableMemoryMiB;
     TASKS_PEER_CONFIG = if cfg.peer.enable then peerConfigPath else peerDisabledPath;
     PKG_CONFIG_PATH = "/run/current-system/sw/lib/pkgconfig";
+  }
+  // optionalAttrs (cfg.declaredCapabilities != [ ]) {
+    TASKS_DECLARED_CAPABILITIES = concatStringsSep "," cfg.declaredCapabilities;
   }
   // optionalAttrs cfg.sccache.enable {
     RUSTC_WRAPPER = lib.getExe' cfg.sccache.package "sccache";
@@ -474,6 +493,22 @@ in
       ];
       defaultText = literalExpression "with pkgs; [ htop iotop-c lsof tmux ]";
       description = "Tools for the operator's SSH sessions (systemPackages only, not the daemon's PATH): no `nix-shell -p htop` on a worker.";
+    };
+
+    declaredCapabilities = mkOption {
+      type = types.listOf (types.strMatching "[A-Za-z0-9._+-]+");
+      default = defaultDeclaredCapabilities;
+      defaultText = literalExpression ''
+        libclang (bindgen.enable), jdk (android.enable or a JDK in toolchains), android-sdk
+        (android.enable), cargo-ndk (in toolchains) and the main program of each operatorTools
+        package (htop, iotop-c, lsof, tmux)
+      '';
+      description = ''
+        TASKS_DECLARED_CAPABILITIES for the daemon: what this node promises. The health monitor
+        and `tasks doctor` probe each one and raise `declared_capability:NODE:NAME` (with a fix
+        line) when it does not resolve, and placement/reroute skip the node for commands that
+        need it (docs/design/node-setup-policy.md).
+      '';
     };
 
     nixLd = {

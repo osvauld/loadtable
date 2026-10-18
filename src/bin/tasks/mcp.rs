@@ -29,6 +29,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
+use tinline_task_manager::health::{Severity, cluster};
 use tinline_task_manager::local_command::{Recipe, Resource};
 use tinline_task_manager::{Action, Job, Phase, Response, Result, metrics::Snapshot, placement};
 
@@ -519,7 +520,7 @@ impl Ctx {
     }
 }
 
-pub const TOOL_NAMES: [&str; 10] = [
+pub const TOOL_NAMES: [&str; 11] = [
     "cluster_status",
     "list_jobs",
     "job",
@@ -530,6 +531,7 @@ pub const TOOL_NAMES: [&str; 10] = [
     "who_is_compiling",
     "search_logs",
     "job_cost",
+    "alerts",
 ];
 
 const PHASES: [&str; 11] = [
@@ -851,6 +853,34 @@ pub fn tools() -> Vec<Value> {
             },
             "annotations": {"readOnlyHint": true, "openWorldHint": false}
         }),
+        json!({
+            "name": "alerts",
+            "title": "Health alerts",
+            "description": "Active health alerts of this machine and every peer (most severe \
+                first): disk below the reserve or filling fast, a build slot held with no live \
+                job (naming the holder process), sustained memory pressure (naming the largest \
+                processes), stale/offline peers, long-waiting jobs, work queued here while a \
+                peer is idle, a machine missing a capability (e.g. libclang, from a failed \
+                job's log; placement anywhere skips it for commands that need it), and very \
+                high per-job CPU. Each alert has a stable id (KIND:NODE[:SUBJECT]), severity, \
+                node, summary, evidence, a suggested fix and first/last seen; alerts clear \
+                when the condition ends. Also lists each machine's disks (free, growth, \
+                time to full, top consumers) and missing-capability marks. Read-only.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "severity": {"type": "string", "enum": ["info", "warn", "critical"], "default": "info",
+                        "description": "Minimum severity."},
+                    "node": {"type": "string",
+                        "description": "Only alerts about this machine (peer name, e.g. \"worker\", or hostname)."},
+                    "include_recent": {"type": "boolean", "default": false,
+                        "description": "Also return recently cleared alerts."},
+                    "placement": placement_schema(),
+                },
+                "additionalProperties": false
+            },
+            "annotations": {"readOnlyHint": true, "openWorldHint": false}
+        }),
     ]
 }
 
@@ -869,6 +899,7 @@ pub fn call_tool(daemon: &Daemon, name: &str, args: &Map<String, Value>, ctx: &C
         }
         match name {
             "cluster_status" => cluster_status(daemon, &args),
+            "alerts" => alerts(daemon, &args),
             "list_jobs" => list_jobs(daemon, &args),
             "job" => job(daemon, &args),
             "job_logs" => job_logs(daemon, &args),
@@ -1194,7 +1225,91 @@ fn cluster_status(daemon: &Daemon, args: &Args) -> Result<Outcome> {
         }
     }
     structured["machines"] = json!(machines(daemon, &snapshot, recent, &mut text)?);
+    // Active warn/critical health alerts of every machine (the `alerts` tool has all).
+    let health = cluster::gather(&daemon.socket).filtered(&cluster::Filter {
+        min_severity: Some(Severity::Warn),
+        ..Default::default()
+    });
+    if !health.alerts.is_empty() {
+        text.push_str(&format!(
+            "\n{} active warn/critical alert(s):\n",
+            health.alerts.len()
+        ));
+        for a in &health.alerts {
+            text.push_str(&format!("{}\n", alert_line(a, health.generated_at)));
+        }
+    }
+    structured["alerts"] = serde_json::to_value(&health.alerts)?;
     Ok(Outcome { text, structured })
+}
+
+fn alert_line(a: &cluster::ClusterAlert, now: f64) -> String {
+    let mut line = a.alert.line(now);
+    if a.reported_by != "local" {
+        line.push_str(&format!(" [via {}]", a.reported_by));
+    }
+    if !a.alert.fix.is_empty() {
+        line.push_str(&format!(" -- fix: {}", a.alert.fix));
+    }
+    line
+}
+
+fn alerts(daemon: &Daemon, args: &Args) -> Result<Outcome> {
+    let filter = cluster::Filter {
+        min_severity: args.str("severity")?.map(Severity::parse).transpose()?,
+        node: args.str("node")?.map(str::to_owned),
+        recent: args.bool("include_recent", false)?,
+    };
+    daemon.ensure()?;
+    let view = cluster::gather(&daemon.socket).filtered(&filter);
+    Ok(Outcome {
+        text: view.render(view.generated_at),
+        structured: serde_json::to_value(&view)?,
+    })
+}
+
+/// Active warn/critical alerts a submission should know: about the machine it went to
+/// (or this one), plus missing capabilities anywhere. Without peers (no decision) this reads
+/// only this daemon's persisted alert book: no extra daemon request.
+fn submit_alerts(daemon: &Daemon, decision: Option<&placement::Decision>) -> Vec<String> {
+    let Some(_) = decision else {
+        let path = daemon
+            .state()
+            .join(tinline_task_manager::health::monitor::ALERTS_FILE);
+        let book: tinline_task_manager::health::AlertBook =
+            tinline_task_manager::peer::records::read_json(&path).unwrap_or_default();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        return book
+            .sorted_active()
+            .into_iter()
+            .filter(|a| a.severity >= Severity::Warn && a.kind != "job_waiting")
+            .map(|a| {
+                let mut line = a.line(now);
+                if !a.fix.is_empty() {
+                    line.push_str(&format!(" -- fix: {}", a.fix));
+                }
+                line
+            })
+            .collect();
+    };
+    let health = cluster::gather(&daemon.socket);
+    let mut machines: Vec<String> = vec!["local".into()];
+    if let Some(id) = health.nodes.first().and_then(|n| n.machine_id.clone()) {
+        machines.push(id);
+    }
+    if let Some(d) = decision {
+        machines.push(d.machine.clone());
+        machines.extend(d.machine_id.clone());
+    }
+    let names: Vec<&str> = machines.iter().map(String::as_str).collect();
+    health
+        .relevant(&names)
+        .into_iter()
+        .map(|a| alert_line(a, health.generated_at))
+        .collect()
 }
 
 fn list_jobs(daemon: &Daemon, args: &Args) -> Result<Outcome> {
@@ -1577,8 +1692,9 @@ fn submit(daemon: &Daemon, args: &Args, ctx: &Ctx) -> Result<Outcome> {
     } else {
         let (cwd, resource) = submission(who, cwd, class, serial)?;
         daemon.ensure()?;
-        let inputs = placement::gather(&daemon.socket, PLACEMENT_SETTLE)
+        let mut inputs = placement::gather(&daemon.socket, PLACEMENT_SETTLE)
             .map_err(|e| daemon.unreachable(e))?;
+        placement::retain_needed(&mut inputs.peers, &argv, Some(&cwd));
         let decision =
             placement::decide_with(&argv, &crate::place_class(&resource), &request, &inputs)?;
         eprintln!("tasks mcp: {}", decision.line());
@@ -1677,6 +1793,13 @@ fn submit(daemon: &Daemon, args: &Args, ctx: &Ctx) -> Result<Outcome> {
     }
     if broad_test {
         outcome.structured["broad_test"] = json!(true);
+    }
+    let alerts = submit_alerts(daemon, decision.as_ref());
+    if !alerts.is_empty() {
+        for a in &alerts {
+            outcome.text.push_str(&format!("\nalert: {a}"));
+        }
+        outcome.structured["alerts"] = json!(alerts);
     }
     Ok(outcome)
 }

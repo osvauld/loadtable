@@ -377,24 +377,61 @@ pub const OFFLOAD_MIN_MEMORY: u64 = 2 * GIB;
 pub fn offload_min_memory(t: &Thresholds) -> u64 {
     t.min_available_memory_bytes.min(OFFLOAD_MIN_MEMORY)
 }
-/// Offload clients fetch artifacts into `~/build-cache/offload`, so they wait
-/// while the cache disk is below its reserve. Unmeasurable fails closed.
-pub fn offload_disk_blocker(cache: Result<crate::cache::DiskSpace>) -> Option<String> {
-    match cache {
+/// Local cache-disk floor of an offload-class job that fetches artifacts back
+/// (`--fetch`, or offload-portable-desktop.sh which always fetches), on top of the
+/// state-disk reserve. The build itself runs on the remote machine under ITS full
+/// admission and writes no local target output, so the 20 GiB cache reserve of
+/// local compile/run jobs does not apply here.
+pub const OFFLOAD_FETCH_FLOOR: u64 = 2 * GIB;
+/// The local disk gate of an offload-class job (tasks-offload,
+/// offload-portable-desktop.sh, tasks peer-forward): the state-disk reserve
+/// always; with `fetches`, also [`OFFLOAD_FETCH_FLOOR`] + the state reserve free
+/// on the cache disk, where fetched artifacts land. Unmeasurable fails closed.
+pub fn offload_disk_blocker(
+    fetches: bool,
+    cache: Result<crate::cache::DiskSpace>,
+    state: Result<crate::cache::DiskSpace>,
+    t: &Thresholds,
+) -> Option<String> {
+    if fetches {
+        let floor = OFFLOAD_FETCH_FLOOR.saturating_add(t.min_state_free_bytes);
+        match cache {
+            Ok(space) if space.available_bytes >= floor => {}
+            Ok(space) => {
+                let space = crate::cache::DiskSpace {
+                    reserve_bytes: floor,
+                    ..space
+                };
+                return Some(format!(
+                    "cache disk below the offload fetch floor, fetching offload slots wait \
+                     (fetched artifacts land there): {}",
+                    space.detail()
+                ));
+            }
+            Err(e) => {
+                return Some(format!(
+                    "cache disk not measured, fetching offload slots wait: {e}"
+                ));
+            }
+        }
+    }
+    match state {
         Ok(space) if space.admitted() => None,
         Ok(space) => Some(format!(
-            "cache disk below reserve, offload slots wait (fetched artifacts land there): {}",
+            "state disk below reserve, offload slots wait: {}",
             space.detail()
         )),
-        Err(e) => Some(format!("cache disk not measured, offload slots wait: {e}")),
+        Err(e) => Some(format!("state disk not measured, offload slots wait: {e}")),
     }
 }
-fn live_offload_disk_blocker() -> Option<String> {
-    let cache = crate::cache::cache_root().and_then(|root| match thresholds() {
-        Ok(t) => crate::cache::cache_space_with(&root, &t),
-        Err(e) => Err(e),
-    });
-    offload_disk_blocker(cache)
+fn live_offload_disk_blocker(fetches: bool) -> Option<String> {
+    let t = match thresholds() {
+        Ok(t) => t,
+        Err(e) => return Some(format!("thresholds invalid, offload slots wait: {e}")),
+    };
+    let cache = crate::cache::cache_root().and_then(|root| crate::cache::disk_space_raw(&root));
+    let state = crate::cache::state_space_with(&crate::state_dir(), &t);
+    offload_disk_blocker(fetches, cache, state, &t)
 }
 impl Kind {
     fn label(&self) -> String {
@@ -777,9 +814,27 @@ fn older_waiter(root: &Path, me: &Wait, slot: &str) -> Result<bool> {
     }
     Ok(false)
 }
+/// Acquires `kind`. An offload slot is gated as a job that fetches artifacts
+/// (the conservative choice); the worker uses [`acquire_offload`] with the
+/// recipe's actual fetch flag.
 pub fn acquire(kind: Kind, who: &str, cmd: &str, stop: impl Fn() -> bool) -> Result<Option<Lease>> {
+    acquire_offload(kind, true, who, cmd, stop)
+}
+/// [`acquire`] with the offload disk gate of a job that does (`fetches`) or does
+/// not bring artifacts back ([`offload_disk_blocker`]). Other kinds ignore it.
+pub fn acquire_offload(
+    kind: Kind,
+    fetches: bool,
+    who: &str,
+    cmd: &str,
+    stop: impl Fn() -> bool,
+) -> Result<Option<Lease>> {
     let offload = matches!(kind, Kind::Offload);
-    let disk = move || offload.then(live_offload_disk_blocker).flatten();
+    let disk = move || {
+        offload
+            .then(|| live_offload_disk_blocker(fetches))
+            .flatten()
+    };
     acquire_gated(&root()?, kind, who, cmd, Pressure::read, disk, stop)
 }
 #[cfg(test)]
@@ -945,11 +1000,18 @@ fn with_disks(
             None
         }
     };
-    // Same fail-closed cache-disk condition that offload admission waits on.
-    let offload_disk = offload_disk_blocker(match &cache {
+    // Same fail-closed condition that a FETCHING offload job waits on (the
+    // worst case; a non-fetching offload job needs only the state reserve).
+    let copy = |d: &Result<crate::cache::DiskSpace>| match d {
         Ok(space) => Ok(space.clone()),
         Err(e) => Err(e.to_string().into()),
-    });
+    };
+    let offload_disk = offload_disk_blocker(
+        true,
+        copy(&cache),
+        copy(&state),
+        &status.thresholds.effective,
+    );
     let cache = keep(cache, "cache");
     let state = keep(state, "state");
     status.disk_blocker = crate::cache::disk_blocker(cache.as_ref(), state.as_ref());

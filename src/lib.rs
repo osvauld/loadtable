@@ -14,6 +14,7 @@ pub mod catalog;
 pub mod device;
 pub mod device_denylist;
 pub mod execution;
+pub mod health;
 pub mod ledger;
 pub mod local_command;
 pub mod log_search;

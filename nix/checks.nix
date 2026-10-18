@@ -319,6 +319,21 @@ in
       )
     ]
     [
+      "declared capabilities: libclang, cargo-ndk, jdk (in toolchains) and operator tools; no android-sdk without android"
+      (
+        let
+          caps = lib.splitString "," dEnv.TASKS_DECLARED_CAPABILITIES;
+        in
+        builtins.all (c: builtins.elem c caps) [
+          "libclang"
+          "jdk"
+          "cargo-ndk"
+          "htop"
+        ]
+        && !(builtins.elem "android-sdk" caps)
+      )
+    ]
+    [
       "bindgen: LIBCLANG_PATH (libclang lib dir) and BINDGEN_EXTRA_CLANG_ARGS (clang + glibc headers)"
       (
         dEnv.LIBCLANG_PATH == "${pkgs.llvmPackages.libclang.lib}/lib"
@@ -407,6 +422,21 @@ in
       )
     ]
     [
+      "android worker declares libclang, jdk, android-sdk, cargo-ndk and htop"
+      (
+        let
+          caps = lib.splitString "," hEnv.TASKS_DECLARED_CAPABILITIES;
+        in
+        builtins.all (c: builtins.elem c caps) [
+          "libclang"
+          "jdk"
+          "android-sdk"
+          "cargo-ndk"
+          "htop"
+        ]
+      )
+    ]
+    [
       "peer UDP 7843 only on wlo1 (not global); 7842 kept for lan-peer; ssh 22 on wlo1"
       (
         fw.allowedUDPPorts == [ ]
@@ -474,10 +504,13 @@ in
       )
     ]
     [
-      "bindgen.enable = false sets neither bindgen variable"
+      "bindgen.enable = false sets neither bindgen variable nor declares libclang"
       (
         !(noPeer.systemd.services.tasks-worker.environment ? LIBCLANG_PATH)
         && !(noPeer.systemd.services.tasks-worker.environment ? BINDGEN_EXTRA_CLANG_ARGS)
+        && !(builtins.elem "libclang" (
+          lib.splitString "," noPeer.systemd.services.tasks-worker.environment.TASKS_DECLARED_CAPABILITIES
+        ))
       )
     ]
   ];

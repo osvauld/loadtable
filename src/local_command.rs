@@ -26,6 +26,32 @@ pub fn is_offload(spec: &JobSpec) -> bool {
         && serde_json::from_str::<Recipe>(&spec.configuration)
             .is_ok_and(|r| r.resource == Resource::Offload)
 }
+/// Does an offload-class command bring artifacts back to this machine? True with
+/// a `--fetch` argument (tasks-offload, tasks peer-forward; `--cargo-fetch` is a
+/// remote `cargo fetch`, not a fetch) or for offload-portable-desktop.sh, which
+/// always fetches its bundle. Decides the offload local disk floor
+/// (`admission::offload_disk_blocker`).
+pub fn offload_fetches(argv: &[String]) -> bool {
+    argv.iter().any(|w| {
+        w == "--fetch"
+            || w.starts_with("--fetch=")
+            || Path::new(w).file_name().and_then(|n| n.to_str())
+                == Some("offload-portable-desktop.sh")
+    })
+}
+/// The output placement of an offload-class job: none. Its build runs on the
+/// remote machine, so no local target link is created and the 20 GiB cache
+/// reserve is not waited on (the offload disk gate applies at admission).
+pub fn offload_placement() -> Placement {
+    Placement {
+        linked: vec![],
+        preserved: vec![],
+        note: Some(
+            "skipped for an offload-class job (the build runs remotely; no local target output)"
+                .into(),
+        ),
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Recipe {
