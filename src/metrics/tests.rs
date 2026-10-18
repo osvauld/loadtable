@@ -587,6 +587,7 @@ pub(super) fn job(
             metrics,
             peer: None,
             reroute: None,
+            remote_result: None,
         }),
     }
 }

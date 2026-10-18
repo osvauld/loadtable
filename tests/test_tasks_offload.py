@@ -55,10 +55,26 @@ os.execve('/bin/sh', ['sh', '-c', command], env)
 '''
 
 FAKE_TASKS = r'''#!/usr/bin/env python3
-import json, os, subprocess, sys, time
+import json, os, subprocess, sys, threading, time
 state = os.path.join(os.environ['HOME'], 'fake-tasks')
 os.makedirs(state, exist_ok=True)
 args = sys.argv[1:]
+if args[:1] == ['logs'] and len(args) == 3 and args[2] == '--json':
+    # Like the installed client: the whole v2 response (jobs + log) as pretty JSON.
+    n = int(args[1])
+    record = os.path.join(state, 'job-%d.json' % n)
+    if not os.path.exists(record):
+        print(json.dumps({'version': 2, 'jobs': [], 'error': 'job not found'}, indent=2))
+        sys.exit(1)
+    rec = json.load(open(record))
+    result = os.path.join(state, 'result-%d.json' % n)
+    res = json.load(open(result)) if os.path.exists(result) else {
+        'phase': 'running', 'stages': [], 'out': ''}
+    job = {'id': n, 'phase': res['phase'], 'spec': {'owner': rec['who']},
+           'execution': {'stages': res['stages'], 'detail': 'fake detail'}}
+    print(json.dumps({'version': 2, 'execution_enabled': False, 'jobs': [job], 'error': None,
+                      'log': {'job_id': n, 'text': res['out'], 'truncated': False}}, indent=2))
+    sys.exit(0)
 if args[:1] == ['cancel'] and len(args) == 2:
     open(os.path.join(state, 'cancel-' + args[1]), 'w').close()
     print(json.dumps({'version': 2, 'error': None}))
@@ -79,6 +95,16 @@ sys.stderr.write('tasks: job %d Running\n' % job)
 sys.stderr.flush()
 child = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 open(os.path.join(state, 'started-%d' % job), 'w').close()
+follow = '--follow' in opts
+streamed = []
+def stream():
+    for line in iter(child.stdout.readline, b''):
+        streamed.append(line)
+        sys.stdout.buffer.write(line)
+        sys.stdout.flush()
+pump = threading.Thread(target=stream, daemon=True)
+if follow:
+    pump.start()
 phase = None
 while child.poll() is None:
     if os.path.exists(os.path.join(state, 'cancel-%d' % job)):
@@ -86,7 +112,12 @@ while child.poll() is None:
         phase = 'cancelled'
         break
     time.sleep(0.05)
-out = child.communicate()[0]
+if follow:
+    child.wait()
+    pump.join(10)
+    out = b''.join(streamed)
+else:
+    out = child.communicate()[0]
 code = child.returncode
 if phase == 'cancelled':
     code = 130
@@ -95,7 +126,14 @@ elif code == 0:
 else:
     phase = 'failed'
 sys.stderr.write('tasks: job %d %s\n' % (job, phase.capitalize()))
-sys.stdout.buffer.write(out)
+stages = [{'stage': 'run', 'exit_code': code}]
+if os.environ.get('FAKE_STAGES'):
+    stages = json.loads(os.environ['FAKE_STAGES'])
+    phase = os.environ.get('FAKE_PHASE', phase)
+with open(os.path.join(state, 'result-%d.json' % job), 'w') as f:
+    json.dump({'phase': phase, 'stages': stages, 'out': out.decode(errors='replace')}, f)
+if not follow:
+    sys.stdout.buffer.write(out)
 if out and not out.endswith(b'\n'):
     sys.stdout.write('\n')
 print('job %d %s (exit %d) owner=%s' % (job, phase, code, who))
@@ -715,6 +753,116 @@ class JobSidecarTests(OffloadFixture):
         r = self.offload('true', opts=('--dry-run',), check_exit=0)
         self.assertIsNone(self.summary(r)['sidecar'])
         self.assertFalse((self.local_home / '.local/state/tasks-offload/jobs').exists())
+
+
+class RestartSurvivalTests(OffloadFixture):
+    """Remote log head+tail (`--follow`) and read-only reconcile after a local interrupt."""
+
+    def setUp(self):
+        super().setUp()
+        self.env.pop('XDG_STATE_HOME', None)
+        self.env.pop('TASKS_JOB_ID', None)
+
+    def sidecar(self, job):
+        return self.local_home / '.local/state/tasks-offload/jobs' / f'{job}.json'
+
+    def reconcile(self, job, opts=()):
+        argv = [sys.executable, '-B', str(CLIENT), '--reconcile-local-job', str(job),
+                '--worker', 'tester@worker.invalid', '--who', 'offload-test', *opts,
+                '--', 'cargo', 'test']
+        r = subprocess.run(argv, cwd=self.repo, env=self.env, capture_output=True, text=True,
+                           timeout=60)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r, json.loads(r.stdout.strip().splitlines()[-1])['reconcile']
+
+    def interrupted_offload(self, job, *cmd):
+        """A finished offload whose client 'died' before recording completion: its sidecar
+        still says `running` (what a laptop reboot leaves behind)."""
+        self.env['TASKS_JOB_ID'] = str(job)
+        s = self.summary(self.offload(*cmd))
+        self.env.pop('TASKS_JOB_ID')
+        record = json.loads(self.sidecar(job).read_text())
+        record.update(stage='running', remote_phase=None, exit=None)
+        self.sidecar(job).write_text(json.dumps(record))
+        return s['remote_job_id']
+
+    def remote_jobs(self):
+        return int((self.remote_home / 'fake-tasks/counter').read_text())
+
+    def test_long_remote_log_keeps_its_head_and_its_tail(self):
+        script = 'echo FIRST-clippy-warning; seq 1 20000; echo "LAST: panicked at x.rs:9"'
+        r = self.offload('sh', '-c', script, opts=('--log-head', '2000', '--log-tail', '3000'),
+                         check_exit=0)
+        rec = self.job_record(self.summary(r)['remote_job_id'])
+        self.assertIn('--follow', rec['opts'])
+        out = r.stdout
+        self.assertTrue(out.startswith('FIRST-clippy-warning\n'), out[:200])
+        self.assertIn('LAST: panicked at x.rs:9', out)
+        self.assertIn('of the remote log omitted here', out)
+        self.assertNotIn('\n10000\n', out)
+        self.assertLess(len(out), 2000 + 3000 + 2000)
+        self.assertEqual(self.summary(r)['remote_phase'], 'passed')
+
+    def test_short_remote_log_is_forwarded_whole_and_tail_mode_is_the_old_behaviour(self):
+        r = self.offload('sh', '-c', 'seq 1 50', check_exit=0)
+        self.assertNotIn('omitted', r.stdout)
+        self.assertIn('\n25\n', r.stdout)
+        r = self.offload('true', opts=('--remote-log', 'tail'), check_exit=0)
+        self.assertNotIn('--follow', self.job_record(self.summary(r)['remote_job_id'])['opts'])
+
+    def test_reconcile_reports_a_remote_pass_without_running_anything(self):
+        remote = self.interrupted_offload(95, 'sh', '-c', 'echo remote says ok')
+        before = self.remote_jobs()
+        self.ssh_log.unlink()
+        r, rec = self.reconcile(95)
+        self.assertEqual((rec['state'], rec['remote_job_id'], rec['remote_phase'],
+                          rec['exit_code']), ('terminal', remote, 'passed', 0))
+        self.assertIn('remote says ok', r.stdout)
+        self.assertEqual(self.remote_jobs(), before, 'nothing submitted')
+        calls = [json.loads(line) for line in self.ssh_log.read_text().splitlines()]
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0][-1].endswith(f'tasks logs {remote} --json'), calls)
+
+    def test_reconcile_never_turns_failure_or_interruption_into_success(self):
+        remote = self.interrupted_offload(96, 'sh', '-c', 'echo boom; exit 101')
+        _, rec = self.reconcile(96)
+        self.assertEqual((rec['remote_phase'], rec['exit_code']), ('failed', 101))
+        self.env.update(FAKE_PHASE='interrupted',
+                        FAKE_STAGES=json.dumps([{'stage': 'build', 'exit_code': 0}]))
+        self.interrupted_offload(97, 'true')
+        _, rec = self.reconcile(97)
+        self.assertEqual((rec['state'], rec['remote_phase'], rec['exit_code']),
+                         ('terminal', 'interrupted', None))
+        self.assertNotEqual(remote, None)
+
+    def test_reconcile_of_a_still_running_or_foreign_or_unknown_job(self):
+        remote = self.interrupted_offload(98, 'true')
+        (self.remote_home / f'fake-tasks/result-{remote}.json').unlink()
+        _, rec = self.reconcile(98)
+        self.assertEqual((rec['state'], rec['remote_phase']), ('running', 'running'))
+        # Someone else's job with that id is never claimed as ours.
+        job = self.remote_home / f'fake-tasks/job-{remote}.json'
+        data = json.loads(job.read_text())
+        data['who'] = 'other-agent@elsewhere'
+        job.write_text(json.dumps(data))
+        _, rec = self.reconcile(98)
+        self.assertEqual(rec['state'], 'unknown')
+        self.assertIn('not reconciled', rec['detail'])
+        # No sidecar: nothing to ask; the worker is not contacted.
+        self.ssh_log.unlink()
+        _, rec = self.reconcile(99)
+        self.assertEqual((rec['state'], rec['remote_job_id']), ('unknown', None))
+        self.assertFalse(self.ssh_log.exists())
+
+    def test_reconcile_with_the_worker_down_is_unreachable_not_failed(self):
+        self.interrupted_offload(100, 'true')
+        down = self.bin / 'down-ssh'
+        down.write_text('#!/bin/sh\necho "ssh: connect: No route to host" >&2\nexit 255\n')
+        down.chmod(0o755)
+        self.env['TASKS_OFFLOAD_SSH'] = str(down)
+        _, rec = self.reconcile(100)
+        self.assertEqual((rec['state'], rec['exit_code']), ('unreachable', None))
+        self.assertIn('No route to host', rec['detail'])
 
 
 class IrohTransportTests(OffloadFixture):

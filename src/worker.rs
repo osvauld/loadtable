@@ -13,12 +13,14 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const MAX_LOG: u64 = 8 * 1024 * 1024;
 const TAIL: u64 = 32 * 1024;
+/// A long log's start (command line, first errors, build plan) is kept with its tail.
+const HEAD: u64 = 16 * 1024;
 static STOP: AtomicBool = AtomicBool::new(false);
 #[derive(Debug)]
 struct SupervisorLost(String);
@@ -79,7 +81,128 @@ pub fn running(state: &Path) -> bool {
     worker_lock(state).is_ok_and(|lock| lock.try_lock().is_err())
 }
 
+/// `<state>/execution-intent.json`: the last explicit `tasks start-worker` (enabled) or
+/// `tasks stop-worker` (disabled). It survives daemon/machine restarts: a daemon that starts
+/// with intent enabled and approved jobs waiting starts the worker itself, and a stopped queue
+/// stays stopped until the next explicit start. Absent (older releases, fresh state) means
+/// "never decided": workers claim as before, but nothing starts one automatically.
+pub const INTENT_FILE: &str = "execution-intent.json";
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ExecutionIntent {
+    pub enabled: bool,
+    pub changed_at: i64,
+    /// `start-worker` or `stop-worker`.
+    pub by: String,
+}
+
+pub fn intent(state: &Path) -> Option<ExecutionIntent> {
+    let path = state.join(INTENT_FILE);
+    let meta = fs::symlink_metadata(&path).ok()?;
+    if !meta.is_file() || meta.len() > 4096 {
+        return None;
+    }
+    load(&path).ok()
+}
+
+pub fn set_intent(state: &Path, enabled: bool, by: &str) -> Result<()> {
+    if intent(state).is_some_and(|i| i.enabled == enabled && i.by == by) {
+        return Ok(()); // unchanged: no rewrite/fsync per `tasks run`
+    }
+    save(
+        &state.join(INTENT_FILE),
+        &ExecutionIntent {
+            enabled,
+            changed_at: now(),
+            by: by.into(),
+        },
+    )
+}
+
+/// True only after an explicit `tasks stop-worker` or `tasks drain` (not when no intent
+/// was ever recorded).
+pub fn stopped(state: &Path) -> bool {
+    intent(state).is_some_and(|i| !i.enabled)
+}
+
+/// `by` of the intent `tasks drain` records: stopped until the daemon next starts.
+pub const DRAIN: &str = "drain";
+
+/// `tasks drain` is in effect: no claims, no worker start (not even from `tasks run`), and
+/// the next daemon start resumes execution. This is what makes "drain, then restart" free of
+/// the window a "no live jobs?" check followed by `systemctl restart` leaves.
+pub fn draining(state: &Path) -> bool {
+    intent(state).is_some_and(|i| !i.enabled && i.by == DRAIN)
+}
+
+/// `tasks drain`: like stop-worker, but resumed by the next daemon start.
+pub fn drain_requested() -> Result<()> {
+    set_intent(&state()?, false, DRAIN)
+}
+
+/// `tasks start-worker`: records the enabled intent (first, so a worker it spawns never
+/// sees a stale stop), then starts a worker if none runs. Returns whether one was spawned.
+pub fn start_requested() -> Result<bool> {
+    let state = state()?;
+    if draining(&state) {
+        // Approved jobs stay approved; the restarted daemon runs them (`tasks drain --cancel`
+        // resumes without a restart).
+        return Ok(false);
+    }
+    set_intent(&state, true, "start-worker")?;
+    start_detached_inner()
+}
+
+/// `tasks drain --cancel`: resume now, without the restart.
+pub fn drain_cancelled() -> Result<bool> {
+    set_intent(&state()?, true, "start-worker")?;
+    start_detached_inner()
+}
+
+/// `tasks stop-worker`: the worker claims no new jobs (running jobs finish normally, nothing
+/// is cancelled) and exits when idle; no daemon starts one until `tasks start-worker`.
+pub fn stop_requested() -> Result<()> {
+    set_intent(&state()?, false, "stop-worker")
+}
+
+/// Daemon start: resume execution when it was enabled before the restart and approved jobs
+/// wait. Returns a log line, or `None` when nothing applies.
+pub fn resume_after_restart(state: &Path, approved: usize) -> Option<String> {
+    let mut intent = intent(state)?;
+    if !intent.enabled && intent.by == DRAIN {
+        // The restart the drain was for has happened: execution resumes.
+        if let Err(e) = set_intent(state, true, "drain-restart") {
+            return Some(format!(
+                "drained before this start, but could not resume: {e}"
+            ));
+        }
+        intent.enabled = true;
+    }
+    if !intent.enabled {
+        return Some(format!(
+            "execution stays stopped (tasks stop-worker at unix {}); {approved} approved job(s) wait for tasks start-worker",
+            intent.changed_at
+        ));
+    }
+    if approved == 0 || running(state) {
+        return None;
+    }
+    Some(match start_detached_inner() {
+        Ok(_) => format!(
+            "execution was enabled before this start (tasks start-worker at unix {}); worker started for {approved} approved job(s)",
+            intent.changed_at
+        ),
+        Err(e) => {
+            format!("execution was enabled before this start, but the worker did not start: {e}")
+        }
+    })
+}
+
 pub fn start_detached() -> Result<()> {
+    start_detached_inner().map(|_| ())
+}
+
+fn start_detached_inner() -> Result<bool> {
     let state = state()?;
     // Report invalid TASKS_MIN_* configuration to the requesting client now.
     admission::thresholds()?;
@@ -91,7 +214,7 @@ pub fn start_detached() -> Result<()> {
         admission::Pressure::read()?;
     }
     if running(&state) {
-        return Ok(());
+        return Ok(false);
     }
     let log = OpenOptions::new()
         .create(true)
@@ -105,7 +228,12 @@ pub fn start_detached() -> Result<()> {
         .process_group(0)
         .spawn()?;
     std::thread::spawn(move || child.wait());
-    Ok(())
+    // Let the reply's execution_enabled reflect the new worker (it takes worker.lock first).
+    let until = Instant::now() + Duration::from_secs(2);
+    while !running(&state) && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Ok(true)
 }
 
 pub fn logs(id: i64) -> Result<LogTail> {
@@ -124,14 +252,49 @@ pub fn logs(id: i64) -> Result<LogTail> {
         Err(e) => return Err(e.into()),
     };
     let len = file.metadata()?.len();
-    file.seek(SeekFrom::Start(len.saturating_sub(TAIL)))?;
-    let mut bytes = Vec::new();
-    file.take(TAIL).read_to_end(&mut bytes)?;
     Ok(LogTail {
         job_id: id,
-        text: String::from_utf8_lossy(&bytes).into_owned(),
-        truncated: len > TAIL,
+        text: head_and_tail(&mut file, len, HEAD, TAIL)?,
+        truncated: len > HEAD + TAIL,
     })
+}
+
+/// The whole text when it fits in `head + tail` bytes, else the first `head` and last `tail`
+/// bytes (cut at line boundaries) around one marker line naming the omitted byte count.
+pub fn head_and_tail(file: &mut File, len: u64, head: u64, tail: u64) -> Result<String> {
+    let mut read = |from: u64, n: u64| -> Result<Vec<u8>> {
+        file.seek(SeekFrom::Start(from))?;
+        let mut bytes = Vec::new();
+        (&mut *file).take(n).read_to_end(&mut bytes)?;
+        Ok(bytes)
+    };
+    if len <= head + tail {
+        return Ok(String::from_utf8_lossy(&read(0, len)?).into_owned());
+    }
+    let mut first = read(0, head)?;
+    if let Some(end) = first.iter().rposition(|b| *b == b'\n') {
+        first.truncate(end + 1);
+    }
+    let mut last = read(len - tail, tail)?;
+    if let Some(start) = last.iter().position(|b| *b == b'\n') {
+        last.drain(..=start);
+    }
+    let omitted = len - first.len() as u64 - last.len() as u64;
+    let mut text = String::from_utf8_lossy(&first).into_owned();
+    text.push_str(&format!(
+        "\n[... tasks: {omitted} bytes of this log omitted here (head and tail shown); the full retained log is the job's job.log ...]\n\n"
+    ));
+    text.push_str(&String::from_utf8_lossy(&last));
+    Ok(text)
+}
+
+/// Appends to a job's log under the same size cap and lock as the worker's own notes
+/// (the controller-side reconciliation note of an interrupted offload job).
+pub(crate) fn append_job_log(state: &Path, id: i64, text: &[u8]) {
+    let dir = job_dir(state, id);
+    if dir.is_dir() {
+        append_log(&dir, text);
+    }
 }
 
 fn append_log(dir: &Path, text: &[u8]) {
@@ -230,8 +393,13 @@ pub fn run() -> Result<()> {
     }
     let worker = identity(std::process::id())?;
     let mut store = database(&state)?;
-    store.reconcile_interrupted()?;
+    let interrupted = store.reconcile_interrupted()?;
     fs::create_dir_all(state.join("jobs"))?;
+    if let Some((bytes, chars)) = own_io() {
+        eprintln!(
+            "worker: startup done ({interrupted} interrupted job(s) recorded); own threads wrote {bytes} bytes ({chars} via write calls)"
+        );
+    }
     let mut idle = Instant::now();
     // One compile + four run slots can be occupied without a long run blocking
     // another agent's compile. SQLite claims are serialized; executions are not.
@@ -239,7 +407,24 @@ pub fn run() -> Result<()> {
     // waiting offloads never use up the general five and vice versa.
     let mut active: Vec<(std::thread::JoinHandle<Result<()>>, bool)> = vec![];
     let mut failure: Option<String> = None;
+    // `tasks stop-worker`: checked about once a second, not per 100 ms tick.
+    let mut paused = stopped(&state);
+    let mut paused_checked = Instant::now();
+    if paused {
+        eprintln!("worker: execution stopped (tasks stop-worker); claiming nothing");
+    }
     loop {
+        if paused_checked.elapsed() >= Duration::from_secs(1) {
+            paused_checked = Instant::now();
+            let now_paused = stopped(&state);
+            if now_paused && !paused {
+                eprintln!(
+                    "worker: tasks stop-worker: claiming no new jobs; {} running job(s) finish",
+                    active.len()
+                );
+            }
+            paused = now_paused;
+        }
         let mut i = 0;
         while i < active.len() {
             if active[i].0.is_finished() {
@@ -261,7 +446,7 @@ pub fn run() -> Result<()> {
         let offloads = active.iter().filter(|(_, offload)| *offload).count();
         let general = active.len() - offloads < 5;
         let offload = offloads < admission::OFFLOAD_SLOTS;
-        if !STOP.load(Ordering::SeqCst) && failure.is_none() && (general || offload) {
+        if !STOP.load(Ordering::SeqCst) && failure.is_none() && !paused && (general || offload) {
             match store.claim_class(worker.clone(), general, offload) {
                 Ok(Some(job)) => {
                     let is_offload = crate::local_command::is_offload(&job.spec);
@@ -270,24 +455,34 @@ pub fn run() -> Result<()> {
                     let lock = lock.try_clone()?;
                     let worker = worker.clone();
                     let handle = std::thread::spawn(move || {
-                        let mut store = database(&state)?;
-                        if let Err(error) = execute(&state, &lock, &mut store, job.id, &worker) {
-                            append_log(
-                                &job_dir(&state, job.id),
-                                format!("worker error: {error}\n").as_bytes(),
-                            );
-                            let phase = if error.is::<SupervisorLost>() {
-                                Phase::Interrupted
-                            } else {
-                                Phase::Failed
-                            };
-                            let detail = error.to_string();
-                            with_ledger(&state, job.id, "final failure record", || {
-                                store.finish(job.id, phase.clone(), &detail)
-                            })?;
-                            return Err(error);
+                        let result = (|| -> Result<()> {
+                            let mut store = database(&state)?;
+                            if let Err(error) = execute(&state, &lock, &mut store, job.id, &worker)
+                            {
+                                append_log(
+                                    &job_dir(&state, job.id),
+                                    format!("worker error: {error}\n").as_bytes(),
+                                );
+                                let phase = if error.is::<SupervisorLost>() {
+                                    Phase::Interrupted
+                                } else {
+                                    Phase::Failed
+                                };
+                                let detail = error.to_string();
+                                with_ledger(&state, job.id, "final failure record", || {
+                                    store.finish(job.id, phase.clone(), &detail)
+                                })?;
+                                return Err(error);
+                            }
+                            Ok(())
+                        })();
+                        // This thread's own I/O, before it leaves the per-thread table.
+                        if let Ok(text) = fs::read_to_string("/proc/thread-self/io") {
+                            let (bytes, chars) = parse_io(&text);
+                            FINISHED_THREADS_IO.0.fetch_add(bytes, Ordering::Relaxed);
+                            FINISHED_THREADS_IO.1.fetch_add(chars, Ordering::Relaxed);
                         }
-                        Ok(())
+                        result
                     });
                     active.push((handle, is_offload));
                     continue;
@@ -314,10 +509,52 @@ pub fn run() -> Result<()> {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+    if let Some(end) = own_io() {
+        // /proc/self/io of this process also counts every job process it reaped (stage
+        // supervisors and, through them, cargo/rustc/gradle/ssh). These are the worker's
+        // OWN threads only, so a burst can be attributed to the jobs, not the worker.
+        eprintln!(
+            "worker: exiting; own threads wrote {} bytes to storage ({} via write calls) since start; jobs' processes are counted in /proc/PID/io, not here",
+            end.0, end.1
+        );
+    }
     if let Some(error) = failure {
         return Err(error.into());
     }
     Ok(())
+}
+
+/// (write_bytes, wchar) of finished execution threads (their per-thread counters vanish with
+/// them, merged with reaped children's in `/proc/self/io`).
+static FINISHED_THREADS_IO: (AtomicU64, AtomicU64) = (AtomicU64::new(0), AtomicU64::new(0));
+
+/// (write_bytes, wchar) of this process's own threads, live and finished: the worker's own
+/// I/O, excluding reaped children (which `/proc/self/io` includes).
+pub fn own_io() -> Option<(u64, u64)> {
+    let mut total = (
+        FINISHED_THREADS_IO.0.load(Ordering::Relaxed),
+        FINISHED_THREADS_IO.1.load(Ordering::Relaxed),
+    );
+    for entry in fs::read_dir("/proc/self/task").ok()?.flatten() {
+        let Ok(text) = fs::read_to_string(entry.path().join("io")) else {
+            continue;
+        };
+        let (bytes, chars) = parse_io(&text);
+        total.0 += bytes;
+        total.1 += chars;
+    }
+    Some(total)
+}
+
+/// (write_bytes, wchar) of one `/proc/.../io` text.
+pub fn parse_io(text: &str) -> (u64, u64) {
+    let field = |name: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(name))
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0)
+    };
+    (field("write_bytes:"), field("wchar:"))
 }
 
 fn execute(
@@ -1834,6 +2071,116 @@ fn run_android(state: &Path, dir: &Path, job: &crate::Job, stage: &str) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn temp_state(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "task-manager-worker-{label}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+    #[test]
+    fn execution_intent_persists_and_stop_sticks_until_start() {
+        let state = temp_state("intent");
+        // Never decided (older release/fresh state): claims allowed, nothing auto-starts.
+        assert!(intent(&state).is_none() && !stopped(&state));
+        assert!(resume_after_restart(&state, 3).is_none());
+        set_intent(&state, false, "stop-worker").unwrap();
+        assert!(stopped(&state));
+        let note = resume_after_restart(&state, 3).unwrap();
+        assert!(
+            note.contains("stays stopped") && note.contains("3 approved"),
+            "{note}"
+        );
+        set_intent(&state, true, "start-worker").unwrap();
+        assert!(!stopped(&state));
+        let first = fs::metadata(state.join(INTENT_FILE))
+            .unwrap()
+            .modified()
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        // Unchanged intent is not rewritten (no fsync per `tasks run`).
+        set_intent(&state, true, "start-worker").unwrap();
+        let second = fs::metadata(state.join(INTENT_FILE))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(first, second);
+        // Enabled but nothing approved: nothing to start.
+        assert!(resume_after_restart(&state, 0).is_none());
+        // A garbage or oversized file is "never decided", never "stopped".
+        fs::write(state.join(INTENT_FILE), vec![b'x'; 5000]).unwrap();
+        assert!(intent(&state).is_none() && !stopped(&state));
+        fs::remove_dir_all(state).unwrap();
+    }
+    #[test]
+    fn drain_stops_claims_until_the_next_daemon_start_resumes_it() {
+        let state = temp_state("drain");
+        set_intent(&state, false, "stop-worker").unwrap();
+        assert!(!draining(&state));
+        // A drain after a stop is still recorded (same `enabled`, different reason).
+        set_intent(&state, false, DRAIN).unwrap();
+        assert!(draining(&state) && stopped(&state));
+        // The restart the drain was for: execution is enabled again (nothing approved, so
+        // no worker is started here).
+        assert!(resume_after_restart(&state, 0).is_none());
+        let after = intent(&state).unwrap();
+        assert!(after.enabled && !draining(&state), "{after:?}");
+        assert_eq!(after.by, "drain-restart");
+        fs::remove_dir_all(state).unwrap();
+    }
+    #[test]
+    fn long_logs_keep_head_and_tail_around_one_marker() {
+        let state = temp_state("headtail");
+        let path = state.join("job.log");
+        let mut text = String::from("cargo clippy: first warning line\n");
+        for i in 0..20_000 {
+            text.push_str(&format!("compiling line {i}\n"));
+        }
+        text.push_str("thread 'main' panicked at src/x.rs:1\ntest result: FAILED\n");
+        fs::write(&path, &text).unwrap();
+        let len = text.len() as u64;
+        let shown = head_and_tail(&mut File::open(&path).unwrap(), len, 1024, 2048).unwrap();
+        assert!(
+            shown.starts_with("cargo clippy: first warning line\n"),
+            "{shown}"
+        );
+        assert!(shown.ends_with("test result: FAILED\n"), "{shown}");
+        assert!(shown.contains("panicked at src/x.rs:1"));
+        assert_eq!(shown.matches("bytes of this log omitted").count(), 1);
+        assert!(shown.len() < 1024 + 2048 + 200);
+        // Whole lines on both sides of the marker.
+        for line in shown.lines().filter(|l| l.starts_with("compiling")) {
+            assert!(line.split(' ').count() == 3, "{line:?}");
+        }
+        // Short logs are returned whole, without a marker.
+        let small = head_and_tail(&mut File::open(&path).unwrap(), 40, 1024, 2048).unwrap();
+        assert_eq!(small, text[..40]);
+        fs::remove_dir_all(state).unwrap();
+    }
+    #[test]
+    fn own_io_reads_thread_counters_not_reaped_children() {
+        assert_eq!(
+            parse_io("rchar: 1\nwchar: 93190\nwrite_bytes: 819200\ncancelled_write_bytes: 0\n"),
+            (819200, 93190)
+        );
+        assert!(own_io().is_some());
+        // A reaped child's writes land in /proc/self/io (what `tasks worker`'s 4.9 GB was)
+        // but not in this thread's own counter. (Other test threads may write meanwhile, so
+        // only this thread is compared.)
+        let thread = || parse_io(&fs::read_to_string("/proc/thread-self/io").unwrap());
+        let whole = || parse_io(&fs::read_to_string("/proc/self/io").unwrap());
+        let (t0, w0) = (thread(), whole());
+        let status = Command::new("sh")
+            .args(["-c", "head -c 3000000 /dev/zero > /dev/null"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let (t1, w1) = (thread(), whole());
+        assert!(t1.1 - t0.1 < 100_000, "{t0:?} -> {t1:?}");
+        assert!(w1.1 - w0.1 >= 3_000_000, "{w0:?} -> {w1:?}");
+    }
     #[test]
     fn sanitized_commands_keep_only_allowlisted_toolchain_env() {
         let cmd = sanitized(Path::new("cargo"));

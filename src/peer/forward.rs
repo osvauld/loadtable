@@ -848,7 +848,7 @@ async fn attach_until_done(
                     phase => format!(
                         "job {remote_id} on {} {phase} (exit {}){}",
                         peer.name,
-                        done.exit_code.map_or("-".into(), |c| c.to_string()),
+                        done.exit_code.filter(|c| *c != 0).map_or("-".into(), |c| c.to_string()),
                         if done.detail.is_empty() {
                             String::new()
                         } else {
@@ -1052,6 +1052,65 @@ async fn fetch(
         ))
         .await;
     Ok(report.dest.display().to_string())
+}
+
+/// What a read-only probe of a remote job found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Probe {
+    /// Terminal there: phase and exit code (0 only if passed).
+    Terminal(String, Option<i32>),
+    /// Still live there (its phase).
+    Live(String),
+}
+
+/// Read-only status of the peer job a local link points to: attaches far past the end of its
+/// log, so no log bytes travel, and stops at the first answer unless the job is already
+/// terminal (the peer then sends `Done` at once). Never submits, cancels or re-runs.
+pub async fn probe_remote(shared: &Shared, link: &OutboundLink) -> Result<Probe, String> {
+    let remote_id = link.remote_job_id.ok_or("no remote job id")?;
+    let (peer, addr) = shared
+        .config
+        .peer(&link.peer)
+        .and_then(|p| p.addr.map(|a| (p.clone(), a)))
+        .ok_or_else(|| format!("peer {} no longer configured", link.peer))?;
+    let addr = task_manager_peer::peer_addr(peer.endpoint, addr);
+    let seen = Arc::new(std::sync::Mutex::new(None::<String>));
+    let probe_seen = Arc::clone(&seen);
+    let attached = jobs::attach(
+        &shared.ep,
+        addr,
+        remote_id,
+        1 << 62,
+        shared.config.connect_timeout,
+        shared.stall,
+        move |event| match event {
+            jobs::AttachEvent::Attached(phase) | jobs::AttachEvent::Phase(phase) => {
+                *probe_seen.lock().unwrap_or_else(|p| p.into_inner()) = Some(phase.to_owned());
+                if matches!(phase, "passed" | "failed" | "cancelled" | "interrupted") {
+                    Ok(())
+                } else {
+                    Err("probe: live".into())
+                }
+            }
+            jobs::AttachEvent::Log { .. } => Ok(()),
+        },
+    )
+    .await;
+    let phase = seen.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    match attached {
+        Ok(done) => {
+            let code = if done.phase == "passed" {
+                Some(0)
+            } else {
+                done.exit_code.filter(|c| *c != 0)
+            };
+            Ok(Probe::Terminal(done.phase, code))
+        }
+        Err(ClientError::Local(why)) if why.starts_with("probe:") => {
+            Ok(Probe::Live(phase.unwrap_or_else(|| "unknown".into())))
+        }
+        Err(e) => Err(format!("job {remote_id} on {}: {e}", link.peer)),
+    }
 }
 
 /// Sends the remote cancel for a local job whose cancel was requested. Idempotent: repeated

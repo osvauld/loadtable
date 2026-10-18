@@ -50,6 +50,18 @@ pub fn run() -> Result<()> {
         ledger.reconcile_interrupted()?;
         worker_lock.unlock()?;
     }
+    // Every held slot lease must belong to a job this ledger knows: tracked, reaped as an
+    // orphan of an ended job, or named as untracked (now and every few minutes).
+    tinline_task_manager::lease_audit::start(state.clone());
+    // Survive restarts: resume execution if it was enabled (and not stopped) before.
+    let approved = ledger
+        .jobs()?
+        .iter()
+        .filter(|j| j.phase == tinline_task_manager::Phase::Approved)
+        .count();
+    if let Some(note) = worker::resume_after_restart(&state, approved) {
+        eprintln!("taskd: {note}");
+    }
     let store = Arc::new(Mutex::new(ledger));
     let active = Arc::new(AtomicUsize::new(0));
     // In-memory machine/job sampling for `tasks status` (2 s ticks, own ledger connection).
@@ -67,6 +79,9 @@ pub fn run() -> Result<()> {
     // threads); the latest result rides on every status snapshot as `health`.
     let health =
         tinline_task_manager::health::monitor::start(state.clone(), sampler.clone(), peers.clone());
+    // Interrupted tasks-offload jobs: ask the worker (read-only) what became of their remote
+    // half and record it (`remote_result`); never re-runs anything.
+    tinline_task_manager::remote_reconcile::start(state.clone());
     eprintln!(
         "taskd: socket={} (execution requires per-job approval and explicit local worker)",
         socket.display()
@@ -202,7 +217,11 @@ fn serve(
             );
             return Ok(None);
         }
-        let mut response = if valid && matches!(action, Action::StartWorker | Action::Logs(_)) {
+        let mut response = if valid
+            && matches!(
+                action,
+                Action::StartWorker | Action::StopWorker | Action::Drain(_) | Action::Logs(_)
+            ) {
             handle(
                 &mut store,
                 Request {
@@ -216,7 +235,10 @@ fn serve(
         drop(store);
         if valid {
             let extra = match action {
-                Action::StartWorker => worker::start_detached(),
+                Action::StartWorker => worker::start_requested().map(|_| ()),
+                Action::StopWorker => worker::stop_requested(),
+                Action::Drain(true) => worker::drain_requested(),
+                Action::Drain(false) => worker::drain_cancelled().map(|_| ()),
                 Action::Logs(id) => worker::logs(id).map(|log| response.log = Some(log)),
                 _ => Ok(()),
             };

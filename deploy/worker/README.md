@@ -187,6 +187,17 @@ loop. Check `systemctl --user status tasks-daemon` and `tasks admission`.
 Stopping the unit stops only the daemon (`KillMode=process`), never the worker
 or admitted job process groups. It is not cancellation; inspect `tasks list`.
 
+**Restarting the daemon (upgrade, unit change):** `tasks drain && systemctl --user
+restart tasks-daemon`. `tasks drain` stops new claims until the next daemon start
+(even `tasks run`'s start-worker cannot start a worker meanwhile), waits until no
+job is active and the worker has exited, and prints `tasks: drained`. The
+restarted daemon resumes the approved jobs itself. A "no live jobs?" check
+followed by a restart leaves a window in which a job can be admitted; drain does
+not. `tasks drain --cancel` resumes without restarting. On every start (and every
+5 min) the daemon audits slot-lock holders: a holder in the admission group of a
+job the ledger already ended (over 60 s ago) is stopped like a cancel; a holder it
+cannot match to a job is logged as UNTRACKED with pid/cmd and never signalled.
+
 ## Client usage over SSH
 
 `~/.local/bin` may not be on the non-interactive SSH `PATH` (NixOS does not add

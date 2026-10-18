@@ -53,21 +53,26 @@ pub fn phase_name(phase: &Phase) -> String {
         .unwrap_or_else(|| format!("{phase:?}"))
 }
 
-/// The `tasks run` exit code of a job: last stage's code, or 128+signal.
+/// The exit code a finished job reports (`Phase::reported_exit_code`; 0 only if passed),
+/// else 128+signal of its last stage. `None` while live.
 pub fn exit_code(job: &Job) -> Option<i32> {
-    let stage = job.execution.as_ref()?.stages.last()?;
-    stage.exit_code.or(stage.signal.map(|s| 128 + s))
+    let stages = job
+        .execution
+        .as_ref()
+        .map_or(&[][..], |e| e.stages.as_slice());
+    job.phase.reported_exit_code(stages).or_else(|| {
+        job.phase
+            .terminal()
+            .then(|| stages.last().and_then(|s| s.signal.map(|s| 128 + s)))
+            .flatten()
+    })
 }
 
 pub fn job_state(job: &Job) -> JobState {
     JobState {
         phase: phase_name(&job.phase),
         terminal: job.phase.terminal(),
-        exit_code: if job.phase == Phase::Passed {
-            Some(0)
-        } else {
-            exit_code(job)
-        },
+        exit_code: exit_code(job),
         detail: job
             .execution
             .as_ref()
@@ -147,6 +152,11 @@ impl DaemonJobHost {
         let r = ask(&self.socket, Action::ApproveCommand(id))?;
         if let Some(e) = r.error {
             return Err(e);
+        }
+        // A peer's submission never overrides this machine's `tasks stop-worker`.
+        if crate::worker::stopped(&self.paths.state) {
+            eprintln!("peer: job {id} approved; execution is stopped here (tasks stop-worker)");
+            return Ok(true);
         }
         if let Err(e) = ask(&self.socket, Action::StartWorker).and_then(|r| match r.error {
             Some(e) => Err(e),

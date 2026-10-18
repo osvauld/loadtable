@@ -122,22 +122,23 @@ fn phase_name(phase: &Phase) -> String {
     phase.as_db().unwrap_or_else(|_| format!("{phase:?}"))
 }
 
-/// Exit code shown for a finished job: 0 when passed, else the last stage's code.
+/// Exit code shown for a finished job (`Phase::reported_exit_code`): 0 only when passed,
+/// else the last stage's nonzero code or signal; `-` otherwise (an interrupted job never
+/// shows 0, even when an earlier stage succeeded).
 pub fn exit_label(job: &Job) -> String {
     if !job.phase.terminal() {
         return "-".into();
     }
-    if job.phase == Phase::Passed {
-        return "0".into();
-    }
-    job.execution
+    let stages = job
+        .execution
         .as_ref()
-        .and_then(|e| e.stages.last())
-        .and_then(|s| {
-            s.exit_code
-                .map(|c| c.to_string())
-                .or(s.signal.map(|s| format!("sig{s}")))
-        })
+        .map_or(&[][..], |e| e.stages.as_slice());
+    if let Some(code) = job.phase.reported_exit_code(stages) {
+        return code.to_string();
+    }
+    stages
+        .last()
+        .and_then(|s| s.signal.map(|s| format!("sig{s}")))
         .unwrap_or_else(|| "-".into())
 }
 
@@ -325,6 +326,28 @@ pub fn holders_section(holders: &[Holder], waiting: &[Holder], jobs: &[Job], now
     out
 }
 
+/// The one line `tasks start-worker` / `tasks stop-worker` print (not the ledger).
+pub fn worker_switch_line(start: bool, running: bool, jobs: &[Job]) -> String {
+    let approved = jobs.iter().filter(|j| j.phase == Phase::Approved).count();
+    let active = jobs.iter().filter(|j| j.phase.active()).count();
+    if start {
+        format!(
+            "tasks: execution enabled; worker {}; {approved} approved job(s) waiting, {active} running. \
+             Stays enabled across daemon restarts until tasks stop-worker",
+            if running {
+                "running"
+            } else {
+                "not running yet (it exits when idle; tasks admission shows blockers)"
+            }
+        )
+    } else {
+        format!(
+            "tasks: execution stopped; the worker claims no new jobs ({active} running job(s) finish, nothing cancelled); \
+             {approved} approved job(s) wait. Stays stopped across daemon restarts until tasks start-worker"
+        )
+    }
+}
+
 /// Human note for replies whose JSON carries `execution_enabled`: that field says
 /// whether a worker process was alive when the daemon replied, not whether a job ran.
 pub fn worker_note(execution_enabled: bool) -> &'static str {
@@ -344,12 +367,31 @@ pub fn job_status_line(job: &Job, execution_enabled: bool) -> String {
         String::new()
     };
     format!(
-        "tasks: job {} {}{exit} owner={}; {}",
+        "tasks: job {} {}{exit} owner={}; {}{}",
         job.id,
         phase_name(&job.phase),
         job.spec.owner,
-        worker_note(execution_enabled)
+        worker_note(execution_enabled),
+        remote_note(job)
     )
+}
+
+/// `; remote job 152 on abe@host passed (exit 0) [terminal]` for an interrupted offload whose
+/// remote half was reconciled; the job's own phase/exit stay as they are.
+pub fn remote_note(job: &Job) -> String {
+    job.execution
+        .as_ref()
+        .and_then(|e| e.remote_result.as_ref())
+        .map(|r| {
+            format!(
+                "\ntasks: job {} is {} here; its {} [{}]",
+                job.id,
+                phase_name(&job.phase),
+                r.summary(),
+                r.state
+            )
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

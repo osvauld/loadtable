@@ -56,7 +56,11 @@ const USAGE: &str = "usage: tasks [ui [--fixtures DIR]]  # DIR: cluster snapshot
        tasks approve-command JOB_ID  # trusted LIVE cwd/argv, not a source snapshot
        # local.command cost=cpu_simulation is a legacy label, NOT the resource class
        tasks approve-android-trial JOB_ID   # EXPERIMENTAL build-only; trusts local source/host config
-       tasks catalog | cache | cache-plan | admission | start-worker | worker
+       tasks catalog | cache | cache-plan | admission | worker
+       tasks start-worker [--json] | stop-worker [--json] | drain [--timeout SECS] | drain --cancel
+         # drain: no new claims until the daemon restarts, wait for running jobs; then restart
+         # start: run approved jobs now and after daemon restarts; stop: claim no new jobs
+         # (running ones finish), stays stopped across restarts until start-worker
        tasks android-submit [--who OWNER] SOURCE REVISION phone|emulator|x86_64,arm64-v8a
        tasks android-plan SOURCE REVISION [emulator|phone|x86_64,arm64-v8a]  # default emulator
        tasks android-capture SOURCE REVISION NEW_DESTINATION
@@ -86,6 +90,11 @@ fn run() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let run_now = args.first().is_some_and(|s| s == "run");
     let plain_logs = args.first().is_some_and(|s| s == "logs") && args.len() == 2;
+    // start-worker/stop-worker print one confirmation line; --json keeps the full reply.
+    let worker_switch = args
+        .first()
+        .is_some_and(|s| s == "start-worker" || s == "stop-worker")
+        && args.len() == 1;
     let mut output = options::Output::Full;
     // A placement decision to record once the job id is known (`--anywhere`).
     let mut placed: Option<tinline_task_manager::placement::Decision> = None;
@@ -161,6 +170,7 @@ fn run() -> Result<()> {
             return Ok(());
         }
         Some("phone-test") => return phone_test(&args[1..]),
+        Some("drain") => return drain(&args[1..]),
         Some("status") if args.len() == 1 || (args.len() == 2 && args[1] == "--json") => {
             return status::run(args.len() == 2);
         }
@@ -185,7 +195,12 @@ fn run() -> Result<()> {
             return Ok(());
         }
         Some("worker") if args.len() == 1 => return tinline_task_manager::worker::run(),
-        Some("start-worker") if args.len() == 1 => Action::StartWorker,
+        Some("start-worker") if args.len() == 1 || (args.len() == 2 && args[1] == "--json") => {
+            Action::StartWorker
+        }
+        Some("stop-worker") if args.len() == 1 || (args.len() == 2 && args[1] == "--json") => {
+            Action::StopWorker
+        }
         Some("approve") if args.len() == 2 => Action::Approve(args[1].parse()?),
         Some("approve-command") if args.len() == 2 => Action::ApproveCommand(args[1].parse()?),
         Some("enqueue" | "run") => {
@@ -343,6 +358,29 @@ fn run() -> Result<()> {
             eprintln!("tasks: {error}");
         } else if let Some(log) = &response.log {
             print!("{}", log.text);
+        }
+    } else if worker_switch {
+        match &response.error {
+            Some(error) if error.contains("unknown variant") => eprintln!(
+                "tasks: the running daemon predates stop-worker (it answered: {error}); nothing changed"
+            ),
+            Some(error) => eprintln!("tasks: {error}"),
+            None if args[0] == "start-worker"
+                && tinline_task_manager::worker::draining(&state_dir()) =>
+            {
+                println!(
+                    "tasks: draining for a daemon restart (tasks drain): no worker started; approved jobs \
+                     run after the restart (tasks drain --cancel resumes now)"
+                )
+            }
+            None => println!(
+                "{}",
+                display::worker_switch_line(
+                    args[0] == "start-worker",
+                    response.execution_enabled,
+                    &response.jobs
+                )
+            ),
         }
     } else if !run_now || response.error.is_some() {
         println!("{}", serde_json::to_string_pretty(&response)?);
@@ -829,6 +867,74 @@ fn peer_add(
 
 fn call(socket: &Path, action: Action) -> Result<tinline_task_manager::Response> {
     request_with_reconnect(socket, action, || ensure_daemon(socket))
+}
+
+/// `tasks drain [--timeout SECS] | --cancel`: stop claiming until the next daemon start, wait
+/// until no job is active and the worker exited, then say it is safe to restart. Approved jobs
+/// stay approved (nothing is cancelled) and the restarted daemon resumes them.
+fn drain(args: &[String]) -> Result<()> {
+    let socket = state_dir().join("taskd.sock");
+    let mut timeout = Duration::from_secs(3600);
+    match args {
+        [] => {}
+        [flag] if flag == "--cancel" => {
+            let r = call(&socket, Action::Drain(false))?;
+            if let Some(e) = r.error {
+                return Err(e.into());
+            }
+            println!("tasks: drain cancelled; execution enabled again");
+            return Ok(());
+        }
+        [flag, secs] if flag == "--timeout" => timeout = Duration::from_secs(secs.parse()?),
+        _ => return Err("usage: tasks drain [--timeout SECS] | tasks drain --cancel".into()),
+    }
+    let r = call(&socket, Action::Drain(true))?;
+    if let Some(e) = r.error {
+        if e.contains("unknown variant") {
+            return Err(format!(
+                "the running daemon predates tasks drain (it answered: {e}); nothing changed"
+            )
+            .into());
+        }
+        return Err(e.into());
+    }
+    let end = Instant::now() + timeout;
+    let mut shown = None;
+    loop {
+        let r = call(&socket, Action::List)?;
+        let active: Vec<i64> = r
+            .jobs
+            .iter()
+            .filter(|j| j.phase.active())
+            .map(|j| j.id)
+            .collect();
+        let approved = r
+            .jobs
+            .iter()
+            .filter(|j| j.phase == tinline_task_manager::Phase::Approved)
+            .count();
+        if active.is_empty() && !r.execution_enabled {
+            println!(
+                "tasks: drained: no job running, worker stopped, no new claims until the daemon restarts. \
+                 Restart it now (e.g. systemctl --user restart tasks-daemon); it resumes the {approved} approved job(s) by itself"
+            );
+            return Ok(());
+        }
+        if shown.as_ref() != Some(&active) {
+            eprintln!(
+                "tasks: draining: waiting for job(s) {active:?} to finish (nothing is cancelled)"
+            );
+            shown = Some(active.clone());
+        }
+        if Instant::now() >= end {
+            eprintln!(
+                "tasks: drain timed out with job(s) {active:?} still active; claims stay paused \
+                 (tasks drain --cancel resumes)"
+            );
+            std::process::exit(1);
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
 }
 
 fn approve_and_start(socket: &Path, approve: Action, id: i64) -> Result<()> {

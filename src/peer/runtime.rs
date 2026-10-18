@@ -2,7 +2,7 @@
 //! only when a peer config exists (`TASKS_PEER_CONFIG`, else `~/.config/tasks/peer.toml`).
 //! The unix-socket request threads never touch iroh: the runtime is a CLIENT of the daemon's
 //! own socket (status, submit, approve, cancel, job state), like any local tool.
-use super::forward::{BridgeEvent, Sink, propagate_cancel, serve_bridge};
+use super::forward::{BridgeEvent, Probe, Sink, probe_remote, propagate_cancel, serve_bridge};
 use super::host::{self, DaemonJobHost};
 use super::records::{
     InboundRecord, OutboundLink, Paths, inbound_records, outbound_links, private_dir, write_json,
@@ -448,6 +448,16 @@ async fn watch_tick(shared: &Arc<Shared>, finished: &mut HashSet<(bool, i64)>) {
             continue;
         }
         if job.phase.terminal() && !link.ledger_linked {
+            // The local job ended without the peer's result (controller restart, killed
+            // bridge): ask the peer what became of its job before linking the ledgers.
+            if link.remote_state.as_deref() == Some("orphaned") && link.remote_job_id.is_some() {
+                if task_manager_peer::now_f64() - link.updated_at < ORPHAN_PROBE_EVERY_S {
+                    continue;
+                }
+                if !reconcile_orphan(shared, &job, &mut link).await {
+                    continue;
+                }
+            }
             let peer_link = outbound_ledger_link(&link);
             let state = shared.paths.state.clone();
             let linked = tokio::task::spawn_blocking(move || {
@@ -502,6 +512,84 @@ async fn watch_tick(shared: &Arc<Shared>, finished: &mut HashSet<(bool, i64)>) {
             finished.insert((false, id));
         }
     }
+}
+
+/// Seconds between probes of one orphaned link's peer job.
+const ORPHAN_PROBE_EVERY_S: f64 = 30.0;
+
+/// One probe of an orphaned link. Records the outcome as the job's `remote_result` and
+/// returns true once the link may be closed into the ledger (peer job terminal, or given up
+/// after `remote_reconcile::MAX_AGE`); false to probe again later.
+async fn reconcile_orphan(shared: &Shared, job: &crate::Job, link: &mut OutboundLink) -> bool {
+    let id = link.local_job_id;
+    let finished = job
+        .execution
+        .as_ref()
+        .and_then(|e| e.finished_at)
+        .unwrap_or(job.submitted_at);
+    let expired =
+        crate::execution::now() - finished > crate::remote_reconcile::MAX_AGE.as_secs() as i64;
+    let probe = probe_remote(shared, link).await;
+    let mut result = crate::execution::RemoteResult {
+        transport: "iroh".into(),
+        worker: link.peer.clone(),
+        remote_job_id: link.remote_job_id,
+        remote_phase: link.remote_phase.clone(),
+        exit_code: None,
+        state: "unreachable".into(),
+        checked_at: crate::execution::now(),
+        detail: String::new(),
+    };
+    let close = match probe {
+        Ok(Probe::Terminal(phase, code)) => {
+            link.remote_phase = Some(phase.clone());
+            link.exit = code;
+            link.remote_state = Some("reconciled".into());
+            link.error = Some(format!(
+                "local job ended before the peer's result; reconciled: peer job {:?} {phase}",
+                link.remote_job_id
+            ));
+            result.remote_phase = Some(phase);
+            result.exit_code = code;
+            result.state = "terminal".into();
+            result.detail = "probed after the local job was interrupted".into();
+            true
+        }
+        Ok(Probe::Live(phase)) => {
+            link.remote_phase = Some(phase.clone());
+            result.remote_phase = Some(phase);
+            result.state = if expired { "unknown" } else { "running" }.into();
+            result.detail = "peer job still live; probed again later".into();
+            expired
+        }
+        Err(e) => {
+            result.state = if expired { "unknown" } else { "unreachable" }.into();
+            result.detail = e;
+            expired
+        }
+    };
+    link.updated_at = task_manager_peer::now_f64();
+    let _ = write_json(&shared.paths.link(id), link);
+    let state = shared.paths.state.clone();
+    let settled = result.settled();
+    let note = format!(
+        "\n=== tasks peer: after this job was interrupted: {} [{}]; this job stays interrupted, nothing was re-run ===\n",
+        result.summary(),
+        result.state
+    );
+    let written = tokio::task::spawn_blocking(move || {
+        let written = crate::Store::open(&state.join("tasks.sqlite"))
+            .and_then(|mut s| s.write_remote_result(id, &result));
+        if settled && matches!(written, Ok(true)) {
+            crate::worker::append_job_log(&state, id, note.as_bytes());
+        }
+        written.map_err(|e| e.to_string())
+    })
+    .await;
+    if let Ok(Err(e)) = written {
+        (shared.log)(format!("peer: remote result of job {id}: {e}"));
+    }
+    close
 }
 
 pub fn outbound_ledger_link(link: &OutboundLink) -> PeerLink {
