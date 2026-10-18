@@ -17,10 +17,17 @@ rusqlite = { version = "0.38", features = ["bundled"] }
 sha2 = "0.10"
 toml = "0.8"
 libc = "0.2"
-eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+eframe = { version = "0.33", optional = true, default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 # Daemon-to-daemon link (iroh, LAN only); runs in the daemon's own peer thread/runtime.
 task-manager-peer = { path = "crates/peer" }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time", "net", "io-util"] }
+
+# `ui`: the egui window (`tasks ui`); `mcp`: the MCP stdio server (`tasks mcp`). A compute
+# worker builds `--no-default-features`: daemon, CLI, peer link and status, no GUI stack.
+[features]
+default = ["ui", "mcp"]
+ui = ["dep:eframe"]
+mcp = []
 
 [[bin]]
 name = "tasks"

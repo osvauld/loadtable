@@ -9,3 +9,6 @@ __pycache__/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+# nix build output links
+/result
+/result-*

@@ -96,8 +96,9 @@ Jobs: 93 red (32 run, 2 failures, 3 errors), 96 red on a test bug (aarch64
 loader path; test corrected, implementation unchanged), 97 green (32 passed),
 98 real-host inspect/plan smoke (EndeavourOS unsupported, `nixos` null, exit 2),
 99 final: 32 passed (28 contracts + 4 wait-budget), 0 failed/skipped.
-`nix/flake.nix`, `nix/worker-module.nix` are drafts: Nix is absent on the
-authoring host, so `nix flake check` was not run (unvalidated).
+`nix/flake.nix`, `nix/worker-module.nix` were drafts at the time (Nix absent on the
+authoring host; unvalidated). They are now retired in favour of the root `flake.nix` and
+`nix/module.nix` (`services.tasks-worker`), see nix/README.md.
 
 ## Future boundary
 

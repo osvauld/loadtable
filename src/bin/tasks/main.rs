@@ -1,15 +1,23 @@
 //! One binary for everyone: agents use the subcommands, people open the window. Any
 //! command that needs the queue starts the background daemon if it is not running.
+//! Features: `ui` (the window and its modules) and `mcp` (`tasks mcp`) are default; a worker
+//! build without them keeps the daemon, CLI, peer link and status.
 mod daemon;
 mod display;
 mod follow;
+#[cfg(feature = "ui")]
 mod log_view;
+#[cfg(feature = "mcp")]
 mod mcp;
 mod options;
 mod status;
+#[cfg(feature = "ui")]
 mod ui;
+#[cfg(feature = "ui")]
 mod ui_legacy;
+#[cfg(feature = "ui")]
 mod ui_model;
+#[cfg(feature = "ui")]
 mod ui_source;
 
 use std::fs;
@@ -40,7 +48,7 @@ const USAGE: &str = "usage: tasks [ui [--fixtures DIR]]  # DIR: cluster snapshot
          # sets Cargo's jobs to that machine's cap; device class and --run stay local
        tasks place [--run | --device SERIAL] [--peer NAME] [--json] -- COMMAND [ARGS...]
          # dry run: print where --anywhere (or --peer) would run it and why; submits nothing
-       tasks peer init --bind IP:PORT [--config PATH] | id | list [--json] | status-watch NAME
+       tasks peer init --bind IP:PORT [--config PATH] | id | add NAME ENDPOINT_ID ADDR [--role worker|host|both|observer] [--approve auto|manual] [--config PATH] | list [--json] | status-watch NAME
        tasks approve-command JOB_ID  # trusted LIVE cwd/argv, not a source snapshot
        # local.command cost=cpu_simulation is a legacy label, NOT the resource class
        tasks approve-android-trial JOB_ID   # EXPERIMENTAL build-only; trusts local source/host config
@@ -83,7 +91,7 @@ fn run() -> Result<()> {
             std::process::exit(tinline_task_manager::peer::bridge::run(&args[1..]));
         }
         Some("peer") => return peer_command(&args[1..]),
-        Some("mcp") => return mcp::run(&args[1..]),
+        Some("mcp") => return mcp_command(&args[1..]),
         Some("place") => return place_command(&args[1..]),
         Some("catalog") if args.len() == 1 => {
             println!(
@@ -583,6 +591,7 @@ bind = "{bind}"
             );
             Ok(())
         }
+        Some("add") => peer_add(&args[1..], default_config),
         Some("id") if args.len() == 1 => {
             let c = PeerConfig::load(&default_config()?)?;
             println!("{}", c.secret_key()?.public());
@@ -658,8 +667,109 @@ bind = "{bind}"
             }
             Ok(())
         }
-        _ => Err("usage: tasks peer init --bind IP:PORT [--config PATH] | id | list [--json] | status-watch NAME".into()),
+        _ => Err("usage: tasks peer init --bind IP:PORT [--config PATH] | id | add NAME ENDPOINT_ID ADDR [--role worker|host|both|observer] [--approve auto|manual] [--config PATH] | list [--json] | status-watch NAME".into()),
     }
+}
+
+/// `tasks peer add NAME ENDPOINT_ID ADDR`: append one `[[peer]]` entry (default role `worker`,
+/// as when pairing a new worker from the line it prints at first boot). The whole resulting
+/// file is validated before it replaces the old one (atomically, 0600); nothing is restarted.
+fn peer_add(
+    args: &[String],
+    default_config: impl Fn() -> Result<std::path::PathBuf>,
+) -> Result<()> {
+    use tinline_task_manager::peer::net::{PeerConfig, config};
+    let mut positional = Vec::new();
+    let (mut role, mut approve, mut path) = ("worker".to_owned(), None, None);
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        if !arg.starts_with("--") {
+            positional.push(arg.clone());
+            continue;
+        }
+        let value = it.next().ok_or(format!("{arg} needs a value"))?.clone();
+        match arg.as_str() {
+            "--role" => role = value,
+            "--approve" => approve = Some(value),
+            "--config" => path = Some(std::path::PathBuf::from(value)),
+            other => return Err(format!("unknown option {other}").into()),
+        }
+    }
+    let [name, id, addr] = <[String; 3]>::try_from(positional).map_err(|_| {
+        "usage: tasks peer add NAME ENDPOINT_ID ADDR [--role worker|host|both|observer] [--approve auto|manual] [--config PATH]"
+    })?;
+    // Checked before formatting, so no value can change the TOML structure.
+    if !config::valid_name(&name) {
+        return Err(format!("peer name {name:?} must match [A-Za-z0-9._-]{{1,64}}").into());
+    }
+    let key: tinline_task_manager::peer::net::iroh::PublicKey = id
+        .trim()
+        .parse()
+        .map_err(|e| format!("endpoint id {id:?}: {e}"))?;
+    let addr: std::net::SocketAddr = addr.parse().map_err(|e| format!("addr {addr:?}: {e}"))?;
+    if !matches!(role.as_str(), "worker" | "host" | "both" | "observer") {
+        return Err(format!("--role {role:?}: worker | host | both | observer").into());
+    }
+    if let Some(a) = &approve
+        && !matches!(a.as_str(), "auto" | "manual")
+    {
+        return Err(format!("--approve {a:?}: auto | manual").into());
+    }
+    let path = match path {
+        Some(p) => p,
+        None => default_config()?,
+    };
+    let current = fs::read_to_string(&path).map_err(|e| {
+        format!(
+            "{}: {e} (create it first with `tasks peer init --bind IP:PORT`)",
+            path.display()
+        )
+    })?;
+    let mut entry = format!(
+        "\n[[peer]]\nname = \"{name}\"\nendpoint_id = \"{key}\"\naddr = \"{addr}\"\nrole = \"{role}\"\n"
+    );
+    if let Some(a) = approve {
+        entry.push_str(&format!("approve = \"{a}\"\n"));
+    }
+    let mut text = current;
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(&entry);
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    PeerConfig::parse(&text, &path, home.as_deref())?;
+    let dir = path.parent().ok_or("config path has no directory")?;
+    let tmp = dir.join(format!(
+        ".{}.add-{}",
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("peer.toml"),
+        std::process::id()
+    ));
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        let written = f.write_all(text.as_bytes()).and_then(|()| f.sync_all());
+        if let Err(e) = written {
+            let _ = fs::remove_file(&tmp);
+            return Err(e.into());
+        }
+    }
+    if let Err(e) = fs::rename(&tmp, &path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    println!(
+        "added peer {name} ({role}) {key} at {addr} to {}",
+        path.display()
+    );
+    eprintln!("tasks: restart the daemon when it is idle (tasks list --active) to apply it");
+    Ok(())
 }
 
 fn call(socket: &Path, action: Action) -> Result<tinline_task_manager::Response> {
@@ -1035,6 +1145,32 @@ fn list(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "mcp")]
+fn mcp_command(args: &[String]) -> Result<()> {
+    mcp::run(args)
+}
+
+#[cfg(not(feature = "mcp"))]
+fn mcp_command(_args: &[String]) -> Result<()> {
+    Err(without_feature("mcp"))
+}
+
+/// The error of a subcommand whose Cargo feature is off; `main` prints it and exits 2.
+#[cfg(not(all(feature = "ui", feature = "mcp")))]
+fn without_feature(feature: &str) -> Box<dyn std::error::Error + Send + Sync> {
+    format!(
+        "built without {feature} (worker build): `tasks {feature}` needs a build with the \
+         `{feature}` Cargo feature (default features); the daemon, CLI and peer link work here"
+    )
+    .into()
+}
+
+#[cfg(not(feature = "ui"))]
+fn open_ui(_fixtures: Option<std::path::PathBuf>) -> Result<()> {
+    Err(without_feature("ui"))
+}
+
+#[cfg(feature = "ui")]
 fn open_ui(fixtures: Option<std::path::PathBuf>) -> Result<()> {
     let socket = state_dir().join("taskd.sock");
     // The window keeps retrying if this fails, and shows why in its status line.

@@ -208,7 +208,8 @@ class SetupTests(unittest.TestCase):
         self.assertIn('review-declarative-nixos-module', kinds)
         self.assertNotIn('review-build-prerequisites', kinds)
         module = plan['proposals'][kinds.index('review-declarative-nixos-module')]
-        self.assertEqual(module['module'], 'nix/worker-module.nix')
+        self.assertEqual(module['module'], 'nix/module.nix')
+        self.assertEqual(module['flake'], 'flake.nix')
         self.assertIs(module['applied'], False)
         self.assertIs(module['approved'], False)
         self.assertEqual(plan['executable_commands'], [])
@@ -257,21 +258,24 @@ class SetupTests(unittest.TestCase):
         self.assertNotIn('review-declarative-nixos-module', kinds)
         self.assertIn('review-build-prerequisites', kinds)
 
-    def test_nix_draft_static_safety(self):
-        nix = Path(__file__).resolve().parents[1] / 'nix'
-        module = (nix / 'worker-module.nix').read_text()
-        flake = (nix / 'flake.nix').read_text()
+    def test_nix_module_static_safety(self):
+        root = Path(__file__).resolve().parents[1]
+        nix = root / 'nix'
+        module = (nix / 'module.nix').read_text()
+        flake = (root / 'flake.nix').read_text()
         self.assertTrue((nix / 'README.md').is_file())
-        self.assertIn('nixosModules', flake)
-        self.assertIn('taskworker', module)
-        self.assertIn('/var/lib/taskworker', module)
-        self.assertIn('networking.firewall.interfaces', module)
-        self.assertNotRegex(module, r'networking\.firewall\.allowed(UDP|TCP)Port')
-        self.assertNotRegex(module + flake, r'accept_license\s*=\s*true')
-        for option in ('kvm.enable', 'service.enable', 'nixLd.enable', 'androidEmulator.enable'):
-            self.assertIn(option.split('.')[0], module)
-        self.assertNotRegex(module, r'mkEnableOption[^;]*;\s*#?\s*default\s*=\s*true')
+        self.assertFalse((nix / 'worker-module.nix').exists())  # the retired draft
+        self.assertIn('nixosModules.worker', flake)
+        self.assertIn('options.services.tasks-worker', module)
+        # Only the peer link's UDP port is opened; never a TCP port.
+        self.assertNotRegex(module, r'allowedTCPPorts')
+        self.assertIn('allowedUDPPorts = [ bindPort ]', module)
+        self.assertNotRegex(module + flake, r'accept_?[lL]icen[cs]e\w*\s*=\s*true')
+        # Lock directory, socket and checkouts stay shared: no mount namespace options.
+        for option in ('PrivateTmp', 'ProtectHome', 'ProtectSystem'):
+            self.assertNotRegex(module, option + r'\s*=')
         self.assertIn('programs.nix-ld.enable', module)
+        self.assertNotIn('TASK_MANAGER_STATE_DIR =', module)
 
     def test_apply_gated_cli(self):
         script = Path(__file__).resolve().parents[1] / 'scripts/setup-linux-worker.sh'

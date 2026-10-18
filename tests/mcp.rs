@@ -1,4 +1,4 @@
-#![cfg(target_os = "linux")]
+#![cfg(all(target_os = "linux", feature = "mcp"))]
 //! `tasks mcp` as a subprocess, speaking newline-delimited JSON-RPC on stdio to a
 //! fake daemon on a temp socket (TASK_MANAGER_STATE_DIR). The fake records every
 //! socket action, so the tests see exactly what the server asked the daemon for.

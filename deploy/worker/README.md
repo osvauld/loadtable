@@ -5,6 +5,30 @@ this repository installs the unit, enables lingering, copies a binary or
 restarts a daemon. The installed runtime on the main host
 (`~/.local/bin/tasks` there) is a separate pinned release and is not affected.
 
+## NixOS: add a worker in 6 steps (module)
+
+On NixOS, use the flake's `nixosModules.worker` (`services.tasks-worker`) instead of this
+user unit: one system service with the headless `tasks-worker` package, the worker limits,
+sccache, toolchains, the peer config (controllers only) and its UDP port. Evaluated, not yet
+applied anywhere. Full guide, options and the migration of 192.168.1.7: `nix/README.md`.
+
+1. Controller: `tasks peer init --bind <laptop IP>:7843`; note `tasks peer id`.
+2. Worker `/etc/nixos/flake.nix`: input `task-manager` (this repo), module
+   `task-manager.nixosModules.worker`.
+3. `services.tasks-worker = { enable = true; peer.bind = "<worker IP>:7843";
+   peer.controllers = [ { name = "laptop"; endpointId = "<step 1>"; } ]; };`
+4. `sudo nixos-rebuild build`, then `switch` (compiles `tasks` on the worker).
+5. `journalctl -u tasks-worker-announce` (or `sudo -u tasks-worker tasks-worker-peer-id`)
+   gives the id; on the controller `tasks peer add NAME ID <worker IP>:7843`; restart the
+   controller daemon when idle.
+6. `tasks peer list` / `tasks place -- …` / `tasks run --peer NAME -- true` on the controller.
+
+A **fresh install** (new machine, its disk wiped) uses `nixosConfigurations.<host>` from
+`nix/hosts/<host>/` with nixos-anywhere or the installer ISO: `nix/README.md`, "Fresh install".
+
+The rest of this file describes the portable user unit (any distro) and the
+ssh/tasks-offload path, which the existing worker still uses.
+
 Remote clients SSH in and run `tasks run --who OWNER -- CMD` on the worker,
 so the worker applies its own native admission (memory/PSI/disk gates and
 flock slots). Admission on another machine never controls this host.
@@ -88,10 +112,10 @@ leave it unset everywhere or export the same value in the SSH environment.
   namespace) gives the daemon its own `/tmp`. Its workers would then lock a
   different `/tmp/claude-$UID` than other daemons, legacy clients and
   `tasks admission` in SSH shells, so admission would silently stop excluding
-  them. The template unit deliberately sets none of these. The draft
-  `nix/worker-module.nix` service sets `PrivateTmp = true` and must not be reused
-  for this daemon unless it also sets `TASKS_LOCK_DIR` outside `/tmp` (with the
-  legacy-client caveat above).
+  them. The template unit deliberately sets none of these, and neither does the
+  NixOS module's `tasks-worker.service` (`nix/module.nix`; it also adds the
+  `x /tmp/claude-*` tmpfiles exclusion). The retired draft
+  `nix/worker-module.nix` set `PrivateTmp = true`.
 
 ## Admission thresholds
 
