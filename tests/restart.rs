@@ -96,8 +96,9 @@ impl Node {
     fn phase(&self, id: i64) -> Phase {
         self.store().job(id).unwrap().phase
     }
+    /// Read-only (/proc/locks): a try_lock probe here could make a starting worker fail.
     fn worker_free(&self) -> bool {
-        !tinline_task_manager::worker::running(&self.state())
+        !tinline_task_manager::worker::lock_held_by_anyone(&self.state().join("worker.lock"))
     }
 }
 

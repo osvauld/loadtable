@@ -229,11 +229,25 @@ fn start_detached_inner() -> Result<bool> {
         .spawn()?;
     std::thread::spawn(move || child.wait());
     // Let the reply's execution_enabled reflect the new worker (it takes worker.lock first).
+    // Watched through /proc/locks only: probing with our own try_lock would make a worker
+    // starting in that instant fail its lock and exit ("another worker ... is active").
     let until = Instant::now() + Duration::from_secs(2);
-    while !running(&state) && Instant::now() < until {
+    while !lock_held_by_anyone(&state.join("worker.lock")) && Instant::now() < until {
         std::thread::sleep(Duration::from_millis(20));
     }
     Ok(true)
+}
+
+/// Whether some process holds a FLOCK on `path`, from /proc/locks, without taking it.
+pub fn lock_held_by_anyone(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    let dev = meta.dev();
+    let want = (libc::major(dev), libc::minor(dev), meta.ino());
+    fs::read_to_string("/proc/locks")
+        .is_ok_and(|t| crate::metrics::procfs::parse_flocks(&t).contains(&want))
 }
 
 pub fn logs(id: i64) -> Result<LogTail> {
@@ -2112,6 +2126,26 @@ mod tests {
         // A garbage or oversized file is "never decided", never "stopped".
         fs::write(state.join(INTENT_FILE), vec![b'x'; 5000]).unwrap();
         assert!(intent(&state).is_none() && !stopped(&state));
+        fs::remove_dir_all(state).unwrap();
+    }
+    #[test]
+    fn lock_watch_never_takes_the_lock_it_watches() {
+        let state = temp_state("lockwatch");
+        let path = state.join("worker.lock");
+        let held = File::create(&path).unwrap();
+        assert!(!lock_held_by_anyone(&path));
+        held.lock().unwrap();
+        assert!(lock_held_by_anyone(&path));
+        // Watching many times leaves the lock free for whoever starts next.
+        held.unlock().unwrap();
+        for _ in 0..50 {
+            assert!(!lock_held_by_anyone(&path));
+        }
+        let other = File::open(&path).unwrap();
+        assert!(
+            other.try_lock().is_ok(),
+            "the watch must not hold worker.lock"
+        );
         fs::remove_dir_all(state).unwrap();
     }
     #[test]
