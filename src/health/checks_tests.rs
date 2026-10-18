@@ -527,3 +527,53 @@ fn environ_parsing_is_exact_and_bounded() {
     );
     assert_eq!(crate::health::procs::parse_environ(env, "HOME"), None);
 }
+
+/// The cache reserve is `TASKS_MIN_CACHE_FREE_GIB` in GiB (default 20); no memory/MiB setting
+/// (e.g. the worker's `TASKS_MIN_AVAILABLE_MEMORY_MIB=1024`) feeds it. 219 GiB free against
+/// the real 20 GiB reserve renders as such and raises no disk alert. (The 65536 GiB in the
+/// sample and hermetic tests is set on purpose there to force the alert.)
+#[test]
+fn disk_reserve_unit_is_gib_and_ample_free_space_raises_nothing() {
+    use crate::health::disk::{History, Measured, ReserveClass, statuses};
+    const GIB: u64 = 1024 * 1024 * 1024;
+    let env = |pairs: &'static [(&'static str, &'static str)]| {
+        move |name: &str| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| std::ffi::OsString::from(v))
+        }
+    };
+    let t = crate::admission::Thresholds::from_lookup(env(&[(
+        "TASKS_MIN_AVAILABLE_MEMORY_MIB",
+        "1024",
+    )]))
+    .unwrap();
+    assert_eq!(t.min_cache_free_bytes, 20 * GIB);
+    assert_eq!(t.min_available_memory_bytes, 1024 * 1024 * 1024);
+    let explicit = crate::admission::Thresholds::from_lookup(env(&[
+        ("TASKS_MIN_CACHE_FREE_GIB", "20"),
+        ("TASKS_MIN_AVAILABLE_MEMORY_MIB", "1024"),
+    ]))
+    .unwrap();
+    assert_eq!(explicit.min_cache_free_bytes, 20 * GIB);
+    let measured = Measured {
+        filesystems: vec![(
+            "/home/u/build-cache".into(),
+            vec!["build-cache=/home/u/build-cache".into()],
+            428 * GIB,
+            219 * GIB,
+            ReserveClass::Cache,
+        )],
+        keys: vec![],
+    };
+    let s = statuses(&measured, &explicit, &History::default(), None, 0.0);
+    assert_eq!(s[0].reserve_bytes, 20 * GIB);
+    assert!(
+        s[0].line()
+            .contains("219.0 GiB free of 428.0 GiB (reserve 20.0 GiB)"),
+        "{}",
+        s[0].line()
+    );
+    assert!(disks("nixos", &s, &[], &cfg()).is_empty());
+}
