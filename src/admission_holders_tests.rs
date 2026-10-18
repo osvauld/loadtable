@@ -98,7 +98,15 @@ pub(crate) fn run_job_with_lease(lease: &Lease, job: i64, script: &str, arg: &st
         .stderr(Stdio::null());
     unsafe {
         cmd.pre_exec(move || {
-            if libc::dup2(fd, 9) < 0 {
+            // dup2(9, 9) is a no-op that keeps FD_CLOEXEC: when the lease already IS fd 9
+            // (it depends on what other test threads have open), clear the flag instead, or
+            // the lease closes at exec and the "job" never holds it (the old flake).
+            if fd == 9 {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            } else if libc::dup2(fd, 9) < 0 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
