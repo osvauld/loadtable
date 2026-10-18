@@ -157,7 +157,9 @@ let
     LIBCLANG_PATH = "${libclang.lib}/lib";
     BINDGEN_EXTRA_CLANG_ARGS = concatStringsSep " " [
       "-isystem ${libclang.lib}/lib/clang/${lib.versions.major libclang.version}/include"
-      "-isystem ${pkgs.glibc.dev}/include"
+      # -idirafter, not -isystem: libstdc++'s <cstdlib> does `#include_next <stdlib.h>`,
+      # which only finds glibc when glibc comes after the C++ headers (worker job 263).
+      "-idirafter ${pkgs.glibc.dev}/include"
     ];
   }
   // cfg.extraEnvironment;

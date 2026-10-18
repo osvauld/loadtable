@@ -338,7 +338,10 @@ in
       (
         dEnv.LIBCLANG_PATH == "${pkgs.llvmPackages.libclang.lib}/lib"
         && has "-isystem ${pkgs.llvmPackages.libclang.lib}/lib/clang/" dEnv.BINDGEN_EXTRA_CLANG_ARGS
-        && has "/include -isystem ${pkgs.glibc.dev}/include" dEnv.BINDGEN_EXTRA_CLANG_ARGS
+        && has "/include -idirafter ${pkgs.glibc.dev}/include" dEnv.BINDGEN_EXTRA_CLANG_ARGS
+        # -isystem would put glibc before libstdc++, and <cstdlib>'s
+        # `#include_next <stdlib.h>` then fails (worker job 263).
+        && !(has "-isystem ${pkgs.glibc.dev}/include" dEnv.BINDGEN_EXTRA_CLANG_ARGS)
       )
     ]
     [
@@ -514,4 +517,21 @@ in
       )
     ]
   ];
+
+  # Built (not only evaluated) by a full `nix flake check`: parse C and C++ headers with the
+  # unwrapped clang (like libclang, no Nix wrapper paths) and exactly the module's
+  # BINDGEN_EXTRA_CLANG_ARGS, the way webrtc-audio-processing-sys's bindgen does.
+  module-bindgen-cxx-probe =
+    let
+      clang = pkgs.llvmPackages.clang-unwrapped;
+      cxx = "${pkgs.stdenv.cc.cc}/include/c++/${pkgs.stdenv.cc.cc.version}";
+    in
+    pkgs.runCommand "tasks-worker-check-bindgen-cxx-probe" { } ''
+      printf '#include <cstdlib>\n#include <cstdio>\n#include <cstddef>\n' > probe.cc
+      printf '#include <stdlib.h>\n#include <stddef.h>\n#include <stdint.h>\n' > probe.c
+      ${clang}/bin/clang -x c++ -fsyntax-only -nostdinc ${dEnv.BINDGEN_EXTRA_CLANG_ARGS} \
+        -isystem ${cxx} -isystem ${cxx}/${pkgs.stdenv.hostPlatform.config} probe.cc
+      ${clang}/bin/clang -x c -fsyntax-only -nostdinc ${dEnv.BINDGEN_EXTRA_CLANG_ARGS} probe.c
+      touch $out
+    '';
 }
