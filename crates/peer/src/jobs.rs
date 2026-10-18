@@ -15,8 +15,15 @@
 //! * `cancel` — cancel a job this peer submitted (the receiver's normal cancel: the worker stops
 //!   the job's own process group).
 //! * `lookup` — the job id recorded for a `key`, if any (re-attach after a lost submit reply).
+//! * `search_logs` — read-only, bounded search of the receiver's retained job logs. The query
+//!   is opaque JSON (the embedder defines it); the reply is `LogMatches{size}` followed by
+//!   exactly `size` raw bytes of JSON (at most [`MAX_SEARCH_REPLY`]). An older receiver
+//!   refuses the unknown op as `BadRequest`.
 //!
-//! Only jobs submitted by the asking peer are visible to it.
+//! Only jobs submitted by the asking peer are visible to it through submit/attach/cancel/
+//! lookup. `search_logs` searches every job's retained log on the receiver: a host peer may
+//! already run any command there as the receiver's user, so this read widens nothing it could
+//! not do; worker/observer peers (no `jobs/0` capability) cannot search.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -36,6 +43,8 @@ pub const JOBS_DOMAINS: Domains = Domains {
     response: b"task-manager/jobs/response/v0\0",
 };
 const LOG_CHUNK: usize = 64 * 1024;
+/// Largest `search_logs` reply body (raw JSON after the signed `LogMatches` reply).
+pub const MAX_SEARCH_REPLY: usize = 2 * 1024 * 1024;
 const POLL: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +70,10 @@ pub struct SubmitRequest {
     pub sub: String,
     pub argv: Vec<String>,
     pub resource: RemoteResource,
+    /// The submitter deliberately allowed a broad test build (`--broad-test`); the receiver
+    /// still applies its own policy. Additive: absent = false; older receivers ignore it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub broad_test: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +83,7 @@ pub enum JobsRequest {
     Attach { remote_id: i64, offset: u64 },
     Cancel { remote_id: i64 },
     Lookup { key: String },
+    SearchLogs { query: serde_json::Value },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +103,10 @@ pub enum JobsReply {
     },
     Found {
         remote_id: Option<i64>,
+    },
+    /// `search_logs`: `size` raw bytes of JSON follow on the stream.
+    LogMatches {
+        size: u64,
     },
     /// The receiver's policy refused the request (validation, denylist, unknown job...).
     Refused {
@@ -134,6 +152,14 @@ pub trait JobHost: Send + Sync + 'static {
     ) -> Result<Vec<u8>, String>;
     fn cancel(&self, peer: &PeerEntry, id: i64) -> Result<JobState, String>;
     fn lookup(&self, peer: &PeerEntry, key: &str) -> Result<Option<i64>, String>;
+    /// Read-only search of the receiver's job logs (`search_logs`); the default refuses.
+    fn search_logs(
+        &self,
+        _peer: &PeerEntry,
+        _query: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        Err("search_logs is not supported by this receiver".into())
+    }
 }
 
 /// Server timing knobs (heartbeats keep a quiet attach stream distinguishable from a dead one).
@@ -202,6 +228,7 @@ pub async fn handle_jobs(
         JobsRequest::Attach { remote_id, offset } => format!("attach #{remote_id} @{offset}"),
         JobsRequest::Cancel { remote_id } => format!("cancel #{remote_id}"),
         JobsRequest::Lookup { key } => format!("lookup {key}"),
+        JobsRequest::SearchLogs { .. } => "search_logs".to_string(),
     };
     let reply = |reply: JobsReply| serde_json::to_vec(&reply).map_err(|e| e.to_string());
     let (h, p) = (Arc::clone(&host), peer.clone());
@@ -237,6 +264,37 @@ pub async fn handle_jobs(
                 Err(reason) => JobsReply::Refused { reason },
             };
             s.respond(ep, &reply(answer)?).await?;
+        }
+        JobsRequest::SearchLogs { query } => {
+            let result = blocking(move || {
+                let value = h.search_logs(&p, &query)?;
+                serde_json::to_vec(&value).map_err(|e| e.to_string())
+            })
+            .await;
+            match result {
+                Ok(bytes) if bytes.len() <= MAX_SEARCH_REPLY => {
+                    s.respond(
+                        ep,
+                        &reply(JobsReply::LogMatches {
+                            size: bytes.len() as u64,
+                        })?,
+                    )
+                    .await?;
+                    s.send.write_all(&bytes).await.map_err(|e| e.to_string())?;
+                }
+                Ok(bytes) => {
+                    let reason = format!(
+                        "search reply of {} bytes exceeds {MAX_SEARCH_REPLY}; lower max_output_bytes",
+                        bytes.len()
+                    );
+                    s.respond(ep, &reply(JobsReply::Refused { reason })?)
+                        .await?;
+                }
+                Err(reason) => {
+                    s.respond(ep, &reply(JobsReply::Refused { reason })?)
+                        .await?;
+                }
+            }
         }
         JobsRequest::Attach { remote_id, offset } => {
             let first = blocking(move || h.state(&p, remote_id)).await;
@@ -352,6 +410,46 @@ pub async fn call(
     let reply: JobsReply = serde_json::from_slice(&reply?)
         .map_err(|e| ClientError::Protocol(format!("bad reply: {e}")))?;
     Ok(reply)
+}
+
+/// `search_logs`: one signed request, the signed `LogMatches{size}` reply, then `size` raw bytes
+/// of JSON. A refusal (including an older receiver's `BadRequest`) is `ClientError::Refused`.
+pub async fn search_logs(
+    ep: &Endpoint,
+    to: EndpointAddr,
+    query: serde_json::Value,
+    timeout: Duration,
+) -> Result<serde_json::Value, ClientError> {
+    let body = serde_json::to_vec(&JobsRequest::SearchLogs { query })
+        .map_err(|e| ClientError::Local(e.to_string()))?;
+    let mut s = open_session(ep, to, JOBS_ALPN, JOBS_DOMAINS, &body, timeout).await?;
+    let result = async {
+        let reply = match tokio::time::timeout(timeout, s.response(MAX_FRAME)).await {
+            Ok(r) => r?,
+            Err(_) => return Err(ClientError::Lost(format!("no reply within {timeout:?}"))),
+        };
+        let size = match serde_json::from_slice::<JobsReply>(&reply) {
+            Ok(JobsReply::LogMatches { size }) => size,
+            Ok(JobsReply::Refused { reason }) => return Err(ClientError::Refused(reason)),
+            Ok(other) => return Err(ClientError::Protocol(format!("unexpected {other:?}"))),
+            Err(e) => return Err(ClientError::Protocol(format!("bad reply: {e}"))),
+        };
+        if size as usize > MAX_SEARCH_REPLY {
+            return Err(ClientError::Protocol(format!(
+                "search reply of {size} bytes exceeds {MAX_SEARCH_REPLY}"
+            )));
+        }
+        let mut buf = vec![0u8; size as usize];
+        tokio::time::timeout(timeout, s.recv.read_exact(&mut buf))
+            .await
+            .map_err(|_| ClientError::Lost("stalled inside the search reply".into()))?
+            .map_err(|e| ClientError::Lost(e.to_string()))?;
+        serde_json::from_slice(&buf)
+            .map_err(|e| ClientError::Protocol(format!("bad search reply: {e}")))
+    }
+    .await;
+    s.close();
+    result
 }
 
 #[derive(Debug)]
@@ -470,6 +568,7 @@ mod tests {
             sub: String::new(),
             argv: vec!["true".into()],
             resource: RemoteResource::Device("SERIAL".into()),
+            broad_test: false,
         });
         let text = serde_json::to_string(&submit).unwrap();
         assert!(text.starts_with(r#"{"op":"submit","key":"k""#), "{text}");
@@ -479,6 +578,17 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&JobsReply::Found { remote_id: None }).unwrap(),
             r#"{"reply":"found","remote_id":null}"#
+        );
+        let search = JobsRequest::SearchLogs {
+            query: serde_json::json!({"pattern": "x"}),
+        };
+        assert_eq!(
+            serde_json::to_string(&search).unwrap(),
+            r#"{"op":"search_logs","query":{"pattern":"x"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&JobsReply::LogMatches { size: 3 }).unwrap(),
+            r#"{"reply":"log_matches","size":3}"#
         );
     }
 

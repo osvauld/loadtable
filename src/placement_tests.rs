@@ -119,6 +119,7 @@ fn apply_jobs_sets_the_cap_in_an_env_prefix_and_passes_other_commands_through() 
     }
     // The rewritten command passes the receiving machine's own validation at its cap.
     crate::local_command::Recipe {
+        broad_test: false,
         argv: apply_jobs(&words("cargo test -j 2"), 6),
         resource: crate::local_command::Resource::Compile,
     }
@@ -126,6 +127,7 @@ fn apply_jobs_sets_the_cap_in_an_env_prefix_and_passes_other_commands_through() 
     .unwrap();
     assert!(
         crate::local_command::Recipe {
+            broad_test: false,
             argv: apply_jobs(&words("cargo test"), 6),
             resource: crate::local_command::Resource::Compile,
         }

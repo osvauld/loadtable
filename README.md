@@ -96,6 +96,39 @@ decision without submitting. `tasks mcp` `submit` has `placement` (`anywhere` by
 worker peer is configured, `local`, or a peer name) and `cluster_status` lists every machine.
 Details: docs/design/peer-link.md "Placement".
 
+## Policy: broad `cargo test` builds (not deployed)
+
+A `cargo test` with a name filter but no target selector (`--lib`, `--test T`, `--bin B`,
+`--bench B`, `--doc`, `--tests`, `--all-targets`, ...) builds and runs EVERY test target of the
+package. By default `tasks run`/`enqueue` refuse it with exit 2 and MCP `submit` with a tool
+error, nothing queued, naming the count and the targets the filter matches:
+
+```text
+tasks: refused: this builds all 37 test targets of -p p2pcore; your filter 'video_call' matches: --lib, --test video_calls. Re-run with those, or pass --broad-test (MCP: broad_test: true) to build every target deliberately.
+```
+
+`--broad-test` (MCP `broad_test: true`) builds every target deliberately and is recorded on the
+job (`"broad_test": true` in its recipe; a daemon that predates the field refuses such a job).
+A `cargo test` without a filter and non-Cargo commands are not affected; queued jobs are never
+re-evaluated. A forwarded job is checked on the submitting side and again by the peer under its
+own policy. The policy is a strict HUML file, `~/.config/tasks/policy.huml` (or `TASKS_POLICY`;
+sample: [deploy/policy.huml](deploy/policy.huml)) holding `broad_test: "refuse" | "warn"`,
+overridden by `TASKS_BROAD_TEST=refuse|warn`. Unknown keys or bad values are reported loudly
+(daemon log, `tasks admission`, every submit) and the defaults apply. `tasks admission` shows
+the effective value and its source (default, file or env).
+
+## Log search, compile attribution and job cost (MCP; not deployed)
+
+`tasks mcp` has `who_is_compiling` (per machine: executing jobs, owner/agent, command and the
+crates their rustc/rustdoc/build-script processes are compiling now, with elapsed time, CPU and
+RSS; optional `crate` filter), `search_logs` (substring or a small regex subset over retained job
+logs, newest job first, filtered by owner/job ids/phases/since/until/machine, bounded by
+max_jobs/max_matches/max_bytes/max_output_bytes; forwarded jobs are found in their mirrored log
+and named by the peer, jobs that exist only on a peer are searched there over the peer link) and
+`job_cost` (wall, CPU, peak RSS, warmth, crates compiled, test targets built, the broad-test flag
+and a hint). `cluster_status` jobs carry `compiling`. Snapshot fields:
+docs/design/cluster-snapshot.md "feature/log-search".
+
 ## Window
 
 `tasks` (or `tasks ui`) opens a live dashboard of both machines: machine cards,

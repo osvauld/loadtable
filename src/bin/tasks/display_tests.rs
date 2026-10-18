@@ -6,6 +6,7 @@ const NOW: i64 = 1_000_000;
 
 fn job(id: i64, owner: &str, cwd: &str, phase: Phase, argv: &[&str], resource: Resource) -> Job {
     let recipe = Recipe {
+        broad_test: false,
         argv: argv.iter().map(|s| s.to_string()).collect(),
         resource,
     };

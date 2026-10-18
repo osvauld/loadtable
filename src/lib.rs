@@ -16,11 +16,13 @@ pub mod device_denylist;
 pub mod execution;
 pub mod ledger;
 pub mod local_command;
+pub mod log_search;
 pub mod metrics;
 #[cfg(target_os = "linux")]
 pub mod peer;
 pub mod peer_link;
 pub mod placement;
+pub mod policy;
 #[cfg(target_os = "linux")]
 pub mod retention;
 pub mod snapshot;

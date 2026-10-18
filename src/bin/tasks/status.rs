@@ -67,6 +67,21 @@ fn job_line(j: &JobView) -> String {
         }
     }
     write!(line, " | {}", j.warmth.as_str()).unwrap();
+    if let Some(c) = j.compiling.as_ref().filter(|c| !c.is_empty()) {
+        let shown: Vec<String> = c
+            .iter()
+            .take(4)
+            .map(|c| format!("{} ({} {:.0}s)", c.unit, c.kind, c.elapsed_s))
+            .collect();
+        let more = c.len().saturating_sub(4);
+        write!(line, " | compiling {}", shown.join(", ")).unwrap();
+        if more > 0 {
+            write!(line, " +{more}").unwrap();
+        }
+    }
+    if j.broad_test_build == Some(true) {
+        line.push_str(" | BROAD test build");
+    }
     if let Some(e) = &j.estimate {
         write!(
             line,

@@ -193,6 +193,7 @@ pub fn forwarded_spec(
     }
     let exe = exe.to_str().ok_or("UTF-8 tasks path required")?;
     Recipe {
+        broad_test: inner.broad_test,
         argv: args.to_argv(exe),
         resource: Resource::Offload,
     }
@@ -290,6 +291,7 @@ mod tests {
     #[test]
     fn forwarded_spec_uses_the_offload_slot_and_keeps_owner_and_cwd() {
         let inner = Recipe {
+            broad_test: false,
             argv: argv(&["cargo", "test", "-j", "8"]),
             resource: Resource::Run,
         };
@@ -321,6 +323,7 @@ mod tests {
         assert_eq!(args.argv, inner.argv);
         // The denylist still applies to the whole forwarded argv on this host.
         let denied = Recipe {
+            broad_test: false,
             argv: argv(&["adb", "-s", "ZD22257P6G", "shell"]),
             resource: Resource::Run,
         };
@@ -468,5 +471,40 @@ pub fn request_peers(path: &Path, timeout: std::time::Duration) -> Result<PeersR
         )
         .into()),
         (None, e) => Err(e.unwrap_or_else(|| "empty peers reply".into()).into()),
+    }
+}
+
+/// Log search on peer `name` through this daemon's peer runtime (`<state>/peer.sock`,
+/// `search_logs` bridge request -> the peer's `jobs/0` `search_logs`). Returns the peer's
+/// `log_search::Report` as JSON. Fails when the peer link is not running or the peer refuses.
+#[cfg(unix)]
+pub fn request_peer_search(
+    state_dir: &Path,
+    name: &str,
+    query: &serde_json::Value,
+    timeout: std::time::Duration,
+) -> Result<serde_json::Value> {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let socket = state_dir.join("peer.sock");
+    let mut stream = std::os::unix::net::UnixStream::connect(&socket)
+        .map_err(|e| format!("{}: {e} (is the peer link enabled?)", socket.display()))?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(std::time::Duration::from_secs(5)))?;
+    let request = serde_json::json!({"op": "search_logs", "peer": name, "query": query});
+    stream.write_all(format!("{request}\n").as_bytes())?;
+    let mut line = String::new();
+    BufReader::new(stream.take(8 * 1024 * 1024)).read_line(&mut line)?;
+    if !line.ends_with('\n') {
+        return Err(format!("incomplete search reply for peer {name}").into());
+    }
+    let event: serde_json::Value = serde_json::from_str(&line)?;
+    match event["event"].as_str() {
+        Some("line") => Ok(event["value"].clone()),
+        Some("error") => Err(event["message"]
+            .as_str()
+            .unwrap_or("peer search failed")
+            .to_owned()
+            .into()),
+        _ => Err(format!("unexpected bridge reply: {line}").into()),
     }
 }

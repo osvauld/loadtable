@@ -780,7 +780,8 @@ fn laptop_snapshot_explains_queue_progress_and_eta() {
         building.progress,
         Some(Progress {
             crates_compiled: 212,
-            crates_expected: Some(310)
+            crates_expected: Some(310),
+            test_targets_built: None,
         })
     );
     let eta = building.estimate.as_ref().unwrap();

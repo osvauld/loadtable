@@ -224,6 +224,7 @@ mod tests {
 
     fn approved_job(store: &mut Store, cwd: &std::path::Path) -> i64 {
         let recipe = Recipe {
+            broad_test: false,
             argv: vec!["/bin/true".into()],
             resource: Resource::Run,
         };

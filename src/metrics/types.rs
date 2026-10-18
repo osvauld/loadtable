@@ -133,6 +133,15 @@ pub struct JobView {
     pub result: Option<JobResult>,
     /// Laptop-side offload linkage, filled by feature/status-stream; null here.
     pub offload: Option<OffloadLink>,
+    /// Live compile attribution (feature/log-search): the compiler/build-tool processes in
+    /// the job's tree at the last sample, largest elapsed first. Optional and additive:
+    /// absent for jobs that are not executing and in older snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compiling: Option<Vec<super::compile::Compiling>>,
+    /// `true` when the command is a `cargo test` with a name filter and no target selector:
+    /// it builds every test target of the package (feature/log-search). Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broad_test_build: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -164,6 +173,10 @@ pub struct LiveHistory {
 pub struct Progress {
     pub crates_compiled: u64,
     pub crates_expected: Option<u64>,
+    /// Test targets built so far (distinct test binaries in the log, or `rustc --test`
+    /// crates seen live, whichever is larger). Absent until one is seen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_targets_built: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -202,6 +215,12 @@ pub struct JobResult {
     pub peak_rss_bytes: Option<u64>,
     pub crates_compiled: Option<u64>,
     pub warmth: Warmth,
+    /// See [`JobMetrics::test_targets_built`]; absent when not measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_targets_built: Option<u64>,
+    /// See [`JobMetrics::broad_test_build`]; absent when not measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broad_test_build: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -233,6 +252,15 @@ pub struct JobMetrics {
     pub peak_rss_bytes: Option<u64>,
     #[serde(default)]
     pub crates_compiled: Option<u64>,
+    /// Test targets the command built (Cargo only): distinct test binaries named by the log's
+    /// `Running`/`Executable` lines plus `Doc-tests` crates, or the `rustc --test` crates the
+    /// sampler saw, whichever is larger. Additive (feature/log-search); older rows lack it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_targets_built: Option<u64>,
+    /// `cargo test` commands only: true when a name filter came without a target selector,
+    /// so every test target of the package was built (see `metrics::testscope`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broad_test_build: Option<bool>,
 }
 
 /// `tasks status` reply on the daemon socket. A separate shape from

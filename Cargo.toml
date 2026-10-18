@@ -21,6 +21,8 @@ eframe = { version = "0.33", optional = true, default-features = false, features
 # Daemon-to-daemon link (iroh, LAN only); runs in the daemon's own peer thread/runtime.
 task-manager-peer = { path = "crates/peer" }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time", "net", "io-util"] }
+# Submission policy file (~/.config/tasks/policy.huml); only dependency: serde.
+huml-rs = "0.3.0"
 
 # `ui`: the egui window (`tasks ui`); `mcp`: the MCP stdio server (`tasks mcp`). A compute
 # worker builds `--no-default-features`: daemon, CLI, peer link and status, no GUI stack.

@@ -83,7 +83,15 @@ sig}` signed by the requester's endpoint key over (domain, nonce, both ids, SHA-
   refused.
 * `task-manager/jobs/0` (role host/both): `submit` (idempotent per key), `attach` (log from
   an offset + phase changes + heartbeats + `Done{phase, exit_code}`), `cancel`, `lookup`. A peer
-  sees and cancels only jobs it submitted.
+  sees and cancels only jobs it submitted. `search_logs` (feature/log-search, read-only): a
+  bounded search of the receiver's retained job logs (`log_search::Query` as opaque JSON;
+  reply `LogMatches{size}` then `size` raw bytes of the `log_search::Report`, at most 2 MiB).
+  It searches EVERY job of the receiver's ledger, not only the asking peer's: a host peer may
+  already run any command there as that user, so this read widens nothing it could not do;
+  worker/observer peers (no jobs capability) cannot search. An older receiver refuses the op
+  as `BadRequest` (the asking side says the peer predates log search). `SubmitRequest` gained
+  an optional `broad_test` flag (the submitter's recorded `--broad-test`; the receiver still
+  applies its own policy; older receivers ignore it).
 * `task-manager/artifact/0` (role host/both): files of the peer's own checkout, by path,
   content-addressed into a NEW local directory.
 

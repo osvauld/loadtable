@@ -9,6 +9,7 @@ mod follow;
 mod log_view;
 #[cfg(feature = "mcp")]
 mod mcp;
+mod mcp_compute;
 mod options;
 mod status;
 #[cfg(feature = "ui")]
@@ -101,10 +102,11 @@ fn run() -> Result<()> {
             return Ok(());
         }
         Some("admission") if args.len() == 1 => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&tinline_task_manager::admission::status()?)?
-            );
+            let status = tinline_task_manager::admission::status()?;
+            println!("{}", serde_json::to_string_pretty(&status)?);
+            if let Some(policy) = &status.policy {
+                eprint!("{}", policy.summary());
+            }
             return Ok(());
         }
         Some("cache") if args.len() == 1 => {
@@ -196,9 +198,26 @@ fn run() -> Result<()> {
                 }
             };
             let recipe = Recipe {
+                broad_test: parsed.broad_test,
                 argv: args[split + 1..].to_vec(),
                 resource,
             };
+            // Submission policy (crate::policy): refuse before anything is queued, or warn.
+            match recipe.policy_verdict(
+                &std::env::current_dir()?,
+                &tinline_task_manager::policy::effective(),
+            ) {
+                tinline_task_manager::policy::Verdict::Refused(message) => {
+                    eprintln!("tasks: {message}");
+                    std::process::exit(2);
+                }
+                tinline_task_manager::policy::Verdict::Warn(lines) => {
+                    for line in lines {
+                        eprintln!("tasks: warning: {line}");
+                    }
+                }
+                tinline_task_manager::policy::Verdict::Allowed => {}
+            }
             match &parsed.peer {
                 None if parsed.anywhere => {
                     let (spec, decision) = anywhere_spec(recipe, owner, &parsed.fetch)?;
@@ -445,6 +464,7 @@ fn anywhere_spec(
     let spec = placement::job_spec(
         &decision,
         recipe.resource,
+        recipe.broad_test,
         owner,
         std::env::current_dir()?,
         fetch,
@@ -1050,6 +1070,7 @@ fn phone_test(args: &[String]) -> Result<()> {
         .join(build.to_string())
         .join(&artifact.path);
     let recipe = Recipe {
+        broad_test: false,
         argv: vec![
             std::env::current_exe()?
                 .to_str()

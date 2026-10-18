@@ -2,7 +2,7 @@
 //! Errors name the exact problem and the correct usage instead of a generic refusal.
 use tinline_task_manager::Result;
 
-pub const RUN_USAGE: &str = "tasks run|enqueue [--who OWNER] [--run | --offload | --device SERIAL] [--peer NAME [--fetch REL]... | --anywhere] [--follow] -- COMMAND [ARGS...]";
+pub const RUN_USAGE: &str = "tasks run|enqueue [--who OWNER] [--run | --offload | --device SERIAL] [--peer NAME [--fetch REL]... | --anywhere] [--follow] [--broad-test] -- COMMAND [ARGS...]";
 pub const PLACE_USAGE: &str =
     "tasks place [--run | --device SERIAL] [--peer NAME] [--json] -- COMMAND [ARGS...]";
 const LIST_USAGE: &str =
@@ -29,6 +29,9 @@ pub struct Enqueue {
     pub fetch: Vec<String>,
     /// Let placement choose this machine or a worker peer (`tasks place` shows the choice).
     pub anywhere: bool,
+    /// Deliberately build every test target of a filtered test command (the policy's
+    /// `broad_test = "refuse"` escape); recorded on the job.
+    pub broad_test: bool,
 }
 
 /// Parses the options before `--`. `--follow` only makes sense when this client waits.
@@ -106,6 +109,7 @@ pub fn enqueue(options: &[String], waits: bool) -> Result<Enqueue> {
                     .ok_or(format!("--fetch needs a relative PATH; usage: {RUN_USAGE}"))?;
                 parsed.fetch.push(rel.clone());
             }
+            "--broad-test" => parsed.broad_test = true,
             "--follow" if waits => parsed.follow = true,
             "--follow" => {
                 return Err(

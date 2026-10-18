@@ -551,6 +551,7 @@ pub(super) fn job(
     metrics: Option<JobMetrics>,
 ) -> Job {
     let recipe = Recipe {
+        broad_test: false,
         argv: argv(words),
         resource,
     };
@@ -739,6 +740,7 @@ fn finished_metrics_merge_into_execution_json_compatibly() {
     use crate::execution::ProcessIdentity;
     let mut store = Store::memory().unwrap();
     let recipe = Recipe {
+        broad_test: false,
         argv: argv(&["cargo", "test", "-p", "a"]),
         resource: Resource::Compile,
     };
@@ -809,6 +811,7 @@ fn finalize_records_new_jobs_and_never_rewrites_pre_metrics_history() {
     let mut store = Store::memory().unwrap();
     let finished = |store: &mut Store, words: &[&str]| -> i64 {
         let recipe = Recipe {
+            broad_test: false,
             argv: argv(words),
             resource: Resource::Run,
         };
@@ -983,6 +986,7 @@ fn sampler_cost() {
     let mut store = Store::open(&state.join("tasks.sqlite")).unwrap();
     for _ in 0..300 {
         let r = Recipe {
+            broad_test: false,
             argv: argv(&["cargo", "test", "-j", "2"]),
             resource: Resource::Compile,
         };
@@ -1002,6 +1006,7 @@ fn sampler_cost() {
     let mut children = vec![];
     for _ in 0..4 {
         let r = Recipe {
+            broad_test: false,
             argv: argv(&["cargo", "test", "-j", "2"]),
             resource: Resource::Compile,
         };
@@ -1034,7 +1039,39 @@ fn sampler_cost() {
     }
     // Includes the periodic full walks (1 in sampler::FULL_WALK_EVERY ticks).
     let tick = (thread_cpu() - t) / N as f64 * 1000.0;
+    // Live compile attribution: fake compilers in the jobs' tree (scripts named rustc: a real
+    // rustc's comm and cmdline shape), so each tick also reads their cmdlines. The script
+    // blocks in the shell's `read` builtin (no grandchild left behind when it is killed).
+    let rustc_script = state.join("bin/rustc");
+    std::fs::create_dir_all(rustc_script.parent().unwrap()).unwrap();
+    std::fs::write(&rustc_script, "#!/bin/sh\nread -r _\n").unwrap();
+    std::fs::set_permissions(
+        &rustc_script,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    for i in 0..8 {
+        children.push(
+            std::process::Command::new(&rustc_script)
+                .args(["--crate-name", &format!("fake_{i}"), "--crate-type", "lib"])
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+    }
+    let t = thread_cpu();
+    for _ in 0..N {
+        sampler.tick(Some(&mut store)).unwrap();
+    }
+    let tick_attr = (thread_cpu() - t) / N as f64 * 1000.0;
     let jobs = store.jobs().unwrap();
+    let attributed: usize = sampler
+        .snapshot(&jobs)
+        .jobs
+        .iter()
+        .filter_map(|j| j.compiling.as_ref())
+        .map(Vec::len)
+        .sum();
     let t = thread_cpu();
     for _ in 0..10 {
         std::hint::black_box(sampler.snapshot(&jobs));
@@ -1053,11 +1090,14 @@ fn sampler_cost() {
         "sampler cost: /proc walk of {procs} processes {walk:.2} ms; targeted tree read \
          ({tree_len} processes, children files supported: {tree_supported}) {tree:.3} ms; full tick with 4 running jobs \
          + 304-row ledger {tick:.2} ms CPU ({:.3}% of one core at 2 s); status snapshot {snap:.2} ms; \
-         ledger listing (Store::jobs) {list:.2} ms",
+         ledger listing (Store::jobs) {list:.2} ms; compile attribution: 8 fake rustc in each \
+         job tree, {attributed} entries in the snapshot, tick {tick_attr:.2} ms",
         tick / 20.0
     );
     std::fs::remove_dir_all(state).unwrap();
     assert!(tick < 50.0, "tick {tick} ms");
+    assert!(tick_attr < 50.0, "tick with attribution {tick_attr} ms");
+    assert_eq!(attributed, 32, "8 fake compilers in each of 4 job trees");
 }
 
 fn read_procs_now() -> usize {

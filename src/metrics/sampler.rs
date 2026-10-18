@@ -72,6 +72,20 @@ struct JobLive {
     start: Option<StartWarmth>,
     /// Group members that are not descendants, from the last full walk.
     orphans: Vec<u32>,
+    /// Compiler/build-tool processes at the last sample (live compile attribution).
+    compiling: Vec<super::compile::Compiling>,
+    /// Per compiler process: (start ticks, cpu ticks, when) of the previous sample.
+    proc_cpu: HashMap<u32, (u64, u64, Instant)>,
+    /// Distinct crates seen compiled as `rustc --test` (bounded).
+    test_crates: std::collections::HashSet<String>,
+}
+
+/// What a finished job's sampled state contributes to its persisted metrics.
+#[derive(Clone, Debug, Default)]
+struct Pending {
+    peak: u64,
+    start: Option<StartWarmth>,
+    test_crates: u64,
 }
 
 struct State {
@@ -96,7 +110,7 @@ struct State {
     /// Terminal jobs already considered (finalized or not eligible).
     considered: std::collections::HashSet<i64>,
     /// Sampled peak/start of jobs that left the active set, until finalized.
-    pending: HashMap<i64, (u64, Option<StartWarmth>)>,
+    pending: HashMap<i64, Pending>,
     /// Ticks that sampled running jobs (drives the periodic full walk).
     job_ticks: u64,
     /// False once the kernel lacked `/proc/PID/task/*/children`.
@@ -283,15 +297,106 @@ pub fn stage_usage(state_dir: &Path, id: i64) -> Option<StageUsage> {
     total
 }
 
-/// Count of `Compiling ` lines in a job's whole log (bounded by the log cap).
-pub fn log_crates(state_dir: &Path, id: i64) -> Option<u64> {
+/// `Compiling ` lines and test targets of a job's whole log (bounded by the log cap).
+pub fn log_counts(state_dir: &Path, id: i64) -> Option<CompileCounter> {
     let mut file = std::fs::File::open(job_dir(state_dir, id).join("job.log")).ok()?;
     let mut bytes = vec![];
     (&mut file)
         .take(16 * 1024 * 1024)
         .read_to_end(&mut bytes)
         .ok()?;
-    Some(CompileCounter::count_text(&bytes))
+    Some(CompileCounter::of_text(&bytes))
+}
+
+/// Count of `Compiling ` lines in a job's whole log (bounded by the log cap).
+pub fn log_crates(state_dir: &Path, id: i64) -> Option<u64> {
+    log_counts(state_dir, id).map(|c| c.count)
+}
+
+/// Adds the test-scope fields (feature/log-search) to a finished Cargo job's metrics:
+/// test targets built = max(test binaries in the log, `rustc --test` crates seen live), and
+/// the broad `cargo test` flag. Non-Cargo jobs keep both absent.
+pub fn add_test_scope(
+    metrics: &mut JobMetrics,
+    job: &Job,
+    log_test_targets: Option<u64>,
+    observed_test_crates: u64,
+) {
+    let argv = history::argv(job);
+    metrics.broad_test_build = super::testscope::broad_flag(&argv);
+    if super::command::is_cargo(&argv) {
+        metrics.test_targets_built = Some(log_test_targets.unwrap_or(0).max(observed_test_crates));
+    }
+}
+
+/// Seconds since boot (`/proc/uptime`), for process ages.
+fn uptime() -> Option<f64> {
+    std::fs::read_to_string("/proc/uptime")
+        .ok()?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// Live compile attribution for one job's members (see `metrics::compile`): reads the
+/// cmdline only of members whose comm names a compiler or build tool. Updates the job's
+/// per-process CPU baselines and its set of `--test` crates.
+fn attribute_members(
+    entry: &mut JobLive,
+    members: &[ProcStat],
+    now: Instant,
+    uptime: Option<f64>,
+    hz: f64,
+    page: u64,
+) {
+    use super::compile::{self, Compiling};
+    let mut out: Vec<Compiling> = vec![];
+    let mut seen = std::collections::HashSet::new();
+    for p in members {
+        if !compile::interesting_comm(&p.comm) {
+            continue;
+        }
+        let Some(argv) = compile::read_cmdline(p.pid) else {
+            continue;
+        };
+        let Some(a) = compile::attribute(&p.comm, &argv) else {
+            continue;
+        };
+        seen.insert(p.pid);
+        let elapsed = uptime
+            .map(|up| (up - p.start_ticks as f64 / hz).max(0.0))
+            .unwrap_or(0.0);
+        let cpu = match entry.proc_cpu.get(&p.pid) {
+            Some(&(start, ticks, at)) if start == p.start_ticks => {
+                let dt = now.duration_since(at).as_secs_f64().max(1e-3);
+                Some((p.cpu_ticks.saturating_sub(ticks) as f64 / hz / dt).max(0.0))
+            }
+            _ if elapsed > 0.05 => Some(p.cpu_ticks as f64 / hz / elapsed),
+            _ => None,
+        };
+        entry
+            .proc_cpu
+            .insert(p.pid, (p.start_ticks, p.cpu_ticks, now));
+        if a.kind == "test" && entry.test_crates.len() < 4096 {
+            entry.test_crates.insert(a.unit.clone());
+        }
+        out.push(Compiling {
+            crate_name: Some(a.unit.clone()),
+            unit: a.unit,
+            kind: a.kind.into(),
+            tool: "cargo".into(),
+            proc_name: a.proc_name,
+            pid: p.pid,
+            elapsed_s: (elapsed * 10.0).round() / 10.0,
+            cpu: cpu.map(|c| (c * 100.0).round() / 100.0),
+            rss_bytes: p.rss_pages * page,
+        });
+    }
+    entry.proc_cpu.retain(|pid, _| seen.contains(pid));
+    out.sort_by(|a, b| b.elapsed_s.total_cmp(&a.elapsed_s).then(a.pid.cmp(&b.pid)));
+    out.truncate(compile::MAX_PER_JOB);
+    entry.compiling = out;
 }
 
 /// The finished-job record (`Execution::metrics`), from stage usage files,
@@ -330,6 +435,9 @@ pub fn finish_metrics(
         cpu_sys_s: usage.as_ref().map(|u| u.cpu_sys_s),
         peak_rss_bytes: peak,
         crates_compiled: crates,
+        // Filled by `add_test_scope` (it needs the log's test binaries and live crates).
+        test_targets_built: None,
+        broad_test_build: None,
     }
 }
 
@@ -549,7 +657,8 @@ impl Sampler {
         let procs = if full_walk { read_procs() } else { vec![] };
         let (hz, page) = (clock_ticks(), page_size());
         let now = Instant::now();
-        let finished: Vec<(i64, u64, Option<StartWarmth>)>;
+        let up = if running.is_empty() { None } else { uptime() };
+        let finished: Vec<(i64, Pending)>;
         {
             let mut s = self.lock();
             let mut unsupported = false;
@@ -570,6 +679,9 @@ impl Sampler {
                     counter: CompileCounter::default(),
                     start: None,
                     orphans: vec![],
+                    compiling: vec![],
+                    proc_cpu: HashMap::new(),
+                    test_crates: Default::default(),
                 });
                 if let Some(sup) = supervisor
                     && entry.supervisor != *sup
@@ -582,6 +694,7 @@ impl Sampler {
                     entry.last_cpu = None;
                     entry.processes = 0;
                     entry.last_rss = 0;
+                    entry.compiling.clear();
                     continue;
                 };
                 let members: Vec<ProcStat> = if full_walk {
@@ -614,8 +727,10 @@ impl Sampler {
                     entry.processes = 0;
                     entry.last_rss = 0;
                     entry.last_cpu = None;
+                    entry.compiling.clear();
                     continue;
                 }
+                attribute_members(entry, &members, now, up, hz, page);
                 let ticks: u64 = members.iter().map(|p| p.cpu_ticks + p.child_ticks).sum();
                 let rss: u64 = members.iter().map(|p| p.rss_pages * page).sum();
                 entry.last_cpu = entry.prev.map(|(before, at)| {
@@ -643,9 +758,16 @@ impl Sampler {
             finished = gone
                 .into_iter()
                 .filter_map(|id| {
-                    s.jobs
-                        .remove(&id)
-                        .map(|j| (id, j.peak_rss, j.start.clone()))
+                    s.jobs.remove(&id).map(|j| {
+                        (
+                            id,
+                            Pending {
+                                peak: j.peak_rss,
+                                start: j.start.clone(),
+                                test_crates: j.test_crates.len() as u64,
+                            },
+                        )
+                    })
                 })
                 .collect();
         }
@@ -653,8 +775,8 @@ impl Sampler {
         self.ensure_start_checks(store, &active)?;
         {
             let mut s = self.lock();
-            for (id, peak, start) in finished {
-                s.pending.insert(id, (peak, start));
+            for (id, pending) in finished {
+                s.pending.insert(id, pending);
             }
         }
         self.finalize(store)
@@ -760,20 +882,27 @@ impl Sampler {
         let jobs = store.jobs()?;
         let history = History::from_jobs(&jobs);
         for id in todo {
-            let (peak, start) = self.lock().pending.remove(&id).unwrap_or((0, None));
+            let pending = self.lock().pending.remove(&id).unwrap_or_default();
             let Some(job) = jobs.iter().find(|j| j.id == id) else {
                 continue;
             };
             if job.spec.suite != crate::local_command::SUITE {
                 continue;
             }
-            let metrics = finish_metrics(
+            let counts = log_counts(&self.state_dir, id);
+            let mut metrics = finish_metrics(
                 job,
                 &history,
                 stage_usage(&self.state_dir, id),
-                log_crates(&self.state_dir, id),
-                start_warmth_file(&self.state_dir, id).or(start),
-                Some(peak),
+                counts.as_ref().map(|c| c.count),
+                start_warmth_file(&self.state_dir, id).or(pending.start),
+                Some(pending.peak),
+            );
+            add_test_scope(
+                &mut metrics,
+                job,
+                counts.as_ref().map(|c| c.test_targets()),
+                pending.test_crates,
             );
             if let Err(error) = write_metrics(store, id, &metrics) {
                 eprintln!("metrics: job {id}: could not record result: {error}");
@@ -836,6 +965,12 @@ impl Sampler {
                 JobExtras {
                     live,
                     crates_so_far: sampled.map(|j| j.counter.count),
+                    test_targets_so_far: sampled
+                        .map(|j| j.counter.test_targets().max(j.test_crates.len() as u64)),
+                    compiling: sampled
+                        .filter(|_| matches!(job.phase, Phase::Building | Phase::Running))
+                        .filter(|j| j.processes > 0)
+                        .map(|j| j.compiling.clone()),
                     start,
                     admitted_at: snapshot::admitted_at(&self.state_dir, job),
                     checkout: snapshot::checkout_of(&job.spec.source),
