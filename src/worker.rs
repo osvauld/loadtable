@@ -817,7 +817,7 @@ fn prepare_local_outputs(
                 // No local output; admission applies the offload disk gate.
                 return Ok(Placed::Done(local::offload_placement()));
             }
-            local::try_place_outputs(cwd)
+            local::try_place_outputs(cwd, &recipe.argv)
         },
         |space| {
             if cancelled(store, job.id)? || STOP.load(Ordering::SeqCst) {
@@ -1624,7 +1624,7 @@ fn run_command(state: &Path, dir: &Path, job: &crate::Job, stage: &str) -> Resul
         let placement = if recipe.resource == crate::local_command::Resource::Offload {
             crate::local_command::offload_placement()
         } else {
-            crate::local_command::place_outputs(Path::new(&job.spec.source))?
+            crate::local_command::place_outputs(Path::new(&job.spec.source), &argv)?
         };
         save(
             &dir.join(format!("{stage}-admitted.json")),

@@ -128,9 +128,12 @@ fn closed_client_stdout_sends_no_mutation_after_the_job_is_terminal() {
     let status = wait_exit(&mut client, 30);
     let mut stderr = String::new();
     std::io::Read::read_to_string(&mut client.stderr.take().unwrap(), &mut stderr).unwrap();
-    // Documented client behaviour (not the job's result): writing the rest of the
-    // log hits EPIPE after the job is already terminal and recorded.
+    // Writing the rest of the log hits EPIPE after the job is already terminal and
+    // recorded; it does not change the job's result.
     eprintln!("client exit after closed stdout: {status:?}; stderr tail: {stderr:?}");
+    // pi-whitepaper 745-747: a closed reader is a quiet 141 (128 + SIGPIPE), not a panic.
+    assert!(!stderr.contains("panicked"), "{stderr:?}");
+    assert_eq!(status.code(), Some(141), "{stderr:?}");
     std::thread::sleep(Duration::from_millis(200));
     let seen = seen.lock().unwrap().clone();
     let logs = seen.iter().position(|s| s == "logs").expect("logs fetched");
@@ -187,7 +190,10 @@ fn real_job_result_is_unaffected_by_a_closed_client_pipe() {
     let _ = daemon.wait();
     // `tasks run` prints the bounded log TAIL, so head sees some single line.
     let first = String::from_utf8_lossy(&out.stdout);
-    assert!(first.ends_with('\n') && first.lines().count() == 1, "{first:?}");
+    assert!(
+        first.ends_with('\n') && first.lines().count() == 1,
+        "{first:?}"
+    );
     let job = list.jobs.last().expect("job recorded");
     assert_eq!(job.phase, tinline_task_manager::Phase::Failed);
     let exit = job

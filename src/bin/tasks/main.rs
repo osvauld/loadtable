@@ -80,10 +80,54 @@ const USAGE: &str = "usage: tasks [ui [--fixtures DIR]]  # DIR: cluster snapshot
        tasks mcp [--no-start-daemon]  # MCP server for agents (stdio JSON-RPC)";
 
 fn main() {
+    if std::env::args().nth(1).is_none_or(|a| a != "daemon") {
+        quiet_on_closed_stdout();
+    }
     if let Err(error) = run() {
+        if is_broken_pipe(error.as_ref()) {
+            std::process::exit(CLOSED_STDOUT);
+        }
         eprintln!("tasks: {error}");
         std::process::exit(2);
     }
+}
+
+/// Exit status when the reader closed stdout: 128 + SIGPIPE, what `yes | head` reports,
+/// so `set -o pipefail` still sees it (a failed `tasks run` never turns into 0).
+const CLOSED_STDOUT: i32 = 141;
+
+/// `tasks list | head`: the reader may close stdout early. `print!` then panics with
+/// "failed printing to stdout: Broken pipe", which reads like a crash; exit quietly
+/// instead. SIGPIPE stays ignored (the daemon, the same binary, must survive a client
+/// closing its socket), so only this stdout panic and propagated EPIPE errors are caught.
+fn quiet_on_closed_stdout() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let message = info
+            .payload()
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| info.payload().downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        if message.starts_with("failed printing to stdout") && message.contains("Broken pipe") {
+            std::process::exit(CLOSED_STDOUT);
+        }
+        default(info);
+    }));
+}
+
+fn is_broken_pipe(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut source = Some(error);
+    while let Some(error) = source {
+        if error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|e| e.kind() == std::io::ErrorKind::BrokenPipe)
+        {
+            return true;
+        }
+        source = error.source();
+    }
+    false
 }
 
 fn run() -> Result<()> {

@@ -385,9 +385,10 @@ pub enum Placed {
 /// One non-waiting attempt with this process's cache root, `git` from PATH and
 /// its effective cache reserve. Used by the worker's pre-admission wait.
 #[cfg(target_os = "linux")]
-pub fn try_place_outputs(cwd: &Path) -> Result<Placed> {
+pub fn try_place_outputs(cwd: &Path, argv: &[String]) -> Result<Placed> {
     try_place_outputs_in(
         cwd,
+        argv,
         &crate::cache::cache_root()?,
         "git".as_ref(),
         crate::cache::disk_space,
@@ -398,8 +399,8 @@ pub fn try_place_outputs(cwd: &Path) -> Result<Placed> {
 /// the job held/waited for its slot; it fails rather than wait while holding a
 /// shared slot that other jobs may be able to use.
 #[cfg(target_os = "linux")]
-pub fn place_outputs(cwd: &Path) -> Result<Placement> {
-    match try_place_outputs(cwd)? {
+pub fn place_outputs(cwd: &Path, argv: &[String]) -> Result<Placement> {
+    match try_place_outputs(cwd, argv)? {
         Placed::Done(placement) => Ok(placement),
         Placed::Blocked(space) => Err(format!(
             "insufficient disk space: {} (dropped below the reserve after queue admission; \
@@ -414,11 +415,12 @@ pub fn place_outputs(cwd: &Path) -> Result<Placement> {
 #[cfg(target_os = "linux")]
 pub fn try_place_outputs_in(
     cwd: &Path,
+    argv: &[String],
     cache: &Path,
     git: &std::ffi::OsStr,
     mut probe: impl FnMut(&Path) -> Result<crate::cache::DiskSpace>,
 ) -> Result<Placed> {
-    let plan = plan_outputs(cwd, cache, git)?;
+    let plan = plan_outputs(cwd, argv, cache, git)?;
     for path in plan.reserve_paths() {
         let space = probe(&path)?;
         if !space.admitted() {
@@ -499,7 +501,19 @@ fn git_root(cwd: &Path, git: &std::ffi::OsStr) -> Result<(Option<PathBuf>, Optio
 /// workspace root) additionally gets its own target link, keyed by its full
 /// canonical path. No environment (CARGO_TARGET_DIR etc.) is set or changed.
 #[cfg(target_os = "linux")]
-fn plan_outputs(cwd: &Path, cache: &Path, git: &std::ffi::OsStr) -> Result<OutputPlan> {
+fn plan_outputs(
+    cwd: &Path,
+    argv: &[String],
+    cache: &Path,
+    git: &std::ffi::OsStr,
+) -> Result<OutputPlan> {
+    let uses = OutputUse::of(argv);
+    if uses == OutputUse::None {
+        return Ok(OutputPlan {
+            cache: cache.to_path_buf(),
+            ..Default::default()
+        });
+    }
     let mut plan = OutputPlan {
         cache: cache.to_path_buf(),
         ..Default::default()
@@ -513,17 +527,43 @@ fn plan_outputs(cwd: &Path, cache: &Path, git: &std::ffi::OsStr) -> Result<Outpu
     let nested = cargo_workspace_root(&std::fs::canonicalize(cwd)?, &root)
         .filter(|workspace| *workspace != root);
     if root_cargo {
-        plan_links(
-            &root,
-            &["target", "android/build", "android/app/build"],
-            &mut plan,
-        )?;
+        let rels: &[&str] = match uses {
+            OutputUse::Cargo => &["target"],
+            _ => &["target", "android/build", "android/app/build"],
+        };
+        plan_links(&root, rels, &mut plan)?;
     }
     if let Some(workspace) = nested {
         // Android outputs remain a Git-root convention; nested gets target only.
         plan_links(&workspace, &["target"], &mut plan)?;
     }
     Ok(plan)
+}
+/// Which cache-output links a command needs, from its program name (after transparent
+/// `env` assignments). Cargo writes `target`; Gradle writes the Android outputs and may
+/// run Cargo through a plugin. A shell, script or other unknown program may run either,
+/// so it keeps every link (the cache stays off this disk). Known non-Cargo, non-Gradle
+/// tools get none, so an `npm` site build does not leave links in the checkout.
+/// Interim: moves to each tool's `outputs` in the policy file's `tools::`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputUse {
+    None,
+    Cargo,
+    All,
+}
+impl OutputUse {
+    const NONE: &'static [&'static str] = &[
+        "npm", "npx", "pnpm", "yarn", "node", "bun", "deno", "git", "ffmpeg", "adb",
+    ];
+    fn of(argv: &[String]) -> Self {
+        if tool_index(argv, &["cargo"]).is_some() {
+            Self::Cargo
+        } else if tool_index(argv, Self::NONE).is_some() {
+            Self::None
+        } else {
+            Self::All
+        }
+    }
 }
 #[cfg(target_os = "linux")]
 fn plan_links(root: &Path, rels: &[&str], plan: &mut OutputPlan) -> Result<()> {
@@ -1032,7 +1072,16 @@ mod tests {
                 git: &str,
                 probe: impl FnMut(&Path) -> Result<crate::cache::DiskSpace>,
             ) -> Result<Placed> {
-                try_place_outputs_in(cwd, &self.cache, git.as_ref(), probe)
+                self.try_place_argv(cwd, &["make".to_string()], git, probe)
+            }
+            fn try_place_argv(
+                &self,
+                cwd: &Path,
+                argv: &[String],
+                git: &str,
+                probe: impl FnMut(&Path) -> Result<crate::cache::DiskSpace>,
+            ) -> Result<Placed> {
+                try_place_outputs_in(cwd, argv, &self.cache, git.as_ref(), probe)
             }
             fn cached(&self, root: &Path, rel: &str) -> PathBuf {
                 let key = format!("{:x}", Sha256::digest(root.as_os_str().as_encoded_bytes()));
@@ -1101,6 +1150,48 @@ mod tests {
             }
             // Idempotent: existing links are neither replaced nor reported.
             assert_eq!(f.place(&root), Placement::default());
+        }
+        #[test]
+        fn links_follow_the_program_not_just_the_checkout() {
+            // pi-whitepaper 745-747: `npm --prefix site run build` in a Cargo-rooted
+            // checkout got Cargo and Android cache links it never uses.
+            let f = Fixture::new();
+            let root = f.checkout("root");
+            f.put(root.join("Cargo.toml"), WORKSPACE);
+            fs::create_dir_all(root.join("android/app")).unwrap();
+            fs::create_dir_all(root.join("site")).unwrap();
+            let place = |argv: &[&str]| {
+                let argv: Vec<String> = argv.iter().map(|s| s.to_string()).collect();
+                match f.try_place_argv(&root, &argv, GIT, ample()).unwrap() {
+                    Placed::Done(placement) => placement,
+                    Placed::Blocked(space) => panic!("unexpected block: {space:?}"),
+                }
+            };
+            for argv in [
+                &["npm", "--prefix", "site", "run", "build"][..],
+                &[
+                    "env",
+                    "NODE_ENV=production",
+                    "/usr/bin/npx",
+                    "astro",
+                    "build",
+                ],
+                &["git", "status"],
+            ] {
+                assert_eq!(place(argv), Placement::default(), "{argv:?}");
+            }
+            for rel in ["target", "android/build", "android/app/build"] {
+                assert!(fs::symlink_metadata(root.join(rel)).is_err(), "{rel}");
+            }
+            assert_eq!(
+                place(&["cargo", "build", "-j", "2"]).linked,
+                [root.join("target")]
+            );
+            // Gradle (which may also run Cargo) and unknown programs keep every link.
+            assert_eq!(
+                place(&["sh", "-c", "./gradlew assembleDebug"]).linked,
+                [root.join("android/build"), root.join("android/app/build")]
+            );
         }
         #[test]
         fn nested_independent_workspace_gets_its_own_cache_target_for_any_argv() {
