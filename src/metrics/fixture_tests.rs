@@ -167,6 +167,7 @@ fn machine(
                 .collect(),
             mem_used_bytes: bytes(points, total - available - GIB, 2 * GIB),
         },
+        cargo_jobs_max: None,
     }
 }
 

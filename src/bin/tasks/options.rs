@@ -2,7 +2,9 @@
 //! Errors name the exact problem and the correct usage instead of a generic refusal.
 use tinline_task_manager::Result;
 
-pub const RUN_USAGE: &str = "tasks run|enqueue [--who OWNER] [--run | --offload | --device SERIAL] [--peer NAME [--fetch REL]...] [--follow] -- COMMAND [ARGS...]";
+pub const RUN_USAGE: &str = "tasks run|enqueue [--who OWNER] [--run | --offload | --device SERIAL] [--peer NAME [--fetch REL]... | --anywhere] [--follow] -- COMMAND [ARGS...]";
+pub const PLACE_USAGE: &str =
+    "tasks place [--run | --device SERIAL] [--peer NAME] [--json] -- COMMAND [ARGS...]";
 const LIST_USAGE: &str =
     "tasks list [--who OWNER] [--active] [--limit N] [--json | --table | --brief]";
 const PHONE_USAGE: &str =
@@ -25,6 +27,8 @@ pub struct Enqueue {
     pub peer: Option<String>,
     /// Artifacts to fetch back from the peer's checkout after a passed job.
     pub fetch: Vec<String>,
+    /// Let placement choose this machine or a worker peer (`tasks place` shows the choice).
+    pub anywhere: bool,
 }
 
 /// Parses the options before `--`. `--follow` only makes sense when this client waits.
@@ -90,6 +94,12 @@ pub fn enqueue(options: &[String], waits: bool) -> Result<Enqueue> {
                     return Err("--peer was given twice; one job runs on one peer".into());
                 }
             }
+            "--anywhere" => {
+                if parsed.anywhere {
+                    return Err("--anywhere was given twice".into());
+                }
+                parsed.anywhere = true;
+            }
             "--fetch" => {
                 let rel = rest
                     .next()
@@ -118,8 +128,63 @@ pub fn enqueue(options: &[String], waits: bool) -> Result<Enqueue> {
                 .into(),
         );
     }
-    if !parsed.fetch.is_empty() && parsed.peer.is_none() {
-        return Err("--fetch only applies with --peer NAME".into());
+    if parsed.anywhere && parsed.peer.is_some() {
+        return Err(
+            "--anywhere and --peer conflict: --peer NAME forwards to that peer; --anywhere lets \
+             placement choose (tasks place -- COMMAND shows its choice)"
+                .into(),
+        );
+    }
+    if parsed.anywhere && parsed.class == Some(Class::Offload) {
+        return Err(
+            "--anywhere and --offload conflict: placement forwards through the peer link itself"
+                .into(),
+        );
+    }
+    if !parsed.fetch.is_empty() && parsed.peer.is_none() && !parsed.anywhere {
+        return Err("--fetch only applies with --peer NAME (or --anywhere)".into());
+    }
+    Ok(parsed)
+}
+
+/// `tasks place` options: a dry run of placement for one command.
+#[derive(Debug, Default, PartialEq)]
+pub struct Place {
+    pub class: Option<Class>,
+    pub peer: Option<String>,
+    pub json: bool,
+}
+
+pub fn place(options: &[String]) -> Result<Place> {
+    let mut parsed = Place::default();
+    let mut rest = options.iter();
+    while let Some(option) = rest.next() {
+        match option.as_str() {
+            "--run" if parsed.class.is_none() => parsed.class = Some(Class::Run),
+            "--device" if parsed.class.is_none() => {
+                parsed.class = Some(Class::Device(
+                    rest.next()
+                        .ok_or(format!(
+                            "--device needs a SERIAL value; usage: {PLACE_USAGE}"
+                        ))?
+                        .clone(),
+                ))
+            }
+            "--peer" if parsed.peer.is_none() => {
+                parsed.peer = Some(
+                    rest.next()
+                        .ok_or(format!("--peer needs a NAME value; usage: {PLACE_USAGE}"))?
+                        .clone(),
+                )
+            }
+            "--json" => parsed.json = true,
+            other => {
+                return Err(format!(
+                    "unknown or repeated option {other:?} before --; usage: {PLACE_USAGE}"
+                )
+                .into());
+            }
+        }
     }
     Ok(parsed)
 }
@@ -309,6 +374,34 @@ mod tests {
         ] {
             let error = enqueue(&args(input), true).unwrap_err().to_string();
             assert!(error.contains(expected), "{input}: {error}");
+        }
+    }
+
+    #[test]
+    fn anywhere_and_place_options_parse_and_conflict() {
+        let parsed = enqueue(&args("--who a --anywhere --fetch out"), true).unwrap();
+        assert!(parsed.anywhere);
+        assert_eq!(parsed.fetch, ["out"]);
+        assert!(enqueue(&args("--anywhere --run"), true).unwrap().anywhere);
+        for (input, expected) in [
+            ("--anywhere --anywhere", "--anywhere was given twice"),
+            ("--anywhere --peer w", "--anywhere and --peer conflict"),
+            ("--anywhere --offload", "--anywhere and --offload conflict"),
+        ] {
+            let error = enqueue(&args(input), true).unwrap_err().to_string();
+            assert!(error.contains(expected), "{input}: {error}");
+        }
+        assert_eq!(
+            place(&args("--device S --peer w --json")).unwrap(),
+            Place {
+                class: Some(Class::Device("S".into())),
+                peer: Some("w".into()),
+                json: true,
+            }
+        );
+        assert_eq!(place(&[]).unwrap(), Place::default());
+        for bad in ["--run --run", "--peer", "--offload", "--who a"] {
+            assert!(place(&args(bad)).is_err(), "{bad}");
         }
     }
 

@@ -89,6 +89,13 @@ live snapshots (usable as `TASKS_UI_REMOTE_CMD`). Design, config, failure semant
 remains before `tasks-offload` can go: [docs/design/peer-link.md](docs/design/peer-link.md);
 LAN check: `scripts/peer-lan-e2e.sh`.
 
+Placement (not deployed): `tasks run --anywhere -- CMD` lets the task manager choose this
+machine or a worker peer from the peers' live snapshots (sooner expected finish, ties to the
+worker; Cargo `-j` replaced by the chosen machine's cap); `tasks place -- CMD` prints the
+decision without submitting. `tasks mcp` `submit` has `placement` (`anywhere` by default once a
+worker peer is configured, `local`, or a peer name) and `cluster_status` lists every machine.
+Details: docs/design/peer-link.md "Placement".
+
 ## Window
 
 `tasks` (or `tasks ui`) opens a live dashboard of both machines: machine cards,

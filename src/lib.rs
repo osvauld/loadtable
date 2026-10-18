@@ -20,6 +20,7 @@ pub mod metrics;
 #[cfg(target_os = "linux")]
 pub mod peer;
 pub mod peer_link;
+pub mod placement;
 #[cfg(target_os = "linux")]
 pub mod retention;
 pub mod snapshot;

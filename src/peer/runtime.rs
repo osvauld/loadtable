@@ -7,7 +7,10 @@ use super::host::{self, DaemonJobHost};
 use super::records::{
     InboundRecord, OutboundLink, Paths, inbound_records, outbound_links, private_dir, write_json,
 };
-use crate::peer_link::{PeerLink, PeerView, PeersReport, write_peer_link};
+use crate::peer_link::{
+    PeerLink, PeerSnapshot, PeerView, PeersReport, STREAM_CONNECTING, STREAM_OFFLINE,
+    STREAM_ONLINE, STREAM_STATUS_ERROR, write_peer_link,
+};
 use std::collections::{HashMap, HashSet};
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::PermissionsExt;
@@ -236,6 +239,7 @@ async fn run(
             })
             .collect();
     }
+    keep_snapshots(&shared, &report);
     log(format!(
         "peer: endpoint {} listening on {} (LAN-only, no relay/discovery); {} allowlisted peers: {}",
         ep.id(),
@@ -252,6 +256,142 @@ async fn run(
     loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
         watch_tick(&shared, &mut finished).await;
+    }
+}
+
+/// Subscribes to the status/0 stream of every worker/both peer with an address and keeps its
+/// latest snapshot in the report (`Action::Peers` -> `snapshots`) for placement and
+/// `cluster_status`. Reconnects with backoff 1 s doubling to 30 s; logs state changes only.
+fn keep_snapshots(shared: &Arc<Shared>, report: &Arc<Mutex<PeersReport>>) {
+    // A live snapshot older than this is stale (the watcher's own stall rule, plus slack).
+    let stale_after = shared.config.status_interval.as_secs_f64() * 3.0 + 10.0;
+    let now = task_manager_peer::now_f64();
+    let peers: Vec<_> = shared
+        .config
+        .peers
+        .iter()
+        .filter(|p| p.role.runs_my_jobs() && p.addr.is_some())
+        .cloned()
+        .collect();
+    report.lock().unwrap_or_else(|p| p.into_inner()).snapshots = peers
+        .iter()
+        .map(|p| PeerSnapshot {
+            name: p.name.clone(),
+            role: format!("{:?}", p.role).to_lowercase(),
+            state: STREAM_CONNECTING.into(),
+            since: now,
+            stale: true,
+            stale_after_s: stale_after,
+            ..Default::default()
+        })
+        .collect();
+    for peer in peers {
+        let (shared, report) = (Arc::clone(shared), Arc::clone(report));
+        tokio::spawn(async move { keep_snapshot(shared, report, peer).await });
+    }
+}
+
+/// Updates the entry of `name` and logs a state change.
+fn set_peer_state(
+    shared: &Shared,
+    report: &Mutex<PeersReport>,
+    name: &str,
+    update: impl FnOnce(&mut PeerSnapshot),
+) {
+    let mut r = report.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(entry) = r.snapshots.iter_mut().find(|s| s.name == name) else {
+        return;
+    };
+    let before = entry.state.clone();
+    update(entry);
+    if entry.state != before {
+        entry.since = task_manager_peer::now_f64();
+        (shared.log)(format!(
+            "peer: status of {name}: {} -> {}{}",
+            before,
+            entry.state,
+            entry
+                .error
+                .as_deref()
+                .filter(|_| entry.state != STREAM_ONLINE)
+                .map(|e| format!(" ({e})"))
+                .unwrap_or_default()
+        ));
+    }
+}
+
+/// Drops the sparkline rings: placement and `cluster_status` read slots, jobs and estimates.
+fn trim_snapshot(mut value: serde_json::Value) -> serde_json::Value {
+    if let Some(machine) = value.get_mut("machine").and_then(|m| m.as_object_mut()) {
+        machine.remove("history");
+    }
+    for job in value
+        .get_mut("jobs")
+        .and_then(|j| j.as_array_mut())
+        .into_iter()
+        .flatten()
+    {
+        if let Some(live) = job.get_mut("live").and_then(|l| l.as_object_mut()) {
+            live.remove("history");
+        }
+    }
+    value
+}
+
+async fn keep_snapshot(
+    shared: Arc<Shared>,
+    report: Arc<Mutex<PeersReport>>,
+    peer: task_manager_peer::PeerEntry,
+) {
+    let Some(addr) = peer.addr else { return };
+    let to = task_manager_peer::peer_addr(peer.endpoint, addr);
+    let mut backoff = 1.0f64;
+    loop {
+        let name = peer.name.clone();
+        let result = status::watch_status(&shared.ep, to.clone(), shared.config.connect_timeout, {
+            let (shared, report) = (Arc::clone(&shared), Arc::clone(&report));
+            move |event| {
+                match event {
+                    status::StatusEvent::Snapshot { value, .. } => {
+                        let value = trim_snapshot(value);
+                        set_peer_state(&shared, &report, &name, |e| {
+                            e.state = STREAM_ONLINE.into();
+                            e.error = None;
+                            e.received_at = Some(task_manager_peer::now_f64());
+                            e.snapshot = Some(value);
+                        });
+                    }
+                    status::StatusEvent::Error { error, .. } => {
+                        set_peer_state(&shared, &report, &name, |e| {
+                            e.state = STREAM_STATUS_ERROR.into();
+                            e.error = Some(error);
+                        });
+                    }
+                }
+                true
+            }
+        })
+        .await;
+        let error = match result {
+            Ok(_) => "status stream ended".to_string(),
+            Err(e) => e.to_string(),
+        };
+        // A stream that delivered anything reconnects quickly again.
+        let was_up = report
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .snapshots
+            .iter()
+            .any(|s| s.name == peer.name && s.online());
+        if was_up {
+            backoff = 1.0;
+        }
+        set_peer_state(&shared, &report, &peer.name, |e| {
+            e.state = STREAM_OFFLINE.into();
+            e.error = Some(error);
+        });
+        tokio::time::sleep(Duration::from_secs_f64(backoff)).await;
+        backoff = (backoff * 2.0).min(30.0);
     }
 }
 

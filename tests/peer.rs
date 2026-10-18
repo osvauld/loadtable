@@ -978,3 +978,367 @@ fn submit_is_idempotent_per_key_and_scoped_to_the_submitting_peer() {
     });
     assert_eq!(b.jobs().len(), 1, "never two jobs for one key");
 }
+
+// ---------------------------------------------------------------------------------------------
+// MCP placement over the peer link: `tasks mcp` on A, the peer runtime's snapshots of B.
+
+/// `tasks mcp --no-start-daemon` with a node's environment (its stderr goes to the state dir).
+struct Mcp {
+    child: Child,
+    stdin: std::process::ChildStdin,
+    out: std::io::BufReader<std::process::ChildStdout>,
+    next: i64,
+}
+
+impl Mcp {
+    fn start(node: &Node) -> Self {
+        let log = std::fs::File::options()
+            .create(true)
+            .append(true)
+            .open(node.state().join("fixture-mcp.log"))
+            .unwrap();
+        let mut child = node
+            .command(&["mcp", "--no-start-daemon"], &node.root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(log)
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let out = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut mcp = Self {
+            child,
+            stdin,
+            out,
+            next: 1,
+        };
+        let init = mcp.request(
+            "initialize",
+            serde_json::json!({"protocolVersion": "2025-06-18", "capabilities": {},
+                               "clientInfo": {"name": "fixture", "version": "0"}}),
+        );
+        assert_eq!(init["result"]["serverInfo"]["name"], "tasks", "{init}");
+        mcp.send(&serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+        mcp
+    }
+    fn send(&mut self, message: &serde_json::Value) {
+        use std::io::Write;
+        let mut line = serde_json::to_vec(message).unwrap();
+        line.push(b'\n');
+        self.stdin.write_all(&line).unwrap();
+        self.stdin.flush().unwrap();
+    }
+    fn request(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
+        use std::io::BufRead;
+        let id = self.next;
+        self.next += 1;
+        self.send(
+            &serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}),
+        );
+        loop {
+            let mut line = String::new();
+            let n = self.out.read_line(&mut line).unwrap();
+            assert!(n > 0, "tasks mcp closed its stdout");
+            let message: serde_json::Value = serde_json::from_str(&line).unwrap();
+            if message["id"] == id {
+                return message;
+            }
+        }
+    }
+    /// A tools/call result (a result, not a JSON-RPC error).
+    fn tool(&mut self, name: &str, arguments: serde_json::Value) -> serde_json::Value {
+        let reply = self.request(
+            "tools/call",
+            serde_json::json!({"name": name, "arguments": arguments}),
+        );
+        assert!(reply.get("error").is_none(), "{reply}");
+        reply["result"].clone()
+    }
+}
+
+impl Drop for Mcp {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn text_of(result: &serde_json::Value) -> String {
+    result["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// A's peer runtime's view of B.
+fn peer_view(a: &Node, name: &str) -> Option<tinline_task_manager::peer_link::PeerSnapshot> {
+    tinline_task_manager::peer_link::request_peers(&a.socket(), Duration::from_secs(5))
+        .ok()?
+        .snapshots
+        .into_iter()
+        .find(|s| s.name == name)
+}
+
+fn wait_peer_online(a: &Node, b: &Node) {
+    until("B online in A's peer runtime", &[a, b], WAIT, || {
+        peer_view(a, b.name).filter(|s| s.online() && !s.stale && s.snapshot.is_some())
+    });
+}
+
+fn hostname() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .unwrap()
+        .trim()
+        .to_owned()
+}
+
+/// Holds a node's compile slot (its isolated `p2p-build.lock`) like a running build would,
+/// until dropped. Close-on-exec (std default), so no fixture process inherits it.
+fn hold_compile_slot(node: &Node) -> std::fs::File {
+    let file = std::fs::File::options()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(node.root.join("locks/p2p-build.lock"))
+        .unwrap();
+    file.lock().unwrap();
+    file
+}
+
+fn compile_slot_busy(snapshot: &serde_json::Value) -> bool {
+    snapshot["machine"]["slots"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|s| s["kind"] == "compile" && s["busy"] == true)
+}
+
+fn local_status(node: &Node) -> serde_json::Value {
+    let status = tinline_task_manager::request_status(&node.socket(), Duration::from_secs(30))
+        .unwrap()
+        .status
+        .unwrap();
+    serde_json::to_value(status).unwrap()
+}
+
+#[test]
+fn mcp_submit_to_a_named_peer_runs_there_and_names_it() {
+    let (a, b) = pair("mcp-named");
+    let repo = repo(&a);
+    wait_peer_online(&a, &b);
+    let mut mcp = Mcp::start(&a);
+    let result = mcp.tool(
+        "submit",
+        serde_json::json!({"who": "fixture-agent", "cwd": repo, "class": "run",
+                           "argv": ["/bin/sh", "-c", "echo hello-mcp-beta"],
+                           "placement": "beta", "wait": true, "timeout_s": 170,
+                           "tail_lines": 50}),
+    );
+    assert_eq!(
+        result["isError"],
+        false,
+        "{result}\n{}",
+        diagnose(&[&a, &b])
+    );
+    let s = &result["structuredContent"];
+    assert_eq!(s["phase"], "passed", "{result}\n{}", diagnose(&[&a, &b]));
+    let b_job = only_job(&b);
+    assert_eq!(b_job.phase, Phase::Passed);
+    // The result names the machine, why, and the remote job id.
+    assert_eq!(s["machine"], "beta", "{result}");
+    assert_eq!(s["remote_job_id"], b_job.id, "{result}");
+    assert_eq!(s["placement"]["forwarded"], true);
+    assert_eq!(s["decision"]["requested"], "beta");
+    assert!(
+        s["decision"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("named explicitly")
+    );
+    let text = text_of(&result);
+    assert!(
+        text.contains(&format!("remote job {} on beta", b_job.id)),
+        "{text}"
+    );
+    assert!(
+        s["log_tail"].as_str().unwrap().contains("hello-mcp-beta"),
+        "{result}"
+    );
+    // The `job` tool says the same later.
+    let a_id = s["job_id"].as_i64().unwrap();
+    let job = mcp.tool("job", serde_json::json!({"id": a_id}));
+    assert_eq!(job["structuredContent"]["machine"], "beta", "{job}");
+    assert_eq!(job["structuredContent"]["remote_job_id"], b_job.id, "{job}");
+    assert!(
+        text_of(&job).contains("named explicitly"),
+        "{}",
+        text_of(&job)
+    );
+}
+
+#[test]
+fn mcp_cluster_status_lists_both_machines() {
+    let (a, b) = pair("mcp-status");
+    wait_peer_online(&a, &b);
+    let mut mcp = Mcp::start(&a);
+    let result = mcp.tool("cluster_status", serde_json::json!({}));
+    assert_eq!(result["isError"], false, "{result}");
+    let machines = result["structuredContent"]["machines"].as_array().unwrap();
+    assert_eq!(machines.len(), 2, "{result}");
+    assert_eq!(machines[0]["local"], true);
+    assert_eq!(machines[0]["name"], hostname());
+    assert_eq!(machines[0]["cargo_jobs_max"], 2);
+    assert_eq!(machines[1]["name"], "beta");
+    assert_eq!(machines[1]["local"], false);
+    assert_eq!(machines[1]["online"], true);
+    assert_eq!(machines[1]["stale"], false);
+    assert!(machines[1]["age_s"].as_f64().unwrap() < 30.0, "{result}");
+    assert_eq!(machines[1]["machine_id"], hostname());
+    assert!(machines[1]["snapshot"]["machine"]["slots"].is_array());
+    assert!(machines[1]["snapshot"]["machine"]["history"].is_null());
+    let text = text_of(&result);
+    assert!(
+        text.contains("=== peer beta (worker): online [online]"),
+        "{text}"
+    );
+}
+
+#[test]
+fn mcp_anywhere_goes_where_the_compile_slot_is_free() {
+    let (a, b) = pair("mcp-anywhere");
+    let repo = repo(&a);
+    wait_peer_online(&a, &b);
+    let mut mcp = Mcp::start(&a);
+    let submit = |mcp: &mut Mcp, tag: &str| {
+        // No placement argument: a worker peer is configured, so the default is anywhere.
+        mcp.tool(
+            "submit",
+            serde_json::json!({"who": "fixture-agent", "cwd": repo,
+                               "argv": ["/bin/sh", "-c", format!("echo placed-{tag}")],
+                               "wait": true, "timeout_s": 170, "tail_lines": 20}),
+        )
+    };
+
+    // 1. A's compile slot held, B idle: B.
+    let held = hold_compile_slot(&a);
+    until("A's compile slot busy", &[&a, &b], WAIT, || {
+        compile_slot_busy(&local_status(&a)).then_some(())
+    });
+    let result = submit(&mut mcp, "one");
+    drop(held);
+    // A sample exchange for the record (visible with --nocapture).
+    eprintln!(
+        "sample submit result:\n{}\n{}",
+        text_of(&result),
+        serde_json::to_string_pretty(&result["structuredContent"]["decision"]).unwrap()
+    );
+    let s = &result["structuredContent"];
+    assert_eq!(
+        result["isError"],
+        false,
+        "{result}\n{}",
+        diagnose(&[&a, &b])
+    );
+    assert_eq!(s["phase"], "passed", "{result}\n{}", diagnose(&[&a, &b]));
+    assert_eq!(s["machine"], "beta", "{result}");
+    assert_eq!(s["decision"]["requested"], "anywhere");
+    let b_job = only_job(&b);
+    assert_eq!(s["remote_job_id"], b_job.id, "{result}");
+    assert!(
+        text_of(&result).contains("placement anywhere -> beta"),
+        "{result}"
+    );
+    let here = s["decision"]["scores"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["target"]["kind"] == "local")
+        .unwrap();
+    assert!(
+        here["wait_basis"].as_str().unwrap().contains("slot held"),
+        "{here}"
+    );
+
+    // 2. B's compile slot held, A idle: A (no forwarding, B gets no new job).
+    let held = hold_compile_slot(&b);
+    until("B's held slot seen by A", &[&a, &b], WAIT, || {
+        let view = peer_view(&a, "beta")?;
+        (!view.stale && compile_slot_busy(view.snapshot.as_ref()?)).then_some(())
+    });
+    until("A's compile slot free", &[&a, &b], WAIT, || {
+        (!compile_slot_busy(&local_status(&a))).then_some(())
+    });
+    let result = submit(&mut mcp, "two");
+    drop(held);
+    let s = &result["structuredContent"];
+    assert_eq!(
+        result["isError"],
+        false,
+        "{result}\n{}",
+        diagnose(&[&a, &b])
+    );
+    assert_eq!(s["phase"], "passed", "{result}\n{}", diagnose(&[&a, &b]));
+    assert_eq!(s["machine"], hostname(), "{result}");
+    assert_eq!(s["placement"]["forwarded"], false, "{result}");
+    assert_eq!(b.jobs().len(), 1, "nothing new was forwarded");
+    let a_job = a.jobs().into_iter().max_by_key(|j| j.id).unwrap();
+    assert!(
+        a.job_log(a_job.id).contains("placed-two"),
+        "{}",
+        a.job_log(a_job.id)
+    );
+}
+
+#[test]
+fn mcp_anywhere_falls_back_when_the_peer_is_down_and_a_named_peer_is_a_clean_error() {
+    let mut a = Node::new("mcp-down", "alpha");
+    let b = Node::new("mcp-down", "beta");
+    a.allow(&b, "worker");
+    a.start();
+    let repo = repo(&a);
+    // B never starts: A's runtime reports it offline once its first connect fails.
+    until("B offline in A's peer runtime", &[&a], WAIT, || {
+        peer_view(&a, "beta").filter(|s| s.state == "offline")
+    });
+    let mut mcp = Mcp::start(&a);
+    let result = mcp.tool(
+        "submit",
+        serde_json::json!({"who": "fixture-agent", "cwd": repo, "placement": "anywhere",
+                           "argv": ["/bin/sh", "-c", "echo fell-back"],
+                           "wait": true, "timeout_s": 170}),
+    );
+    let s = &result["structuredContent"];
+    assert_eq!(result["isError"], false, "{result}\n{}", diagnose(&[&a]));
+    assert_eq!(s["phase"], "passed", "{result}\n{}", diagnose(&[&a]));
+    assert_eq!(s["machine"], hostname(), "{result}");
+    let notes = s["placement"]["notes"].to_string();
+    assert!(
+        notes.contains("beta skipped: offline") && notes.contains("fell back to local"),
+        "{result}"
+    );
+    assert!(
+        text_of(&result).contains("beta skipped: offline"),
+        "{result}"
+    );
+    // Named explicitly: a clean tool error, nothing submitted.
+    let before = a.jobs().len();
+    let result = mcp.tool(
+        "submit",
+        serde_json::json!({"who": "fixture-agent", "cwd": repo, "placement": "beta",
+                           "argv": ["/bin/sh", "-c", "true"]}),
+    );
+    assert_eq!(result["isError"], true, "{result}");
+    let text = text_of(&result);
+    assert!(
+        text.contains("peer beta is offline") && text.contains("nothing was submitted"),
+        "{text}"
+    );
+    assert_eq!(a.jobs().len(), before, "nothing was submitted");
+    // cluster_status shows it offline.
+    let status = mcp.tool("cluster_status", serde_json::json!({}));
+    let machines = status["structuredContent"]["machines"].as_array().unwrap();
+    assert_eq!(machines[1]["name"], "beta");
+    assert_eq!(machines[1]["online"], false);
+    assert_eq!(machines[1]["state"], "offline");
+}

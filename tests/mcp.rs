@@ -138,6 +138,8 @@ impl Client {
             .args(["mcp", "--no-start-daemon"])
             .env("TASK_MANAGER_STATE_DIR", state)
             .env("TASKS_LOCK_DIR", state.join("locks"))
+            // Hermetic: never this user's peer config (no peers = placement is local).
+            .env("TASKS_PEER_CONFIG", state.join("no-peer-config.toml"))
             .env_remove("TASKS_MAX_CARGO_JOBS")
             .env_remove("TASKS_DENIED_DEVICES")
             .stdin(Stdio::piped())
