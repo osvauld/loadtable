@@ -96,6 +96,13 @@ decision without submitting. `tasks mcp` `submit` has `placement` (`anywhere` by
 worker peer is configured, `local`, or a peer name) and `cluster_status` lists every machine.
 Details: docs/design/peer-link.md "Placement".
 
+Reroute (not deployed): with a worker peer configured, the daemon re-scores its waiting,
+not-yet-started compile jobs every 20 s and moves one (same job id) to an idle worker peer when
+that finishes it at least 2x and 5 min sooner; a failed move puts it back at its queue position.
+`tasks run --pin` (MCP `pin: true`, or placement `local`/a named peer) keeps a job where it is.
+Peers marked as lacking a capability the job needs are skipped. Knobs: `TASKS_REROUTE*` or the
+policy file's `reroute::` section (src/reroute.rs).
+
 ## Policy: broad `cargo test` builds (not deployed)
 
 A `cargo test` with a name filter but no target selector (`--lib`, `--test T`, `--bin B`,
@@ -115,7 +122,9 @@ own policy. The policy is a strict HUML file, `~/.config/tasks/policy.huml` (or 
 sample: [deploy/policy.huml](deploy/policy.huml)) holding `broad_test: "refuse" | "warn"`,
 overridden by `TASKS_BROAD_TEST=refuse|warn`. Unknown keys or bad values are reported loudly
 (daemon log, `tasks admission`, every submit) and the defaults apply. `tasks admission` shows
-the effective value and its source (default, file or env).
+the effective value and its source (default, file or env). The same file can hold `health::`
+(health monitor thresholds) and `reroute::` sections; the `TASKS_HEALTH_*`/`TASKS_REROUTE*`
+variables win over them (see the sample).
 
 ## Log search, compile attribution and job cost (MCP; not deployed)
 

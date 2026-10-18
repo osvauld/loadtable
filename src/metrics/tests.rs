@@ -586,6 +586,7 @@ pub(super) fn job(
             detail: String::new(),
             metrics,
             peer: None,
+            reroute: None,
         }),
     }
 }

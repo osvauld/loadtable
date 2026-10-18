@@ -58,7 +58,7 @@ impl BroadTest {
 }
 
 /// The policy document.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
     #[serde(default)]
@@ -70,10 +70,17 @@ pub struct Policy {
         skip_serializing_if = "crate::health::config::HealthPolicy::is_empty"
     )]
     pub health: crate::health::config::HealthPolicy,
+    /// Reroute knobs (`reroute::` section; `reroute::Policy`). Each `TASKS_REROUTE*`
+    /// environment variable wins over its key. Read when the peer runtime starts.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::reroute::ReroutePolicy::is_empty"
+    )]
+    pub reroute: crate::reroute::ReroutePolicy,
 }
 
 /// The policy in force and where each value came from (what `tasks admission` shows).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Effective {
     pub policy: Policy,
     /// The file consulted (whether or not it exists).
@@ -103,6 +110,12 @@ impl Effective {
             let set = serde_json::to_string(&self.policy.health).unwrap_or_default();
             out.push_str(&format!(
                 "policy: health {set} (from file; TASKS_HEALTH_* variables win)\n"
+            ));
+        }
+        if !self.policy.reroute.is_empty() {
+            let set = serde_json::to_string(&self.policy.reroute).unwrap_or_default();
+            out.push_str(&format!(
+                "policy: reroute {set} (from file; TASKS_REROUTE* variables win)\n"
             ));
         }
         for e in &self.errors {
@@ -322,6 +335,19 @@ mod tests {
         assert_eq!(p.health.interval_s, None);
         let typo = parse("%HUML v0.2.0\nhealth::\n  slot_orphan: 300\n").unwrap_err();
         assert!(typo.contains("slot_orphan"), "{typo}");
+    }
+
+    #[test]
+    fn the_reroute_section_parses_strictly() {
+        let p = parse(
+            "%HUML v0.2.0\nreroute::\n  enabled: false\n  interval_s: 60\n  min_ratio: 1.5\n",
+        )
+        .unwrap();
+        assert_eq!(p.reroute.enabled, Some(false));
+        assert_eq!(p.reroute.interval_s, Some(60.0), "an integer is a number");
+        assert_eq!(p.reroute.min_ratio, Some(1.5));
+        assert_eq!(p.reroute.min_gain_s, None);
+        assert!(parse("%HUML v0.2.0\nreroute::\n  ratio: 2\n").is_err());
     }
 
     #[test]

@@ -89,6 +89,8 @@ fn run() -> Result<()> {
     let mut output = options::Output::Full;
     // A placement decision to record once the job id is known (`--anywhere`).
     let mut placed: Option<tinline_task_manager::placement::Decision> = None;
+    // `--pin`: written before approval, so reroute never sees the job unpinned.
+    let mut pin = false;
     let action = match args.first().map(String::as_str) {
         None | Some("ui") if args.len() <= 1 => return open_ui(None),
         Some("ui") if args.len() == 3 && args[1] == "--fixtures" => {
@@ -200,6 +202,7 @@ fn run() -> Result<()> {
             if parsed.follow {
                 output = options::Output::Follow;
             }
+            pin = parsed.pin;
             if owner.trim().is_empty() || owner.len() > 128 {
                 return Err("bounded owner required".into());
             }
@@ -362,6 +365,20 @@ fn run() -> Result<()> {
         )
     {
         eprintln!("tasks: could not record the placement of job {id}: {e}");
+    }
+    if pin
+        && let Some(id) = response.submitted_id
+        && let Err(e) = tinline_task_manager::reroute::pin(
+            &fs::canonicalize(state_dir()).unwrap_or_else(|_| state_dir()),
+            id,
+            "--pin at submit",
+        )
+    {
+        // Not approved yet: refuse to start it unpinned.
+        return Err(format!(
+            "could not pin job {id} ({e}); it was submitted but NOT approved: cancel it with tasks cancel {id}"
+        )
+        .into());
     }
     if submitting && let Some(id) = response.submitted_id {
         let job = response.jobs.iter().find(|j| j.id == id);
@@ -834,6 +851,7 @@ fn wait_job(
 ) -> Result<(tinline_task_manager::Job, i32)> {
     use options::Output;
     let mut previous = None;
+    let mut rerouted: Option<String> = None;
     let mut live = LiveLog {
         id,
         output,
@@ -872,6 +890,13 @@ fn wait_job(
         if previous.as_ref() != Some(&j.phase) {
             eprintln!("tasks: job {id} {:?}", j.phase);
             previous = Some(j.phase.clone());
+        }
+        // A waiting job moved to a peer (or back): say so once per state.
+        if let Some(r) = j.execution.as_ref().and_then(|e| e.reroute.as_ref())
+            && rerouted.as_deref() != Some(r.state.as_str())
+        {
+            eprintln!("tasks: job {id} {}", r.summary());
+            rerouted = Some(r.state.clone());
         }
         live.pump(false);
         if j.phase.terminal() {

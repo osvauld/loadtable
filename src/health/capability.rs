@@ -212,6 +212,41 @@ pub fn blocking<'a>(
     marks.into_iter().find(|m| needed(&m.family, argv, cwd))
 }
 
+/// The marks about each peer, as placement sees them ([`crate::placement::marks_for`]: this
+/// machine's own marks of the peer plus the ones the peer publishes in its snapshot). Reroute
+/// consults it through [`crate::reroute::Capabilities`], so a waiting job is never moved to a
+/// peer that lacks what it needs, the same way `anywhere` placement skips that peer.
+#[derive(Clone, Debug, Default)]
+pub struct PeerMarks(pub Vec<(String, Vec<CapabilityMark>)>);
+
+impl PeerMarks {
+    pub fn new(peers: &[crate::placement::Peer], local: &[CapabilityMark]) -> Self {
+        Self(
+            peers
+                .iter()
+                .map(|p| (p.name.clone(), crate::placement::marks_for(p, local)))
+                .collect(),
+        )
+    }
+    /// With this machine's marks from `state`.
+    pub fn load(state: &Path, peers: &[crate::placement::Peer]) -> Self {
+        Self::new(peers, &Marks::load(state).marks)
+    }
+}
+
+impl crate::reroute::Capabilities for PeerMarks {
+    fn lacks(&self, node: &str, argv: &[String], cwd: Option<&Path>) -> Option<String> {
+        let (_, marks) = self.0.iter().find(|(name, _)| name == node)?;
+        let m = blocking(marks, argv, cwd)?;
+        let what = m.lacks();
+        Some(format!(
+            "{} ({})",
+            what.strip_prefix("lacks ").unwrap_or(&what),
+            m.evidence()
+        ))
+    }
+}
+
 /// A manual clear request file body.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ClearRequest {
@@ -276,6 +311,33 @@ mod tests {
             expires_at: 1000.0,
             source: "job log".into(),
         }
+    }
+
+    #[test]
+    fn peer_marks_answer_reroute_for_the_commands_that_need_the_capability() {
+        use crate::reroute::Capabilities;
+        let nixos = crate::placement::Peer {
+            name: "nixos".into(),
+            ..Default::default()
+        };
+        let other = crate::placement::Peer {
+            name: "other".into(),
+            ..Default::default()
+        };
+        let marks = PeerMarks::new(
+            &[nixos, other],
+            &[mark("nixos", "libclang", 7, "cargo build")],
+        );
+        let why = marks
+            .lacks("nixos", &words("cargo build -p a"), None)
+            .unwrap();
+        assert!(
+            !why.starts_with("lacks ") && why.contains("job #7: Unable to find libclang"),
+            "{why}"
+        );
+        assert_eq!(marks.lacks("nixos", &words("sh -c true"), None), None);
+        assert_eq!(marks.lacks("other", &words("cargo build"), None), None);
+        assert_eq!(marks.lacks("unknown", &words("cargo build"), None), None);
     }
 
     #[test]

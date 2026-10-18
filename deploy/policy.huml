@@ -29,3 +29,12 @@ broad_test: "refuse"
 #   notify: "off"           # on | off | file:/ABS/PATH
 # Also: disk_scan_s, disk_scan_files, disk_scan_max_s, pressure_s, idle_peer_s, peer_s,
 # high_cpu_h, capability_ttl_h.
+
+# Rerouting of waiting jobs to an idle worker peer (src/reroute.rs), read when the peer
+# runtime starts. TASKS_REROUTE, TASKS_REROUTE_INTERVAL_S, TASKS_REROUTE_MIN_RATIO and
+# TASKS_REROUTE_MIN_GAIN_S win over these keys. An invalid value disables rerouting.
+# reroute::
+#   enabled: true
+#   interval_s: 20          # 1..3600
+#   min_ratio: 2.0          # move only when the peer finishes >= this many times sooner
+#   min_gain_s: 300         # ... and at least this many seconds sooner (0..86400)

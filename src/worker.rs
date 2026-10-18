@@ -454,6 +454,8 @@ fn execute_local(
         &dir,
         b"TRUSTED LIVE COMMAND: cwd is NOT snapshotted; no immutable-source/artifact guarantee\n",
     );
+    // A job rerouted before this directory existed gets its move line now.
+    crate::reroute::flush_pending_line(state, store, job.id);
     // Metrics: cold/unknown build state BEFORE output placement can create a
     // target link. Diagnostic only; a failure to record it never fails the job.
     let start = crate::metrics::warmth::at_start(&recipe.argv, Path::new(&job.spec.source));
@@ -465,51 +467,68 @@ fn execute_local(
             "Cancelled while waiting for disk reserve",
         );
     }
-    for stage in recipe.stages() {
-        if cancelled(store, job.id)? || STOP.load(Ordering::SeqCst) {
-            return store.finish(
-                job.id,
-                Phase::Cancelled,
-                "Cancelled before local command stage",
-            );
-        }
-        let result = supervise(state, lock, &lease, store, job.id, stage, worker)?;
-        with_ledger(state, job.id, "stage result", || {
-            let mut e = store.execution(job.id)?.ok_or("missing execution")?;
-            e.supervisor = None;
-            e.stages.push(result.timing.clone());
-            store.update_execution(
-                job.id,
-                if stage == "build" {
-                    Phase::Building
-                } else {
-                    Phase::Running
-                },
-                e,
-            )
-        })?;
-        if cancelled(store, job.id)? || STOP.load(Ordering::SeqCst) {
-            return with_ledger(state, job.id, "cancel record", || {
-                store.finish(
+    // The spec can change under a waiting job: a reroute turns it into the forward to a peer
+    // (its local admission withdraws), a forward that submitted nothing turns it back.
+    // Re-read: a reroute may have claimed the job while it waited for the disk reserve.
+    let mut current = with_ledger(state, job.id, "job re-read", || store.job(job.id))?;
+    'spec: loop {
+        let recipe = crate::local_command::Recipe::from_spec(&current.spec)?;
+        let ran = crate::reroute::spec_key(&current.spec)?;
+        for stage in recipe.stages() {
+            if cancelled(store, job.id)? || STOP.load(Ordering::SeqCst) {
+                return store.finish(
                     job.id,
                     Phase::Cancelled,
-                    "Cancelled local command; owned group stopped",
-                )
-            });
-        }
-        if result.timing.exit_code != Some(0) {
-            return with_ledger(state, job.id, "failure record", || {
-                store.finish(
+                    "Cancelled before local command stage",
+                );
+            }
+            let result = supervise(state, lock, &lease, store, job.id, stage, worker)?;
+            if let crate::reroute::Next::Respec(note) =
+                with_ledger(state, job.id, "reroute check", || {
+                    crate::reroute::after_stage(state, store, job.id, &ran, stage)
+                })?
+            {
+                append_log(&dir, note.as_bytes());
+                current = with_ledger(state, job.id, "job re-read", || store.job(job.id))?;
+                continue 'spec;
+            }
+            with_ledger(state, job.id, "stage result", || {
+                let mut e = store.execution(job.id)?.ok_or("missing execution")?;
+                e.supervisor = None;
+                e.stages.push(result.timing.clone());
+                store.update_execution(
                     job.id,
-                    Phase::Failed,
-                    "Local command failed; inspect retained log",
+                    if stage == "build" {
+                        Phase::Building
+                    } else {
+                        Phase::Running
+                    },
+                    e,
                 )
-            });
+            })?;
+            if cancelled(store, job.id)? || STOP.load(Ordering::SeqCst) {
+                return with_ledger(state, job.id, "cancel record", || {
+                    store.finish(
+                        job.id,
+                        Phase::Cancelled,
+                        "Cancelled local command; owned group stopped",
+                    )
+                });
+            }
+            if result.timing.exit_code != Some(0) {
+                return with_ledger(state, job.id, "failure record", || {
+                    store.finish(
+                        job.id,
+                        Phase::Failed,
+                        "Local command failed; inspect retained log",
+                    )
+                });
+            }
         }
+        return with_ledger(state, job.id, "completion", || {
+            store.complete_success(job.id)
+        });
     }
-    with_ledger(state, job.id, "completion", || {
-        store.complete_success(job.id)
-    })
 }
 
 const DISK_WAIT_LOG_INTERVAL: Duration = Duration::from_secs(60);
@@ -981,14 +1000,26 @@ pub fn admit(id: i64, stage: &str, supervisor: ProcessIdentity) -> Result<()> {
         return Err("unknown native admission stage".into());
     }
     let state = state()?;
-    let store = database(&state)?;
+    let mut store = database(&state)?;
     let job = with_ledger(&state, id, "admission job read", || store.job(id))?;
     catalog::validate_claimed(&job)?;
+    // The spec this admission is for: a reroute that claims the job meanwhile changes it, and
+    // then this admission withdraws (waiting) or does not commit (slot already taken).
+    let ran = crate::reroute::spec_key(&job.spec)?;
+    let rerouted = std::cell::Cell::new(false);
+    let checked = std::cell::Cell::new(Instant::now());
     // Admission may wait a long time; a busy ledger during that wait is retried,
     // never read as a cancel. This process's stderr is the job log.
     let probe = std::cell::RefCell::new(CancelProbe::default());
     let unavailable = std::cell::RefCell::new(None::<String>);
     let stop_waiting = || {
+        if checked.get().elapsed() >= Duration::from_millis(500) {
+            checked.set(Instant::now());
+            if store.spec_changed(id, &ran).unwrap_or(false) {
+                rerouted.set(true);
+                return true;
+            }
+        }
         let state = probe
             .borrow_mut()
             .poll(|| ledger::cancel_requested(&store, id), &mut |note| {
@@ -1004,6 +1035,12 @@ pub fn admit(id: i64, stage: &str, supervisor: ProcessIdentity) -> Result<()> {
         }
     };
     let not_admitted = |what: &str| -> Box<dyn std::error::Error + Send + Sync> {
+        if rerouted.get() {
+            return format!(
+                "{what} withdrawn: job {id} was rerouted to a peer before it started here"
+            )
+            .into();
+        }
         match unavailable.borrow().as_ref() {
             Some(why) => ledger::LedgerUnavailable(format!("{what} abandoned: {why}")).into(),
             None => format!("{what} cancelled or owner disappeared").into(),
@@ -1056,7 +1093,9 @@ pub fn admit(id: i64, stage: &str, supervisor: ProcessIdentity) -> Result<()> {
     } else {
         admission::Kind::Run
     };
-    let Some(lease) = admission::acquire_offload(
+    // A job back from a failed reroute queues with its first wait time (original position).
+    let since = crate::reroute::queued_since(&job_dir(&state, id), stage);
+    let Some(lease) = admission::acquire_offload_since(
         kind,
         fetches,
         &format!("{}:job-{id}", job.spec.owner),
@@ -1064,11 +1103,31 @@ pub fn admit(id: i64, stage: &str, supervisor: ProcessIdentity) -> Result<()> {
             "{} __command {id} {stage} {} {}",
             job.spec.suite, supervisor.pid, supervisor.start_ticks
         ),
+        since,
         || STOP.load(Ordering::SeqCst) || !alive(&supervisor) || !alive(worker) || stop_waiting(),
     )?
     else {
         return Err(not_admitted("native admission"));
     };
+    #[cfg(debug_assertions)]
+    crate::reroute::test_admit_hold(id, stage);
+    // Commit under the ledger write lock: from here on no reroute can claim this job. If one
+    // claimed it first, release the slot without running anything.
+    let committed = with_ledger(&state, id, "admission commit", || {
+        store.commit_admission(&state, id, stage, &ran)
+    })?;
+    if !committed {
+        drop(lease);
+        append_log(
+            &job_dir(&state, id),
+            format!(
+                "tasks: {stage} slot taken just as job {id} was rerouted; released it unused (nothing ran here)\n"
+            )
+            .as_bytes(),
+        );
+        rerouted.set(true);
+        return Err(not_admitted("native admission"));
+    }
     lease.inherit()?;
     append_log(
         &job_dir(&state, id),
@@ -1377,10 +1436,7 @@ fn run_command(state: &Path, dir: &Path, job: &crate::Job, stage: &str) -> Resul
             &crate::metrics::sampler::children_usage(),
         );
         let _ = save(
-            &dir.join(format!(
-                "{stage}{}",
-                crate::metrics::sampler::USAGE_SUFFIX
-            )),
+            &dir.join(format!("{stage}{}", crate::metrics::sampler::USAGE_SUFFIX)),
             &usage,
         );
         save(

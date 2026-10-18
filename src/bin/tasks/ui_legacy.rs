@@ -432,6 +432,7 @@ mod tests {
                 detail: String::new(),
                 metrics: None,
                 peer: None,
+                reroute: None,
             }),
         }
     }

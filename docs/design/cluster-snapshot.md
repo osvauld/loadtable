@@ -71,7 +71,11 @@ guessed. Unknown fields must be ignored by readers (forward compatible).
       "kind": "lib"|"bin"|"test"|"build-script"|"build-script-run"|"doctest"|"doc"|"cargo",
       "pid": 4242, "elapsed_s": 12.4, "cpu": 0.98 | null, "rss_bytes": 0
     } ],
-    "broad_test_build": true                      // optional: only present (true) for a broad cargo test
+    "broad_test_build": true,                     // optional: only present (true) for a broad cargo test
+    "reroute": {                                  // optional (feature/reroute): only for a job that moved
+      "state": "moving"|"moved"|"returned", "moved_from": "kurukkan", "moved_to": "nixos",
+      "reason": "rerouted: ...", "at": 1792216000, "remote_job_id": 77 | null, "note": null
+    }
   } ],
   "stream": {                                     // added by the watchers only (see below);
     "transport": "iroh" | "ssh", "peer": "...",   // never printed by `tasks status --json`
@@ -342,6 +346,17 @@ readers and the fixtures are unchanged (the contract test checks that).
   `--example(s)`, `--bench(es)`, `--all-targets`) builds every test target of the package
   (`metrics::testscope`). The submission policy (`src/policy.rs`, README "Policy") refuses
   or warns about it at submit.
+
+## feature/reroute: `jobs[].reroute` (additive, optional)
+
+Present only on a job that the daemon's reroute loop moved to a worker peer (`src/reroute.rs`;
+same job id, the job becomes the local mirror of the forward); omitted otherwise, so older
+readers and fixtures are unchanged. From `execution.reroute` in the ledger: `state` `moving`
+(claimed, the forward is starting), `moved` (the peer has it; `remote_job_id` once known) or
+`returned` (the forward submitted nothing; the job waits here again at its original queue
+position, `note` says why). `reason` is the decision line also written to the job log. Reroute
+skips a peer whose missing-capability marks (`health.capabilities`, below) the job needs, as
+placement does.
 
 ## `health` (feature/health-alerts; additive, optional)
 

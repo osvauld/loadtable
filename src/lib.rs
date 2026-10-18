@@ -24,6 +24,7 @@ pub mod peer;
 pub mod peer_link;
 pub mod placement;
 pub mod policy;
+pub mod reroute;
 #[cfg(target_os = "linux")]
 pub mod retention;
 pub mod snapshot;
@@ -68,7 +69,7 @@ pub enum Phase {
     Cancelled,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct JobSpec {
     pub suite: String,
     pub owner: String,

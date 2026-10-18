@@ -146,6 +146,24 @@ pub struct JobView {
     /// it builds every test target of the package (feature/log-search). Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub broad_test_build: Option<bool>,
+    /// The move of this waiting job to a peer (`reroute`); absent when it never moved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reroute: Option<RerouteView>,
+}
+
+/// What the snapshot shows about a rerouted job.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RerouteView {
+    /// `moving`, `moved` or `returned`.
+    pub state: String,
+    pub moved_from: String,
+    pub moved_to: String,
+    pub reason: String,
+    pub at: i64,
+    #[serde(default)]
+    pub remote_job_id: Option<i64>,
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
