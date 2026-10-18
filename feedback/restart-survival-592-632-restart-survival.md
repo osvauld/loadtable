@@ -64,3 +64,20 @@
 - Workaround requested/authorized: none. Friction: the worker's single compile slot
   queued my test run behind three Android builds for 13 min; I cancelled my own stale job
   rather than hold a second submission.
+
+## Addendum: merge into feature/osvauld-foundation and install scripts (2026-10-18)
+
+- Job IDs: laptop 637 (worker 200: matrix after the merge; every target failed to build
+  on log-search's new `Recipe.broad_test` field in my test fixtures), laptop job for worker
+  201 (matrix plus `nix flake check` after fix 81a2108).
+- Observed: the merge conflicts were all additive (`reroute` and `remote_result` side by
+  side), but a field added on another branch broke struct literals in tests that
+  `git merge-tree` cannot see. A plain `cargo check --all-targets` right after a merge
+  catches this in minutes; the full matrix takes much longer behind the single compile slot.
+- Install path: neither installed release (laptop 7df4fe15, worker plain file) has
+  `tasks drain`, so the first upgrade still has to wait for "no live jobs" and has the
+  admission window that drain removes. Every later upgrade can use drain.
+- Laptop: no systemd user unit, so after a reboot nothing runs until the first `tasks`
+  command starts the daemon. The script prints this and proposes a unit; it does not apply it.
+- Acceptance: after both installs, `tasks --usage-probe` mentions `drain [--timeout`, and
+  `tasks doctor` is green on the worker with LIBCLANG_PATH in the daemon environment.
