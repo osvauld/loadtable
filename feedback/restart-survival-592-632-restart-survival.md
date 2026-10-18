@@ -81,3 +81,11 @@
   command starts the daemon. The script prints this and proposes a unit; it does not apply it.
 - Acceptance: after both installs, `tasks --usage-probe` mentions `drain [--timeout`, and
   `tasks doctor` is green on the worker with LIBCLANG_PATH in the daemon environment.
+- Defect I introduced and fixed after the merge (5a184b1): my 2 s "worker started?" wait
+  probed worker.lock with try_lock every 20 ms, so a worker starting in that instant failed
+  its own lock and exited. It showed up only in the merged tests/peer.rs MCP placement tests
+  (two failures every run, worker jobs 201 and 205). Lesson: never probe a lease by taking
+  it. /proc/locks (or fdinfo) answers "is it held" without the race.
+- The lease-leak flake (57289f7) was the test helper's dup2(9, 9) no-op leaving
+  FD_CLOEXEC set whenever the lease already was fd 9. 20 isolated repeats plus both lib runs
+  passed after the fix (worker job for laptop 653).
