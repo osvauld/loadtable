@@ -45,6 +45,7 @@ fn interrupted_offload(store: &mut Store, client: &str) -> Job {
     let spec = Recipe {
         argv: argv(client),
         resource: Resource::Offload,
+        broad_test: false,
     }
     .spec("fixture-agent".into(), PathBuf::from("/"))
     .unwrap();
@@ -187,6 +188,7 @@ fn only_interrupted_ssh_offloads_are_candidates() {
     let spec = Recipe {
         argv: argv("tasks-offload"),
         resource: Resource::Offload,
+        broad_test: false,
     }
     .spec("fixture-agent".into(), PathBuf::from("/"))
     .unwrap();
@@ -205,6 +207,7 @@ fn only_interrupted_ssh_offloads_are_candidates() {
         }
         .to_argv("/bin/tasks"),
         resource: Resource::Offload,
+        broad_test: false,
     }
     .spec("fixture-agent".into(), PathBuf::from("/"))
     .unwrap();

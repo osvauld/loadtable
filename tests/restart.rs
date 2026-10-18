@@ -81,6 +81,7 @@ impl Node {
         let spec = Recipe {
             argv: vec!["/bin/true".into()],
             resource: Resource::Run,
+            broad_test: false,
         }
         .spec("restart-survival-test".into(), self.dir.clone())
         .unwrap();
