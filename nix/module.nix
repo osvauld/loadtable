@@ -438,6 +438,12 @@ in
         alsa-lib.dev
         meson
         patchelf
+        # osvauld2 runtime (parley text layout): yeslogic-fontconfig-sys links fontconfig via
+        # pkg-config, and fontconfig.pc requires freetype2.pc.
+        fontconfig
+        fontconfig.dev
+        freetype
+        freetype.dev
         # p2p_chat Android: JDK 21 for Gradle/AGP, cargo-ndk; unzip for sdkmanager archives.
         jdk21
         cargo-ndk
@@ -526,8 +532,10 @@ in
           libvpx
           libvmaf
           openssl
+          fontconfig.lib
+          freetype
         ];
-        defaultText = literalExpression "[ libaom libvpx libvmaf openssl ]";
+        defaultText = literalExpression "[ libaom libvpx libvmaf openssl fontconfig.lib freetype ]";
         description = "Extra programs.nix-ld.libraries for offloaded test binaries.";
       };
     };

@@ -72,7 +72,7 @@
   # rustup toolchains (rust-toolchain.toml) and prebuilt tools need a dynamic loader.
   programs.nix-ld.enable = true;
   # Shared libraries that offloaded test binaries (rustup-built, nix-ld loader) load at runtime.
-  programs.nix-ld.libraries = with pkgs; [ libaom libvpx libvmaf openssl ];
+  programs.nix-ld.libraries = with pkgs; [ libaom libvpx libvmaf openssl fontconfig.lib freetype ];
 
   environment.systemPackages = with pkgs; [
     git rsync python3 rustup gcc clang cmake ninja gnumake pkg-config
@@ -82,6 +82,8 @@
     # p2p_chat desktop crate: alsa (cpal), meson for webrtc-audio-processing's bundled build,
     # patchelf to make worker-built binaries run on other distros (deploy/worker/README.md).
     alsa-lib alsa-lib.dev meson patchelf
+    # osvauld2 (parley): yeslogic-fontconfig-sys links fontconfig; fontconfig.pc needs freetype2.pc.
+    fontconfig fontconfig.dev freetype freetype.dev
     # p2p_chat Android APK: Gradle 9.8.1 (wrapper) and AGP 9.4.1 need a JDK; the main host
     # uses OpenJDK 21. cargo-ndk 4.1.2 matches the main host. The Android SDK itself is
     # installed per user with Google's sdkmanager into ~/Android/Sdk (deploy/worker/README.md);
