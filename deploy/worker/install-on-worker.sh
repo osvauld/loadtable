@@ -58,13 +58,31 @@ quiesce() {
     esac
 }
 
+# Probe only once the unit's own daemon has bound a NEW socket: any client autostarts a
+# daemon when the socket does not answer, and one started here would run outside the unit
+# (no bindgen env, default memory gate). Then refuse if a second `tasks daemon` exists.
 restart_unit() {
+    sock=$HOME/.local/state/tinline-task-manager-native/taskd.sock
+    started=$(date +%s)
     systemctl --user restart "$UNIT"
-    for _ in $(seq 1 40); do
-        [ -S "$HOME/.local/state/tinline-task-manager-native/taskd.sock" ] && "$BIN" list --active > /dev/null 2>&1 && return 0
+    ok=""
+    for _ in $(seq 1 60); do
+        pid=$(systemctl --user show -p MainPID --value "$UNIT")
+        if [ "${pid:-0}" != 0 ] && [ -S "$sock" ] && [ "$(stat -c %Y "$sock")" -ge "$started" ]; then
+            ok=1
+            break
+        fi
         sleep 0.5
     done
-    die "daemon did not answer after restart (systemctl --user status $UNIT)"
+    [ -n "$ok" ] || die "unit daemon did not bind a new socket (systemctl --user status $UNIT)"
+    "$BIN" list --active > /dev/null 2>&1 || die "daemon did not answer after restart"
+    for d in /proc/[0-9]*; do
+        [ -O "$d" ] || continue
+        case "$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null || true)" in
+            *"/tasks daemon ") [ "${d#/proc/}" = "$pid" ] ||
+                die "stray daemon pid ${d#/proc/} beside unit pid $pid (stop it, then rerun check)" ;;
+        esac
+    done
 }
 
 case "$step" in
