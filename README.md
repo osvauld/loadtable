@@ -158,6 +158,14 @@ without it the card says "not configured". `tasks ui --fixtures DIR` replays
 snapshot files (e.g. `tests/fixtures/snapshot/ui-busy`) and contacts nothing.
 Contract: docs/design/cluster-snapshot.md.
 
+Idle cost (fix/idle-cost, not deployed): the window keeps only the newest snapshot per feed
+and fetches nothing while it is not drawn (hidden/minimised), asks the daemon for `status`
+in-process and polls `list_active` (unfinished jobs) instead of the full `list`. The daemon
+caches the listing per ledger generation and buffers its replies; `logs ID` replies carry only
+that job and `start-worker`/`stop-worker`/`drain` replies only the unfinished jobs (no
+estimates); `tasks list --active` (table) uses `list_active`. Budgets and the bench
+(`scripts/idle_bench.py`): [docs/design/idle-budget.md](docs/design/idle-budget.md).
+
 ## Development
 
 This is an independent Cargo workspace. No app checkout or workspace dependency

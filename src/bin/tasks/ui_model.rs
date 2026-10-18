@@ -691,6 +691,8 @@ pub struct RecentRow {
 
 #[derive(Clone, Debug, Default)]
 pub struct Details {
+    /// The job id on its machine (stable widget ids for the expanded row).
+    pub job_id: i64,
     /// The full owner, `agent@host`.
     pub owner: String,
     pub argv: String,
@@ -1195,6 +1197,7 @@ fn pair_offloads(states: &[MachineState], list: &[Entry]) -> HashMap<usize, usiz
 
 fn details(job: &Job) -> Details {
     Details {
+        job_id: job.id,
         owner: job.owner.clone().unwrap_or_else(|| "unknown".into()),
         argv: if job.argv.is_empty() {
             "unknown".into()

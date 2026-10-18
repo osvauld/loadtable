@@ -2,9 +2,14 @@
 //! source does its I/O on its own background thread and hands results over a
 //! channel: `poll` never blocks the UI thread.
 //!
-//! - [`LocalSource`]: this machine. `tasks status --json` (feature/metrics); until
-//!   that exists, the temporary adapter in `ui_legacy.rs` builds a partial
-//!   snapshot from the daemon's `list` reply and /proc.
+//! - [`LocalSource`]: this machine. The daemon's `status` request, in-process (with a
+//!   daemon that lacks it, the temporary adapter in `ui_legacy.rs` builds a partial
+//!   snapshot from the daemon's `list` reply and /proc). Demand-driven: while the
+//!   window does not take snapshots (hidden, minimised) nothing is fetched.
+//!
+//! Every source hands over through a [`Mailbox`] that keeps only the newest
+//! snapshot (and a later error), so an undrawn window holds one snapshot per
+//! source, never a backlog.
 //! - [`RemoteSource`]: a long-running subprocess printing snapshots as JSON lines
 //!   (`lan-peer status-watch ...`, `scripts/status-watch-ssh`), or a one-shot
 //!   command printing one snapshot (`ssh worker tasks status --json`), which is
@@ -12,13 +17,12 @@
 //!   of `~/.config/tasks/ui-remote-cmd`.
 //! - [`FixtureSource`]: snapshot files for demos and tests (`tasks ui --fixtures DIR`).
 use crate::ui_model::Snapshot;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 pub const REMOTE_CMD_ENV: &str = "TASKS_UI_REMOTE_CMD";
@@ -53,8 +57,71 @@ pub trait SnapshotSource {
     fn poll(&mut self) -> Vec<Update>;
 }
 
-fn drain(rx: &Receiver<Update>) -> Vec<Update> {
-    rx.try_iter().collect()
+// ---------------------------------------------------------------------------
+// Mailbox: the latest update only
+// ---------------------------------------------------------------------------
+
+/// Hand-over from a source thread to the window that keeps only what the window would end
+/// up showing: the newest snapshot and an error that arrived after it. An unbounded channel
+/// grew without limit while the window was not drawn (a hidden or minimised Wayland window
+/// gets no frames, so nothing drained it): ~hundreds of KB per parsed snapshot, two feeds,
+/// every 2 s, GiBs after a few hours. Applying [`Mailbox::take`]'s result in order gives
+/// the same `Feed` state as applying every update ever sent.
+#[derive(Default)]
+pub struct Mailbox {
+    pending: Mutex<Pending>,
+    taken: Condvar,
+}
+
+#[derive(Default)]
+struct Pending {
+    /// Newest snapshot, its source age and when it was handed over.
+    snapshot: Option<(Box<Snapshot>, f64, Instant)>,
+    /// An error newer than `snapshot` (an older one is cleared by the snapshot anyway).
+    error: Option<String>,
+}
+
+impl Mailbox {
+    pub fn send(&self, update: Update) {
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        match update {
+            Update::Snapshot { snapshot, age_s } => {
+                pending.snapshot = Some((snapshot, age_s, Instant::now()));
+                pending.error = None;
+            }
+            Update::Error(error) => pending.error = Some(error),
+        }
+    }
+
+    /// Everything the window has not seen yet, at most a snapshot and an error, in order.
+    /// A snapshot that waited here counts as older by that wait.
+    pub fn take(&self) -> Vec<Update> {
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out = Vec::with_capacity(2);
+        if let Some((snapshot, age_s, at)) = pending.snapshot.take() {
+            out.push(Update::Snapshot {
+                snapshot,
+                age_s: age_s + at.elapsed().as_secs_f64(),
+            });
+        }
+        if let Some(error) = pending.error.take() {
+            out.push(Update::Error(error));
+        }
+        drop(pending);
+        self.taken.notify_all();
+        out
+    }
+
+    /// Blocks while the last snapshot has not been taken (the window is not drawing), up to
+    /// `timeout`; true when nothing is pending any more.
+    pub fn wait_taken(&self, timeout: Duration) -> bool {
+        let pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        let (pending, _) = self
+            .taken
+            .wait_timeout_while(pending, timeout, |p| p.snapshot.is_some())
+            .unwrap_or_else(|e| e.into_inner());
+        pending.snapshot.is_none()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -62,15 +129,24 @@ fn drain(rx: &Receiver<Update>) -> Vec<Update> {
 // ---------------------------------------------------------------------------
 
 pub struct LocalSource {
-    rx: Receiver<Update>,
+    mailbox: Arc<Mailbox>,
+    stop: Arc<AtomicBool>,
 }
 
 impl LocalSource {
     /// Starts the polling thread. `repaint` is called after each update.
     pub fn start(socket: PathBuf, repaint: impl Fn() + Send + 'static) -> Self {
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || local_loop(socket, tx, repaint));
-        Self { rx }
+        let mailbox = Arc::new(Mailbox::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        let (m, s) = (mailbox.clone(), stop.clone());
+        std::thread::spawn(move || local_loop(socket, &m, &s, repaint));
+        Self { mailbox, stop }
+    }
+}
+
+impl Drop for LocalSource {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
     }
 }
 
@@ -82,18 +158,23 @@ impl SnapshotSource for LocalSource {
         true
     }
     fn poll(&mut self) -> Vec<Update> {
-        drain(&self.rx)
+        self.mailbox.take()
     }
 }
 
-fn local_loop(socket: PathBuf, tx: Sender<Update>, repaint: impl Fn()) {
+/// How long the local loop waits for the window to take a snapshot before it checks again
+/// whether it should stop. While the window is not drawn nothing is fetched at all, so a
+/// hidden window costs the daemon nothing.
+const UNCONSUMED_RECHECK: Duration = Duration::from_secs(30);
+
+fn local_loop(socket: PathBuf, mailbox: &Mailbox, stop: &AtomicBool, repaint: impl Fn()) {
     let mut status_failed_at: Option<Instant> = None;
     let mut sampler = crate::ui_legacy::Sampler::default();
-    loop {
+    while !stop.load(Ordering::SeqCst) {
         let started = Instant::now();
         let mut update = None;
         if status_failed_at.is_none_or(|at| at.elapsed() >= STATUS_RETRY) {
-            match status_json() {
+            match status_snapshot(&socket) {
                 Ok(snapshot) => {
                     status_failed_at = None;
                     update = Some(Update::Snapshot {
@@ -116,58 +197,27 @@ fn local_loop(socket: PathBuf, tx: Sender<Update>, repaint: impl Fn()) {
                 Err(_) => Update::Error("local snapshot thread panicked".into()),
             }
         });
-        if tx.send(update).is_err() {
-            return; // window closed
-        }
+        mailbox.send(update);
         repaint();
         std::thread::sleep(LOCAL_INTERVAL.saturating_sub(started.elapsed()));
+        // Demand-driven: the next fetch waits until the window took this one.
+        while !stop.load(Ordering::SeqCst) && !mailbox.wait_taken(UNCONSUMED_RECHECK) {}
     }
 }
 
-/// `tasks status --json` from this same binary (feature/metrics). Fails on a
-/// binary without the subcommand; the caller then uses the legacy adapter.
-fn status_json() -> Result<Snapshot, String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let mut command = Command::new(exe);
-    command.args(["status", "--json"]);
-    let text = output_with_timeout(command, STATUS_TIMEOUT)?;
-    Snapshot::parse_str(&text)
-}
-
-fn output_with_timeout(mut command: Command, timeout: Duration) -> Result<String, String> {
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    let mut stdout = child.stdout.take().ok_or("no stdout")?;
-    let reader = std::thread::spawn(move || {
-        let mut text = String::new();
-        let _ = stdout
-            .by_ref()
-            .take(MAX_DOCUMENT as u64)
-            .read_to_string(&mut text);
-        text
-    });
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait().map_err(|e| e.to_string())? {
-            Some(status) => break status,
-            None if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("timed out".into());
-            }
-            None => std::thread::sleep(Duration::from_millis(20)),
-        }
-    };
-    let text = reader.join().map_err(|_| "reader panicked")?;
-    if status.success() {
-        Ok(text)
-    } else {
-        Err(format!("exited with {status}"))
-    }
+/// The daemon's `status` snapshot, requested in-process (it used to spawn `tasks status
+/// --json` every 2 s). Fails against a daemon without `status`; the caller then uses the
+/// legacy adapter.
+fn status_snapshot(socket: &Path) -> Result<Snapshot, String> {
+    crate::ensure_daemon(socket).map_err(|e| e.to_string())?;
+    let reply =
+        tinline_task_manager::request_status(socket, STATUS_TIMEOUT).map_err(|e| e.to_string())?;
+    let status = reply.status.ok_or_else(|| {
+        reply
+            .error
+            .unwrap_or_else(|| "daemon returned no status".into())
+    })?;
+    Snapshot::parse(serde_json::to_value(&status).map_err(|e| e.to_string())?)
 }
 
 // ---------------------------------------------------------------------------
@@ -201,7 +251,7 @@ pub fn pick_command(env: Option<&str>, config: Option<&str>) -> Option<String> {
 }
 
 pub struct RemoteSource {
-    rx: Option<Receiver<Update>>,
+    mailbox: Option<Arc<Mailbox>>,
     stop: Arc<AtomicBool>,
     child: Arc<Mutex<Option<Child>>>,
     reported: bool,
@@ -212,14 +262,14 @@ impl RemoteSource {
     pub fn start(command: Option<String>, repaint: impl Fn() + Send + 'static) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let child = Arc::new(Mutex::new(None));
-        let rx = command.map(|command| {
-            let (tx, rx) = mpsc::channel();
-            let (stop, child) = (stop.clone(), child.clone());
-            std::thread::spawn(move || remote_loop(command, tx, stop, child, repaint));
-            rx
+        let mailbox = command.map(|command| {
+            let mailbox = Arc::new(Mailbox::default());
+            let (m, stop, child) = (mailbox.clone(), stop.clone(), child.clone());
+            std::thread::spawn(move || remote_loop(command, &m, stop, child, repaint));
+            mailbox
         });
         Self {
-            rx,
+            mailbox,
             stop,
             child,
             reported: false,
@@ -254,11 +304,11 @@ impl SnapshotSource for RemoteSource {
         false
     }
     fn configured(&self) -> bool {
-        self.rx.is_some()
+        self.mailbox.is_some()
     }
     fn poll(&mut self) -> Vec<Update> {
-        match &self.rx {
-            Some(rx) => drain(rx),
+        match &self.mailbox {
+            Some(mailbox) => mailbox.take(),
             None if !self.reported => {
                 self.reported = true;
                 vec![Update::Error(format!(
@@ -301,15 +351,15 @@ impl DocumentSplitter {
 
 fn remote_loop(
     command: String,
-    tx: Sender<Update>,
+    mailbox: &Mailbox,
     stop: Arc<AtomicBool>,
     slot: Arc<Mutex<Option<Child>>>,
     repaint: impl Fn(),
 ) {
     let send = |update| {
-        let sent = tx.send(update).is_ok();
+        mailbox.send(update);
         repaint();
-        sent
+        !stop.load(Ordering::SeqCst)
     };
     while !stop.load(Ordering::SeqCst) {
         let spawned = Command::new("sh")
@@ -485,5 +535,117 @@ impl SnapshotSource for FixtureSource {
             snapshot: Box::new(self.snapshot.clone()),
             age_s: self.age_s,
         }]
+    }
+}
+
+#[cfg(test)]
+mod mailbox_tests {
+    use super::*;
+
+    fn snapshot(n: u64) -> Update {
+        let text = format!(
+            r#"{{"version":1,"taken_at":{n},"machine":{{"id":"synthetic-host"}},"jobs":[{{"id":{n},"phase":"running","owner":"synthetic-agent@host","argv":["cargo","test","pad{}"]}}]}}"#,
+            "x".repeat((n % 97) as usize)
+        );
+        Update::Snapshot {
+            snapshot: Box::new(Snapshot::parse_str(&text).unwrap()),
+            age_s: 0.0,
+        }
+    }
+
+    fn taken_at(update: &Update) -> Option<f64> {
+        match update {
+            Update::Snapshot { snapshot, .. } => snapshot.taken_at,
+            Update::Error(_) => None,
+        }
+    }
+
+    /// A window that is not drawn never drains: the mailbox holds one snapshot, not N.
+    #[test]
+    fn an_undrained_mailbox_keeps_only_the_newest_snapshot() {
+        let mailbox = Mailbox::default();
+        for n in 1..=10_000 {
+            mailbox.send(snapshot(n));
+        }
+        let updates = mailbox.take();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(taken_at(&updates[0]), Some(10_000.0));
+        assert!(mailbox.take().is_empty(), "taken once");
+    }
+
+    /// Coalescing gives the window the same end state as replaying every update in order.
+    #[test]
+    fn coalesced_updates_end_in_the_same_state_as_the_full_sequence() {
+        let cases: Vec<Vec<Option<u64>>> = vec![
+            vec![Some(1), None, Some(2)],
+            vec![Some(1), Some(2), None],
+            vec![None, None],
+            vec![None, Some(3)],
+            vec![Some(4), None, None],
+        ];
+        for case in cases {
+            let mailbox = Mailbox::default();
+            // (snapshot taken_at, error) after replaying the full sequence.
+            let mut replayed: (Option<f64>, Option<String>) = (None, None);
+            for (i, item) in case.iter().enumerate() {
+                match item {
+                    Some(n) => {
+                        mailbox.send(snapshot(*n));
+                        replayed = (Some(*n as f64), None);
+                    }
+                    None => {
+                        mailbox.send(Update::Error(format!("error {i}")));
+                        replayed.1 = Some(format!("error {i}"));
+                    }
+                }
+            }
+            let mut state: (Option<f64>, Option<String>) = (None, None);
+            for update in mailbox.take() {
+                match update {
+                    Update::Snapshot { snapshot, .. } => state = (snapshot.taken_at, None),
+                    Update::Error(e) => state.1 = Some(e),
+                }
+            }
+            assert_eq!(state, replayed, "case {case:?}");
+        }
+    }
+
+    /// A snapshot that waited for the window is shown as that much older.
+    #[test]
+    fn a_waiting_snapshot_ages() {
+        let mailbox = Mailbox::default();
+        mailbox.send(snapshot(1));
+        std::thread::sleep(Duration::from_millis(120));
+        match &mailbox.take()[0] {
+            Update::Snapshot { age_s, .. } => assert!(*age_s >= 0.1, "{age_s}"),
+            Update::Error(e) => panic!("{e}"),
+        }
+    }
+
+    /// The local loop blocks while its last snapshot is unconsumed and wakes when taken.
+    #[test]
+    fn wait_taken_blocks_until_the_window_takes_the_snapshot() {
+        let mailbox = Arc::new(Mailbox::default());
+        assert!(
+            mailbox.wait_taken(Duration::from_millis(1)),
+            "nothing pending"
+        );
+        mailbox.send(snapshot(1));
+        assert!(
+            !mailbox.wait_taken(Duration::from_millis(50)),
+            "still pending"
+        );
+        let m = mailbox.clone();
+        let taker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            m.take().len()
+        });
+        let started = Instant::now();
+        assert!(mailbox.wait_taken(Duration::from_secs(10)));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(taker.join().unwrap(), 1);
+        // Errors alone never block the producer.
+        mailbox.send(Update::Error("synthetic".into()));
+        assert!(mailbox.wait_taken(Duration::from_millis(1)));
     }
 }

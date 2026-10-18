@@ -18,6 +18,7 @@ pub mod health;
 #[cfg(target_os = "linux")]
 pub mod lease_audit;
 pub mod ledger;
+pub mod listing;
 pub mod local_command;
 pub mod log_search;
 pub mod metrics;
@@ -371,6 +372,10 @@ pub enum Action {
     /// The daemon's peer runtime (config, endpoint, forwarded/inbound links). Answered with a
     /// `peer_link::PeersResponse`; daemons older than it answer "unknown variant".
     Peers,
+    /// Unfinished jobs only (queued, approved, active), without estimates: what
+    /// `tasks list --active` and the window poll. Daemons older than it answer
+    /// "unknown variant"; clients then fall back to `List`.
+    ListActive,
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Response {
@@ -393,6 +398,22 @@ pub fn handle(store: &mut Store, request: Request) -> Response {
     } else {
         match request.action {
             Action::List => Ok(()),
+            Action::ListActive => {
+                let jobs = store.jobs();
+                return Response {
+                    version: PROTOCOL_VERSION,
+                    execution_enabled: false,
+                    submitted_id: None,
+                    error: jobs.as_ref().err().map(|e| e.to_string()),
+                    jobs: jobs
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|j| !j.phase.terminal())
+                        .collect(),
+                    estimates: Vec::new(),
+                    log: None,
+                };
+            }
             Action::Job(id) => {
                 let job = store.job(id);
                 return Response {
@@ -614,6 +635,7 @@ pub fn request_with_reconnect_timeouts(
     match &action {
         // Read-only or idempotent: safe to send again.
         Action::List
+        | Action::ListActive
         | Action::Job(_)
         | Action::Logs(_)
         | Action::StartWorker

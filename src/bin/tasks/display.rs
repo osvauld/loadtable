@@ -290,6 +290,16 @@ pub fn slot_name(file_name: &str) -> String {
 
 /// Where a holder note comes from: a listed durable job (`OWNER:job-ID`), a native
 /// job of another state directory, or a legacy/external client.
+/// Job ids named by native holder notes (`owner:job-N`), each once.
+pub fn holder_job_ids<'a>(holders: impl Iterator<Item = &'a Holder>) -> Vec<i64> {
+    let mut ids: Vec<i64> = holders
+        .filter_map(|h| h.who.rsplit_once(":job-")?.1.parse().ok())
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
 fn origin(who: &str, jobs: &[Job]) -> String {
     let native = who
         .rsplit_once(":job-")

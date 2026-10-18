@@ -75,6 +75,8 @@ letting jobs hang.
 | Daemon's own I/O at start is measured separately from its jobs' | laptop `tasks worker` showed ~4.9 GB at start: it was reaped children's I/O, not the daemon's | worker (deployed) |
 | Monitoring is bounded (no unbounded `du` over caches) | ad-hoc `du` over 142 GB added I/O pressure on both nodes | health disk scan |
 | Heavy work goes to a capable node with a free slot without the submitter choosing | 2026-10-17/18: agents queued on an I/O-bound, space-short laptop while the worker sat idle (e.g. call-stats-panel #699) | cluster queue ([cluster-queue.md](cluster-queue.md)) |
+| Idle daemon <= 0.2 CPU s/min, <= 0.5 with one window; `status` <= 10 ms, `list_active`/`job` <= 2 ms ([idle-budget.md](idle-budget.md)) | 2026-10-18: laptop daemon at 2-5 % of a core while idle (unbuffered 1 MB replies, full history rebuilt per request, stale `tasks logs` wait loops) | fix/idle-cost + health (budget check unassigned) |
+| Window RSS <= 400 MiB, growth <= 20 MiB/h, drawn or hidden | 2026-10-18: hidden `tasks ui` at 2.8 GiB RSS / 5.6 GiB peak after 6 h (unbounded snapshot channels, ~1.9 GiB/h undrained) | fix/idle-cost + health (budget check unassigned) |
 | Job labels say what they mean | "cold" shown for a fresh checkout while sccache hit 99.7% | display |
 
 ## Adding a node

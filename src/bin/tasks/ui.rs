@@ -163,6 +163,9 @@ struct Dashboard {
     next_seq: u64,
     applied_seq: u64,
     poll_in_flight: bool,
+    /// Poll with `list_active` (unfinished jobs only); false after an older daemon answered
+    /// "unknown variant", then the full `list` as before.
+    poll_active: bool,
     last_poll: Option<Instant>,
     last_update: Option<Instant>,
     response: Option<Response>,
@@ -195,6 +198,7 @@ impl Dashboard {
             next_seq: 0,
             applied_seq: 0,
             poll_in_flight: false,
+            poll_active: true,
             last_poll: None,
             last_update: None,
             response: None,
@@ -260,7 +264,14 @@ impl Dashboard {
         }
         self.poll_in_flight = true;
         self.last_poll = Some(Instant::now());
-        self.send(context, Kind::Poll, Action::List);
+        // The window needs the queued/approved proposals and the worker flag, not the whole
+        // history (~1 MB with a few hundred jobs, every 2.5 s).
+        let action = if self.poll_active {
+            Action::ListActive
+        } else {
+            Action::List
+        };
+        self.send(context, Kind::Poll, action);
     }
 
     fn receive(&mut self) {
@@ -272,6 +283,19 @@ impl Dashboard {
                 Kind::Approve(_) | Kind::StartWorker | Kind::Logs(_) => {}
             }
             let action = !matches!(reply.kind, Kind::Poll);
+            if !action
+                && self.poll_active
+                && let Ok(response) = &reply.result
+                && response
+                    .error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("unknown variant"))
+            {
+                // An older daemon: poll the full listing from now on, right away.
+                self.poll_active = false;
+                self.last_poll = None;
+                continue;
+            }
             match reply.result {
                 Err(error) => {
                     self.status =
@@ -1278,7 +1302,9 @@ fn detail_block(ui: &mut egui::Ui, details: &ui_model::Details, extra: impl FnOn
             ui.add(egui::Label::new(RichText::new(&details.argv).monospace()).wrap());
             extra(ui);
             egui::CollapsingHeader::new(RichText::new("raw snapshot JSON").small())
-                .id_salt(("raw", details.raw_json.len(), details.argv.as_str()))
+                // Stable per job: a salt that changes with the JSON (it used to include its
+                // length) leaves a new collapsing/scroll state in egui's memory every refresh.
+                .id_salt(("raw", details.job_id, details.argv.as_str()))
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical()
                         .max_height(220.0)
