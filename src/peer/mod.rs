@@ -10,10 +10,13 @@
 //! * [`bridge`]: `tasks peer-forward`, the command of a forwarded job (prints the peer's log,
 //!   exits with its exit code, re-attaches across a restart of this daemon).
 //! * [`records`]: link records on disk (`<state>/peer/...`).
+//! * [`reroute`]: re-scores waiting local jobs and moves one to a worker peer that would
+//!   clearly finish it sooner (`crate::reroute`).
 pub mod bridge;
 pub mod forward;
 pub mod host;
 pub mod records;
+pub mod reroute;
 pub mod runtime;
 
 pub use task_manager_peer as net;

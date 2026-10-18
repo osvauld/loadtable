@@ -128,7 +128,7 @@ impl Peer {
         )
     }
     /// Why `anywhere` cannot consider it, or None when it is a candidate.
-    fn unusable(&self) -> Option<String> {
+    pub fn unusable(&self) -> Option<String> {
         let error = self
             .error
             .as_deref()
@@ -351,7 +351,7 @@ fn waiting(phase: &Phase) -> bool {
 /// Seconds until `snapshot`'s compile slot is free for a new job, and how that was found:
 /// the holder's remaining ETA plus each compile job queued for the slot (jobs awaiting
 /// approval have no queue position and are not ahead), plus [`BLOCKED_S`] under a blocker.
-fn compile_wait(snapshot: &Snapshot) -> (f64, String) {
+pub fn compile_wait(snapshot: &Snapshot) -> (f64, String) {
     let eta = |id: i64| {
         snapshot
             .jobs
@@ -413,7 +413,7 @@ fn compile_wait(snapshot: &Snapshot) -> (f64, String) {
 
 /// Local offload jobs still waiting for a local offload slot are ahead of a forwarded job
 /// too, and with every local offload slot held a new bridge waits for one.
-fn offload_backlog(local: &Snapshot) -> (f64, Option<String>) {
+pub fn offload_backlog(local: &Snapshot) -> (f64, Option<String>) {
     let ahead: Vec<f64> = local
         .jobs
         .iter()
@@ -443,7 +443,7 @@ fn offload_backlog(local: &Snapshot) -> (f64, Option<String>) {
     (wait, text)
 }
 
-fn median(mut values: Vec<f64>) -> Option<f64> {
+pub fn median(mut values: Vec<f64>) -> Option<f64> {
     values.retain(|v| v.is_finite() && *v > 0.0);
     if values.is_empty() {
         return None;
@@ -458,7 +458,7 @@ fn median(mut values: Vec<f64>) -> Option<f64> {
 }
 
 /// Median wall time of passed jobs of `kind` in a snapshot's job list.
-fn history(snapshot: &Snapshot, kind: &str) -> Option<(f64, usize)> {
+pub fn history(snapshot: &Snapshot, kind: &str) -> Option<(f64, usize)> {
     let walls: Vec<f64> = snapshot
         .jobs
         .iter()

@@ -87,6 +87,10 @@ pub struct Execution {
     /// additive like `metrics`: written once the job is terminal, older releases ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer: Option<crate::peer_link::PeerLink>,
+    /// A move of this waiting job to a peer (`reroute`). Optional and additive like `peer`;
+    /// written only by the reroute transactions, never dropped by `update_execution`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reroute: Option<crate::reroute::Reroute>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -192,6 +196,7 @@ impl Store {
             local_command: command,
             metrics: None,
             peer: None,
+            reroute: None,
             detail: if command {
                 "Explicitly approved trusted local argv/live cwd; NOT a source snapshot or sandbox; command may write to workspace"
             } else if trial {
@@ -336,6 +341,8 @@ impl Store {
         let current_e: Execution = serde_json::from_str(&current_data)?;
         // Never erase a cancellation committed concurrently by the daemon.
         e.cancel_requested |= current_e.cancel_requested;
+        // The reroute record has its own transactions; a stale copy never rewinds it.
+        e.reroute = current_e.reroute;
         // Apply cancellation precedence inside the same write transaction as completion.
         let phase = if e.cancel_requested && phase.terminal() && phase != Phase::Interrupted {
             Phase::Cancelled

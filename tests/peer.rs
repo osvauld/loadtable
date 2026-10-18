@@ -1342,3 +1342,405 @@ fn mcp_anywhere_falls_back_when_the_peer_is_down_and_a_named_peer_is_a_clean_err
     assert_eq!(machines[1]["online"], false);
     assert_eq!(machines[1]["state"], "offline");
 }
+
+// ---- reroute: waiting jobs move to an idle peer ---------------------------------------------
+
+/// A (forwards, reroute on with `env`) and B (worker); B is started only when `start_b`.
+fn reroute_pair(test: &str, env: &[(&str, String)], start_b: bool) -> (Node, Node) {
+    let mut a = Node::new(test, "alpha");
+    let mut b = Node::new(test, "beta");
+    a.allow(&b, "worker");
+    b.allow(&a, "host");
+    a.extra_env = env
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.clone()))
+        .collect();
+    if start_b {
+        b.start();
+    }
+    a.start();
+    (a, b)
+}
+
+/// The test-mode knobs: injected ticks, forced moves, an admission hold point.
+fn test_dirs(a_root: &Path) -> (PathBuf, PathBuf) {
+    let (ticks, holds) = (a_root.join("ticks"), a_root.join("holds"));
+    std::fs::create_dir_all(&ticks).unwrap();
+    std::fs::create_dir_all(&holds).unwrap();
+    (ticks, holds)
+}
+
+fn forced_env(ticks: &Path, holds: &Path) -> Vec<(&'static str, String)> {
+    vec![
+        ("TASKS_REROUTE_TEST_FORCE", "1".into()),
+        ("TASKS_REROUTE_TEST_TICKS", ticks.display().to_string()),
+        ("TASKS_TEST_ADMIT_HOLD", holds.display().to_string()),
+    ]
+}
+
+/// One injected scheduler tick; returns the round as the daemon reported it.
+fn tick(a: &Node, ticks: &Path, name: &str) -> serde_json::Value {
+    std::fs::write(ticks.join(name), b"").unwrap();
+    let done = ticks.join(format!("{name}.done"));
+    until(&format!("reroute tick {name}"), &[a], WAIT, || {
+        std::fs::read(&done)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+    })
+}
+
+/// `tasks enqueue` (not approved yet); returns the job id.
+fn enqueue(a: &Node, cwd: &Path, extra: &[&str], command: &str) -> i64 {
+    let mut args = vec!["enqueue", "--who", "fixture-agent"];
+    args.extend_from_slice(extra);
+    args.extend_from_slice(&["--", "/bin/sh", "-c", command]);
+    let out = a.cli(&args, cwd);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    v["submitted_id"].as_i64().unwrap()
+}
+
+fn approve(a: &Node, id: i64, cwd: &Path) {
+    for args in [
+        vec!["approve-command".to_string(), id.to_string()],
+        vec!["start-worker".into()],
+    ] {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = a.cli(&args, cwd);
+        assert!(out.status.success(), "{}", stderr(&out));
+    }
+}
+
+/// Lines a fixture command appended to `$HOME/NAME` on that node (where it really ran).
+fn ran(node: &Node, name: &str) -> Vec<String> {
+    std::fs::read_to_string(node.home().join(name))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+fn reroute_record(job: &Job) -> Option<tinline_task_manager::reroute::Reroute> {
+    job.execution.as_ref()?.reroute.clone()
+}
+
+fn wait_terminal(a: &Node, b: &Node, id: i64) -> Job {
+    until(&format!("job {id} terminal on A"), &[a, b], WAIT, || {
+        Some(a.job(id)).filter(|j| j.phase.terminal())
+    })
+}
+
+#[test]
+fn reroute_moves_a_job_waiting_behind_a_held_slot_to_the_idle_peer_under_the_same_id() {
+    // Real scoring (no force): A's slot is held with no known ETA (10m guess) and the job
+    // has no history (10m guess) = 20m here; B is idle but cold (10m guess) = 10m there.
+    let env = vec![
+        ("TASKS_REROUTE_INTERVAL_S", "1".to_string()),
+        // Both fixture nodes are this host: host pressure adds the same 10m blocker to both
+        // sides (30m here vs 20m there), so the ratio stays above 1.1 either way.
+        ("TASKS_REROUTE_MIN_RATIO", "1.1".into()),
+        ("TASKS_REROUTE_MIN_GAIN_S", "60".into()),
+    ];
+    let (a, b) = reroute_pair("reroute-move", &env, true);
+    let repo = repo(&a);
+    wait_peer_online(&a, &b);
+    let held = hold_compile_slot(&a);
+    until("A's compile slot busy", &[&a, &b], WAIT, || {
+        compile_slot_busy(&local_status(&a)).then_some(())
+    });
+    // `tasks run` waits like an agent would, on A, for the job it submitted.
+    let mut client = a
+        .command(
+            &[
+                "run",
+                "--who",
+                "fixture-agent",
+                "--",
+                "/bin/sh",
+                "-c",
+                "echo rerouted-ran; echo once >> \"$HOME/runs\"; exit 3",
+            ],
+            &repo,
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let out = finish(&mut client, WAIT);
+    drop(held);
+    let id = only_job(&a).id;
+    let job = a.job(id);
+    let err = stderr(&out);
+    eprintln!(
+        "sample client output:\n{err}\nA job log:\n{}",
+        a.job_log(id)
+    );
+    // The waiting client saw the move and returned the REMOTE exit code.
+    assert_eq!(out.status.code(), Some(3), "{err}\n{}", diagnose(&[&a, &b]));
+    assert!(
+        err.contains(&format!("tasks: job {id} rerouted: ")),
+        "{err}"
+    );
+    assert_eq!(job.phase, Phase::Failed);
+    assert_eq!(exit_of(&job), Some(3));
+    // It ran once, on B.
+    assert!(ran(&a, "runs").is_empty(), "ran on A too");
+    assert_eq!(ran(&b, "runs"), ["once"]);
+    let b_job = only_job(&b);
+    assert_eq!(exit_of(&b_job), Some(3));
+    // A's ledger: same id, moved_from/moved_to, reason, state.
+    let r = reroute_record(&job).expect("reroute record");
+    assert_eq!(r.moved_from, hostname());
+    assert_eq!(r.moved_to, "beta");
+    assert_eq!(r.state, "moved");
+    assert_eq!(r.remote_job_id, Some(b_job.id));
+    assert_eq!(r.moves, 1);
+    assert!(
+        r.reason
+            .starts_with(&format!("rerouted: {} → beta (~", hostname())),
+        "{}",
+        r.reason
+    );
+    // ~10m wait here, ~20m under host pressure (the blocker); the peer pays a cold build.
+    assert!(
+        r.reason.contains(" wait + ~10m run here vs ~"),
+        "{}",
+        r.reason
+    );
+    assert!(r.reason.contains("cold build there"), "{}", r.reason);
+    // A's job log: the move, the withdrawn admission, then B's lines mirrored.
+    let log = a.job_log(id);
+    assert_eq!(note_count(&log, "rerouted: "), 1, "{log}");
+    assert!(
+        log.contains("local build admission withdrawn before anything ran here"),
+        "{log}"
+    );
+    assert!(log.contains("rerouted-ran"), "{log}");
+    assert!(
+        a.daemon_log()
+            .contains(&format!("reroute: job {id}: rerouted: "))
+    );
+    // MCP job / wait_job report it; the snapshot shows it.
+    let mut mcp = Mcp::start(&a);
+    for tool in ["job", "wait_job"] {
+        let result = mcp.tool(tool, serde_json::json!({"id": id}));
+        let s = &result["structuredContent"];
+        assert_eq!(s["reroute"]["moved_to"], "beta", "{tool}: {result}");
+        assert_eq!(s["reroute"]["moved_from"], hostname(), "{tool}: {result}");
+        assert_eq!(s["machine"], "beta", "{tool}: {result}");
+        assert_eq!(s["remote_job_id"], b_job.id, "{tool}: {result}");
+        assert!(text_of(&result).contains("rerouted: "), "{tool}: {result}");
+    }
+    let snapshot = local_status(&a);
+    let view = snapshot["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["id"] == id)
+        .cloned()
+        .unwrap();
+    assert_eq!(view["reroute"]["moved_to"], "beta", "{view}");
+}
+
+#[test]
+fn reroute_racing_a_local_admission_never_runs_the_job_twice() {
+    let root = std::env::temp_dir().join(format!("tasks-reroute-race-dirs-{}", std::process::id()));
+    let (ticks, holds) = test_dirs(&root);
+    let (a, b) = reroute_pair("reroute-race", &forced_env(&ticks, &holds), true);
+    let repo = repo(&a);
+    wait_peer_online(&a, &b);
+    let id = enqueue(&a, &repo, &[], "echo race-ran; echo once >> \"$HOME/runs\"");
+    // Admission will take A's (free) compile slot and pause right before committing.
+    std::fs::write(holds.join(format!("{id}-build.hold")), b"").unwrap();
+    approve(&a, id, &repo);
+    until("admission holding the slot", &[&a, &b], WAIT, || {
+        holds
+            .join(format!("{id}-build.held"))
+            .exists()
+            .then_some(())
+    });
+    // The reroute fires at exactly that moment: it claims the job first.
+    let round = tick(&a, &ticks, "t1");
+    assert_eq!(round["moves"][0]["job"], id, "{round}");
+    assert_eq!(round["moves"][0]["claim"], "claimed", "{round}");
+    std::fs::write(holds.join(format!("{id}-build.release")), b"").unwrap();
+    let job = wait_terminal(&a, &b, id);
+    assert_eq!(job.phase, Phase::Passed, "{}", diagnose(&[&a, &b]));
+    let log = a.job_log(id);
+    assert!(
+        log.contains("slot taken just as job") && log.contains("released it unused"),
+        "{log}"
+    );
+    assert!(ran(&a, "runs").is_empty(), "ran on A: {log}");
+    assert_eq!(ran(&b, "runs"), ["once"], "{}", diagnose(&[&a, &b]));
+    assert_eq!(b.jobs().len(), 1);
+    // A second tick finds nothing to move (moved once; and the job is finished).
+    let round = tick(&a, &ticks, "t2");
+    assert!(
+        round["moves"].as_array().is_none_or(|m| m.is_empty()),
+        "{round}"
+    );
+
+    // The other order: admission commits first, then the tick refuses to move it.
+    let id2 = enqueue(&a, &repo, &[], "sleep 3; echo once >> \"$HOME/runs2\"");
+    approve(&a, id2, &repo);
+    until("job 2 building on A", &[&a, &b], WAIT, || {
+        (a.job(id2).phase == Phase::Building).then_some(())
+    });
+    let round = tick(&a, &ticks, "t3");
+    let verdict = round["verdicts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|v| v["job"] == id2)
+        .cloned();
+    // Not even a candidate any more, or a stay verdict: never a move.
+    assert!(
+        round["moves"]
+            .as_array()
+            .is_none_or(|m| m.iter().all(|m| m["job"] != id2)),
+        "{round}"
+    );
+    if let Some(v) = verdict {
+        assert_eq!(v["action"]["action"], "stay", "{v}");
+    }
+    let job2 = wait_terminal(&a, &b, id2);
+    assert_eq!(job2.phase, Phase::Passed);
+    assert_eq!(ran(&a, "runs2"), ["once"]);
+    assert_eq!(b.jobs().len(), 1, "nothing new forwarded");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn reroute_to_an_offline_peer_returns_the_job_to_its_queue_position_and_pins_stay() {
+    let root = std::env::temp_dir().join(format!("tasks-reroute-off-dirs-{}", std::process::id()));
+    let (ticks, holds) = test_dirs(&root);
+    // B never starts: A sees it offline; the forced move goes there anyway and fails.
+    let (a, b) = reroute_pair("reroute-offline", &forced_env(&ticks, &holds), false);
+    let repo = repo(&a);
+    until("B offline in A's peer runtime", &[&a], WAIT, || {
+        peer_view(&a, "beta").filter(|s| s.state == "offline")
+    });
+    let held = hold_compile_slot(&a);
+    let j1 = enqueue(&a, &repo, &[], "echo j1 >> \"$HOME/order\"; sleep 1");
+    approve(&a, j1, &repo);
+    until("j1 waiting for A's compile slot", &[&a], WAIT, || {
+        let dir = a.state().join(format!("jobs/{j1}"));
+        (a.job(j1).phase == Phase::WaitingBuild && dir.join("build-queued-at.json").exists())
+            .then_some(())
+    });
+    std::thread::sleep(Duration::from_millis(1100));
+    // j2 queues AFTER j1 and is pinned.
+    let j2 = enqueue(&a, &repo, &["--pin"], "echo j2 >> \"$HOME/order\"; sleep 1");
+    approve(&a, j2, &repo);
+    until("j2 waiting too", &[&a], WAIT, || {
+        (a.job(j2).phase == Phase::WaitingBuild).then_some(())
+    });
+    let round = tick(&a, &ticks, "t1");
+    let moves = round["moves"].as_array().unwrap();
+    assert_eq!(moves.len(), 1, "{round}");
+    assert_eq!(moves[0]["job"], j1);
+    let pinned = round["verdicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["job"] == j2)
+        .unwrap();
+    assert!(
+        pinned["line"]
+            .as_str()
+            .unwrap()
+            .contains("pinned (--pin at submit)"),
+        "{pinned}"
+    );
+    // The forward submits nothing (offline): j1 comes back, with a note.
+    let back = until("j1 back in A's queue", &[&a], WAIT, || {
+        let job = a.job(j1);
+        let r = reroute_record(&job)?;
+        (r.state == "returned" && job.phase == Phase::WaitingBuild).then_some(r)
+    });
+    let note = back.note.unwrap_or_default();
+    assert!(note.contains("submitted nothing"), "{note}");
+    let log = a.job_log(j1);
+    assert!(
+        log.contains("back in the local queue at its original position"),
+        "{log}"
+    );
+    // A second forced tick never moves it again (one move per job).
+    let round = tick(&a, &ticks, "t2");
+    assert!(round["moves"].as_array().unwrap().is_empty(), "{round}");
+    // Let j1's new admission wait register, then free the slot: j1 (older) runs first.
+    std::thread::sleep(Duration::from_secs(2));
+    drop(held);
+    for id in [j1, j2] {
+        let job = until(&format!("job {id} done"), &[&a], WAIT, || {
+            Some(a.job(id)).filter(|j| j.phase.terminal())
+        });
+        assert_eq!(job.phase, Phase::Passed, "{}", diagnose(&[&a]));
+    }
+    assert_eq!(ran(&a, "order"), ["j1", "j2"], "{}", diagnose(&[&a]));
+    assert!(reroute_record(&a.job(j2)).is_none());
+    drop(b);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn reroute_never_moves_pinned_or_local_placement_jobs_even_to_an_idle_peer() {
+    let root = std::env::temp_dir().join(format!("tasks-reroute-pin-dirs-{}", std::process::id()));
+    let (ticks, holds) = test_dirs(&root);
+    let (a, b) = reroute_pair("reroute-pin", &forced_env(&ticks, &holds), true);
+    let repo = repo(&a);
+    wait_peer_online(&a, &b);
+    let held = hold_compile_slot(&a);
+    let cli = enqueue(&a, &repo, &["--pin"], "echo pinned-cli >> \"$HOME/runs\"");
+    approve(&a, cli, &repo);
+    let mut mcp = Mcp::start(&a);
+    let mut mcp_ids = vec![];
+    for args in [
+        serde_json::json!({"placement": "local"}),
+        serde_json::json!({"pin": true}),
+    ] {
+        let mut call = serde_json::json!({"who": "fixture-agent", "cwd": repo,
+            "argv": ["/bin/sh", "-c", "echo pinned-mcp >> \"$HOME/runs\""]});
+        for (k, v) in args.as_object().unwrap() {
+            call[k] = v.clone();
+        }
+        let result = mcp.tool("submit", call);
+        assert_eq!(result["isError"], false, "{result}");
+        let s = &result["structuredContent"];
+        // `pin: true` with anywhere: B is idle and A's slot is held, so placement itself
+        // forwards it at submit; that is a forward, which never moves either.
+        mcp_ids.push(s["job_id"].as_i64().unwrap());
+    }
+    until("jobs approved/waiting", &[&a, &b], WAIT, || {
+        (a.job(cli).phase == Phase::WaitingBuild && a.job(mcp_ids[0]).phase == Phase::WaitingBuild)
+            .then_some(())
+    });
+    let round = tick(&a, &ticks, "t1");
+    assert!(round["moves"].as_array().unwrap().is_empty(), "{round}");
+    let line_of = |id: i64| {
+        round["verdicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["job"] == id)
+            .map(|v| v["line"].as_str().unwrap().to_owned())
+            .unwrap_or_default()
+    };
+    assert!(line_of(cli).contains("pinned (--pin at submit)"), "{round}");
+    assert!(
+        line_of(mcp_ids[0]).contains("pinned (MCP placement \"local\")"),
+        "{round}"
+    );
+    drop(held);
+    for id in [cli, mcp_ids[0]] {
+        let job = wait_terminal(&a, &b, id);
+        assert_eq!(job.phase, Phase::Passed, "{}", diagnose(&[&a, &b]));
+        assert!(reroute_record(&job).is_none());
+    }
+    let job = wait_terminal(&a, &b, mcp_ids[1]);
+    assert_eq!(job.phase, Phase::Passed, "{}", diagnose(&[&a, &b]));
+    assert!(reroute_record(&job).is_none());
+    assert_eq!(ran(&a, "runs").len(), 2, "both local ones ran here");
+    let _ = std::fs::remove_dir_all(&root);
+}

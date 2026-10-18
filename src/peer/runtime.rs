@@ -240,6 +240,7 @@ async fn run(
             .collect();
     }
     keep_snapshots(&shared, &report);
+    super::reroute::start(&shared, &report);
     log(format!(
         "peer: endpoint {} listening on {} (LAN-only, no relay/discovery); {} allowlisted peers: {}",
         ep.id(),

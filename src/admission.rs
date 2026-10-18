@@ -679,7 +679,13 @@ struct Wait {
     dev: u64,
 }
 impl Wait {
+    #[cfg(test)]
     fn new(root: &Path, note: &Note) -> Result<Self> {
+        Self::new_since(root, note, None)
+    }
+    /// `since`: an earlier time to queue with (the note's mtime orders the FIFO), e.g. a job
+    /// returning from a failed reroute keeps its original position; None queues now.
+    fn new_since(root: &Path, note: &Note, since: Option<std::time::SystemTime>) -> Result<Self> {
         let path = root.join(format!(
             "p2p-wait-{}-{}-{}.json",
             std::process::id(),
@@ -694,6 +700,9 @@ impl Wait {
             .custom_flags(libc::O_NOFOLLOW)
             .open(&path)?;
         f.write_all(&serde_json::to_vec(note)?)?;
+        if let Some(since) = since {
+            f.set_modified(since)?;
+        }
         let m = f.metadata()?;
         Ok(Self {
             path,
@@ -764,9 +773,20 @@ fn older_waiter(root: &Path, me: &Wait, slot: &str) -> Result<bool> {
     Ok(false)
 }
 pub fn acquire(kind: Kind, who: &str, cmd: &str, stop: impl Fn() -> bool) -> Result<Option<Lease>> {
+    acquire_since(kind, who, cmd, None, stop)
+}
+/// [`acquire`], queued as if the wait had started at `since` (a job that returned from a
+/// failed reroute keeps its place; see `reroute::queued_since`).
+pub fn acquire_since(
+    kind: Kind,
+    who: &str,
+    cmd: &str,
+    since: Option<std::time::SystemTime>,
+    stop: impl Fn() -> bool,
+) -> Result<Option<Lease>> {
     let offload = matches!(kind, Kind::Offload);
     let disk = move || offload.then(live_offload_disk_blocker).flatten();
-    acquire_gated(&root()?, kind, who, cmd, Pressure::read, disk, stop)
+    acquire_gated_since(&root()?, kind, who, cmd, since, Pressure::read, disk, stop)
 }
 #[cfg(test)]
 fn acquire_at(
@@ -780,11 +800,25 @@ fn acquire_at(
     acquire_gated(root, kind, who, cmd, pressure, || None, stop)
 }
 /// `disk` is an extra wait condition (the offload cache-disk reserve); `None` admits.
+#[cfg(test)]
 fn acquire_gated(
     root: &Path,
     kind: Kind,
     who: &str,
     cmd: &str,
+    pressure: impl Fn() -> Result<Pressure>,
+    disk: impl Fn() -> Option<String>,
+    stop: impl Fn() -> bool,
+) -> Result<Option<Lease>> {
+    acquire_gated_since(root, kind, who, cmd, None, pressure, disk, stop)
+}
+#[allow(clippy::too_many_arguments)]
+fn acquire_gated_since(
+    root: &Path,
+    kind: Kind,
+    who: &str,
+    cmd: &str,
+    since: Option<std::time::SystemTime>,
     pressure: impl Fn() -> Result<Pressure>,
     disk: impl Fn() -> Option<String>,
     stop: impl Fn() -> bool,
@@ -804,7 +838,7 @@ fn acquire_gated(
         start_ticks: Some(identity.start_ticks),
         slot: Some(kind.label()),
     };
-    let wait = Wait::new(root, &note)?;
+    let wait = Wait::new_since(root, &note, since)?;
     let mut previous_blocker = None;
     loop {
         if stop() {

@@ -50,6 +50,7 @@ fn finished(mut j: Job, stages: &[(f64, f64, i32)]) -> Job {
         detail: String::new(),
         metrics: None,
         peer: None,
+        reroute: None,
     });
     j
 }

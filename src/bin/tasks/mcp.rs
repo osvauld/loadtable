@@ -698,6 +698,8 @@ pub fn tools() -> Vec<Value> {
                     "tail_lines": {"type": "integer", "minimum": 0, "maximum": MAX_TAIL, "default": 60,
                         "description": "Log lines returned when the job finished while waiting."},
                     "placement": submit_placement_schema(),
+                    "pin": {"type": "boolean", "default": false,
+                        "description": "Keep the job on the machine chosen at submit: a job still waiting is otherwise moved to an idle worker peer when that clearly finishes it sooner (same job id). placement \"local\" or a named peer also pins."},
                     "fetch": {"type": "array", "items": {"type": "string"}, "maxItems": 64,
                         "description": "Only for a job that runs on a peer: relative paths in the checkout to copy back after it passes (into ~/build-cache/offload/WHO/JOB_ID here)."},
                 },
@@ -1145,6 +1147,7 @@ fn job(daemon: &Daemon, args: &Args) -> Result<Outcome> {
     if let Some(e) = &job.execution {
         text.push_str(&format!("\n  detail: {}", e.detail));
     }
+    add_reroute(&job, &mut text, &mut structured);
     let mut outcome = Outcome { text, structured };
     add_placement(daemon, &job, &mut outcome);
     Ok(outcome)
@@ -1224,6 +1227,7 @@ fn waited(daemon: &Daemon, job: &Job, timed_out: bool, tail: usize) -> Outcome {
     let mut text = job_line(job);
     let mut structured = job_summary(job);
     structured["timed_out"] = json!(timed_out);
+    add_reroute(job, &mut text, &mut structured);
     if let Some(p) = placement_of(&daemon.state(), job) {
         text.push('\n');
         text.push_str(&placement_text(&p));
@@ -1385,6 +1389,32 @@ fn placement_text(p: &Value) -> String {
     text
 }
 
+/// The move of a waiting job to a peer (reroute), if it was moved or tried.
+pub fn reroute_of(job: &Job) -> Option<Value> {
+    let r = job.execution.as_ref()?.reroute.as_ref()?;
+    Some(json!({
+        "state": r.state,
+        "moved_from": r.moved_from,
+        "moved_to": r.moved_to,
+        "reason": r.reason,
+        "at": r.at,
+        "local_s": r.local_s,
+        "peer_s": r.peer_s,
+        "remote_job_id": r.remote_job_id,
+        "note": r.note,
+        "returned_at": r.returned_at,
+        "summary": r.summary(),
+    }))
+}
+
+/// Adds the reroute record of `job` (if any) to a tool result.
+fn add_reroute(job: &Job, text: &mut String, structured: &mut Value) {
+    if let Some(r) = reroute_of(job) {
+        text.push_str(&format!("\n{}", r["summary"].as_str().unwrap_or_default()));
+        structured["reroute"] = r;
+    }
+}
+
 /// Adds the placement of `job` (if any) to a tool result.
 fn add_placement(daemon: &Daemon, job: &Job, outcome: &mut Outcome) {
     if let Some(p) = placement_of(&daemon.state(), job) {
@@ -1433,6 +1463,13 @@ fn submit(daemon: &Daemon, args: &Args, ctx: &Ctx) -> Result<Outcome> {
         None => placement::Request::Anywhere,
         Some(text) => placement::Request::parse(text)?,
     };
+    let pin_why = if args.bool("pin", false)? {
+        Some("MCP pin: true")
+    } else if request == placement::Request::Local {
+        Some("MCP placement \"local\"")
+    } else {
+        None
+    };
     // `local` (and anywhere without peers) is exactly the previous submission.
     let (spec, decision) = if request == placement::Request::Local {
         if !fetch.is_empty() {
@@ -1469,6 +1506,15 @@ fn submit(daemon: &Daemon, args: &Args, ctx: &Ctx) -> Result<Outcome> {
         && let Err(e) = placement::record(&daemon.state(), id, decision)
     {
         eprintln!("tasks mcp: could not record the placement of job {id}: {e}");
+    }
+    // Before approval: reroute never sees the job unpinned.
+    if let Some(why) = pin_why
+        && let Err(e) = tinline_task_manager::reroute::pin(&daemon.state(), id, why)
+    {
+        return Err(format!(
+            "job {id} was submitted but could not be pinned ({e}); it is NOT approved. Cancel it with cancel {{\"id\": {id}, \"who\": \"{who}\"}}; do not resubmit blindly"
+        )
+        .into());
     }
     let warning = display::shared_cwd_warning(&response.jobs, id)
         .map(|w| w.trim_start_matches("tasks: ").to_owned());

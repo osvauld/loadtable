@@ -348,6 +348,17 @@ fn job_view(job: &Job, inputs: &Inputs, history: &History) -> JobView {
         estimate,
         result,
         offload: extras.offload.clone(),
+        reroute: execution
+            .and_then(|e| e.reroute.as_ref())
+            .map(|r| super::types::RerouteView {
+                state: r.state.clone(),
+                moved_from: r.moved_from.clone(),
+                moved_to: r.moved_to.clone(),
+                reason: r.reason.clone(),
+                at: r.at,
+                remote_job_id: r.remote_job_id,
+                note: r.note.clone(),
+            }),
     }
 }
 

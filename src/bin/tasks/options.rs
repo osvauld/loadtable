@@ -2,7 +2,7 @@
 //! Errors name the exact problem and the correct usage instead of a generic refusal.
 use tinline_task_manager::Result;
 
-pub const RUN_USAGE: &str = "tasks run|enqueue [--who OWNER] [--run | --offload | --device SERIAL] [--peer NAME [--fetch REL]... | --anywhere] [--follow] -- COMMAND [ARGS...]";
+pub const RUN_USAGE: &str = "tasks run|enqueue [--who OWNER] [--run | --offload | --device SERIAL] [--peer NAME [--fetch REL]... | --anywhere] [--pin] [--follow] -- COMMAND [ARGS...]";
 pub const PLACE_USAGE: &str =
     "tasks place [--run | --device SERIAL] [--peer NAME] [--json] -- COMMAND [ARGS...]";
 const LIST_USAGE: &str =
@@ -29,6 +29,8 @@ pub struct Enqueue {
     pub fetch: Vec<String>,
     /// Let placement choose this machine or a worker peer (`tasks place` shows the choice).
     pub anywhere: bool,
+    /// Keep the job on the machine it was submitted to: reroute never moves it.
+    pub pin: bool,
 }
 
 /// Parses the options before `--`. `--follow` only makes sense when this client waits.
@@ -100,6 +102,12 @@ pub fn enqueue(options: &[String], waits: bool) -> Result<Enqueue> {
                 }
                 parsed.anywhere = true;
             }
+            "--pin" => {
+                if parsed.pin {
+                    return Err("--pin was given twice".into());
+                }
+                parsed.pin = true;
+            }
             "--fetch" => {
                 let rel = rest
                     .next()
@@ -140,6 +148,9 @@ pub fn enqueue(options: &[String], waits: bool) -> Result<Enqueue> {
             "--anywhere and --offload conflict: placement forwards through the peer link itself"
                 .into(),
         );
+    }
+    if parsed.pin && parsed.class == Some(Class::Offload) {
+        return Err("--pin applies to compile jobs; an --offload client never moves anyway".into());
     }
     if !parsed.fetch.is_empty() && parsed.peer.is_none() && !parsed.anywhere {
         return Err("--fetch only applies with --peer NAME (or --anywhere)".into());
@@ -375,6 +386,21 @@ mod tests {
             let error = enqueue(&args(input), true).unwrap_err().to_string();
             assert!(error.contains(expected), "{input}: {error}");
         }
+    }
+
+    #[test]
+    fn pin_option_parses_once_and_not_with_offload() {
+        assert!(enqueue(&args("--who a --pin"), true).unwrap().pin);
+        assert!(!enqueue(&args("--who a"), true).unwrap().pin);
+        let twice = enqueue(&args("--pin --pin"), true).unwrap_err().to_string();
+        assert!(twice.contains("--pin was given twice"), "{twice}");
+        let offload = enqueue(&args("--pin --offload"), true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            offload.contains("--pin applies to compile jobs"),
+            "{offload}"
+        );
     }
 
     #[test]
