@@ -632,3 +632,27 @@ fn marks_for_reads_the_peers_own_published_marks_by_machine_id() {
     assert_eq!(marks.len(), 1);
     assert_eq!(marks[0].node, "worker");
 }
+
+#[test]
+fn only_log_only_cargo_commands_are_placed_by_default() {
+    let v = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+    for yes in [
+        "cargo test -p runtime",
+        "cargo check --workspace --tests",
+        "cargo +nightly --offline clippy --all-targets",
+        "env RUST_LOG=debug cargo nextest run",
+        "/home/x/.cargo/bin/cargo test",
+    ] {
+        assert!(placed_by_default(&v(yes)), "{yes}");
+    }
+    for no in [
+        "cargo build -p shell2 --release",
+        "cargo run -p app",
+        "cargo --color always test",
+        "sh -c cargo test",
+        "npm run build",
+        "cargo",
+    ] {
+        assert!(!placed_by_default(&v(no)), "{no}");
+    }
+}

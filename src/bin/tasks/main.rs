@@ -49,7 +49,10 @@ const USAGE: &str = "usage: tasks [ui [--fixtures DIR]]  # DIR: cluster snapshot
          # stream its log here, exit with its exit code (needs a peer config; tasks peer list)
        tasks run|enqueue --anywhere [--run | --device SERIAL] [--fetch REL]... -- COMMAND [ARGS...]
          # placement picks this machine or a worker peer (sooner finish; ties to the worker) and
-         # sets Cargo's jobs to that machine's cap; device class and --run stay local
+         # sets Cargo's jobs to that machine's cap; device class and --run stay local.
+         # With a worker peer configured, cargo check/test/clippy/nextest are placed this way
+         # by default (their result is the log); cargo build/run and scripts stay here unless
+         # asked; --pin keeps any job on this machine
        tasks place [--run | --device SERIAL] [--peer NAME] [--json] -- COMMAND [ARGS...]
          # dry run: print where --anywhere (or --peer) would run it and why; submits nothing
        tasks peer init --bind IP:PORT [--config PATH] | id | add NAME ENDPOINT_ID ADDR [--role worker|host|both|observer] [--approve auto|manual] [--config PATH] | list [--json] | status-watch NAME
@@ -265,6 +268,7 @@ fn run() -> Result<()> {
             if owner.trim().is_empty() || owner.len() > 128 {
                 return Err("bounded owner required".into());
             }
+            let no_class = parsed.class.is_none();
             let resource = match parsed.class {
                 None => Resource::Compile,
                 Some(options::Class::Run) => Resource::Run,
@@ -294,12 +298,31 @@ fn run() -> Result<()> {
                 }
                 tinline_task_manager::policy::Verdict::Allowed => {}
             }
+            // Log-only Cargo commands (check/test/clippy/nextest) are placed by default once a
+            // worker peer is configured; `--pin` (or `--run`/`--device`) keeps them here.
+            let by_default = !parsed.anywhere
+                && parsed.peer.is_none()
+                && no_class
+                && !parsed.pin
+                && tinline_task_manager::placement::placed_by_default(&recipe.argv)
+                && tinline_task_manager::placement::peer_config_present();
             match &parsed.peer {
                 None if parsed.anywhere => {
                     let (spec, decision) = anywhere_spec(recipe, owner, &parsed.fetch)?;
                     placed = decision.decided().then_some(decision);
                     Action::Submit(spec)
                 }
+                // A placement failure on the default path never blocks the job: it runs here.
+                None if by_default => match anywhere_spec(recipe.clone(), owner.clone(), &[]) {
+                    Ok((spec, decision)) => {
+                        placed = decision.decided().then_some(decision);
+                        Action::Submit(spec)
+                    }
+                    Err(error) => {
+                        eprintln!("tasks: note: placement failed ({error}); running here");
+                        Action::Submit(recipe.spec(owner, std::env::current_dir()?)?)
+                    }
+                },
                 None => Action::Submit(recipe.spec(owner, std::env::current_dir()?)?),
                 Some(peer) => Action::Submit(forward_spec(
                     peer,

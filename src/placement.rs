@@ -380,6 +380,26 @@ pub fn is_cargo(argv: &[String]) -> bool {
     cargo_index(argv).is_some()
 }
 
+/// Cargo subcommands whose result is the log and exit status, not a file the submitter uses
+/// next: `tasks run` places these anywhere by default once a worker peer is configured.
+/// `build`, `run`, scripts and everything else stay on this machine unless the submitter
+/// asks (`--anywhere`, `--peer`), because their outputs would stay on the machine that built
+/// them. Interim: moves to the policy file's `workflows::`/`tools::`.
+pub const PLACED_BY_DEFAULT: &[&str] = &["check", "test", "clippy", "nextest"];
+
+/// The first word after Cargo that is not `+toolchain` or a flag is the subcommand. A
+/// global flag with a value (`--color always test`) yields the value, which matches no
+/// subcommand and so stays local.
+pub fn placed_by_default(argv: &[String]) -> bool {
+    let Some(cargo) = cargo_index(argv) else {
+        return false;
+    };
+    argv[cargo + 1..]
+        .iter()
+        .find(|w| !w.starts_with('-') && !w.starts_with('+'))
+        .is_some_and(|sub| PLACED_BY_DEFAULT.contains(&sub.as_str()))
+}
+
 fn waiting(phase: &Phase) -> bool {
     matches!(
         phase,

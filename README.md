@@ -101,7 +101,10 @@ LAN check: `scripts/peer-lan-e2e.sh`.
 Placement (not deployed): `tasks run --anywhere -- CMD` lets the task manager choose this
 machine or a worker peer from the peers' live snapshots (sooner expected finish, ties to the
 worker; Cargo `-j` replaced by the chosen machine's cap); `tasks place -- CMD` prints the
-decision without submitting. `tasks mcp` `submit` has `placement` (`anywhere` by default once a
+decision without submitting. With a worker peer configured, plain `tasks run` places
+`cargo check`/`test`/`clippy`/`nextest` this way by default (their result is the log);
+`cargo build`/`run` and scripts stay local unless asked, and `--pin` keeps any job local.
+`tasks mcp` `submit` has `placement` (`anywhere` by default once a
 worker peer is configured, `local`, or a peer name) and `cluster_status` lists every machine.
 Details: docs/design/peer-link.md "Placement".
 
