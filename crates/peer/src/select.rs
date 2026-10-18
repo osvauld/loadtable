@@ -9,7 +9,8 @@
 //! * no-follow descent; a directory beside a build marker (`target` next to `Cargo.toml`,
 //!   `build` next to `build.gradle*`) is an excluded output;
 //! * tracked-but-deleted files are counted and skipped; nested repositories/submodules,
-//!   special files and in-tree symlinks are refused (the manifest carries regular files only);
+//!   special files and in-tree symlinks are refused (the manifest carries regular files only),
+//!   except a symlink where a marked output directory would be (excluded like that directory);
 //! * the checkout id is `tasks-offload`'s: `sha256(hostname NUL toplevel)[:16]`, so a forwarded
 //!   job reuses the worker's warm checkout of the same laptop path.
 
@@ -178,6 +179,19 @@ pub fn select(top: &Path, limits: &Limits) -> Result<Selection, String> {
         };
         match st.st_mode & libc::S_IFMT {
             libc::S_IFREG => {}
+            // A link where build output goes (`target` beside Cargo.toml, `build` beside
+            // build.gradle*) is output, like a directory there: `tasks` places such links
+            // into its cache (launch-site-ticks 797). Any other in-tree symlink is refused.
+            libc::S_IFLNK
+                if prune::is_marked_output(parent.as_raw_fd(), parts[parts.len() - 1])
+                    .map_err(|e| format!("{path}: {e}"))? =>
+            {
+                excluded_count += 1;
+                if excluded.len() < 200 {
+                    excluded.push(path);
+                }
+                continue;
+            }
             libc::S_IFLNK => {
                 return Err(format!(
                     "{path}: in-tree symlinks are not supported by the peer transport (its manifest \

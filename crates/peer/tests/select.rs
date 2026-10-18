@@ -78,7 +78,29 @@ fn selection_matches_tasks_offload_rules() {
     assert_eq!(s.deleted_tracked, 1);
     assert!(s.manifest.files.iter().all(|f| f.iroh_blobs_hash.is_some()));
 
-    // In-tree symlinks are refused (the manifest carries regular files only).
+    // Cache links that tasks places where outputs go are excluded like output directories,
+    // even when git lists them (a `target/` ignore pattern does not match a symlink).
+    let cache = dir.path().join("cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::remove_dir_all(repo.join("target")).unwrap();
+    std::os::unix::fs::symlink(&cache, repo.join("target")).unwrap();
+    write(&repo, "android/app/build.gradle.kts", "\n");
+    std::os::unix::fs::symlink(&cache, repo.join("android/app/build")).unwrap();
+    let s = select::select(&top, &Limits::default()).unwrap();
+    assert!(s.excluded.iter().any(|p| p == "target"), "{:?}", s.excluded);
+    assert!(
+        s.excluded.iter().any(|p| p == "android/app/build"),
+        "{:?}",
+        s.excluded
+    );
+    assert!(
+        !s.manifest
+            .files
+            .iter()
+            .any(|f| f.path.ends_with("build") || f.path == "target")
+    );
+
+    // Other in-tree symlinks are refused (the manifest carries regular files only).
     std::os::unix::fs::symlink("src/lib.rs", repo.join("link.rs")).unwrap();
     let err = select::select(&top, &Limits::default()).unwrap_err();
     assert!(err.contains("symlink"), "{err}");
