@@ -233,7 +233,12 @@ fn serve(
             handle(&mut store, request)
         };
         drop(store);
-        if valid && !matches!(action, Action::List) {
+        if valid
+            && matches!(
+                action,
+                Action::StartWorker | Action::StopWorker | Action::Drain(_) | Action::Logs(_)
+            )
+        {
             let keep = if let Action::Logs(id) = &action {
                 Some(*id)
             } else {
