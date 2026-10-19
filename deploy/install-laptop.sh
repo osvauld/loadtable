@@ -143,7 +143,22 @@ probe=$("$BIN_LINK" --usage-probe 2>&1 || true)
 case "$probe" in
     *"drain [--timeout"*)
         say "installed release has tasks drain: pausing claims until the daemon restarts"
-        "$BIN_LINK" drain --timeout 3600 || die "drain did not finish; nothing switched (tasks drain --cancel resumes)"
+        if ! "$BIN_LINK" drain --timeout 3600; then
+            # A daemon whose replies exceed the client's bound still honours the drain; only
+            # its answer is unreadable. Wait on the ledger itself, up to an hour.
+            state=${TASK_MANAGER_STATE_DIR:-$HOME/.local/state/tinline-task-manager-native}
+            command -v sqlite3 > /dev/null && [ -r "$state/tasks.sqlite" ] ||
+                die "drain did not finish; nothing switched (tasks drain --cancel resumes)"
+            grep -q '"enabled":false' "$state/execution-intent.json" ||
+                die "drain did not take effect; nothing switched"
+            say "drain reply unreadable; the daemon is draining. Waiting for running jobs in the ledger"
+            waited=0
+            while [ "$(sqlite3 "$state/tasks.sqlite" "select count(*) from jobs where phase in ('preparing','building','running','waiting_build','waiting_run')")" -gt 0 ]; do
+                [ "$waited" -lt 3600 ] || die "jobs still running after 1 h; nothing switched (tasks drain --cancel resumes)"
+                sleep 15
+                waited=$((waited + 15))
+            done
+        fi
         ;;
     *)
         say "installed release has no tasks drain: waiting for 'no live jobs' (twice, 15 s apart)"

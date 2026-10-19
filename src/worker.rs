@@ -77,8 +77,11 @@ fn worker_lock(state: &Path) -> Result<File> {
         .write(true)
         .open(state.join("worker.lock"))?)
 }
+/// Whether a worker (or its cleanup supervisor) holds `worker.lock`, read from /proc/locks.
+/// Probing with a `try_lock` of our own would hold the lock for an instant, long enough for a
+/// worker starting then to fail its own lock and exit.
 pub fn running(state: &Path) -> bool {
-    worker_lock(state).is_ok_and(|lock| lock.try_lock().is_err())
+    lock_held_by_anyone(&state.join("worker.lock"))
 }
 
 /// `<state>/execution-intent.json`: the last explicit `tasks start-worker` (enabled) or
