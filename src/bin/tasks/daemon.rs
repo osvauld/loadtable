@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::os::unix::{
     fs::PermissionsExt,
     net::{UnixListener, UnixStream},
@@ -7,6 +7,7 @@ use std::os::unix::{
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tinline_task_manager::health::monitor::Health;
+use tinline_task_manager::listing::Listing;
 use tinline_task_manager::metrics::{StatusResponse, sampler::Sampler};
 use tinline_task_manager::peer_link::{PeersReport, PeersResponse};
 use tinline_task_manager::{
@@ -15,6 +16,16 @@ use tinline_task_manager::{
 
 /// Connections beyond this are refused so a flood cannot spawn unbounded threads.
 const MAX_CONNECTIONS: usize = 64;
+/// Replies are written through a buffer this large: serde_json emits one write per token,
+/// which on an unbuffered socket was one syscall per token (~0.15 s of system time for a
+/// 1 MB listing).
+const REPLY_BUFFER: usize = 64 * 1024;
+
+/// The ledger connection and its listing cache, serialized together.
+struct Ledger {
+    store: Store,
+    listing: Listing,
+}
 
 pub fn run() -> Result<()> {
     let state = state_dir();
@@ -62,7 +73,10 @@ pub fn run() -> Result<()> {
     if let Some(note) = worker::resume_after_restart(&state, approved) {
         eprintln!("taskd: {note}");
     }
-    let store = Arc::new(Mutex::new(ledger));
+    let store = Arc::new(Mutex::new(Ledger {
+        store: ledger,
+        listing: Listing::default(),
+    }));
     let active = Arc::new(AtomicUsize::new(0));
     // In-memory machine/job sampling for `tasks status` (2 s ticks, own ledger connection).
     let sampler = Sampler::start(state.clone());
@@ -118,7 +132,7 @@ pub fn run() -> Result<()> {
 /// Socket I/O happens without the store lock; only `handle` is serialized.
 fn serve(
     mut stream: UnixStream,
-    store: &Mutex<Store>,
+    ledger: &Mutex<Ledger>,
     sampler: &Sampler,
     peers: &Mutex<PeersReport>,
     health: &Health,
@@ -138,9 +152,10 @@ fn serve(
         let request: Request = serde_json::from_str(&line)?;
         // SQLite rolls back an interrupted transaction, so a poisoned lock still guards a
         // consistent store.
-        let mut store = store
+        let mut guard = ledger
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Ledger { store, listing } = &mut *guard;
         // A dead worker may have gone away while this daemon stayed alive. The stage
         // supervisor/command retains worker.lock through cleanup; never reconcile sooner.
         let state = state_dir();
@@ -151,15 +166,20 @@ fn serve(
             .write(true)
             .open(state.join("worker.lock"))?;
         if lease.try_lock().is_ok() {
-            store.reconcile_interrupted()?;
+            // Only active jobs are reconciled; the cached listing says whether there are any,
+            // so an idle ledger is not re-read and parsed on every request.
+            let refreshed = listing.refresh(store);
+            if refreshed.is_err() || listing.any_active() {
+                store.reconcile_interrupted()?;
+            }
             lease.unlock()?;
         }
         let action = request.action.clone();
         let valid = request.version == PROTOCOL_VERSION;
         if valid && matches!(action, Action::Status) {
             // Own reply shape; the ledger is only read, then released before assembly.
-            let jobs = store.jobs();
-            drop(store);
+            let jobs = listing.refresh(store).map(|()| listing.jobs());
+            drop(guard);
             let reply = match jobs {
                 Ok(jobs) => StatusResponse {
                     version: PROTOCOL_VERSION,
@@ -181,7 +201,7 @@ fn serve(
             return Ok(None);
         }
         if valid && matches!(action, Action::Peers) {
-            drop(store);
+            drop(guard);
             let mut report = peers.lock().unwrap_or_else(|p| p.into_inner()).clone();
             report.refresh(
                 std::time::SystemTime::now()
@@ -217,36 +237,46 @@ fn serve(
             );
             return Ok(None);
         }
-        let mut response = if valid
-            && matches!(
-                action,
-                Action::StartWorker | Action::StopWorker | Action::Drain(_) | Action::Logs(_)
-            ) {
-            handle(
-                &mut store,
-                Request {
-                    version: PROTOCOL_VERSION,
-                    action: Action::List,
-                },
-            )
-        } else {
-            handle(&mut store, request)
-        };
-        drop(store);
-        if valid
-            && matches!(
-                action,
-                Action::StartWorker | Action::StopWorker | Action::Drain(_) | Action::Logs(_)
-            )
-        {
-            let keep = if let Action::Logs(id) = &action {
-                Some(*id)
-            } else {
-                None
-            };
-            response.jobs =
-                tinline_task_manager::relevant(std::mem::take(&mut response.jobs), keep);
+        if valid && matches!(action, Action::List) {
+            // The full listing, from the cache (serialised once per ledger generation).
+            let enabled = worker::running(&state);
+            let line = listing
+                .refresh(store)
+                .and_then(|()| listing.list_reply(enabled));
+            drop(guard);
+            match line {
+                Ok(line) => write_bytes(&mut stream, &line),
+                Err(error) => reply(&mut stream, &error_response(&error.to_string())),
+            }
+            return Ok(None);
         }
+        // Lean replies: `list_active` and the worker switches carry the unfinished jobs only
+        // (all their clients read: approved/active counts, queued proposals), `logs` only its
+        // job (the client's phase line). None of them carries the estimates.
+        let lean = valid
+            && matches!(
+                action,
+                Action::ListActive
+                    | Action::StartWorker
+                    | Action::StopWorker
+                    | Action::Drain(_)
+                    | Action::Logs(_)
+            );
+        let mut response = if lean {
+            match listing.refresh(store) {
+                Ok(()) => Listing::reply_with(
+                    match action {
+                        Action::Logs(id) => listing.job(id).into_iter().collect(),
+                        _ => listing.unfinished(),
+                    },
+                    None,
+                ),
+                Err(error) => error_response(&error.to_string()),
+            }
+        } else {
+            handle(store, request)
+        };
+        drop(guard);
         if valid {
             let extra = match action {
                 Action::StartWorker => worker::start_requested().map(|_| ()),
@@ -287,9 +317,19 @@ fn reply(stream: &mut UnixStream, response: &Response) {
 
 fn write_line<T: serde::Serialize>(stream: &mut UnixStream, response: &T) {
     let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(2)));
-    if let Err(error) = serde_json::to_writer(&mut *stream, response)
-        .and_then(|_| stream.write_all(b"\n").map_err(serde_json::Error::io))
+    let mut out = BufWriter::with_capacity(REPLY_BUFFER, &mut *stream);
+    if let Err(error) = serde_json::to_writer(&mut out, response)
+        .and_then(|_| out.write_all(b"\n").map_err(serde_json::Error::io))
+        .and_then(|_| out.flush().map_err(serde_json::Error::io))
     {
+        eprintln!("reply: {error}");
+    }
+}
+
+/// An already serialised reply line (the cached listing).
+fn write_bytes(stream: &mut UnixStream, line: &[u8]) {
+    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(2)));
+    if let Err(error) = stream.write_all(line) {
         eprintln!("reply: {error}");
     }
 }

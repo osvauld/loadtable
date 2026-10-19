@@ -403,3 +403,130 @@ fn screenshots_when_requested() {
         std::fs::write(dir.join(format!("{name}.ppm")), raster::ppm(&rgb, size)).unwrap();
     }
 }
+
+/// A source whose snapshot changes on every poll (the raw JSON of every job grows by one
+/// byte), like a busy live machine; it never contacts anything.
+struct Churn {
+    template: serde_json::Value,
+    n: usize,
+}
+
+impl SnapshotSource for Churn {
+    fn label(&self) -> &str {
+        "laptop"
+    }
+    fn local(&self) -> bool {
+        true
+    }
+    fn poll(&mut self) -> Vec<Update> {
+        self.n += 1;
+        let mut value = self.template.clone();
+        for job in value["jobs"].as_array_mut().unwrap() {
+            job["synthetic_pad"] = serde_json::Value::String("x".repeat(self.n));
+        }
+        vec![Update::Snapshot {
+            snapshot: Box::new(crate::ui_model::Snapshot::parse(value).unwrap()),
+            age_s: 0.0,
+        }]
+    }
+}
+
+/// UI memory after N refreshes: with every row expanded and every job's JSON changing each
+/// frame, egui's per-id memory stays flat (it grew by one collapsing/scroll state per open
+/// row per refresh while the raw-JSON header's id included the JSON length).
+#[test]
+fn widget_memory_stays_flat_over_many_refreshes_with_open_rows() {
+    let path = format!("{FIXTURES}/ui-busy/laptop.json");
+    let template: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let feeds = vec![Feed::new(
+        Box::new(Churn { template, n: 0 }) as Box<dyn SnapshotSource>
+    )];
+    // Fixture (demo) mode: no request is ever sent.
+    let mut d = Dashboard::new(
+        PathBuf::from("/unused-ui-test.sock"),
+        feeds,
+        Some("synthetic churn".into()),
+    );
+    d.recent.expanded = true;
+    d.recent.show_cancelled = true;
+    let context = egui::Context::default();
+    frames(&mut d, &context, 1400.0, 1800.0);
+    let keys: Vec<JobKey> = d
+        .view
+        .running
+        .iter()
+        .map(|c| c.key.clone())
+        .chain(d.view.queued.iter().map(|r| r.key.clone()))
+        .chain(d.view.recent.iter().map(|r| r.key.clone()))
+        .collect();
+    assert!(keys.len() >= 8, "fixture rows: {}", keys.len());
+    d.open_rows.extend(keys);
+    for _ in 0..20 {
+        let _ = context.run(input(1400.0, 1800.0), |c| d.frame(c));
+    }
+    let settled = context.memory(|m| m.data.len());
+    let refreshes = 300;
+    for _ in 0..refreshes {
+        let _ = context.run(input(1400.0, 1800.0), |c| d.frame(c));
+    }
+    let after = context.memory(|m| m.data.len());
+    assert!(
+        after <= settled + 4,
+        "egui memory grew from {settled} to {after} entries over {refreshes} refreshes"
+    );
+    assert_eq!(d.next_seq, 0, "fixture mode sent a request");
+}
+
+/// Measurement, not a check (`cargo test --bin tasks -- --ignored --exact
+/// ui::tests::parsed_snapshot_memory_cost --nocapture`, alone): resident memory one parsed
+/// snapshot keeps, for a synthetic document shaped like a live one (51 jobs, ~80 KB). The
+/// unbounded hand-over this replaced queued one such snapshot per feed every 2 s while the
+/// window was not drawn.
+#[test]
+#[ignore]
+fn parsed_snapshot_memory_cost() {
+    fn rss_kb() -> i64 {
+        std::fs::read_to_string("/proc/self/status")
+            .unwrap()
+            .lines()
+            .find_map(|l| l.strip_prefix("VmRSS:"))
+            .and_then(|v| v.trim().trim_end_matches("kB").trim().parse().ok())
+            .unwrap()
+    }
+    let path = format!("{FIXTURES}/ui-busy/laptop.json");
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let template = doc["jobs"].as_array().unwrap().clone();
+    let jobs: Vec<serde_json::Value> = (0..51)
+        .map(|i| {
+            let mut job = template[i % template.len()].clone();
+            job["id"] = serde_json::json!(1000 + i);
+            job["argv"] = serde_json::json!([
+                "cargo",
+                "test",
+                "--locked",
+                "-j",
+                "2",
+                format!("synthetic_filter_{i}_{}", "x".repeat(900))
+            ]);
+            job
+        })
+        .collect();
+    doc["jobs"] = serde_json::Value::Array(jobs);
+    let text = doc.to_string();
+    let count = 200;
+    let before = rss_kb();
+    let kept: Vec<_> = (0..count)
+        .map(|_| crate::ui_model::Snapshot::parse_str(&text).unwrap())
+        .collect();
+    let after = rss_kb();
+    let per = (after - before) as f64 / f64::from(count);
+    eprintln!(
+        "parsed snapshot: document {} B, ~{per:.0} KiB resident each ({count} kept); \
+         two feeds every 2 s = {:.0} MiB/h while undrained",
+        text.len(),
+        per * 3600.0 / 1024.0
+    );
+    assert_eq!(kept.len(), count as usize);
+}

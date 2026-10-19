@@ -1317,12 +1317,27 @@ fn phone_test(args: &[String]) -> Result<()> {
 fn list(args: &[String]) -> Result<()> {
     let options = options::list(args)?;
     let socket = state_dir().join("taskd.sock");
-    let mut response = call(&socket, Action::List)?;
+    // The `--active` table needs only the unfinished jobs: `list_active` (an older daemon
+    // answers "unknown variant"; then the full listing, filtered here as before). `--json`
+    // keeps the full reply (estimates included) for scripts.
+    let mut response = if options.active && !options.json {
+        let r = call(&socket, Action::ListActive)?;
+        if r.error
+            .as_deref()
+            .is_some_and(|e| e.contains("unknown variant"))
+        {
+            call(&socket, Action::List)?
+        } else {
+            r
+        }
+    } else {
+        call(&socket, Action::List)?
+    };
     if let Some(error) = &response.error {
         eprintln!("tasks: {error}");
         std::process::exit(1);
     }
-    let all = std::mem::take(&mut response.jobs);
+    let mut all = std::mem::take(&mut response.jobs);
     response.jobs = display::select(
         all.clone(),
         options.who.as_deref(),
@@ -1373,6 +1388,15 @@ fn list(args: &[String]) -> Result<()> {
                     .iter()
                     .map(|n| note(n.slot.clone().unwrap_or_else(|| "-".into()), n))
                     .collect();
+                // A holder may belong to a job that already ended (a leaked holder): fetch
+                // those few jobs by id, so the section names them as the full listing did.
+                for id in display::holder_job_ids(holders.iter().chain(&waiting)) {
+                    if !all.iter().any(|j| j.id == id)
+                        && let Ok(r) = call(&socket, Action::Job(id))
+                    {
+                        all.extend(r.jobs.into_iter().filter(|j| j.id == id));
+                    }
+                }
                 print!(
                     "{}",
                     display::holders_section(&holders, &waiting, &all, now)
