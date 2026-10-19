@@ -233,6 +233,15 @@ fn serve(
             handle(&mut store, request)
         };
         drop(store);
+        if valid && !matches!(action, Action::List) {
+            let keep = if let Action::Logs(id) = &action {
+                Some(*id)
+            } else {
+                None
+            };
+            response.jobs =
+                tinline_task_manager::relevant(std::mem::take(&mut response.jobs), keep);
+        }
         if valid {
             let extra = match action {
                 Action::StartWorker => worker::start_requested().map(|_| ()),

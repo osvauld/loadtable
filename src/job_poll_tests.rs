@@ -64,3 +64,20 @@ fn older_daemons_reject_job_as_an_unknown_variant() {
     let line = serde_json::to_string(&Action::Job(7)).unwrap();
     assert_eq!(line, r#"{"type":"job","data":7}"#);
 }
+
+#[test]
+fn only_a_list_carries_the_whole_ledger() {
+    let mut s = Store::memory().unwrap();
+    let ended = s.submit(&spec("synthetic-a")).unwrap();
+    s.cancel(ended.id).unwrap();
+    let live = s.submit(&spec("synthetic-b")).unwrap();
+    let ids = |r: Response| r.jobs.iter().map(|j| j.id).collect::<Vec<_>>();
+    assert_eq!(ids(ask(&mut s, Action::List)), vec![ended.id, live.id]);
+    // A job that has ended is carried only when the action names it.
+    let newest = ask(&mut s, Action::Submit(spec("synthetic-c")));
+    assert_eq!(ids(newest), vec![live.id, live.id + 1]);
+    assert_eq!(
+        ids(ask(&mut s, Action::Cancel(ended.id))),
+        vec![ended.id, live.id, live.id + 1]
+    );
+}

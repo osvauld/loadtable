@@ -35,7 +35,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     Accepted, Allowlist, CLOSE_GRACE, Capability, ClientError, Domains, Frame, accept_session,
-    open_session, read_frame, write_frame,
+    open_session, read_frame, read_frame_limited, write_frame,
 };
 
 /// Source-transfer protocol; distinct from iroh-blobs' own ALPN.
@@ -1043,7 +1043,7 @@ pub async fn sync_push(
     .map_err(|e| ClientError::Local(e.to_string()))?;
     let mut s = open_session(ep, to, SOURCE_ALPN, SOURCE_DOMAINS, &body, timeout).await?;
     let result = async {
-        let wanted = match read_frame(&mut s.recv).await {
+        let wanted = match read_frame_limited(&mut s.recv, MAX_SOURCE_FRAME).await {
             Ok(Frame::Missing { hashes }) => hashes,
             Ok(Frame::Rejected { reason }) => return Err(ClientError::Refused(reason)),
             Ok(other) => return Err(ClientError::Protocol(format!("unexpected {other:?}"))),

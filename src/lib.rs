@@ -389,6 +389,14 @@ pub struct Response {
 
 pub fn handle(store: &mut Store, request: Request) -> Response {
     let mut submitted_id = None;
+    let full = matches!(request.action, Action::List);
+    let named = match &request.action {
+        Action::Cancel(id)
+        | Action::Approve(id)
+        | Action::ApproveAndroidTrial(id)
+        | Action::ApproveCommand(id) => Some(*id),
+        _ => None,
+    };
     let result = if request.version != PROTOCOL_VERSION {
         Err("unsupported protocol version".into())
     } else {
@@ -433,7 +441,10 @@ pub fn handle(store: &mut Store, request: Request) -> Response {
             }
         }
     };
-    let jobs = store.jobs();
+    let keep = named.or(submitted_id);
+    let jobs = store
+        .jobs()
+        .map(|jobs| if full { jobs } else { relevant(jobs, keep) });
     let estimates = store.estimates();
     let error = result
         .err()
@@ -448,6 +459,14 @@ pub fn handle(store: &mut Store, request: Request) -> Response {
         error: error.map(|e| e.to_string()),
         log: None,
     }
+}
+
+/// What a reply to anything but `List` carries: the jobs still live plus the one the action named.
+/// The whole ledger grows without bound and a reply over `MAX_REPLY` fails every client.
+pub fn relevant(jobs: Vec<Job>, keep: Option<i64>) -> Vec<Job> {
+    jobs.into_iter()
+        .filter(|j| !j.phase.terminal() || Some(j.id) == keep)
+        .collect()
 }
 
 pub fn state_dir() -> PathBuf {

@@ -2506,3 +2506,29 @@ fn reroute_never_moves_pinned_or_local_placement_jobs_even_to_an_idle_peer() {
     assert_eq!(ran(&a, "runs").len(), 2, "both local ones ran here");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn a_first_sync_of_thousands_of_files_is_not_cut_off_by_the_reply_frame_limit() {
+    let (a, b) = pair("manyfiles");
+    let repo = repo(&a);
+    // The receiver names every missing hash in one reply (about 67 bytes each); the sender used
+    // to read it with the 64 KiB control-frame bound, so about 980 files was the ceiling.
+    std::fs::create_dir_all(repo.join("many")).unwrap();
+    for i in 0..3000 {
+        std::fs::write(repo.join(format!("many/f{i}.txt")), format!("file {i}\n")).unwrap();
+    }
+    let out = forward(&a, &repo, &["--run"], "true");
+    assert!(out.status.success(), "{}", stderr(&out));
+    let id = a.jobs().into_iter().max_by_key(|j| j.id).unwrap().id;
+    assert!(
+        a.link(id)["blobs_sent"].as_u64() >= Some(3000),
+        "{}",
+        a.job_log(id)
+    );
+    let cid = a.link(id)["checkout"].as_str().unwrap().to_owned();
+    let co = b.checkouts().join(&cid);
+    assert_eq!(
+        std::fs::read_to_string(co.join("many/f2999.txt")).unwrap(),
+        "file 2999\n"
+    );
+}
