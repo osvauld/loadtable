@@ -38,3 +38,10 @@ broad_test: "refuse"
 #   interval_s: 20          # 1..3600
 #   min_ratio: 2.0          # move only when the peer finishes >= this many times sooner
 #   min_gain_s: 300         # ... and at least this many seconds sooner (0..86400)
+
+# `tasks gc`: what counts as idle (src/gc.rs). Run `tasks gc` for the list, `tasks gc --apply`
+# to remove. Offload copies (~/offload/checkouts, on a worker) go whole; checkout output caches
+# (~/build-cache/p2p_chat/tasks/checkouts) are emptied and their directories stay.
+# gc::
+#   offload_idle_days: 3    # 1..365
+#   output_idle_days: 7     # 1..365

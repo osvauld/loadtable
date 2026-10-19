@@ -14,6 +14,7 @@ pub mod catalog;
 pub mod device;
 pub mod device_denylist;
 pub mod execution;
+pub mod gc;
 pub mod health;
 #[cfg(target_os = "linux")]
 pub mod lease_audit;
@@ -26,9 +27,9 @@ pub mod peer;
 pub mod peer_link;
 pub mod placement;
 pub mod policy;
-pub mod reroute;
 #[cfg(target_os = "linux")]
 pub mod remote_reconcile;
+pub mod reroute;
 #[cfg(target_os = "linux")]
 pub mod retention;
 pub mod snapshot;
@@ -854,7 +855,12 @@ pub fn request_status(path: &Path, timeout: Duration) -> Result<metrics::StatusR
         return Err("incomplete status reply from the daemon".into());
     }
     let reply: metrics::StatusResponse = serde_json::from_str(&line)?;
-    if reply.status.is_none() && reply.error.as_deref().is_some_and(|e| e.contains("variant")) {
+    if reply.status.is_none()
+        && reply
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("variant"))
+    {
         return Err(format!(
             "the running daemon does not support `status` (older release): {}",
             reply.error.unwrap_or_default()

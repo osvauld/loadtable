@@ -77,6 +77,9 @@ pub struct Policy {
         skip_serializing_if = "crate::reroute::ReroutePolicy::is_empty"
     )]
     pub reroute: crate::reroute::ReroutePolicy,
+    /// Idle limits of `tasks gc` (`gc::` section; `gc::GcPolicy`).
+    #[serde(default, skip_serializing_if = "crate::gc::GcPolicy::is_empty")]
+    pub gc: crate::gc::GcPolicy,
 }
 
 /// The policy in force and where each value came from (what `tasks admission` shows).

@@ -7,6 +7,7 @@ mod daemon;
 mod display;
 mod doctor;
 mod follow;
+mod gc;
 #[cfg(feature = "ui")]
 mod log_view;
 #[cfg(feature = "mcp")]
@@ -60,6 +61,7 @@ const USAGE: &str = "usage: tasks [ui [--fixtures DIR]]  # DIR: cluster snapshot
        # local.command cost=cpu_simulation is a legacy label, NOT the resource class
        tasks approve-android-trial JOB_ID   # EXPERIMENTAL build-only; trusts local source/host config
        tasks catalog | cache | cache-plan | admission | worker
+       tasks gc [--apply] [--json]  # idle offload copies and checkout output caches; dry run unless --apply
        tasks start-worker [--json] | stop-worker [--json] | drain [--timeout SECS] | drain --cancel
          # drain: no new claims until the daemon restarts, wait for running jobs; then restart
          # start: run approved jobs now and after daemon restarts; stop: claim no new jobs
@@ -157,6 +159,7 @@ fn run() -> Result<()> {
             std::process::exit(tinline_task_manager::peer::bridge::run(&args[1..]));
         }
         Some("peer") => return peer_command(&args[1..]),
+        Some("gc") => return gc::run(&args[1..]),
         Some("mcp") => return mcp_command(&args[1..]),
         Some("place") => return place_command(&args[1..]),
         Some("catalog") if args.len() == 1 => {

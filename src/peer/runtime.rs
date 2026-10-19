@@ -12,12 +12,13 @@ use crate::peer_link::{
     STREAM_ONLINE, STREAM_STATUS_ERROR, write_peer_link,
 };
 use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use task_manager_peer::iroh::Endpoint;
+use task_manager_peer::iroh::{Endpoint, SecretKey};
 use task_manager_peer::iroh_blobs::api::Store as BlobStore;
 use task_manager_peer::iroh_blobs::store::fs::FsStore;
 use task_manager_peer::jobs::JobsTiming;
@@ -124,6 +125,47 @@ pub fn start(state: &Path, socket: &Path) -> Arc<Mutex<PeersReport>> {
     report
 }
 
+/// How long to wait between attempts to bind the LAN address.
+const BIND_RETRY: Duration = Duration::from_secs(5);
+
+/// Binds the configured address, retrying until it works. After a reboot the daemon can start
+/// before Wi-Fi has its address; giving up there left the link off until someone restarted
+/// the daemon. The report says what it is waiting for in the meantime.
+async fn bind_when_possible(
+    key: &SecretKey,
+    bind: SocketAddr,
+    retry: Duration,
+    report: &Arc<Mutex<PeersReport>>,
+    log: &Logger,
+) -> Endpoint {
+    let mut attempt = 0u64;
+    loop {
+        match lan_endpoint(key.clone(), bind, server::alpns()).await {
+            Ok(ep) => {
+                if attempt > 0 {
+                    log(format!("peer: bound {bind} after {attempt} retries"));
+                }
+                report.lock().unwrap().error = None;
+                return ep;
+            }
+            Err(e) => {
+                if attempt.is_multiple_of(12) {
+                    log(format!(
+                        "peer: cannot bind {bind} yet ({e}); retrying every {} s",
+                        retry.as_secs()
+                    ));
+                }
+                report.lock().unwrap().error = Some(format!(
+                    "waiting to bind {bind}: {e} (retrying every {} s)",
+                    retry.as_secs()
+                ));
+                attempt += 1;
+                tokio::time::sleep(retry).await;
+            }
+        }
+    }
+}
+
 async fn run(
     config_path: &Path,
     state: &Path,
@@ -133,7 +175,7 @@ async fn run(
 ) -> Result<(), String> {
     let config = PeerConfig::load(config_path)?;
     let key = config.secret_key()?;
-    let ep = lan_endpoint(key, config.bind, server::alpns()).await?;
+    let ep = bind_when_possible(&key, config.bind, BIND_RETRY, &report, &log).await;
     let lan = LanReport::of(&ep)?;
     if !lan.is_relay_and_lookup_free() {
         return Err(format!("endpoint is not LAN-only: {lan:?}"));
@@ -695,3 +737,7 @@ pub async fn watch_peer(shared: &Shared, name: &str, sink: &mut Sink) {
         backoff = (backoff * 2.0).min(30.0);
     }
 }
+
+#[cfg(test)]
+#[path = "runtime_tests.rs"]
+mod tests;
