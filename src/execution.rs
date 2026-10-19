@@ -331,6 +331,15 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+    /// Approved jobs no worker has claimed yet.
+    pub fn approved_waiting(&self) -> Result<usize> {
+        let n: i64 = self.0.query_row(
+            "SELECT COUNT(*) FROM jobs WHERE phase='approved'",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
     /// Oldest approved job, FIFO.
     pub fn claim(&mut self, worker: ProcessIdentity) -> Result<Option<Job>> {
         self.claim_class(worker, true, true)

@@ -519,6 +519,19 @@ pub fn run() -> Result<()> {
                 || failure.is_some()
                 || idle.elapsed() > Duration::from_secs(2))
         {
+            // A client that approves a job then asks for a worker sees this one still holding
+            // worker.lock and spawns nothing. Release the lock first, then look again: any
+            // approval committed before that client's check is visible here, and any later
+            // one finds the lock free and spawns a worker.
+            let leaving = STOP.load(Ordering::SeqCst) || failure.is_some() || paused;
+            if !leaving
+                && lock.unlock().is_ok()
+                && store.approved_waiting().unwrap_or(0) > 0
+                && lock.try_lock().is_ok()
+            {
+                idle = Instant::now();
+                continue;
+            }
             break;
         }
         std::thread::sleep(Duration::from_millis(100));
