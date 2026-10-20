@@ -1105,3 +1105,28 @@ fn sampler_cost() {
 fn read_procs_now() -> usize {
     sampler::read_procs().len()
 }
+
+#[test]
+fn a_flock_on_a_btrfs_subvolume_file_is_found_by_inode_despite_the_anonymous_device() {
+    use std::os::unix::fs::MetadataExt;
+    let path = std::env::temp_dir().join(format!("tasks-flock-held-{}", std::process::id()));
+    std::fs::write(&path, "").unwrap();
+    let meta = std::fs::metadata(&path).unwrap();
+    let (major, minor) = (libc::major(meta.dev()), libc::minor(meta.dev()));
+    let held = |m, n, i| std::collections::HashSet::from([(m, n, i)]);
+    assert!(
+        flock_held(&held(major, minor, meta.ino()), &meta),
+        "exact match"
+    );
+    assert!(
+        !flock_held(&held(major, minor, meta.ino() + 1), &meta),
+        "other inode"
+    );
+    assert!(!flock_held(&Default::default(), &meta));
+    // The file's stat device is anonymous (major 0, as on a btrfs subvolume) while
+    // /proc/locks names the superblock device: still held.
+    if major == 0 {
+        assert!(flock_held(&held(0, minor + 1, meta.ino()), &meta));
+    }
+    std::fs::remove_file(&path).unwrap();
+}

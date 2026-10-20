@@ -129,6 +129,25 @@ pub fn marks_for(
 
 /// Keeps only the marks `argv` (run from `cwd`) needs, so [`decide`] (which has no cwd)
 /// skips only for capabilities this command uses (e.g. libclang only with `bindgen`).
+/// Prefixes where a path that exists here is private to this machine (another machine has its
+/// own home and `/tmp`); system and toolchain paths exist on every machine.
+const PRIVATE_PREFIXES: &[&str] = &["/tmp/", "/var/tmp/", "/home/", "/root/", "/mnt/", "/media/"];
+/// Toolchain homes every worker has its own copy of.
+const SHARED_HOME_DIRS: &[&str] = &["/.cargo/", "/.rustup/", "/.local/bin/", "/.nix-profile/"];
+
+/// The first argument naming an absolute path that exists on this machine but would not on
+/// another: a script in a scratchpad or `/tmp`, or a file under the home directory. Only the
+/// checkout is synced, and it lives at a different path on the peer, so the command would
+/// exit 127 or fail to open it there. Looks into `NAME=/path` and `--flag=/path` too.
+pub fn local_only_path(argv: &[String]) -> Option<String> {
+    argv.iter().skip(1).find_map(|arg| {
+        let path = arg.rsplit_once('=').map_or(arg.as_str(), |(_, v)| v);
+        let private = PRIVATE_PREFIXES.iter().any(|p| path.starts_with(p))
+            && !SHARED_HOME_DIRS.iter().any(|d| path.contains(d));
+        (private && Path::new(path).exists()).then(|| path.to_string())
+    })
+}
+
 pub fn retain_needed(peers: &mut [Peer], argv: &[String], cwd: Option<&Path>) {
     for p in peers {
         p.missing
@@ -391,6 +410,9 @@ pub const PLACED_BY_DEFAULT: &[&str] = &["check", "test", "clippy", "nextest"];
 /// global flag with a value (`--color always test`) yields the value, which matches no
 /// subcommand and so stays local.
 pub fn placed_by_default(argv: &[String]) -> bool {
+    if gradle_tasks(argv).is_some_and(|t| !t.is_empty() && t.iter().all(|t| !makes_artifact(t))) {
+        return true;
+    }
     let Some(cargo) = cargo_index(argv) else {
         return false;
     };
@@ -398,6 +420,44 @@ pub fn placed_by_default(argv: &[String]) -> bool {
         .iter()
         .find(|w| !w.starts_with('-') && !w.starts_with('+'))
         .is_some_and(|sub| PLACED_BY_DEFAULT.contains(&sub.as_str()))
+}
+
+/// Task names of a direct `gradlew`/`gradle` command (the last `:`-segment of each, so
+/// `:app:compileDebugKotlin` is `compileDebugKotlin`); None for any other command. Options and
+/// the values of `-p`/`--project-dir`/`-c` are skipped.
+pub fn gradle_tasks(argv: &[String]) -> Option<Vec<String>> {
+    let first = base(argv.first()?)?;
+    if first != "gradlew" && first != "gradle" {
+        return None;
+    }
+    let mut tasks = vec![];
+    let mut words = argv[1..].iter();
+    while let Some(w) = words.next() {
+        if matches!(
+            w.as_str(),
+            "-p" | "--project-dir" | "-c" | "--settings-file"
+        ) {
+            words.next();
+        } else if !w.starts_with('-') {
+            tasks.push(w.rsplit(':').next().unwrap_or(w).to_string());
+        }
+    }
+    Some(tasks)
+}
+
+/// Tasks whose product is a file the submitter wants (an APK, a bundle, an install): placed
+/// elsewhere, that output would stay on the worker unless the submission fetches it.
+fn makes_artifact(task: &str) -> bool {
+    [
+        "assemble", "bundle", "install", "build", "package", "publish", "export",
+    ]
+    .iter()
+    .any(|p| task.starts_with(p))
+}
+
+/// A gradle command that builds an artifact (so it is not placed by default).
+pub fn gradle_builds_artifact(argv: &[String]) -> bool {
+    gradle_tasks(argv).is_some_and(|t| t.iter().any(|t| makes_artifact(t)))
 }
 
 fn waiting(phase: &Phase) -> bool {

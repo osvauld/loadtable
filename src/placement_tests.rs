@@ -642,6 +642,8 @@ fn only_log_only_cargo_commands_are_placed_by_default() {
         "cargo +nightly --offline clippy --all-targets",
         "env RUST_LOG=debug cargo nextest run",
         "/home/x/.cargo/bin/cargo test",
+        "./android/gradlew -p android --no-daemon :app:compileDebugKotlin :app:testDebugUnitTest",
+        "gradle lint",
     ] {
         assert!(placed_by_default(&v(yes)), "{yes}");
     }
@@ -652,6 +654,10 @@ fn only_log_only_cargo_commands_are_placed_by_default() {
         "sh -c cargo test",
         "npm run build",
         "cargo",
+        "./android/gradlew -p android :app:assembleDebug",
+        "./gradlew compileDebugKotlin bundleRelease",
+        "./gradlew -p android",
+        "gradlew",
     ] {
         assert!(!placed_by_default(&v(no)), "{no}");
     }
@@ -675,4 +681,46 @@ fn a_second_compile_slot_that_is_free_means_no_wait_on_the_holder() {
     assert_eq!(compile_wait(&host).0, 0.0);
     host.machine.slots.last_mut().unwrap().busy = true;
     assert_eq!(compile_wait(&host).0, UNKNOWN_S);
+}
+
+#[test]
+fn a_path_that_exists_only_on_this_machine_is_found_in_the_argv() {
+    let dir = std::env::temp_dir().join(format!("tasks-local-only-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = dir.join("exp.sh");
+    std::fs::write(&script, "true").unwrap();
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    let path = script.to_str().unwrap();
+    assert_eq!(local_only_path(&s(&["sh", path])).as_deref(), Some(path));
+    let env = format!("SIM_BASE={path}");
+    assert_eq!(
+        local_only_path(&s(&["env", &env, "x"])).as_deref(),
+        Some(path)
+    );
+    // Missing files, relative paths, system paths and the program itself do not count.
+    assert_eq!(
+        local_only_path(&s(&["sh", "/tmp/definitely-not-here-4821"])),
+        None
+    );
+    assert_eq!(local_only_path(&s(&["cargo", "test", "-p", "video"])), None);
+    assert_eq!(local_only_path(&s(&["/bin/sh", "-c", "true"])), None);
+    assert_eq!(local_only_path(&s(&[path, "x"])), None);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn gradle_tasks_are_read_past_options_and_project_dirs() {
+    let v = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+    assert_eq!(
+        gradle_tasks(&v(
+            "./android/gradlew -p android --no-daemon -Pabis=x86 :app:assembleDebug test"
+        )),
+        Some(vec!["assembleDebug".to_string(), "test".to_string()])
+    );
+    assert_eq!(gradle_tasks(&v("cargo test")), None);
+    assert!(gradle_builds_artifact(&v("./gradlew :app:installDebug")));
+    assert!(!gradle_builds_artifact(&v(
+        "./gradlew :app:compileDebugKotlin"
+    )));
+    assert!(!gradle_builds_artifact(&v("cargo build")));
 }

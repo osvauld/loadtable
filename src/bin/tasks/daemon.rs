@@ -96,6 +96,8 @@ pub fn run() -> Result<()> {
     // Interrupted tasks-offload jobs: ask the worker (read-only) what became of their remote
     // half and record it (`remote_result`); never re-runs anything.
     tinline_task_manager::remote_reconcile::start(state.clone());
+    // Under disk pressure the oldest idle caches go (policy gc:: auto_when_full).
+    tinline_task_manager::gc_auto::start(state.clone(), socket.clone());
     eprintln!(
         "taskd: socket={} (execution requires per-job approval and explicit local worker)",
         socket.display()

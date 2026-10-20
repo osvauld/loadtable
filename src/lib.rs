@@ -15,6 +15,7 @@ pub mod device;
 pub mod device_denylist;
 pub mod execution;
 pub mod gc;
+pub mod gc_auto;
 pub mod health;
 #[cfg(target_os = "linux")]
 pub mod lease_audit;

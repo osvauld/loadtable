@@ -233,13 +233,81 @@ fn limits_come_from_the_policy_and_reject_nonsense() {
     let set = GcPolicy {
         offload_idle_days: Some(1),
         output_idle_days: Some(30),
+        ..GcPolicy::default()
     };
     assert_eq!(set.limits().unwrap().offload_idle_s, DAY);
     assert_eq!(set.limits().unwrap().output_idle_s, 30 * DAY);
     let bad = GcPolicy {
         offload_idle_days: Some(0),
         output_idle_days: None,
+        ..GcPolicy::default()
     };
     assert!(bad.limits().unwrap_err().contains("offload_idle_days"));
     assert_eq!(limits().offload_idle_s, 3 * DAY);
+}
+
+#[test]
+fn under_pressure_the_oldest_idle_caches_go_first_until_the_target_and_live_ones_stay() {
+    let t = Temp::new();
+    let roots = Roots::of_home(&t.0);
+    fs::create_dir_all(&roots.outputs).unwrap();
+    let names = ["old", "older", "new", "fresh"];
+    for (name, days) in [("old", 9), ("older", 12), ("new", 1), ("fresh", 0)] {
+        let dir = roots.outputs.join(name).join("debug");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("big"), vec![1u8; 2 << 20]).unwrap();
+        age_tree(&roots.outputs.join(name), days);
+    }
+    // The disk starts at 10 free and gains 8 for every cache that has been emptied.
+    let free = |_: &Path| {
+        let emptied = names
+            .iter()
+            .filter(|n| !roots.outputs.join(n).join("debug/big").exists())
+            .count() as u64;
+        Some(10 + 8 * emptied)
+    };
+    let removed = relieve(&roots, &InUse::default(), now(), 20, 25, &free);
+    let order: Vec<_> = removed
+        .iter()
+        .map(|r| r.path.file_name().unwrap().to_str().unwrap().to_string())
+        .collect();
+    // Oldest first, stopping once the target is met; 'fresh' (touched minutes ago) never goes.
+    assert_eq!(order, ["older", "old"]);
+    assert!(removed.iter().all(|r| r.error.is_none()));
+    assert!(removed[0].free_before == 10 && removed[1].free_after == 26);
+    assert!(roots.outputs.join("new/debug/big").exists());
+    assert!(roots.outputs.join("fresh/debug/big").exists());
+}
+
+#[test]
+fn nothing_is_removed_while_the_disk_is_above_its_reserve() {
+    let t = Temp::new();
+    let roots = Roots::of_home(&t.0);
+    fs::create_dir_all(roots.outputs.join("a/debug")).unwrap();
+    fs::write(roots.outputs.join("a/debug/big"), vec![1u8; 2 << 20]).unwrap();
+    age_tree(&roots.outputs.join("a"), 30);
+    let removed = relieve(&roots, &InUse::default(), now(), 20, 25, &|_| Some(100));
+    assert!(removed.is_empty());
+    assert!(roots.outputs.join("a/debug/big").exists());
+}
+
+#[test]
+fn a_live_checkout_is_not_taken_under_pressure() {
+    let t = Temp::new();
+    let roots = Roots::of_home(&t.0);
+    let checkout = PathBuf::from("/work/live-checkout");
+    let key = output_key(&checkout);
+    fs::create_dir_all(roots.outputs.join(&key).join("debug")).unwrap();
+    fs::write(
+        roots.outputs.join(&key).join("debug/big"),
+        vec![1u8; 2 << 20],
+    )
+    .unwrap();
+    age_tree(&roots.outputs.join(&key), 30);
+    let using = InUse {
+        sources: vec![checkout],
+        cwds: vec![],
+    };
+    let removed = relieve(&roots, &using, now(), 20, 25, &|_| Some(1));
+    assert!(removed.is_empty());
 }

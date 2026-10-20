@@ -35,11 +35,18 @@ pub struct GcPolicy {
     pub offload_idle_days: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_idle_days: Option<u64>,
+    /// Free the oldest idle caches by itself when the cache disk drops under its reserve
+    /// (default on; `false` leaves cleanup to `tasks gc`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_when_full: Option<bool>,
 }
 
 impl GcPolicy {
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
+    }
+    pub fn auto_when_full(&self) -> bool {
+        self.auto_when_full.unwrap_or(true)
     }
     pub fn limits(&self) -> Result<Limits, String> {
         let day = |name: &str, value: Option<u64>, default: u64| match value {
@@ -342,6 +349,114 @@ fn output_caches(plan: &mut Plan, roots: &Roots, limits: Limits, using: &InUse, 
             path,
         });
     }
+}
+
+/// Nothing modified in the last 10 minutes is taken under disk pressure: a build is writing it.
+const PRESSURE_MIN_IDLE_S: i64 = 600;
+/// Pressure cleanup stops this far above the reserve, so it does not run again at once.
+pub const PRESSURE_HEADROOM: u64 = 5 << 30;
+
+/// One removal made under disk pressure.
+#[derive(Debug, Serialize)]
+pub struct Relieved {
+    pub path: PathBuf,
+    pub kind: Kind,
+    pub bytes: u64,
+    pub idle_s: i64,
+    pub free_before: u64,
+    pub free_after: u64,
+    pub error: Option<String>,
+}
+
+/// Disk-pressure cleanup: while a cache's disk has less than `reserve` free, remove the OLDEST
+/// idle entries (no age limit beyond the last 10 minutes) until it has `target` free. `free`
+/// measures the disk under a path. Whatever a live job or a process of yours uses is never
+/// taken; every removal is returned (and so can be audited).
+pub fn relieve(
+    roots: &Roots,
+    using: &InUse,
+    now: i64,
+    reserve: u64,
+    target: u64,
+    free: &dyn Fn(&Path) -> Option<u64>,
+) -> Vec<Relieved> {
+    let none = Limits {
+        offload_idle_s: 0,
+        output_idle_s: 0,
+    };
+    let mut candidates = plan(roots, none, using, now).candidates;
+    candidates.retain(|c| c.idle_s >= PRESSURE_MIN_IDLE_S);
+    candidates.sort_by_key(|c| std::cmp::Reverse(c.idle_s));
+    // Per cache kind: removing starts below `reserve` and runs on up to `target`.
+    let (mut copies_active, mut outputs_active) = (false, false);
+    let mut out = vec![];
+    for c in candidates {
+        let Some(before) = free(&c.path) else {
+            continue;
+        };
+        let active = match c.kind {
+            Kind::OffloadCopy => &mut copies_active,
+            Kind::OutputCache => &mut outputs_active,
+        };
+        *active |= before < reserve;
+        if *active && before >= target {
+            *active = false;
+        }
+        if !*active {
+            continue;
+        }
+        let outcome = apply(
+            &Plan {
+                candidates: vec![c.clone()],
+                skipped: vec![],
+            },
+            roots,
+        )
+        .remove(0);
+        out.push(Relieved {
+            free_after: free(&c.path).unwrap_or(before),
+            path: c.path,
+            kind: c.kind,
+            bytes: c.bytes,
+            idle_s: c.idle_s,
+            free_before: before,
+            error: outcome.error,
+        });
+    }
+    out
+}
+
+/// Job sources of unfinished jobs (from the daemon at `socket`; never autostarts one) and the
+/// working directories of this user's processes. The flag says whether the daemon answered.
+pub fn in_use_via(socket: &Path) -> (InUse, bool) {
+    use crate::{Action, Phase};
+    let mut using = InUse::default();
+    let answered = match crate::request(socket, Action::ListActive) {
+        Ok(r) if r.error.is_none() => {
+            using.sources = r
+                .jobs
+                .iter()
+                .filter(|j| {
+                    !matches!(
+                        j.phase,
+                        Phase::Passed | Phase::Failed | Phase::Interrupted | Phase::Cancelled
+                    )
+                })
+                .map(|j| PathBuf::from(&j.spec.source))
+                .collect();
+            true
+        }
+        _ => false,
+    };
+    let me = unsafe { libc::geteuid() };
+    for entry in fs::read_dir("/proc").into_iter().flatten().flatten() {
+        if entry.metadata().is_ok_and(|m| m.uid() == me)
+            && let Ok(cwd) = fs::read_link(entry.path().join("cwd"))
+        {
+            using.cwds.push(cwd);
+        }
+    }
+    (using, answered)
 }
 
 #[derive(Debug, Serialize)]

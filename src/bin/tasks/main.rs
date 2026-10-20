@@ -310,6 +310,19 @@ fn run() -> Result<()> {
                 && !parsed.pin
                 && tinline_task_manager::placement::placed_by_default(&recipe.argv)
                 && tinline_task_manager::placement::peer_config_present();
+            if no_class
+                && !parsed.anywhere
+                && parsed.peer.is_none()
+                && !parsed.pin
+                && tinline_task_manager::placement::gradle_builds_artifact(&recipe.argv)
+                && tinline_task_manager::placement::peer_config_present()
+            {
+                eprintln!(
+                    "tasks: note: this gradle build makes an artifact, so it stays on this machine. \
+                     To build on a free worker: tasks run --who {owner} --peer NAME --fetch PATH_TO_OUTPUT -- ... \
+                     (e.g. --peer nixos --fetch android/app/build/outputs/apk/debug/app-debug.apk)"
+                );
+            }
             match &parsed.peer {
                 None if parsed.anywhere => {
                     let (spec, decision) = anywhere_spec(recipe, owner, &parsed.fetch)?;
@@ -597,8 +610,17 @@ fn anywhere_spec(
     let cwd = std::env::current_dir().ok();
     placement::retain_needed(&mut inputs.peers, &recipe.argv, cwd.as_deref());
     let class = place_class(&recipe.resource);
-    let decision =
-        placement::decide_with(&recipe.argv, &class, &placement::Request::Anywhere, &inputs)?;
+    // A path that exists only here cannot be reached from a peer: stay local.
+    let local_only = placement::local_only_path(&recipe.argv);
+    let request = if local_only.is_some() {
+        placement::Request::Local
+    } else {
+        placement::Request::Anywhere
+    };
+    let mut decision = placement::decide_with(&recipe.argv, &class, &request, &inputs)?;
+    if let Some(path) = local_only {
+        decision.reason = format!("kept local: {path} exists only on this machine");
+    }
     eprintln!("tasks: {}", decision.line());
     for note in &decision.notes {
         eprintln!("tasks: note: {note}");
@@ -659,7 +681,18 @@ fn place_command(args: &[String]) -> Result<()> {
     let mut inputs = placement::gather(&socket, Duration::from_secs(15))?;
     let cwd = std::env::current_dir().ok();
     placement::retain_needed(&mut inputs.peers, &argv, cwd.as_deref());
-    let decision = placement::decide_with(&argv, &class, &request, &inputs)?;
+    let local_only = placement::local_only_path(&argv);
+    let request = match (&request, &local_only) {
+        (placement::Request::Anywhere, Some(_)) => placement::Request::Local,
+        _ => request,
+    };
+    let mut decision = placement::decide_with(&argv, &class, &request, &inputs)?;
+    if let Some(path) = local_only {
+        decision.notes.push(match request {
+            placement::Request::Local => format!("kept local: {path} exists only on this machine"),
+            _ => format!("warning: {path} exists only on this machine, not on the peer"),
+        });
+    }
     if parsed.json {
         println!("{}", serde_json::to_string_pretty(&decision)?);
         return Ok(());

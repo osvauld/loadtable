@@ -1,8 +1,7 @@
 //! `tasks gc`: age-based cleanup of offload copies and checkout output caches (src/gc.rs).
-use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
-use tinline_task_manager::gc::{self, InUse, Kind, Roots};
-use tinline_task_manager::{Action, Phase, Result, policy, request, state_dir};
+use std::path::Path;
+use tinline_task_manager::gc::{self, Kind, Roots};
+use tinline_task_manager::{Result, policy, state_dir};
 
 const USAGE: &str = "usage: tasks gc [--apply] [--json]
   Lists what is idle past the limits of the gc:: policy section (offload copies 3 days,
@@ -27,7 +26,7 @@ pub fn run(args: &[String]) -> Result<()> {
     let limits = effective.policy.gc.limits()?;
     let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
     let roots = Roots::of_home(Path::new(&home));
-    let (using, daemon_answered) = in_use();
+    let (using, daemon_answered) = gc::in_use_via(&state_dir().join("taskd.sock"));
     if apply && !daemon_answered {
         return Err(
             "the daemon did not answer, so live jobs are unknown; nothing removed \
@@ -92,37 +91,4 @@ fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64)
-}
-
-/// Job sources of unfinished jobs (from a running daemon; never autostarts one) and the working
-/// directories of this user's processes. The flag says whether the daemon answered.
-fn in_use() -> (InUse, bool) {
-    let mut using = InUse::default();
-    let socket = state_dir().join("taskd.sock");
-    let answered = match request(&socket, Action::List) {
-        Ok(r) if r.error.is_none() => {
-            using.sources = r
-                .jobs
-                .iter()
-                .filter(|j| {
-                    !matches!(
-                        j.phase,
-                        Phase::Passed | Phase::Failed | Phase::Interrupted | Phase::Cancelled
-                    )
-                })
-                .map(|j| PathBuf::from(&j.spec.source))
-                .collect();
-            true
-        }
-        _ => false,
-    };
-    let me = unsafe { libc::geteuid() };
-    for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
-        if entry.metadata().is_ok_and(|m| m.uid() == me)
-            && let Ok(cwd) = std::fs::read_link(entry.path().join("cwd"))
-        {
-            using.cwds.push(cwd);
-        }
-    }
-    (using, answered)
 }

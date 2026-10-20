@@ -22,6 +22,12 @@ const TAIL: u64 = 32 * 1024;
 /// A long log's start (command line, first errors, build plan) is kept with its tail.
 const HEAD: u64 = 16 * 1024;
 static STOP: AtomicBool = AtomicBool::new(false);
+/// Whether a job thread's error is an infrastructure fault that makes the worker stop
+/// claiming. A busy ledger or a lost stage supervisor belongs to one job (its record is
+/// already final), so the worker keeps serving the others.
+fn stops_claims(error: &(dyn std::error::Error + 'static)) -> bool {
+    !(ledger::is_transient(error) || error.is::<SupervisorLost>())
+}
 #[derive(Debug)]
 struct SupervisorLost(String);
 impl std::fmt::Display for SupervisorLost {
@@ -243,14 +249,12 @@ fn start_detached_inner() -> Result<bool> {
 
 /// Whether some process holds a FLOCK on `path`, from /proc/locks, without taking it.
 pub fn lock_held_by_anyone(path: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
     let Ok(meta) = fs::metadata(path) else {
         return false;
     };
-    let dev = meta.dev();
-    let want = (libc::major(dev), libc::minor(dev), meta.ino());
-    fs::read_to_string("/proc/locks")
-        .is_ok_and(|t| crate::metrics::procfs::parse_flocks(&t).contains(&want))
+    fs::read_to_string("/proc/locks").is_ok_and(|t| {
+        crate::metrics::procfs::flock_held(&crate::metrics::procfs::parse_flocks(&t), &meta)
+    })
 }
 
 pub fn logs(id: i64) -> Result<LogTail> {
@@ -447,6 +451,11 @@ pub fn run() -> Result<()> {
             if active[i].0.is_finished() {
                 match active.swap_remove(i).0.join() {
                     Ok(Ok(())) => (),
+                    // A job's own transient ledger error or lost supervisor is already on that
+                    // job's record; it must not stop every other approved job being claimed.
+                    Ok(Err(e)) if !stops_claims(e.as_ref()) => {
+                        eprintln!("worker: job ended with an error, still claiming: {e}");
+                    }
                     Ok(Err(e)) => {
                         failure.get_or_insert(e.to_string());
                     }
@@ -2104,6 +2113,17 @@ fn run_android(state: &Path, dir: &Path, job: &crate::Job, stage: &str) -> Resul
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_jobs_busy_ledger_or_lost_supervisor_does_not_stop_the_worker_claiming() {
+        let busy = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            None,
+        );
+        assert!(!stops_claims(&busy));
+        assert!(!stops_claims(&SupervisorLost("exited".into())));
+        let other: Box<dyn std::error::Error + Send + Sync> = "disk failure".into();
+        assert!(stops_claims(other.as_ref()));
+    }
     use super::*;
     fn temp_state(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

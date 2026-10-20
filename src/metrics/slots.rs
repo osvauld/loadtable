@@ -105,10 +105,8 @@ pub fn scan(root: &Path, held: &HashSet<(u32, u32, u64)>) -> Scan {
     for name in names {
         let Some(kind) = kind_of(&name) else { continue };
         let path = root.join(&name);
-        let busy = std::fs::symlink_metadata(&path).is_ok_and(|m| {
-            let dev = m.dev();
-            held.contains(&(libc::major(dev), libc::minor(dev), m.ino()))
-        });
+        let busy = std::fs::symlink_metadata(&path)
+            .is_ok_and(|m| crate::metrics::procfs::flock_held(held, &m));
         let holder = busy
             .then(|| read_note(&path.with_extension("holder")))
             .flatten()

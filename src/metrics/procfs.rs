@@ -157,6 +157,17 @@ pub fn job_members(procs: &[ProcStat], supervisor: u32) -> Vec<usize> {
     out
 }
 
+/// Whether `meta`'s file is flocked, per `held` (from [`parse_flocks`]). /proc/locks names a
+/// file by its superblock's device, but `stat` on a btrfs subvolume reports the subvolume's own
+/// anonymous device, so the pair never matches there. For such a file (device major 0) the
+/// inode number alone is compared against the other major-0 entries.
+pub fn flock_held(held: &HashSet<(u32, u32, u64)>, meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let (major, minor, inode) = (libc::major(meta.dev()), libc::minor(meta.dev()), meta.ino());
+    held.contains(&(major, minor, inode))
+        || (major == 0 && held.iter().any(|&(m, _, i)| m == 0 && i == inode))
+}
+
 /// FLOCK entries of /proc/locks as (major, minor, inode). Blocked waiters
 /// (`->` lines) are not holders and are skipped.
 pub fn parse_flocks(text: &str) -> HashSet<(u32, u32, u64)> {
