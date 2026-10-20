@@ -350,3 +350,23 @@ fn status_reports_the_offload_blocker_and_floor() {
     let text = status.offload_pressure_blocker.unwrap();
     assert!(text.contains("cache disk not measured"), "{text}");
 }
+
+#[test]
+fn service_slots_have_their_own_names_and_ignore_cpu_pressure() {
+    let names = Kind::Service.names().unwrap();
+    assert_eq!(names.len(), SERVICE_SLOTS);
+    assert!(names.iter().all(|n| n.starts_with("p2p-service-")));
+    assert_eq!(Kind::Service.label(), "service");
+    let t = Thresholds::default();
+    assert_eq!(compiling().blocker_for(&t, &Kind::Service), None);
+    let f = Fixture::new();
+    let busy = || Ok(compiling());
+    let held: Vec<_> = (0..SERVICE_SLOTS)
+        .map(|_| {
+            acquire_gated(&f.0, Kind::Service, "model", "s", busy, || None, || false)
+                .unwrap()
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(held.len(), SERVICE_SLOTS);
+}

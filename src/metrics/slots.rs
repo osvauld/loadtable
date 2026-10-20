@@ -51,10 +51,12 @@ fn note_alive(note: &Note) -> bool {
 }
 
 fn kind_of(name: &str) -> Option<SlotKind> {
-    if name == "p2p-build.lock" {
+    if name == "p2p-build.lock" || name.starts_with("p2p-build-") {
         Some(SlotKind::Compile)
     } else if name.starts_with("p2p-run-") {
         Some(SlotKind::Run)
+    } else if name.starts_with("p2p-service-") {
+        Some(SlotKind::Service)
     } else if name.starts_with("p2p-offload-") {
         Some(SlotKind::Offload)
     } else if name.starts_with("p2p-device-") {
@@ -66,10 +68,13 @@ fn kind_of(name: &str) -> Option<SlotKind> {
 
 /// Scans one admission lock directory. `held` is the FLOCK set of /proc/locks.
 pub fn scan(root: &Path, held: &HashSet<(u32, u32, u64)>) -> Scan {
-    let mut names: Vec<String> = std::iter::once("p2p-build.lock".to_string())
-        .chain((0..4).map(|i| format!("p2p-run-{i}.lock")))
-        .chain((0..OFFLOAD_SLOTS).map(|i| format!("p2p-offload-{i}.lock")))
-        .collect();
+    let mut names: Vec<String> =
+        crate::admission::compile_slot_names(crate::admission::compile_slots())
+            .into_iter()
+            .chain((0..4).map(|i| format!("p2p-run-{i}.lock")))
+            .chain((0..OFFLOAD_SLOTS).map(|i| format!("p2p-offload-{i}.lock")))
+            .chain((0..crate::admission::SERVICE_SLOTS).map(|i| format!("p2p-service-{i}.lock")))
+            .collect();
     let mut waiters = vec![];
     if let Ok(entries) = std::fs::read_dir(root) {
         for entry in entries.take(4096).flatten() {

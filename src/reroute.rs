@@ -361,6 +361,7 @@ pub fn ineligible(c: &Candidate) -> Option<String> {
         Resource::Offload => {
             return Some("already a forward or an offload client".into());
         }
+        Resource::Service => return Some("a service never moves".into()),
         Resource::Compile => {}
     }
     if let Some(why) = &c.pinned {

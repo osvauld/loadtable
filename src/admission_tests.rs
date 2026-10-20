@@ -745,3 +745,16 @@ fn denylisted_device_lock_is_never_taken() {
         assert!(!f.0.join(format!("p2p-device-{serial}.lock")).exists());
     }
 }
+
+#[test]
+fn compile_slot_names_keep_the_first_lock_name_and_the_policy_bounds_the_count() {
+    assert_eq!(compile_slot_names(1), ["p2p-build.lock"]);
+    assert_eq!(
+        compile_slot_names(3),
+        ["p2p-build.lock", "p2p-build-1.lock", "p2p-build-2.lock"]
+    );
+    let slots = |n| AdmissionPolicy { compile_slots: n }.slots();
+    assert_eq!(slots(None), Ok(DEFAULT_COMPILE_SLOTS));
+    assert_eq!(slots(Some(3)), Ok(3));
+    assert!(slots(Some(0)).is_err() && slots(Some(9)).is_err());
+}

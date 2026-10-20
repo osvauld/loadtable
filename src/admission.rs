@@ -363,13 +363,62 @@ pub enum Kind {
     Run,
     Device(String),
     Offload,
+    Service,
 }
+/// Service slots (`p2p-service-N.lock`): long-lived servers that cost little, so they
+/// neither take a run slot nor wait on the CPU gate.
+pub const SERVICE_SLOTS: usize = 4;
 /// Offload slots (`p2p-offload-N.lock`) hold only an offload CLIENT (`tasks-offload`
 /// or `offload-portable-desktop.sh`, enforced by `local_command`): Git scan,
 /// hashing, transfer and a waiting ssh. Four lets four agents/checkouts offload at
 /// once (each checkout is serialized by the client's own flock) and bounds local
 /// ssh/python clients; the worker's own admission queues the actual work.
 pub const OFFLOAD_SLOTS: usize = 4;
+/// Compile slots a machine offers unless its policy file says otherwise.
+pub const DEFAULT_COMPILE_SLOTS: usize = 1;
+const MAX_COMPILE_SLOTS: u64 = 8;
+
+/// The `admission::` section of the policy file.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdmissionPolicy {
+    /// Concurrent compile-class jobs (1..=8). Each takes `p2p-build.lock` or `p2p-build-N.lock`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compile_slots: Option<u64>,
+}
+
+impl AdmissionPolicy {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+    pub fn slots(&self) -> std::result::Result<usize, String> {
+        match self.compile_slots {
+            None => Ok(DEFAULT_COMPILE_SLOTS),
+            Some(n) if (1..=MAX_COMPILE_SLOTS).contains(&n) => Ok(n as usize),
+            Some(n) => Err(format!("admission::compile_slots: {n} is outside 1..=8")),
+        }
+    }
+}
+
+/// Lock file names of the compile slots; the first keeps its historical name.
+pub fn compile_slot_names(count: usize) -> Vec<String> {
+    (0..count)
+        .map(|i| match i {
+            0 => "p2p-build.lock".to_string(),
+            i => format!("p2p-build-{i}.lock"),
+        })
+        .collect()
+}
+
+/// The compile slot count in force (an invalid policy value falls back to the default).
+pub fn compile_slots() -> usize {
+    crate::policy::effective()
+        .policy
+        .admission
+        .slots()
+        .unwrap_or(DEFAULT_COMPILE_SLOTS)
+}
+
 /// Memory floor for offload clients: a small Python/ssh/rsync client, plus whole
 /// blobs held in memory by the experimental iroh transport (<= 512 MiB). The
 /// configured reserve still applies when it is lower than this.
@@ -440,14 +489,18 @@ impl Kind {
             Self::Run => "run".into(),
             Self::Device(s) => format!("device {s}"),
             Self::Offload => "offload".into(),
+            Self::Service => "service".into(),
         }
     }
     fn names(&self) -> Result<Vec<String>> {
         Ok(match self {
-            Self::Compile => vec!["p2p-build.lock".into()],
+            Self::Compile => compile_slot_names(compile_slots()),
             Self::Run => (0..4).map(|i| format!("p2p-run-{i}.lock")).collect(),
             Self::Offload => (0..OFFLOAD_SLOTS)
                 .map(|i| format!("p2p-offload-{i}.lock"))
+                .collect(),
+            Self::Service => (0..SERVICE_SLOTS)
+                .map(|i| format!("p2p-service-{i}.lock"))
                 .collect(),
             Self::Device(s) => {
                 // Do not silently alias two device names to one sanitized identity.
@@ -555,7 +608,7 @@ impl Pressure {
     /// and every gate for compile/device stages, is unchanged policy.
     pub fn blocker_for(&self, thresholds: &Thresholds, kind: &Kind) -> Option<String> {
         let run_cpu = thresholds.run_cpu_some_avg10_max_pct;
-        if matches!(kind, Kind::Offload) {
+        if matches!(kind, Kind::Offload | Kind::Service) {
             self.offload_blocker(thresholds)
         } else if matches!(kind, Kind::Run) && run_cpu as f64 > CPU_SOME_MAX {
             self.blocker_at(thresholds, run_cpu as f64, || {
@@ -1110,8 +1163,10 @@ fn status_with(
         if name.starts_with("p2p-")
             && name.ends_with(".lock")
             && (name == "p2p-build.lock"
+                || name.starts_with("p2p-build-")
                 || name.starts_with("p2p-run-")
                 || name.starts_with("p2p-offload-")
+                || name.starts_with("p2p-service-")
                 || name.starts_with("p2p-device-"))
         {
             let f = open_lock(&path, false)?;

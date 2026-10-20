@@ -14,6 +14,10 @@ pub enum Resource {
     /// clients in OFFLOAD_CLIENTS may use it. Stored as `"offload"`; releases
     /// without it refuse to approve/execute such a job (fail closed).
     Offload,
+    /// Long-lived server (a dev or preview server): its own service slot
+    /// (`p2p-service-N.lock`), memory gates only, never waited on by a drain, never moved
+    /// to another machine. Stored as `"service"`; releases without it refuse the job.
+    Service,
 }
 /// argv[0] basenames (after an optional `env NAME=value...` prefix) admitted to
 /// the offload slot. A guard against accidental local heavy work, not a sandbox.
@@ -1598,3 +1602,22 @@ mod tests {
 #[cfg(test)]
 #[path = "local_command_offload_tests.rs"]
 mod offload_tests;
+
+#[cfg(test)]
+mod service_tests {
+    use super::*;
+
+    #[test]
+    fn a_service_has_only_a_run_stage_and_round_trips_by_name() {
+        let recipe = Recipe {
+            argv: vec!["npm".into(), "run".into(), "dev".into()],
+            resource: Resource::Service,
+            broad_test: false,
+        };
+        assert_eq!(recipe.stages(), ["run"]);
+        assert_eq!(
+            serde_json::to_string(&recipe.resource).unwrap(),
+            "\"service\""
+        );
+    }
+}

@@ -80,6 +80,12 @@ pub struct Policy {
     /// Idle limits of `tasks gc` (`gc::` section; `gc::GcPolicy`).
     #[serde(default, skip_serializing_if = "crate::gc::GcPolicy::is_empty")]
     pub gc: crate::gc::GcPolicy,
+    /// Slot counts (`admission::` section; `admission::AdmissionPolicy`).
+    #[serde(
+        default,
+        skip_serializing_if = "crate::admission::AdmissionPolicy::is_empty"
+    )]
+    pub admission: crate::admission::AdmissionPolicy,
 }
 
 /// The policy in force and where each value came from (what `tasks admission` shows).

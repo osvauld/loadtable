@@ -1323,11 +1323,13 @@ pub fn admit(id: i64, stage: &str, supervisor: ProcessIdentity) -> Result<()> {
         return Err("native admission requires its owned supervisor/group and valid stage".into());
     }
     let mut offload = false;
+    let mut service = false;
     let mut fetches = true;
     let _device = if job.spec.suite == crate::local_command::SUITE {
         let recipe = crate::local_command::Recipe::from_spec(&job.spec)?;
         recipe.argv_for(stage)?;
         offload = recipe.resource == crate::local_command::Resource::Offload;
+        service = recipe.resource == crate::local_command::Resource::Service;
         fetches = crate::local_command::offload_fetches(&recipe.argv);
         if let crate::local_command::Resource::Device(serial) = recipe.resource {
             let Some(d) = admission::acquire(
@@ -1357,6 +1359,8 @@ pub fn admit(id: i64, stage: &str, supervisor: ProcessIdentity) -> Result<()> {
     } else if offload {
         // Validated recipe: only an allowlisted offload client, run stage only.
         admission::Kind::Offload
+    } else if service {
+        admission::Kind::Service
     } else {
         admission::Kind::Run
     };

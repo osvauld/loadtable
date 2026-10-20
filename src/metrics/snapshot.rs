@@ -140,6 +140,7 @@ fn slot_kind(resource: &Resource) -> SlotKind {
         Resource::Run => SlotKind::Run,
         Resource::Offload => SlotKind::Offload,
         Resource::Device(_) => SlotKind::Device,
+        Resource::Service => SlotKind::Service,
     }
 }
 
@@ -152,6 +153,7 @@ fn wanted_label(job: &Job, resource: &Resource, waiters: &[Waiter]) -> Option<St
         Phase::WaitingBuild => Some("compile".into()),
         Phase::WaitingRun => Some(match resource {
             Resource::Offload => "offload".into(),
+            Resource::Service => "service".into(),
             _ => "run".into(),
         }),
         _ => None,
@@ -206,13 +208,14 @@ fn queue(job: &Job, resource: &Resource, inputs: &Inputs) -> Option<Queue> {
     let blocker = match label.as_str() {
         "compile" => inputs.blockers.compile.clone(),
         "run" => inputs.blockers.run.clone(),
-        "offload" => inputs.blockers.offload.clone(),
+        "offload" | "service" => inputs.blockers.offload.clone(),
         _ => None,
     };
     let kind = match label.as_str() {
         "compile" => Some(SlotKind::Compile),
         "run" => Some(SlotKind::Run),
         "offload" => Some(SlotKind::Offload),
+        "service" => Some(SlotKind::Service),
         _ => None,
     };
     let holders = |kind: Option<SlotKind>| -> Option<String> {

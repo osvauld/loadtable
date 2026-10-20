@@ -656,3 +656,23 @@ fn only_log_only_cargo_commands_are_placed_by_default() {
         assert!(!placed_by_default(&v(no)), "{no}");
     }
 }
+
+#[test]
+fn a_second_compile_slot_that_is_free_means_no_wait_on_the_holder() {
+    let mut host = laptop("metrics-idle");
+    host.jobs.clear();
+    host.machine.slots.retain(|s| s.kind != SlotKind::Compile);
+    for (i, busy) in [true, false].into_iter().enumerate() {
+        host.machine.slots.push(crate::metrics::types::Slot {
+            kind: SlotKind::Compile,
+            name: format!("p2p-build-{i}"),
+            busy,
+            holder_job: None,
+            holder_who: None,
+            holder_processes: Vec::new(),
+        });
+    }
+    assert_eq!(compile_wait(&host).0, 0.0);
+    host.machine.slots.last_mut().unwrap().busy = true;
+    assert_eq!(compile_wait(&host).0, UNKNOWN_S);
+}

@@ -436,11 +436,26 @@ pub fn compile_wait(snapshot: &Snapshot) -> (f64, String) {
             holders.push((Some(job.id), eta(job.id)));
         }
     }
-    let mut wait = 0.0f64;
-    // One compile slot per machine: the longest holder decides when it frees.
+    let slots = snapshot
+        .machine
+        .slots
+        .iter()
+        .filter(|s| s.kind == SlotKind::Compile)
+        .count()
+        .max(1);
+    // With every compile slot held the soonest holder to finish decides when one frees; a
+    // free slot means no wait on holders.
+    let mut remaining_s: Vec<f64> = holders
+        .iter()
+        .map(|(_, r)| r.unwrap_or(UNKNOWN_S))
+        .collect();
+    remaining_s.sort_by(f64::total_cmp);
+    let mut wait = if holders.len() >= slots {
+        remaining_s[holders.len() - slots]
+    } else {
+        0.0
+    };
     for (id, remaining) in &holders {
-        let r = remaining.unwrap_or(UNKNOWN_S);
-        wait = wait.max(r);
         parts.push(match (id, remaining) {
             (Some(id), Some(r)) => format!("slot held by #{id}, ~{} left", duration(*r)),
             (Some(id), None) => format!("slot held by #{id}, ETA unknown"),

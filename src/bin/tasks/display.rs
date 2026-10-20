@@ -91,6 +91,7 @@ pub fn resource_label(job: &Job) -> String {
         Some(Resource::Compile) => "compile".into(),
         Some(Resource::Run) => "run".into(),
         Some(Resource::Offload) => "offload".into(),
+        Some(Resource::Service) => "service".into(),
         Some(Resource::Device(serial)) => format!("device:{serial}"),
         None if job.spec.suite == tinline_task_manager::catalog::ANDROID_SUITE => "android".into(),
         None => "suite".into(),
@@ -281,6 +282,8 @@ pub fn slot_name(file_name: &str) -> String {
     let stem = stem.strip_prefix("p2p-").unwrap_or(stem);
     if stem == "build" {
         "compile".into()
+    } else if let Some(n) = stem.strip_prefix("build-") {
+        format!("compile-{n}")
     } else if let Some(serial) = stem.strip_prefix("device-") {
         format!("device {serial}")
     } else {

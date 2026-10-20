@@ -2,7 +2,7 @@
 //! Errors name the exact problem and the correct usage instead of a generic refusal.
 use tinline_task_manager::Result;
 
-pub const RUN_USAGE: &str = "tasks run|enqueue [--who OWNER] [--run | --offload | --device SERIAL] [--peer NAME [--fetch REL]... | --anywhere] [--pin] [--follow] [--broad-test] -- COMMAND [ARGS...]";
+pub const RUN_USAGE: &str = "tasks run|enqueue [--who OWNER] [--run | --offload | --service | --device SERIAL] [--peer NAME [--fetch REL]... | --anywhere] [--pin] [--follow] [--broad-test] -- COMMAND [ARGS...]";
 pub const PLACE_USAGE: &str =
     "tasks place [--run | --device SERIAL] [--peer NAME] [--json] -- COMMAND [ARGS...]";
 const LIST_USAGE: &str =
@@ -16,6 +16,8 @@ pub enum Class {
     Run,
     Offload,
     Device(String),
+    /// A long-lived server: its own service slot, never forwarded or moved.
+    Service,
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -61,6 +63,9 @@ pub fn enqueue(options: &[String], waits: bool) -> Result<Enqueue> {
                     )
                 };
                 match (&parsed.class, &class) {
+                    (Some(Class::Service), _) => {
+                        return Err("--service conflicts with --run/--offload/--device".into());
+                    }
                     (None, _) => parsed.class = Some(class),
                     (Some(Class::Run), Class::Run) => {
                         return Err("--run was given twice".into());
@@ -90,6 +95,17 @@ pub fn enqueue(options: &[String], waits: bool) -> Result<Enqueue> {
                         );
                     }
                 }
+            }
+            "--service" => {
+                if parsed.class.is_some() {
+                    return Err(
+                        "--service conflicts with --run/--offload/--device: it selects its own \
+                         admission class (service slot, memory gate only) for a long-lived \
+                         server such as a dev or preview server"
+                            .into(),
+                    );
+                }
+                parsed.class = Some(Class::Service);
             }
             "--peer" => {
                 let name = rest
@@ -150,6 +166,14 @@ pub fn enqueue(options: &[String], waits: bool) -> Result<Enqueue> {
     if parsed.anywhere && parsed.class == Some(Class::Offload) {
         return Err(
             "--anywhere and --offload conflict: placement forwards through the peer link itself"
+                .into(),
+        );
+    }
+    if parsed.class == Some(Class::Service)
+        && (parsed.peer.is_some() || parsed.anywhere || parsed.pin || !parsed.fetch.is_empty())
+    {
+        return Err(
+            "--service runs on this machine only; it conflicts with --peer/--anywhere/--pin/--fetch"
                 .into(),
         );
     }
@@ -466,6 +490,23 @@ mod tests {
             assert!(error.contains("tasks-offload"), "{order}: {error}");
         }
         assert!(RUN_USAGE.contains("--offload"), "{RUN_USAGE}");
+    }
+
+    #[test]
+    fn service_class_parses_alone_and_stays_on_this_machine() {
+        let parsed = enqueue(&args("--who a --service"), true).unwrap();
+        assert_eq!(parsed.class, Some(Class::Service));
+        for bad in [
+            "--service --run",
+            "--run --service",
+            "--device S --service",
+            "--service --offload",
+            "--service --anywhere",
+            "--service --peer w",
+            "--service --pin",
+        ] {
+            assert!(enqueue(&args(bad), true).is_err(), "{bad}");
+        }
     }
 
     #[test]

@@ -276,6 +276,7 @@ fn run() -> Result<()> {
                 None => Resource::Compile,
                 Some(options::Class::Run) => Resource::Run,
                 Some(options::Class::Offload) => Resource::Offload,
+                Some(options::Class::Service) => Resource::Service,
                 Some(options::Class::Device(serial)) => {
                     Resource::Device(tinline_task_manager::device::lock_serial(&serial)?)
                 }
@@ -623,7 +624,7 @@ fn place_class(
     match resource {
         Resource::Run => Class::Run,
         Resource::Device(serial) => Class::Device(serial.clone()),
-        Resource::Compile | Resource::Offload => Class::Compile,
+        Resource::Compile | Resource::Offload | Resource::Service => Class::Compile,
     }
 }
 
@@ -645,7 +646,9 @@ fn place_command(args: &[String]) -> Result<()> {
         Some(options::Class::Device(s)) => {
             placement::Class::Device(tinline_task_manager::device::lock_serial(s)?)
         }
-        Some(options::Class::Offload) => return Err(options::PLACE_USAGE.into()),
+        Some(options::Class::Offload | options::Class::Service) => {
+            return Err(options::PLACE_USAGE.into());
+        }
     };
     let request = match &parsed.peer {
         Some(name) => placement::Request::parse(name)?,
@@ -942,6 +945,12 @@ fn call(socket: &Path, action: Action) -> Result<tinline_task_manager::Response>
 /// `tasks drain [--timeout SECS] | --cancel`: stop claiming until the next daemon start, wait
 /// until no job is active and the worker exited, then say it is safe to restart. Approved jobs
 /// stay approved (nothing is cancelled) and the restarted daemon resumes them.
+/// A `--service` job (long-lived server).
+fn is_service(job: &tinline_task_manager::Job) -> bool {
+    tinline_task_manager::local_command::Recipe::from_spec_unvalidated(&job.spec)
+        .is_ok_and(|r| r.resource == tinline_task_manager::local_command::Resource::Service)
+}
+
 fn drain(args: &[String]) -> Result<()> {
     let socket = state_dir().join("taskd.sock");
     let mut timeout = Duration::from_secs(3600);
@@ -972,18 +981,26 @@ fn drain(args: &[String]) -> Result<()> {
     let mut shown = None;
     loop {
         let r = call(&socket, Action::List)?;
-        let active: Vec<i64> = r
+        // A service (dev/preview server) never finishes by itself: the drain does not wait for
+        // it, and says so (the daemon restart that follows stops it).
+        let (services, active): (Vec<_>, Vec<_>) = r
             .jobs
             .iter()
             .filter(|j| j.phase.active())
-            .map(|j| j.id)
-            .collect();
+            .partition(|j| is_service(j));
+        let services: Vec<i64> = services.iter().map(|j| j.id).collect();
+        let active: Vec<i64> = active.iter().map(|j| j.id).collect();
         let approved = r
             .jobs
             .iter()
             .filter(|j| j.phase == tinline_task_manager::Phase::Approved)
             .count();
         if active.is_empty() && !r.execution_enabled {
+            if !services.is_empty() {
+                println!(
+                    "tasks: not waited for: service job(s) {services:?}; a daemon restart stops them (resubmit with --service)"
+                );
+            }
             println!(
                 "tasks: drained: no job running, worker stopped, no new claims until the daemon restarts. \
                  Restart it now (e.g. systemctl --user restart tasks-daemon); it resumes the {approved} approved job(s) by itself"

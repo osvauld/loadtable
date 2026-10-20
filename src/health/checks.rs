@@ -183,6 +183,7 @@ fn executing(job: &JobView, kind: SlotKind) -> bool {
         }
         SlotKind::Offload => job.phase == Phase::Running && job.resource == SlotKind::Offload,
         SlotKind::Device => job.phase == Phase::Running && job.resource == SlotKind::Device,
+        SlotKind::Service => job.phase == Phase::Running && job.resource == SlotKind::Service,
     }
 }
 
@@ -195,6 +196,7 @@ pub fn unexplained_slots<'a>(slots: &'a [Slot], jobs: &[JobView]) -> Vec<&'a Slo
         SlotKind::Run,
         SlotKind::Offload,
         SlotKind::Device,
+        SlotKind::Service,
     ] {
         let mut free: Vec<i64> = jobs
             .iter()
@@ -327,6 +329,7 @@ fn kind_name(kind: SlotKind) -> &'static str {
         SlotKind::Run => "run",
         SlotKind::Offload => "offload",
         SlotKind::Device => "device",
+        SlotKind::Service => "service",
     }
 }
 

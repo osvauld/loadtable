@@ -174,6 +174,9 @@ pub fn forwarded_spec(
         Resource::Offload => {
             return Err("an offload client cannot be forwarded to a peer".into());
         }
+        Resource::Service => {
+            return Err("a service runs on the machine it was submitted to".into());
+        }
     };
     if !task_manager_peer::config::valid_name(peer) {
         return Err(format!("invalid peer name {peer:?}").into());

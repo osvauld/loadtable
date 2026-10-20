@@ -166,6 +166,7 @@ fn resource(job: &Job) -> (&'static str, Option<String>) {
         Some(Resource::Compile) => ("compile", None),
         Some(Resource::Run) => ("run", None),
         Some(Resource::Offload) => ("offload", None),
+        Some(Resource::Service) => ("service", None),
         Some(Resource::Device(serial)) => ("device", Some(serial)),
         None if matches!(job.phase, Phase::Running | Phase::WaitingRun) => ("run", None),
         None => ("compile", None),

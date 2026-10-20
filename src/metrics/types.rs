@@ -72,6 +72,7 @@ pub enum SlotKind {
     Run,
     Offload,
     Device,
+    Service,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
