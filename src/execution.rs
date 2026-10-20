@@ -96,6 +96,26 @@ pub struct Execution {
     /// Optional and additive like `metrics`; older releases ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_result: Option<RemoteResult>,
+    /// Why and by whom this job was moved ahead of the queue (`tasks prioritize`, `--priority`).
+    /// Optional and additive like `reroute`; never dropped by `update_execution`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<PriorityNote>,
+}
+
+/// An urgent-priority decision, kept with the job for audit. Urgent jobs are claimed and
+/// admitted before normal ones (FIFO among themselves); nothing running is ever preempted.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PriorityNote {
+    pub level: String,
+    pub reason: String,
+    pub by: String,
+    pub at: i64,
+}
+
+impl Execution {
+    pub fn urgent(&self) -> bool {
+        self.priority.as_ref().is_some_and(|p| p.level == "urgent")
+    }
 }
 
 /// Reconciliation of the remote half of a job that was interrupted HERE (execution JSON key
@@ -259,6 +279,7 @@ impl Store {
             peer: None,
             reroute: None,
             remote_result: None,
+            priority: None,
             detail: if command {
                 "Explicitly approved trusted local argv/live cwd; NOT a source snapshot or sandbox; command may write to workspace"
             } else if trial {
@@ -283,6 +304,43 @@ impl Store {
         tx.execute(
             "INSERT INTO executions(job_id,data) VALUES (?1,?2)",
             params![id, serde_json::to_string(&execution)?],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+    /// Moves an approved or running-admission job ahead of the normal queue, with the reason and
+    /// who asked kept on the job. Never preempts: a job already running is left alone.
+    pub fn prioritize(&mut self, id: i64, by: &str, reason: &str) -> Result<()> {
+        if reason.trim().is_empty() {
+            return Err("a priority needs a reason (--reason \"...\")".into());
+        }
+        let tx = self
+            .0
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let phase: String =
+            tx.query_row("SELECT phase FROM jobs WHERE id=?1", [id], |r| r.get(0))?;
+        let phase = Phase::from_db(&phase)?;
+        if phase.terminal() {
+            return Err("finished jobs cannot be prioritized".into());
+        }
+        let data: Option<String> = tx
+            .query_row("SELECT data FROM executions WHERE job_id=?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        let Some(data) = data else {
+            return Err("job is not approved yet; approve it first".into());
+        };
+        let mut e: Execution = serde_json::from_str(&data)?;
+        e.priority = Some(PriorityNote {
+            level: "urgent".into(),
+            reason: reason.chars().take(200).collect(),
+            by: by.chars().take(64).collect(),
+            at: now(),
+        });
+        tx.execute(
+            "UPDATE executions SET data=?2 WHERE job_id=?1",
+            params![id, serde_json::to_string(&e)?],
         )?;
         tx.commit()?;
         Ok(())
@@ -358,8 +416,12 @@ impl Store {
             .0
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let id = {
-            let mut statement =
-                tx.prepare("SELECT id,spec FROM jobs WHERE phase='approved' ORDER BY id")?;
+            // Urgent jobs first (`tasks prioritize`), each group in submission order.
+            let mut statement = tx.prepare(
+                "SELECT j.id, j.spec, COALESCE(json_extract(e.data, '$.priority.level') = 'urgent', 0) AS urgent \
+                 FROM jobs j LEFT JOIN executions e ON e.job_id=j.id \
+                 WHERE j.phase='approved' ORDER BY urgent DESC, j.id",
+            )?;
             let mut rows = statement.query([])?;
             let mut found = None;
             while let Some(row) = rows.next()? {
@@ -414,6 +476,8 @@ impl Store {
         e.cancel_requested |= current_e.cancel_requested;
         // The reroute record has its own transactions; a stale copy never rewinds it.
         e.reroute = current_e.reroute;
+        // Likewise a priority decision made while the worker held an older copy.
+        e.priority = current_e.priority;
         // Apply cancellation precedence inside the same write transaction as completion.
         let phase = if e.cancel_requested && phase.terminal() && phase != Phase::Interrupted {
             Phase::Cancelled
@@ -661,6 +725,82 @@ mod tests {
             .unwrap();
         assert_eq!(job.id, ready.id);
         assert_eq!(s.job(old.id).unwrap().phase, Phase::Queued);
+    }
+    fn me() -> ProcessIdentity {
+        ProcessIdentity {
+            pid: 1,
+            start_ticks: 1,
+        }
+    }
+    #[test]
+    fn urgent_job_is_claimed_before_older_normal_jobs() {
+        let mut s = Store::memory().unwrap();
+        let first = s.submit(&spec()).unwrap();
+        let second = s.submit(&spec()).unwrap();
+        let third = s.submit(&spec()).unwrap();
+        for id in [first.id, second.id, third.id] {
+            s.approve(id).unwrap();
+        }
+        s.prioritize(third.id, "alice", "release blocker").unwrap();
+        assert_eq!(s.claim(me()).unwrap().unwrap().id, third.id);
+        assert_eq!(s.claim(me()).unwrap().unwrap().id, first.id);
+        assert_eq!(s.claim(me()).unwrap().unwrap().id, second.id);
+    }
+    #[test]
+    fn urgent_jobs_keep_submission_order_among_themselves() {
+        let mut s = Store::memory().unwrap();
+        let ids: Vec<i64> = (0..3).map(|_| s.submit(&spec()).unwrap().id).collect();
+        for id in &ids {
+            s.approve(*id).unwrap();
+        }
+        s.prioritize(ids[2], "a", "r").unwrap();
+        s.prioritize(ids[1], "a", "r").unwrap();
+        assert_eq!(s.claim(me()).unwrap().unwrap().id, ids[1]);
+        assert_eq!(s.claim(me()).unwrap().unwrap().id, ids[2]);
+        assert_eq!(s.claim(me()).unwrap().unwrap().id, ids[0]);
+    }
+    #[test]
+    fn priority_needs_a_reason_an_approval_and_an_unfinished_job() {
+        let mut s = Store::memory().unwrap();
+        let job = s.submit(&spec()).unwrap();
+        assert!(
+            s.prioritize(job.id, "a", "r")
+                .unwrap_err()
+                .to_string()
+                .contains("approve")
+        );
+        s.approve(job.id).unwrap();
+        assert!(
+            s.prioritize(job.id, "a", "  ")
+                .unwrap_err()
+                .to_string()
+                .contains("reason")
+        );
+        s.prioritize(job.id, "alice", "unblocks the release")
+            .unwrap();
+        let note = s.execution(job.id).unwrap().unwrap().priority.unwrap();
+        assert_eq!(
+            (note.level.as_str(), note.by.as_str(), note.reason.as_str()),
+            ("urgent", "alice", "unblocks the release")
+        );
+        s.cancel(job.id).unwrap();
+        assert!(
+            s.prioritize(job.id, "a", "r")
+                .unwrap_err()
+                .to_string()
+                .contains("finished")
+        );
+    }
+    #[test]
+    fn a_stale_worker_update_keeps_the_priority_decision() {
+        let mut s = Store::memory().unwrap();
+        let job = s.submit(&spec()).unwrap();
+        s.approve(job.id).unwrap();
+        let claimed = s.claim(me()).unwrap().unwrap();
+        let stale = claimed.execution.unwrap();
+        s.prioritize(job.id, "alice", "urgent fix").unwrap();
+        s.update_execution(job.id, Phase::Running, stale).unwrap();
+        assert!(s.execution(job.id).unwrap().unwrap().urgent());
     }
     #[test]
     fn cancellation_wins_over_stale_worker_update() {

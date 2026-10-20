@@ -566,16 +566,40 @@ async fn sync_and_submit(
         host: shared.hostname.clone(),
         toplevel: top_str,
     };
-    let pushed = task_manager_peer::source::sync_push(
-        &shared.ep,
-        addr.clone(),
-        &top,
-        &selection.manifest,
-        &cid,
-        &identity,
-        shared.config.connect_timeout.max(Duration::from_secs(1)) * 30,
-    )
-    .await;
+    // A link lost mid-sync is retried once: the sync is idempotent (blobs already sent are not
+    // sent again) and nothing has been submitted yet.
+    let mut attempt = 0;
+    let pushed = loop {
+        let pushed = task_manager_peer::source::sync_push(
+            &shared.ep,
+            addr.clone(),
+            &top,
+            &selection.manifest,
+            &cid,
+            &identity,
+            shared.config.connect_timeout.max(Duration::from_secs(1)) * 30,
+        )
+        .await;
+        attempt += 1;
+        match &pushed {
+            Err(e)
+                if attempt == 1
+                    && !matches!(
+                        e,
+                        ClientError::Offline(_) | ClientError::Refused(_) | ClientError::Local(_)
+                    ) =>
+            {
+                let _ = sink
+                    .note(format!(
+                        "source sync to {} failed ({e}); retrying once",
+                        peer.name
+                    ))
+                    .await;
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            _ => break pushed,
+        }
+    };
     let report = match pushed {
         Ok(r) => r,
         Err(ClientError::Offline(e)) => {
@@ -848,7 +872,9 @@ async fn attach_until_done(
                     phase => format!(
                         "job {remote_id} on {} {phase} (exit {}){}",
                         peer.name,
-                        done.exit_code.filter(|c| *c != 0).map_or("-".into(), |c| c.to_string()),
+                        done.exit_code
+                            .filter(|c| *c != 0)
+                            .map_or("-".into(), |c| c.to_string()),
                         if done.detail.is_empty() {
                             String::new()
                         } else {

@@ -21,7 +21,8 @@ use std::path::{Path, PathBuf};
 
 pub const DEFAULT_OFFLOAD_IDLE_DAYS: u64 = 3;
 pub const DEFAULT_OUTPUT_IDLE_DAYS: u64 = 7;
-const DAY: i64 = 24 * 60 * 60;
+const HOUR: i64 = 60 * 60;
+const DAY: i64 = 24 * HOUR;
 /// Entries one scan may visit; a tree beyond it is reported, never deleted.
 const MAX_ENTRIES: u64 = 5_000_000;
 /// An output cache below this is just its (empty) directory skeleton.
@@ -39,6 +40,15 @@ pub struct GcPolicy {
     /// (default on; `false` leaves cleanup to `tasks gc`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_when_full: Option<bool>,
+    /// Idle limits shorter than a day (1..=8760); they replace the matching `*_idle_days`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offload_idle_hours: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_idle_hours: Option<u64>,
+    /// The daemon applies the idle limits by itself every ten minutes (rotation), not only
+    /// when `tasks gc --apply` runs or the disk is full. Default off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotate: Option<bool>,
 }
 
 impl GcPolicy {
@@ -48,25 +58,38 @@ impl GcPolicy {
     pub fn auto_when_full(&self) -> bool {
         self.auto_when_full.unwrap_or(true)
     }
+    pub fn rotate(&self) -> bool {
+        self.rotate.unwrap_or(false)
+    }
     pub fn limits(&self) -> Result<Limits, String> {
-        let day = |name: &str, value: Option<u64>, default: u64| match value {
-            None => Ok(default),
-            Some(d) if (1..=365).contains(&d) => Ok(d),
-            Some(d) => Err(format!("gc::{name}: {d} is outside 1..=365 days")),
+        let idle = |what: &str, days: Option<u64>, hours: Option<u64>, default: u64| {
+            if let Some(h) = hours {
+                return match h {
+                    1..=8760 => Ok(h as i64 * HOUR),
+                    _ => Err(format!(
+                        "gc::{what}_idle_hours: {h} is outside 1..=8760 hours"
+                    )),
+                };
+            }
+            match days {
+                None => Ok(default as i64 * DAY),
+                Some(d) if (1..=365).contains(&d) => Ok(d as i64 * DAY),
+                Some(d) => Err(format!("gc::{what}_idle_days: {d} is outside 1..=365 days")),
+            }
         };
         Ok(Limits {
-            offload_idle_s: day(
-                "offload_idle_days",
+            offload_idle_s: idle(
+                "offload",
                 self.offload_idle_days,
+                self.offload_idle_hours,
                 DEFAULT_OFFLOAD_IDLE_DAYS,
-            )? as i64
-                * DAY,
-            output_idle_s: day(
-                "output_idle_days",
+            )?,
+            output_idle_s: idle(
+                "output",
                 self.output_idle_days,
+                self.output_idle_hours,
                 DEFAULT_OUTPUT_IDLE_DAYS,
-            )? as i64
-                * DAY,
+            )?,
         })
     }
 }

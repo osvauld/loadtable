@@ -281,6 +281,7 @@ mod tests {
                 metrics: None,
                 peer: None,
                 remote_result: None,
+                priority: None,
                 reroute: None,
             }),
         }

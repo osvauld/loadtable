@@ -2,7 +2,7 @@
 //! Errors name the exact problem and the correct usage instead of a generic refusal.
 use tinline_task_manager::Result;
 
-pub const RUN_USAGE: &str = "tasks run|enqueue [--who OWNER] [--run | --offload | --service | --device SERIAL] [--peer NAME [--fetch REL]... | --anywhere] [--pin] [--follow] [--broad-test] -- COMMAND [ARGS...]";
+pub const RUN_USAGE: &str = "tasks run|enqueue [--who OWNER] [--run | --offload | --service | --device SERIAL] [--peer NAME [--fetch REL]... | --anywhere] [--pin] [--priority urgent --reason TEXT] [--follow] [--broad-test] -- COMMAND [ARGS...]";
 pub const PLACE_USAGE: &str =
     "tasks place [--run | --device SERIAL] [--peer NAME] [--json] -- COMMAND [ARGS...]";
 const LIST_USAGE: &str =
@@ -36,6 +36,10 @@ pub struct Enqueue {
     pub broad_test: bool,
     /// Keep the job on the machine it was submitted to: reroute never moves it.
     pub pin: bool,
+    /// `--priority urgent`: claimed and admitted ahead of normal jobs (never preempts a running
+    /// one); needs `--reason`, which is kept on the job for audit.
+    pub urgent: bool,
+    pub reason: Option<String>,
 }
 
 /// Parses the options before `--`. `--follow` only makes sense when this client waits.
@@ -133,6 +137,24 @@ pub fn enqueue(options: &[String], waits: bool) -> Result<Enqueue> {
                     .ok_or(format!("--fetch needs a relative PATH; usage: {RUN_USAGE}"))?;
                 parsed.fetch.push(rel.clone());
             }
+            "--priority" => {
+                match rest.next().map(String::as_str) {
+                    Some("urgent") => parsed.urgent = true,
+                    Some("normal") => {}
+                    _ => {
+                        return Err(format!(
+                            "--priority takes urgent or normal; usage: {RUN_USAGE}"
+                        )
+                        .into());
+                    }
+                };
+            }
+            "--reason" => {
+                let why = rest
+                    .next()
+                    .ok_or(format!("--reason needs a TEXT value; usage: {RUN_USAGE}"))?;
+                parsed.reason = Some(why.clone());
+            }
             "--broad-test" => parsed.broad_test = true,
             "--follow" if waits => parsed.follow = true,
             "--follow" => {
@@ -182,6 +204,20 @@ pub fn enqueue(options: &[String], waits: bool) -> Result<Enqueue> {
     }
     if !parsed.fetch.is_empty() && parsed.peer.is_none() && !parsed.anywhere {
         return Err("--fetch only applies with --peer NAME (or --anywhere)".into());
+    }
+    match (&parsed.urgent, &parsed.reason) {
+        (true, None) => {
+            return Err("--priority urgent needs --reason \"why this skips the queue\"".into());
+        }
+        (false, Some(_)) => return Err("--reason only applies with --priority urgent".into()),
+        (true, Some(_)) if !waits => {
+            return Err(
+                "--priority applies once the job is approved: use tasks run, or tasks prioritize \
+                 JOB_ID --reason \"...\" after approving the enqueued job"
+                    .into(),
+            );
+        }
+        _ => {}
     }
     Ok(parsed)
 }
@@ -457,6 +493,27 @@ mod tests {
         for bad in ["--run --run", "--peer", "--offload", "--who a"] {
             assert!(place(&args(bad)).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn urgent_priority_needs_a_reason_and_a_waiting_client() {
+        let parsed = enqueue(&args("--who a --priority urgent --reason blocker"), true).unwrap();
+        assert!(parsed.urgent);
+        assert_eq!(parsed.reason.as_deref(), Some("blocker"));
+        assert!(!enqueue(&args("--priority normal"), true).unwrap().urgent);
+        for bad in [
+            "--priority urgent",
+            "--reason blocker",
+            "--priority high --reason x",
+            "--priority",
+            "--priority urgent --reason",
+        ] {
+            assert!(enqueue(&args(bad), true).is_err(), "{bad}");
+        }
+        let error = enqueue(&args("--priority urgent --reason x"), false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("tasks prioritize"), "{error}");
     }
 
     #[test]

@@ -434,6 +434,7 @@ mod tests {
                 peer: None,
                 reroute: None,
                 remote_result: None,
+                priority: None,
             }),
         }
     }

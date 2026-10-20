@@ -809,6 +809,20 @@ impl Wait {
         })
     }
 }
+impl Wait {
+    /// Re-stamps this waiter's place in line (the FIFO is ordered by the note's mtime).
+    fn set_since(&self, since: std::time::SystemTime) {
+        if fs::symlink_metadata(&self.path)
+            .is_ok_and(|m| m.ino() == self.ino && m.dev() == self.dev)
+            && let Ok(f) = OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&self.path)
+        {
+            let _ = f.set_modified(since);
+        }
+    }
+}
 impl Drop for Wait {
     fn drop(&mut self) {
         if fs::symlink_metadata(&self.path)
@@ -904,6 +918,11 @@ pub fn acquire_since(
 ) -> Result<Option<Lease>> {
     acquire_offload_since(kind, true, who, cmd, since, stop)
 }
+/// The queue time of an urgent job: far before any real clock time, ordered by submission, so
+/// urgent waiters go ahead of normal ones and stay FIFO among themselves.
+pub fn urgent_time(submitted_at: i64) -> std::time::SystemTime {
+    std::time::UNIX_EPOCH + Duration::from_millis(u64::try_from(submitted_at).unwrap_or(0))
+}
 /// [`acquire_offload`] and [`acquire_since`] together: the worker's admission of a job.
 pub fn acquire_offload_since(
     kind: Kind,
@@ -913,13 +932,36 @@ pub fn acquire_offload_since(
     since: Option<std::time::SystemTime>,
     stop: impl Fn() -> bool,
 ) -> Result<Option<Lease>> {
+    acquire_offload_prio(kind, fetches, who, cmd, since, || None, stop)
+}
+/// [`acquire_offload_since`] that also asks `urgent` every couple of seconds while waiting; once
+/// it returns a time (a priority decision arrived), the waiter moves to that place in line.
+pub fn acquire_offload_prio(
+    kind: Kind,
+    fetches: bool,
+    who: &str,
+    cmd: &str,
+    since: Option<std::time::SystemTime>,
+    urgent: impl Fn() -> Option<std::time::SystemTime>,
+    stop: impl Fn() -> bool,
+) -> Result<Option<Lease>> {
     let offload = matches!(kind, Kind::Offload);
     let disk = move || {
         offload
             .then(|| live_offload_disk_blocker(fetches))
             .flatten()
     };
-    acquire_gated_since(&root()?, kind, who, cmd, since, Pressure::read, disk, stop)
+    acquire_gated_prio(
+        &root()?,
+        kind,
+        who,
+        cmd,
+        since,
+        urgent,
+        Pressure::read,
+        disk,
+        stop,
+    )
 }
 #[cfg(test)]
 fn acquire_at(
@@ -945,6 +987,7 @@ fn acquire_gated(
 ) -> Result<Option<Lease>> {
     acquire_gated_since(root, kind, who, cmd, None, pressure, disk, stop)
 }
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn acquire_gated_since(
     root: &Path,
@@ -952,6 +995,21 @@ fn acquire_gated_since(
     who: &str,
     cmd: &str,
     since: Option<std::time::SystemTime>,
+    pressure: impl Fn() -> Result<Pressure>,
+    disk: impl Fn() -> Option<String>,
+    stop: impl Fn() -> bool,
+) -> Result<Option<Lease>> {
+    acquire_gated_prio(root, kind, who, cmd, since, || None, pressure, disk, stop)
+}
+const URGENT_CHECK_EVERY: Duration = Duration::from_secs(2);
+#[allow(clippy::too_many_arguments)]
+fn acquire_gated_prio(
+    root: &Path,
+    kind: Kind,
+    who: &str,
+    cmd: &str,
+    since: Option<std::time::SystemTime>,
+    urgent: impl Fn() -> Option<std::time::SystemTime>,
     pressure: impl Fn() -> Result<Pressure>,
     disk: impl Fn() -> Option<String>,
     stop: impl Fn() -> bool,
@@ -975,9 +1033,19 @@ fn acquire_gated_since(
     let mut previous_blocker = None;
     let mut last_holder_check: Option<std::time::Instant> = None;
     let mut previous_holders: Option<String> = None;
+    let mut moved_up = false;
+    let mut last_urgent_check: Option<std::time::Instant> = None;
     loop {
         if stop() {
             return Ok(None);
+        }
+        if !moved_up && last_urgent_check.is_none_or(|t| t.elapsed() >= URGENT_CHECK_EVERY) {
+            last_urgent_check = Some(std::time::Instant::now());
+            if let Some(t) = urgent() {
+                wait.set_since(t);
+                moved_up = true;
+                eprintln!("Native admission: urgent priority, moved ahead of waiting jobs");
+            }
         }
         let gated = !matches!(kind, Kind::Device(_));
         let ready = if gated {

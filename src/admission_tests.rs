@@ -340,6 +340,31 @@ fn fifo_notes_are_scoped_and_stale_notes_do_not_block() {
     assert!(!older_waiter(&f.0, &second, "compile").unwrap());
 }
 #[test]
+fn an_urgent_waiter_moves_ahead_of_an_older_one() {
+    let f = Fixture::new();
+    let id = worker::identity(std::process::id()).unwrap();
+    let n = Note {
+        who: "model".into(),
+        cmd: "test".into(),
+        since: 0.0,
+        pid: id.pid,
+        start_ticks: Some(id.start_ticks),
+        slot: Some("compile".into()),
+    };
+    let old = Wait::new(&f.0, &n).unwrap();
+    std::thread::sleep(Duration::from_millis(5));
+    let late = Wait::new(&f.0, &n).unwrap();
+    assert!(older_waiter(&f.0, &late, "compile").unwrap());
+    late.set_since(urgent_time(1_792_000_000));
+    assert!(!older_waiter(&f.0, &late, "compile").unwrap());
+    assert!(older_waiter(&f.0, &old, "compile").unwrap());
+    // Urgent waiters stay FIFO among themselves, and all precede any real clock time.
+    assert!(urgent_time(1_792_000_000) < urgent_time(1_792_000_001));
+    assert!(
+        urgent_time(1_792_000_001) < std::time::UNIX_EPOCH + Duration::from_secs(1_000_000_000)
+    );
+}
+#[test]
 fn unsafe_lock_and_pressure_errors_refuse_admission() {
     let f = Fixture::new();
     let other = f.0.join("preserve");

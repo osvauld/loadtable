@@ -39,6 +39,7 @@ const USAGE: &str = "usage: tasks [ui [--fixtures DIR]]  # DIR: cluster snapshot
        tasks list [--who OWNER] [--active] [--limit N] [--json | --table | --brief]
          # with any option: compact table by default (--active adds live lock holders); --json = filtered JSON
        tasks submit SPEC.json | approve JOB_ID | cancel JOB_ID
+       tasks prioritize JOB_ID --reason TEXT [--who OWNER]  # urgent: skips the queue, never preempts; audited
        tasks logs JOB_ID [--json]  # plain log text by default; --json preserves v2 response
        tasks run [--who OWNER] [--run | --offload | --device SERIAL] [--follow] -- COMMAND [ARGS...]
          # --run: already-built command, run slot; --device: exclusive device lock (never with --run)
@@ -149,6 +150,8 @@ fn run() -> Result<()> {
     let mut placed: Option<tinline_task_manager::placement::Decision> = None;
     // `--pin`: written before approval, so reroute never sees the job unpinned.
     let mut pin = false;
+    // `--priority urgent --reason TEXT`: recorded right after approval (who, reason).
+    let mut urgent: Option<(String, String)> = None;
     let action = match args.first().map(String::as_str) {
         None | Some("ui") if args.len() <= 1 => return open_ui(None),
         Some("ui") if args.len() == 3 && args[1] == "--fixtures" => {
@@ -270,6 +273,9 @@ fn run() -> Result<()> {
             pin = parsed.pin;
             if owner.trim().is_empty() || owner.len() > 128 {
                 return Err("bounded owner required".into());
+            }
+            if let (true, Some(reason)) = (parsed.urgent, parsed.reason) {
+                urgent = Some((owner.clone(), reason));
             }
             let no_class = parsed.class.is_none();
             let resource = match parsed.class {
@@ -419,6 +425,10 @@ fn run() -> Result<()> {
             Action::Submit(spec)
         }
         Some("cancel") if args.len() == 2 => Action::Cancel(args[1].parse()?),
+        Some("prioritize") if args.len() >= 4 => {
+            let (id, reason, by) = prioritize_args(&args[1..])?;
+            Action::Prioritize(id, by, reason)
+        }
         Some("record") if args.len() == 5 => Action::Record(RuntimeSample {
             suite: args[1].clone(),
             configuration: args[2].clone(),
@@ -464,6 +474,17 @@ fn run() -> Result<()> {
                     response.execution_enabled,
                     &response.jobs
                 )
+            ),
+        }
+    } else if args[0] == "prioritize" {
+        match &response.error {
+            Some(error) if error.contains("unknown variant") => eprintln!(
+                "tasks: the running daemon predates priorities (it answered: {error}); nothing changed"
+            ),
+            Some(error) => eprintln!("tasks: {error}"),
+            None => println!(
+                "tasks: job {} is urgent: it is claimed and admitted ahead of normal jobs (a running job is never stopped)",
+                args[1]
             ),
         }
     } else if !run_now || response.error.is_some() {
@@ -528,6 +549,24 @@ fn run() -> Result<()> {
         );
         tinline_task_manager::print_hint_on_detach(id);
         let waited = approve_and_start(&socket, Action::ApproveCommand(id), id)
+            .and_then(|()| match urgent {
+                Some((by, reason)) => {
+                    let sent = call(&socket, Action::Prioritize(id, by, reason.clone()))?;
+                    match sent.error {
+                        Some(e) => Err(format!(
+                            "job {id} is approved and queued normally; priority was not set: {e}"
+                        )
+                        .into()),
+                        None => {
+                            eprintln!(
+                                "tasks: job {id} is urgent ({reason}); it goes ahead of normal jobs"
+                            );
+                            Ok(())
+                        }
+                    }
+                }
+                None => Ok(()),
+            })
             .and_then(|()| wait_job(&socket, id, output));
         match waited {
             Ok((_, code)) => std::process::exit(code),
@@ -1055,6 +1094,25 @@ fn drain(args: &[String]) -> Result<()> {
         }
         std::thread::sleep(Duration::from_secs(2));
     }
+}
+
+/// `tasks prioritize JOB_ID --reason TEXT [--who OWNER]`: (id, reason, who).
+fn prioritize_args(args: &[String]) -> Result<(i64, String, String)> {
+    let usage = "usage: tasks prioritize JOB_ID --reason TEXT [--who OWNER]";
+    let id: i64 = args.first().ok_or(usage)?.parse().map_err(|_| usage)?;
+    let (mut reason, mut by) = (None, None);
+    let mut rest = args[1..].iter();
+    while let Some(option) = rest.next() {
+        let value = rest.next().ok_or(usage)?;
+        match option.as_str() {
+            "--reason" => reason = Some(value.clone()),
+            "--who" => by = Some(value.clone()),
+            _ => return Err(usage.into()),
+        }
+    }
+    let reason = reason.filter(|r| !r.trim().is_empty()).ok_or(usage)?;
+    let by = by.unwrap_or_else(|| std::env::var("USER").unwrap_or_else(|_| "local-agent".into()));
+    Ok((id, reason, by))
 }
 
 fn approve_and_start(socket: &Path, approve: Action, id: i64) -> Result<()> {

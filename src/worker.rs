@@ -1375,7 +1375,16 @@ pub fn admit(id: i64, stage: &str, supervisor: ProcessIdentity) -> Result<()> {
     };
     // A job back from a failed reroute queues with its first wait time (original position).
     let since = crate::reroute::queued_since(&job_dir(&state, id), stage);
-    let Some(lease) = admission::acquire_offload_since(
+    let submitted_at = job.submitted_at;
+    let urgent = || {
+        store
+            .execution(id)
+            .ok()
+            .flatten()
+            .filter(|e| e.urgent())
+            .map(|_| admission::urgent_time(submitted_at))
+    };
+    let Some(lease) = admission::acquire_offload_prio(
         kind,
         fetches,
         &format!("{}:job-{id}", job.spec.owner),
@@ -1384,6 +1393,7 @@ pub fn admit(id: i64, stage: &str, supervisor: ProcessIdentity) -> Result<()> {
             job.spec.suite, supervisor.pid, supervisor.start_ticks
         ),
         since,
+        urgent,
         || STOP.load(Ordering::SeqCst) || !alive(&supervisor) || !alive(worker) || stop_waiting(),
     )?
     else {
@@ -1595,6 +1605,33 @@ fn prepare_compiler_cache_server(dir: &Path, cmd: &Command) {
     append_log(dir, outcome.note().as_bytes());
 }
 
+/// The soft open-file limit admitted commands get: a normal login shell or CI runner has far more
+/// than a service unit's 1024, and real-network test suites start many sockets.
+const NOFILE_TARGET: libc::rlim_t = 65536;
+
+/// Raises this process's soft `RLIMIT_NOFILE` to `NOFILE_TARGET` (never above the hard limit,
+/// never lowering it); children inherit it. Returns the effective (soft, hard) limits.
+fn raise_nofile() -> Option<(libc::rlim_t, libc::rlim_t)> {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        return None;
+    }
+    let want = NOFILE_TARGET.min(limit.rlim_max);
+    if limit.rlim_cur < want {
+        let raised = libc::rlimit {
+            rlim_cur: want,
+            rlim_max: limit.rlim_max,
+        };
+        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) } == 0 {
+            limit.rlim_cur = want;
+        }
+    }
+    Some((limit.rlim_cur, limit.rlim_max))
+}
+
 /// Admitted command runner. No arbitrary command/spec arguments are accepted.
 /// If its supervisor dies it kills its own dedicated group, not another agent's group.
 pub fn command(id: i64, stage: &str, supervisor: ProcessIdentity) -> Result<()> {
@@ -1605,6 +1642,12 @@ pub fn command(id: i64, stage: &str, supervisor: ProcessIdentity) -> Result<()> 
     catalog::validate_claimed(&job)?;
     if !job.phase.active() {
         return Err("command requires active claimed job".into());
+    }
+    if let Some((soft, hard)) = raise_nofile() {
+        append_log(
+            &dir,
+            format!("tasks: open-file limit nofile={soft} (hard {hard})\n").as_bytes(),
+        );
     }
     let worker = job
         .execution
@@ -2320,6 +2363,13 @@ mod tests {
         // A raised TASKS_MAX_CARGO_JOBS only permits larger explicit -j; the
         // injected default is fixed and never read from the cap.
         assert_eq!(DEFAULT_CARGO_BUILD_JOBS, "2");
+    }
+    #[test]
+    fn open_file_limit_is_raised_to_the_target_within_the_hard_limit() {
+        let before = raise_nofile().unwrap();
+        assert!(before.0 >= NOFILE_TARGET.min(before.1));
+        // Idempotent, and never lowers.
+        assert_eq!(raise_nofile().unwrap(), before);
     }
     #[test]
     fn proc_identity_detects_pid_reuse_without_signalling_it() {

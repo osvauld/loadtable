@@ -247,6 +247,29 @@ fn limits_come_from_the_policy_and_reject_nonsense() {
 }
 
 #[test]
+fn idle_hours_replace_days_and_rotation_is_opt_in() {
+    let set = GcPolicy {
+        offload_idle_hours: Some(6),
+        offload_idle_days: Some(3),
+        output_idle_hours: Some(12),
+        ..GcPolicy::default()
+    };
+    assert_eq!(set.limits().unwrap().offload_idle_s, 6 * 3600);
+    assert_eq!(set.limits().unwrap().output_idle_s, 12 * 3600);
+    let bad = GcPolicy {
+        output_idle_hours: Some(0),
+        ..GcPolicy::default()
+    };
+    assert!(bad.limits().unwrap_err().contains("output_idle_hours"));
+    assert!(!GcPolicy::default().rotate());
+    let on = GcPolicy {
+        rotate: Some(true),
+        ..GcPolicy::default()
+    };
+    assert!(on.rotate());
+}
+
+#[test]
 fn under_pressure_the_oldest_idle_caches_go_first_until_the_target_and_live_ones_stay() {
     let t = Temp::new();
     let roots = Roots::of_home(&t.0);

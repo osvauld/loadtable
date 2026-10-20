@@ -355,6 +355,9 @@ pub enum Action {
     Job(i64),
     Submit(JobSpec),
     Cancel(i64),
+    /// Moves an approved job ahead of the normal queue: (job id, who asked, reason). Daemons
+    /// older than it answer "unknown variant".
+    Prioritize(i64, String, String),
     Approve(i64),
     ApproveAndroidTrial(i64),
     ApproveCommand(i64),
@@ -404,7 +407,8 @@ pub fn handle(store: &mut Store, request: Request) -> Response {
         Action::Cancel(id)
         | Action::Approve(id)
         | Action::ApproveAndroidTrial(id)
-        | Action::ApproveCommand(id) => Some(*id),
+        | Action::ApproveCommand(id)
+        | Action::Prioritize(id, _, _) => Some(*id),
         _ => None,
     };
     let result = if request.version != PROTOCOL_VERSION {
@@ -456,6 +460,7 @@ pub fn handle(store: &mut Store, request: Request) -> Response {
                 submitted_id = Some(j.id);
             }),
             Action::Cancel(id) => store.cancel(id),
+            Action::Prioritize(id, by, reason) => store.prioritize(id, &by, &reason),
             Action::Approve(id) => store.approve(id),
             Action::ApproveAndroidTrial(id) => store.approve_android_trial(id),
             Action::ApproveCommand(id) => store.approve_command(id),
@@ -724,6 +729,10 @@ pub fn request_with_reconnect_timeouts(
         }
         Action::Cancel(id) => Err(format!(
             "cancel of job {id} was sent but no reply arrived ({lost}); it may have been applied. Check `tasks list` before retrying"
+        )
+        .into()),
+        Action::Prioritize(id, _, _) => Err(format!(
+            "priority of job {id} was sent but no reply arrived ({lost}); it may have been applied. Check `tasks list` before retrying"
         )
         .into()),
         Action::Record(_) => Err(format!(

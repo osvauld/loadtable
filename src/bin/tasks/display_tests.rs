@@ -53,6 +53,7 @@ fn finished(mut j: Job, stages: &[(f64, f64, i32)]) -> Job {
         peer: None,
         reroute: None,
         remote_result: None,
+        priority: None,
     });
     j
 }
