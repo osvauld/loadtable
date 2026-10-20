@@ -123,8 +123,8 @@ fn status_reports_machine_slots_and_a_queued_proposal() {
     assert!(!compile.busy, "isolated lock directory has no holder");
     assert_eq!(
         s.machine.slots.len(),
-        9,
-        "1 compile + 4 run + 4 offload slots"
+        13,
+        "1 compile + 4 run + 4 offload + 4 service slots"
     );
     let job = s.jobs.iter().find(|j| j.id == id).unwrap();
     assert_eq!(job.phase, Phase::Queued);
