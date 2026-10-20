@@ -4679,9 +4679,12 @@ dependencies = [
 name = "task-manager-peer"
 version = "0.1.0"
 dependencies = [
+ "blake3",
+ "bytes",
  "iroh",
  "iroh-blobs",
  "libc",
+ "n0-future",
  "rand 0.8.8",
  "serde",
  "serde_json",

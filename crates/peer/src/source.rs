@@ -71,6 +71,18 @@ impl Default for Limits {
     }
 }
 
+impl Limits {
+    /// Fetched build outputs (APKs, binaries) are larger than source files; they are streamed
+    /// through the store and never held in memory whole.
+    pub fn artifact() -> Self {
+        Self {
+            max_file_bytes: 2 * 1024 * 1024 * 1024,
+            max_bytes: 4 * 1024 * 1024 * 1024,
+            ..Self::default()
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceError {
     InvalidManifest(String),
@@ -607,6 +619,72 @@ pub async fn import_verified_tagged(
     Ok(())
 }
 
+/// Chunk size for streaming file and blob content.
+pub(crate) const CHUNK: usize = 1024 * 1024;
+
+/// One pass over `reader`: blake3 (the blob hash), SHA-256 and length, in `CHUNK`s.
+pub(crate) fn digest_reader(reader: &mut impl Read) -> io::Result<(Hash, String, u64)> {
+    let mut blake = blake3::Hasher::new();
+    let mut sha = Sha256::new();
+    let mut buf = vec![0u8; CHUNK];
+    let mut len = 0u64;
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        blake.update(&buf[..n]);
+        sha.update(&buf[..n]);
+        len += n as u64;
+    }
+    let hex: String = sha.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    Ok((Hash::from_bytes(*blake.finalize().as_bytes()), hex, len))
+}
+
+/// Receiving end of an mpsc channel as the stream `Blobs::add_stream` takes.
+struct ChunkStream(tokio::sync::mpsc::Receiver<io::Result<bytes::Bytes>>);
+
+impl n0_future::Stream for ChunkStream {
+    type Item = io::Result<bytes::Bytes>;
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.0.poll_recv(cx)
+    }
+}
+
+/// Streams the chunks `pump` sends into the store without holding the whole blob in memory.
+/// Returns the temp tag of what the store computed; the caller compares its hash with the
+/// one it expects before tagging. A pump error fails the import.
+pub(crate) async fn import_chunks<P, Fut>(
+    store: &Store,
+    pump: P,
+) -> Result<iroh_blobs::api::TempTag, SourceError>
+where
+    P: FnOnce(tokio::sync::mpsc::Sender<io::Result<bytes::Bytes>>) -> Fut,
+    Fut: std::future::Future<Output = io::Result<()>>,
+{
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    let error_tx = tx.clone();
+    let add = store.blobs().add_stream(ChunkStream(rx)).await;
+    let (pumped, added) = tokio::join!(
+        async {
+            let result = pump(tx).await;
+            if let Err(e) = &result {
+                let _ = error_tx
+                    .send(Err(io::Error::new(e.kind(), e.to_string())))
+                    .await;
+            }
+            drop(error_tx);
+            result
+        },
+        add.temp_tag()
+    );
+    pumped.map_err(|e| SourceError::Io(format!("stream into the store: {e}")))?;
+    added.map_err(|e| SourceError::Io(format!("store import: {e}")))
+}
+
 /// Fails with `Exists` if anything (including a dangling symlink) already has that name.
 pub fn checkout_available(checkout_root: &Path, name: &str) -> Result<(), SourceError> {
     check_checkout_name(name)?;
@@ -621,18 +699,45 @@ pub(crate) fn mode_of(executable: bool) -> u32 {
     if executable { 0o755 } else { 0o644 }
 }
 
-fn write_tree(
+async fn write_tree(
     root: &OwnedFd,
-    files: &[(&ManifestFile, Vec<u8>)],
+    store: &Store,
+    files: &[ManifestFile],
     limits: &Limits,
 ) -> Result<(), SourceError> {
-    for (f, bytes) in files {
+    use tokio::io::AsyncReadExt;
+    let mut buf = vec![0u8; CHUNK];
+    for f in files {
         let parts = check_path(&f.path, limits)?;
         let parent = descend(root, &parts, true)?;
         let name = cstr(parts[parts.len() - 1])?;
         let mut file = create_file_at(parent.as_raw_fd(), &name)
             .map_err(|e| SourceError::UnsafePath(format!("create {:?}: {e}", f.path)))?;
-        file.write_all(bytes).map_err(io_err(&f.path))?;
+        if f.size > 0 {
+            let hex = f.iroh_blobs_hash.clone().unwrap_or_default();
+            let hash: Hash = hex
+                .parse()
+                .map_err(|_| SourceError::InvalidManifest(hex.clone()))?;
+            let mut reader = store.blobs().reader(hash);
+            let mut left = f.size;
+            loop {
+                let n = reader
+                    .read(&mut buf)
+                    .await
+                    .map_err(|e| SourceError::MissingBlob(format!("{hex}: {e}")))?;
+                if n == 0 {
+                    break;
+                }
+                if n as u64 > left {
+                    return Err(SourceError::HashMismatch(hex));
+                }
+                file.write_all(&buf[..n]).map_err(io_err(&f.path))?;
+                left -= n as u64;
+            }
+            if left != 0 {
+                return Err(SourceError::HashMismatch(hex));
+            }
+        }
         file.set_permissions(std::fs::Permissions::from_mode(mode_of(f.executable)))
             .map_err(io_err(&f.path))?;
         file.sync_all().map_err(io_err(&f.path))?;
@@ -651,14 +756,12 @@ pub(crate) fn verify_tree(
         let mut file = open_file_at(parent.as_raw_fd(), &cstr(parts[parts.len() - 1])?)
             .map_err(io_err(&f.path))?;
         let meta = file.metadata().map_err(io_err(&f.path))?;
-        let mut content = Vec::new();
-        file.read_to_end(&mut content).map_err(io_err(&f.path))?;
-        let blake = Hash::new(&content).to_hex();
+        let (blake, sha, len) = digest_reader(&mut file).map_err(io_err(&f.path))?;
         if !meta.is_file()
             || meta.permissions().mode() & 0o777 != mode_of(f.executable)
-            || content.len() as u64 != f.size
-            || Some(blake.as_str()) != f.iroh_blobs_hash.as_deref()
-            || sha256_hex(&content) != f.sha256
+            || len != f.size
+            || Some(blake.to_hex().as_str()) != f.iroh_blobs_hash.as_deref()
+            || sha != f.sha256
         {
             return Err(SourceError::HashMismatch(format!(
                 "{:?} differs from the manifest after writing",
@@ -686,34 +789,19 @@ pub async fn materialize(
         return Err(SourceError::Exists(name.to_owned()));
     }
 
-    // Fetch and verify every blob before touching the filesystem.
-    let mut contents = Vec::with_capacity(manifest.files.len());
-    let mut cache: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    // Every blob must be in the store before the filesystem is touched; the content is
+    // streamed to disk below and verified against the manifest after writing.
     for f in &manifest.files {
-        let hex = f.iroh_blobs_hash.clone().unwrap_or_default();
-        if !cache.contains_key(&hex) {
-            let hash: Hash = hex
-                .parse()
-                .map_err(|_| SourceError::InvalidManifest(hex.clone()))?;
-            let bytes = if f.size == 0 {
-                Vec::new()
-            } else {
-                if !store.blobs().has(hash).await.unwrap_or(false) {
-                    return Err(SourceError::MissingBlob(hex));
-                }
-                store
-                    .blobs()
-                    .get_bytes(hash)
-                    .await
-                    .map_err(|e| SourceError::MissingBlob(format!("{hex}: {e}")))?
-                    .to_vec()
-            };
-            if Hash::new(&bytes) != hash || bytes.len() as u64 != f.size {
-                return Err(SourceError::HashMismatch(hex));
-            }
-            cache.insert(hex.clone(), bytes);
+        if f.size == 0 {
+            continue;
         }
-        contents.push((f, cache[&hex].clone()));
+        let hex = f.iroh_blobs_hash.clone().unwrap_or_default();
+        let hash: Hash = hex
+            .parse()
+            .map_err(|_| SourceError::InvalidManifest(hex.clone()))?;
+        if !store.blobs().has(hash).await.unwrap_or(false) {
+            return Err(SourceError::MissingBlob(hex));
+        }
     }
 
     let mut nonce = [0u8; 8];
@@ -721,9 +809,9 @@ pub async fn materialize(
     let tmp_name = format!(".tmp-{name}-{}", crate::hex(&nonce));
     let tmp = cstr(&tmp_name)?;
     mkdir_at(root.as_raw_fd(), &tmp, 0o700).map_err(io_err(&tmp_name))?;
-    let result = (|| {
+    let result = async {
         let tmp_fd = open_dir_at(root.as_raw_fd(), &tmp).map_err(io_err(&tmp_name))?;
-        write_tree(&tmp_fd, &contents, limits)?;
+        write_tree(&tmp_fd, store, &manifest.files, limits).await?;
         verify_tree(&tmp_fd, manifest, limits)?;
         File::from(tmp_fd)
             .set_permissions(std::fs::Permissions::from_mode(0o755))
@@ -735,7 +823,8 @@ pub async fn materialize(
                 SourceError::Io(format!("rename: {e}"))
             }
         })
-    })();
+    }
+    .await;
     if let Err(e) = result {
         // Best effort: only our own private temp directory is removed.
         let _ = std::fs::remove_dir_all(checkout_root.join(&tmp_name));

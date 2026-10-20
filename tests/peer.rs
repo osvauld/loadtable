@@ -587,6 +587,35 @@ fn worker_bindgen_environment_reaches_forwarded_jobs() {
 }
 
 #[test]
+fn a_build_output_over_the_source_file_limit_is_fetched_back_intact() {
+    let (a, _b) = pair("bigfetch");
+    let repo = repo(&a);
+    std::fs::create_dir_all(repo.join("sub")).unwrap();
+    // 150 MB, past the 64 MiB source-file limit: an APK-sized output, streamed not buffered.
+    let out = forward(
+        &a,
+        &repo.join("sub"),
+        &["--run", "--fetch", "out"],
+        "mkdir -p ../out && head -c 150000000 /dev/urandom > ../out/big.bin && sha256sum ../out/big.bin",
+    );
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let job = only_job(&a);
+    let log = a.job_log(job.id);
+    let fetched = a.home().join(format!(
+        "build-cache/offload/fixture-agent/{}/out/big.bin",
+        job.id
+    ));
+    assert_eq!(std::fs::metadata(&fetched).unwrap().len(), 150_000_000);
+    let sum = Command::new("sha256sum").arg(&fetched).output().unwrap();
+    let sum = String::from_utf8_lossy(&sum.stdout);
+    let sum = sum.split_whitespace().next().unwrap();
+    assert!(
+        log.contains(sum),
+        "remote sha256 differs from {sum}:\n{log}"
+    );
+}
+
+#[test]
 fn forwarded_jobs_run_on_the_peer_stream_logs_mirror_exit_codes_and_link_both_ledgers() {
     let (a, b) = pair("forward");
     let repo = repo(&a);

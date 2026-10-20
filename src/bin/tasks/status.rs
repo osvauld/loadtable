@@ -178,8 +178,33 @@ pub fn render(s: &Snapshot) -> String {
     )
     .unwrap();
     let live: Vec<&JobView> = s.jobs.iter().filter(|j| !j.phase.terminal()).collect();
-    if live.is_empty() {
+    // A busy slot whose holder has no job row: a legacy script or a bare flock holder. It
+    // takes the machine's capacity like any job, so it is listed with the live work.
+    let external: Vec<&tinline_task_manager::metrics::Slot> = m
+        .slots
+        .iter()
+        .filter(|s| s.busy && s.holder_job.is_none())
+        .collect();
+    if live.is_empty() && external.is_empty() {
         out.push_str("no live jobs\n");
+    }
+    for s in &external {
+        let by = match (&s.holder_who, s.holder_processes.is_empty()) {
+            (Some(w), _) => w.clone(),
+            (None, false) => s
+                .holder_processes
+                .iter()
+                .map(tinline_task_manager::admission::holders::describe_text)
+                .collect::<Vec<_>>()
+                .join(" and "),
+            _ => "an unknown holder".into(),
+        };
+        writeln!(
+            out,
+            "external, not in the ledger: {} held by {by} (started outside `tasks run`; not placeable)",
+            s.name
+        )
+        .unwrap();
     }
     for j in live {
         writeln!(out, "{}", job_line(j)).unwrap();
@@ -193,6 +218,31 @@ pub fn render(s: &Snapshot) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_busy_slot_without_a_job_is_listed_as_external_work() {
+        let path = format!(
+            "{}/tests/fixtures/snapshot/metrics-idle.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let mut snapshot: Snapshot =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        snapshot.jobs.clear();
+        snapshot.machine.slots = vec![tinline_task_manager::metrics::Slot {
+            kind: tinline_task_manager::metrics::SlotKind::Compile,
+            name: "p2p-build".into(),
+            busy: true,
+            holder_job: None,
+            holder_who: Some("build_android".into()),
+            holder_processes: vec![],
+        }];
+        let text = render(&snapshot);
+        assert!(!text.contains("no live jobs"), "{text}");
+        assert!(
+            text.contains("external, not in the ledger: p2p-build held by build_android"),
+            "{text}"
+        );
+    }
+
     #[test]
     fn renders_the_fixture_snapshots_without_panicking() {
         for name in ["metrics-laptop-busy", "metrics-worker-busy", "metrics-idle"] {

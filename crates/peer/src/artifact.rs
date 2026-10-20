@@ -12,21 +12,23 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use bytes::Bytes;
 use iroh::endpoint::{Connection, VarInt};
 use iroh::{Endpoint, EndpointAddr};
 use iroh_blobs::Hash;
 use iroh_blobs::api::Store;
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncReadExt;
 
 use crate::source::{
-    Limits, MAX_SOURCE_FRAME, Manifest, ManifestFile, SourceError, check_checkout_name, check_path,
-    cstr, descend, exists_nofollow, import_verified_tagged, materialize, missing, open_dir_at,
-    open_file_at, open_root, read_dir_names, sha256_hex, stat_at, validate_manifest,
+    CHUNK, Limits, MAX_SOURCE_FRAME, Manifest, ManifestFile, SourceError, check_checkout_name,
+    check_path, cstr, descend, digest_reader, exists_nofollow, import_chunks, materialize, missing,
+    open_dir_at, open_file_at, open_root, read_dir_names, stat_at, validate_manifest,
 };
 use crate::source::{SourceService, identity_path};
 use crate::{
@@ -110,12 +112,14 @@ fn walk(
     Ok(())
 }
 
-/// Reads one artifact file no-follow (hardlinks allowed: Cargo hardlinks binaries into deps/).
-fn read_artifact(
+/// Opens one artifact file no-follow (hardlinks allowed: Cargo hardlinks binaries into deps/).
+/// Returns the file, its length and whether it is executable; the content is streamed, never
+/// held whole.
+fn open_artifact(
     co: &OwnedFd,
     path: &str,
     limits: &Limits,
-) -> Result<(Vec<u8>, bool), SourceError> {
+) -> Result<(std::fs::File, u64, bool), SourceError> {
     let parts = check_path(path, limits)?;
     let parent = descend(co, &parts, false)?;
     let file = open_file_at(parent.as_raw_fd(), &cstr(parts[parts.len() - 1])?).map_err(|e| {
@@ -136,14 +140,7 @@ fn read_artifact(
     if meta.len() > limits.max_file_bytes {
         return Err(SourceError::Limit(format!("{path:?}: file too large")));
     }
-    let mut content = Vec::with_capacity(meta.len() as usize);
-    file.take(limits.max_file_bytes + 1)
-        .read_to_end(&mut content)
-        .map_err(|e| SourceError::Io(format!("{path:?}: {e}")))?;
-    if content.len() as u64 != meta.len() {
-        return Err(SourceError::Io(format!("{path:?} changed while reading")));
-    }
-    Ok((content, meta.permissions().mode() & 0o111 != 0))
+    Ok((file, meta.len(), meta.permissions().mode() & 0o111 != 0))
 }
 
 /// Worker side: validates `paths` under `checkout_root/name`, imports every file into `store`
@@ -201,21 +198,51 @@ pub async fn export(
     let mut total = 0u64;
     let mut entries = Vec::with_capacity(files.len());
     for path in files {
-        let (content, executable) = read_artifact(&co, &path, limits)?;
-        total += content.len() as u64;
+        let (mut file, len, executable) = open_artifact(&co, &path, limits)?;
+        total += len;
         if total > limits.max_bytes {
             return Err(SourceError::Limit("aggregate bytes exceed bound".into()));
         }
-        let hash = Hash::new(&content);
-        let entry = ManifestFile {
+        // Pass one hashes the file; pass two streams it into the store, whose own hash must
+        // agree (a file rewritten in between does not).
+        let (hash, sha256, read) =
+            digest_reader(&mut file).map_err(|e| SourceError::Io(format!("{path:?}: {e}")))?;
+        if read != len {
+            return Err(SourceError::Io(format!("{path:?} changed while reading")));
+        }
+        file.seek(SeekFrom::Start(0))
+            .map_err(|e| SourceError::Io(format!("{path:?}: {e}")))?;
+        let tag = import_chunks(store, |tx| async move {
+            let mut buf = vec![0u8; CHUNK];
+            loop {
+                let n = file.read(&mut buf)?;
+                if n == 0 {
+                    return Ok(());
+                }
+                tx.send(Ok(Bytes::copy_from_slice(&buf[..n])))
+                    .await
+                    .map_err(|_| std::io::Error::from(std::io::ErrorKind::BrokenPipe))?;
+            }
+        })
+        .await?;
+        if tag.hash() != hash {
+            return Err(SourceError::Io(format!("{path:?} changed while reading")));
+        }
+        store
+            .tags()
+            .set(
+                format!("{ARTIFACT_TAG_PREFIX}{}", hash.to_hex()),
+                tag.hash_and_format(),
+            )
+            .await
+            .map_err(|e| SourceError::Io(format!("store tag: {e}")))?;
+        entries.push(ManifestFile {
             path,
-            size: content.len() as u64,
+            size: len,
             executable,
-            sha256: sha256_hex(&content),
+            sha256,
             iroh_blobs_hash: Some(hash.to_hex()),
-        };
-        import_verified_tagged(store, hash, content, ARTIFACT_TAG_PREFIX).await?;
-        entries.push(entry);
+        });
     }
     let manifest = Manifest::from_files_unchecked(entries);
     validate_manifest(&manifest, limits)?;
@@ -286,7 +313,7 @@ pub async fn handle_artifact(
             &svc.checkouts,
             &request.checkout,
             &request.paths,
-            &svc.limits,
+            &Limits::artifact(),
         )
         .await
         .map_err(|e| format!("{e:?}"))?;
@@ -315,29 +342,39 @@ pub async fn handle_artifact(
         let mut bytes_sent = 0u64;
         for hex in &wanted {
             let hash: Hash = hex.parse().map_err(|_| "bad hash".to_string())?;
-            let bytes = svc
-                .store
-                .blobs()
-                .get_bytes(hash)
-                .await
-                .map_err(|e| format!("store: {e}"))?
-                .to_vec();
-            if Hash::new(&bytes) != hash || bytes.len() as u64 != sizes[hex] {
-                return Err(format!("HashMismatch({hex})"));
-            }
+            let size = sizes[hex];
             write_frame(
                 &mut s.send,
                 &Frame::Blob {
                     hash: hex.clone(),
-                    size: bytes.len() as u64,
+                    size,
                 },
             )
             .await?;
-            s.send
-                .write_all(&bytes)
-                .await
-                .map_err(|e| format!("client stopped the transfer: {e}"))?;
-            bytes_sent += bytes.len() as u64;
+            let mut reader = svc.store.blobs().reader(hash);
+            let mut buf = vec![0u8; CHUNK];
+            let mut sent = 0u64;
+            loop {
+                let n = reader
+                    .read(&mut buf)
+                    .await
+                    .map_err(|e| format!("store: {e}"))?;
+                if n == 0 {
+                    break;
+                }
+                sent += n as u64;
+                if sent > size {
+                    return Err(format!("HashMismatch({hex})"));
+                }
+                s.send
+                    .write_all(&buf[..n])
+                    .await
+                    .map_err(|e| format!("client stopped the transfer: {e}"))?;
+            }
+            if sent != size {
+                return Err(format!("HashMismatch({hex})"));
+            }
+            bytes_sent += size;
         }
         let _ = s.send.finish();
         Ok(ArtifactOutcome::Served {
@@ -391,7 +428,7 @@ pub async fn fetch_artifacts(
     timeout: std::time::Duration,
 ) -> Result<FetchReport, ClientError> {
     let local = |e: String| ClientError::Local(e);
-    let limits = Limits::default();
+    let limits = Limits::artifact();
     let (dest_parent, dest_name) = match (dest.parent(), dest.file_name().and_then(|n| n.to_str()))
     {
         (Some(parent), Some(name)) => (parent, name),
@@ -473,17 +510,38 @@ pub async fn fetch_artifacts(
                     "UnrequestedBlob/SizeMismatch({hash})"
                 )));
             }
-            let mut buf = vec![0u8; size as usize];
-            s.recv
-                .read_exact(&mut buf)
-                .await
-                .map_err(|e| ClientError::Lost(e.to_string()))?;
-            if let Err(e) =
-                import_verified_tagged(store, expected_hash, buf, ARTIFACT_TAG_PREFIX).await
-            {
+            let recv = &mut s.recv;
+            let tag = import_chunks(store, |tx| async move {
+                let mut left = size;
+                while left > 0 {
+                    let mut buf = vec![0u8; left.min(CHUNK as u64) as usize];
+                    recv.read_exact(&mut buf)
+                        .await
+                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+                    left -= buf.len() as u64;
+                    tx.send(Ok(Bytes::from(buf)))
+                        .await
+                        .map_err(|_| std::io::Error::from(std::io::ErrorKind::BrokenPipe))?;
+                }
+                Ok(())
+            })
+            .await
+            .map_err(|e| match e {
+                SourceError::Io(m) => ClientError::Lost(m),
+                other => ClientError::Protocol(format!("{other:?}")),
+            })?;
+            if tag.hash() != expected_hash {
                 let _ = s.recv.stop(VarInt::from_u32(1));
-                return Err(ClientError::Protocol(format!("{e:?}")));
+                return Err(ClientError::Protocol(format!("HashMismatch({expected})")));
             }
+            store
+                .tags()
+                .set(
+                    format!("{ARTIFACT_TAG_PREFIX}{expected}"),
+                    tag.hash_and_format(),
+                )
+                .await
+                .map_err(|e| local(format!("store tag: {e}")))?;
             bytes_received += size;
         }
         let dest = materialize(store, dest_parent, dest_name, &response.manifest, &limits)
