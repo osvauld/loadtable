@@ -257,6 +257,7 @@ fn serve(
             && matches!(
                 action,
                 Action::ListActive
+                    | Action::Recent(_)
                     | Action::StartWorker
                     | Action::StopWorker
                     | Action::Drain(_)
@@ -267,6 +268,7 @@ fn serve(
                 Ok(()) => Listing::reply_with(
                     match action {
                         Action::Logs(id) => listing.job(id).into_iter().collect(),
+                        Action::Recent(n) => listing.recent(n),
                         _ => listing.unfinished(),
                     },
                     None,

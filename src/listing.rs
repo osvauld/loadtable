@@ -78,6 +78,11 @@ impl Listing {
             .collect()
     }
 
+    /// Unfinished jobs plus the newest `n` finished ones.
+    pub fn recent(&self, n: usize) -> Vec<Job> {
+        crate::recent((*self.jobs).clone(), n)
+    }
+
     pub fn any_active(&self) -> bool {
         self.jobs.iter().any(|j| j.phase.active())
     }

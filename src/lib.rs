@@ -377,6 +377,10 @@ pub enum Action {
     /// `tasks list --active` and the window poll. Daemons older than it answer
     /// "unknown variant"; clients then fall back to `List`.
     ListActive,
+    /// The unfinished jobs plus the newest `n` finished ones, without estimates: what
+    /// `tasks list` shows, so a ledger of thousands of jobs never makes the reply too large.
+    /// Daemons older than it answer "unknown variant"; clients then fall back to `List`.
+    Recent(usize),
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Response {
@@ -407,6 +411,18 @@ pub fn handle(store: &mut Store, request: Request) -> Response {
     } else {
         match request.action {
             Action::List => Ok(()),
+            Action::Recent(n) => {
+                let jobs = store.jobs();
+                return Response {
+                    version: PROTOCOL_VERSION,
+                    execution_enabled: false,
+                    submitted_id: None,
+                    error: jobs.as_ref().err().map(|e| e.to_string()),
+                    jobs: recent(jobs.unwrap_or_default(), n),
+                    estimates: Vec::new(),
+                    log: None,
+                };
+            }
             Action::ListActive => {
                 let jobs = store.jobs();
                 return Response {
@@ -484,6 +500,24 @@ pub fn handle(store: &mut Store, request: Request) -> Response {
 
 /// What a reply to anything but `List` carries: the jobs still live plus the one the action named.
 /// The whole ledger grows without bound and a reply over `MAX_REPLY` fails every client.
+/// The unfinished jobs and the newest `n` finished ones, oldest first.
+pub fn recent(jobs: Vec<Job>, n: usize) -> Vec<Job> {
+    let finished = jobs.iter().filter(|j| j.phase.terminal()).count();
+    let mut skip = finished.saturating_sub(n);
+    jobs.into_iter()
+        .filter(|j| {
+            if !j.phase.terminal() {
+                return true;
+            }
+            if skip > 0 {
+                skip -= 1;
+                return false;
+            }
+            true
+        })
+        .collect()
+}
+
 pub fn relevant(jobs: Vec<Job>, keep: Option<i64>) -> Vec<Job> {
     jobs.into_iter()
         .filter(|j| !j.phase.terminal() || Some(j.id) == keep)
@@ -591,7 +625,9 @@ fn connect(
     }
 }
 
-const MAX_REPLY: u64 = 4 * 1024 * 1024;
+/// Replies come from the local daemon over a private socket. The complete ledger (`List`,
+/// kept for scripts and the callers that need every job) is several MB with thousands of jobs.
+const MAX_REPLY: u64 = 32 * 1024 * 1024;
 
 /// Outcome of one delivered request.
 #[cfg(unix)]
@@ -633,6 +669,7 @@ pub fn request_with_reconnect_timeouts(
             busy && matches!(
                 action,
                 Action::List
+                    | Action::Recent(_)
                     | Action::Job(_)
                     | Action::Logs(_)
                     | Action::StartWorker
@@ -656,6 +693,7 @@ pub fn request_with_reconnect_timeouts(
         // Read-only or idempotent: safe to send again.
         Action::List
         | Action::ListActive
+        | Action::Recent(_)
         | Action::Job(_)
         | Action::Logs(_)
         | Action::StartWorker

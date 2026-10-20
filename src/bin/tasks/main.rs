@@ -1313,6 +1313,10 @@ fn phone_test(args: &[String]) -> Result<()> {
     std::process::exit(wait_job(&socket, install, output)?.1);
 }
 
+/// Finished jobs `tasks list` shows without `--limit`, and the window `--who` filters within.
+const LIST_WINDOW: usize = 200;
+const LIST_WHO_WINDOW: usize = 2000;
+
 /// `tasks list` with options: filtered table (default) or filtered JSON (`--json`).
 fn list(args: &[String]) -> Result<()> {
     let options = options::list(args)?;
@@ -1330,8 +1334,24 @@ fn list(args: &[String]) -> Result<()> {
         } else {
             r
         }
-    } else {
+    } else if options.json {
         call(&socket, Action::List)?
+    } else {
+        // The table shows the newest jobs (the unfinished ones always): the whole ledger is
+        // thousands of jobs and several MB. `--who` looks further back; `--json` has it all.
+        let window = if options.who.is_some() {
+            LIST_WHO_WINDOW
+        } else {
+            options.limit.unwrap_or(LIST_WINDOW)
+        };
+        let mut r = call(&socket, Action::Recent(window))?;
+        if r.error
+            .as_deref()
+            .is_some_and(|e| e.contains("unknown variant"))
+        {
+            r = call(&socket, Action::List)?;
+        }
+        r
     };
     if let Some(error) = &response.error {
         eprintln!("tasks: {error}");

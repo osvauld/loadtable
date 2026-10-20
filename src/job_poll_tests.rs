@@ -81,3 +81,24 @@ fn only_a_list_carries_the_whole_ledger() {
         vec![ended.id, live.id, live.id + 1]
     );
 }
+
+#[test]
+fn recent_carries_the_unfinished_jobs_and_only_the_newest_finished_ones() {
+    let mut s = Store::memory().unwrap();
+    let mut ended = vec![];
+    for _ in 0..4 {
+        let job = s.submit(&spec("synthetic-a")).unwrap();
+        s.cancel(job.id).unwrap();
+        ended.push(job.id);
+    }
+    let live = s.submit(&spec("synthetic-b")).unwrap();
+    let ids = |r: Response| r.jobs.iter().map(|j| j.id).collect::<Vec<_>>();
+    // Two finished jobs back, plus the unfinished one, oldest first.
+    assert_eq!(
+        ids(ask(&mut s, Action::Recent(2))),
+        vec![ended[2], ended[3], live.id]
+    );
+    assert_eq!(ids(ask(&mut s, Action::Recent(0))), vec![live.id]);
+    assert_eq!(ids(ask(&mut s, Action::Recent(99))).len(), 5);
+    assert!(ask(&mut s, Action::Recent(2)).estimates.is_empty());
+}
