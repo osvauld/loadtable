@@ -1,4 +1,4 @@
-//! Daemon-to-daemon link of the task manager over iroh (LAN only).
+//! Daemon-to-daemon link over iroh (LAN by default, explicit configured relay opt-in).
 //!
 //! Moved here from `experiments/osvauld-foundation` (the `lan-peer` experiment) as a proper
 //! component of the coordinator. What changed on the way:
@@ -41,7 +41,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub use config::{Allowlist, Capability, PeerConfig, PeerEntry, Role};
+pub use config::{Allowlist, Capability, PeerConfig, PeerEntry, Role, Transport};
 
 /// Default small frame bound (handshakes, replies, log/blob headers).
 pub const MAX_FRAME: usize = 64 * 1024;
@@ -487,7 +487,37 @@ pub async fn lan_endpoint(
         .map_err(|e| e.to_string())
 }
 
-/// Observable LAN-only configuration of a bound endpoint.
+/// Builds the locally configured endpoint. Relay mode never enables public address
+/// lookup or port mapping, and contacts only the explicit relay. Pairing still
+/// requires an authenticated endpoint ID in the local allowlist.
+pub async fn configured_endpoint(
+    secret: SecretKey,
+    config: &PeerConfig,
+    alpns: Vec<Vec<u8>>,
+) -> Result<Endpoint, String> {
+    if config.transport == Transport::Lan {
+        return lan_endpoint(secret, config.bind, alpns).await;
+    }
+    let relay = config
+        .relay_url
+        .clone()
+        .ok_or("relay mode requires relay_url")?;
+    Endpoint::builder(presets::Minimal)
+        .relay_mode(RelayMode::Custom(relay.into()))
+        .clear_address_lookup()
+        .portmapper_config(PortmapperConfig::Disabled)
+        .net_report_config(NetReportConfig::minimal())
+        .clear_ip_transports()
+        .bind_addr(config.bind)
+        .map_err(|e| e.to_string())?
+        .secret_key(secret)
+        .alpns(alpns)
+        .bind()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Observable configuration of a bound endpoint. LAN mode must remain relay-free.
 #[derive(Debug, Clone, Serialize)]
 pub struct LanReport {
     pub address_lookup_services: usize,

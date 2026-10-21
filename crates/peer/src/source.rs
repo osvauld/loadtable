@@ -414,7 +414,14 @@ pub(crate) fn read_dir_names(dir: RawFd) -> io::Result<Vec<CString>> {
     let mut out = Vec::new();
     let result = loop {
         // SAFETY: errno is thread-local; reset to tell end-of-stream from an error.
-        unsafe { *libc::__errno_location() = 0 };
+        #[cfg(target_os = "linux")]
+        unsafe {
+            *libc::__errno_location() = 0
+        };
+        #[cfg(target_os = "macos")]
+        unsafe {
+            *libc::__error() = 0
+        };
         // SAFETY: stream is valid until closedir below.
         let entry = unsafe { libc::readdir(stream) };
         if entry.is_null() {
@@ -436,6 +443,15 @@ pub(crate) fn read_dir_names(dir: RawFd) -> io::Result<Vec<CString>> {
     result.map(|_| out)
 }
 
+#[cfg(target_os = "macos")]
+fn rename_noreplace(dir: RawFd, from: &CStr, to: &CStr) -> io::Result<()> {
+    // SAFETY: directory fd is live; names are NUL-terminated. RENAME_EXCL
+    // preserves the atomic never-replace contract (no exists/rename race).
+    cvt(unsafe { libc::renameatx_np(dir, from.as_ptr(), dir, to.as_ptr(), libc::RENAME_EXCL) })
+        .map(drop)
+}
+
+#[cfg(target_os = "linux")]
 fn rename_noreplace(dir: RawFd, from: &CStr, to: &CStr) -> io::Result<()> {
     // SAFETY: raw renameat2 syscall (works on glibc and musl); both names NUL-terminated.
     let ret = unsafe {

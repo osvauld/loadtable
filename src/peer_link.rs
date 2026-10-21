@@ -366,6 +366,10 @@ pub struct PeersReport {
     pub endpoint_id: Option<String>,
     pub bind: Option<String>,
     #[serde(default)]
+    pub transport: Option<String>,
+    #[serde(default)]
+    pub relay_url: Option<String>,
+    #[serde(default)]
     pub peers: Vec<PeerView>,
     /// Outbound link records (jobs this daemon forwarded), newest last.
     #[serde(default)]
