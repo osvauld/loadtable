@@ -4,9 +4,10 @@
 
 No Mac, Apple SDK, CI run, binary build or simulator execution was available for
 this handoff. The starting revision `fd8d016a6b539c79a27cd92323e033d6526d90c9`
-is Linux-only. A parent macOS platform port and explicit relay mode are in
-progress elsewhere. **Do not treat this document or the workflow as a working
-macOS release.** Merge and review the port first, then record actual results.
+is Linux-only. Native platform primitives and explicit opt-in relay configuration
+are now integrated on `feature/macos-worker`, but the full macOS worker remains
+blocked on `docs/design/macos-platform.md`. **Do not treat this as a working Mac
+build-worker release.** Review the port and record actual native results first.
 
 Owned deliverables:
 
@@ -23,6 +24,50 @@ signing identity, provisioning profile, Apple credentials, secrets or
 notarization service is required or configured. Apple toolchains may emit
 implicit linker metadata/ad-hoc signatures; that is not Developer ID signing,
 notarization or a trust guarantee.
+
+## Standalone setup app versus the worker
+
+`crates/setup` is deliberately independent of the Linux coordinator. Its binary
+`tasks-mac-setup` can assess tools and render inert setup plans; it CANNOT pair,
+start a daemon, install tools, approve jobs or run remote builds. Default UI builds
+open an egui window; probes require a separate local button click. No-UI builds
+print an unprobed plan when invoked without arguments.
+
+Source recipes (not evidence of native builds):
+
+```sh
+# On an authorized real Mac/runner, under its applicable build admission:
+cargo build --locked -j 2 -p task-manager-setup --features ui --bin tasks-mac-setup
+# Explicit local inspection, not an installer:
+./target/debug/tasks-mac-setup --help
+./target/debug/tasks-mac-setup --requirements docs/examples/apple-silicon-ios-requirements.json --probe --json
+```
+
+The integrated coordinator exposes the same options as `tasks setup`; it does not
+contact a daemon. `--plan FILE` renders untrusted received JSON without running it.
+The JSON requirements/plan schema is a bounded wire/display document, NOT a second
+machine-policy language or an implemented HUML recipe loader. A digest binds exact
+bytes only, not identity/approval/freshness. There is no setup-plan iroh operation
+or remote install engine yet. The full config-send/owner-approval workflow remains
+future work; source-file transfer alone does not authorize executing a setup plan.
+
+Manual CI dispatch now builds this standalone app in a separate `setup` job and
+wraps it as `Task Manager Setup.app` in a ZIP, recording revision/tool versions,
+linked libraries and SHA256. This is still an unsigned, unnotarized, unexecuted
+packaging template. The `build_worker` input defaults false: leave it false until
+the full port is completed and reviewed. The native egui window itself is not
+validated by a Linux UI fixture or SDK-free Rust check.
+
+The sample requirements cover Apple Silicon Rust targets and the presence of
+Xcode/iOS SDKs. They do not prove a particular project's pinned Rust/Xcode version
+or latest Xcode compatibility with macOS 13. Review the actual project manifest.
+A read-only inventory found another agent's speculative iOS work at
+`/home/abe/p2p_chat/.claude/worktrees/ios-app/ios`; do not overwrite it. At inspection
+its app recipe additionally needs **XcodeGen**, and the repository pins Rust
+**1.99.0** with Android targets in its toolchain declaration. Coordinate a reviewed
+Mac-specific recipe with that agent; do not silently install those Android targets,
+run project setup scripts, or change their parallelism/output handling here.
+No p2p_chat build, Swift binding or codec/platform integration was validated.
 
 ## 1. Owner prepares the Mac
 
@@ -121,13 +166,15 @@ no relay, no public discovery. Existing source syntax is
 actual integrated binary's help before using even this syntax on macOS.
 These are not completed Internet pairing instructions.
 
-The parent is adding an **explicit relay mode with an owner-configured HTTPS
+The source branch adds **explicit relay mode with an owner-configured HTTPS
 relay URL**, no public discovery, and manual approvals by default in relay mode.
-Exact relay flags/configuration and macOS startup paths are pending CLI review;
-**no relay setup command or configuration schema is asserted here**. Do not try
-to adapt LAN init by guessing relay flags, use a public default relay, publish
-endpoint identities, or open broad inbound access. Endpoint allowlisting is not
-account identity attestation, and a relay does not sandbox jobs.
+See [peer-relay.md](design/peer-relay.md) for `tasks peer init --relay HTTPS_URL`
+and `tasks peer add NAME ENDPOINT_ID - ...`. These are coordinator commands, NOT
+commands provided by the standalone setup app. They do not make the Linux-only
+worker run on macOS. No relay was provisioned/contacted and no real remote-network
+acceptance was performed. Do not choose a public default relay, publish endpoint
+identities or open broad inbound access. Endpoint allowlisting is not account
+identity attestation, and a relay does not sandbox jobs.
 
 Before authorizing a host peer, the owner must verify endpoint IDs over a trusted
 channel, apply least-privilege roles on both sides (a `host`/`both` peer can

@@ -38,6 +38,7 @@ pub mod reroute;
 #[cfg(target_os = "linux")]
 pub mod retention;
 pub mod snapshot;
+pub use task_manager_setup as setup;
 #[cfg(target_os = "linux")]
 pub mod tmp_usage;
 #[cfg(target_os = "linux")]

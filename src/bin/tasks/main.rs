@@ -83,6 +83,8 @@ const USAGE: &str = "usage: tasks [ui [--fixtures DIR]]  # DIR: cluster snapshot
        tasks alerts [--json] [--all] [--severity info|warn|critical] [--node NAME]
          # health alerts of this machine and its peers, disks, missing capabilities
        tasks alerts clear NODE [CAPABILITY]  # drop a node's missing-capability mark(s)
+       tasks setup [--ui | --json] [--probe [--simulator-runtime]] [--requirements FILE] [--plan FILE]
+         # read-only Apple Silicon onboarding; no daemon/install; probes only on explicit opt-in
        tasks doctor [--json]  # node-setup checks with fix lines; exit 1 when this machine is unhealthy
        tasks record SUITE CONFIG STAGE SECONDS
        tasks daemon
@@ -165,6 +167,7 @@ fn run() -> Result<()> {
             std::process::exit(tinline_task_manager::peer::bridge::run(&args[1..]));
         }
         Some("peer") => return peer_command(&args[1..]),
+        Some("setup") => return tinline_task_manager::setup::cli::run(&args[1..]),
         Some("gc") => return gc::run(&args[1..]),
         Some("mcp") => return mcp_command(&args[1..]),
         Some("place") => return place_command(&args[1..]),

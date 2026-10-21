@@ -1,13 +1,10 @@
-//! Integration hook: `#[cfg(feature = "ui")] mod setup_ui;` in tasks/main.rs,
-//! then call `setup_ui::run(requirements, optional_received_plan)` from an explicit
-//! setup UI entry point. No daemon, peer or installed runtime is contacted.
+//! Shared standalone/coordinator setup window. No daemon, peer or installed
+//! runtime is contacted. Probes require the explicit local button click.
 
+use crate::{self as setup, PlanDocument, ProbeOptions, ProbeReport, Requirements, SetupError};
 use eframe::egui;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Duration;
-use tinline_task_manager::setup::{
-    self, PlanDocument, ProbeOptions, ProbeReport, Requirements, SetupError,
-};
 
 /// Can also be embedded in an existing tab via `show`. Construction and rendering
 /// are pure with respect to external processes; only the labelled local button

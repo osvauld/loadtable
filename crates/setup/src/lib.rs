@@ -6,6 +6,10 @@
 //! a sandbox: the locally installed Rust tools and Apple tools must be trusted.
 //! Manual commands are display data, NOT an execution or approval API.
 
+pub mod cli;
+#[cfg(feature = "ui")]
+pub mod ui;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -949,5 +953,4 @@ pub fn assess(requirements: &Requirements, report: &ProbeReport) -> Result<Setup
 }
 
 #[cfg(test)]
-#[path = "setup/tests.rs"]
 mod tests;

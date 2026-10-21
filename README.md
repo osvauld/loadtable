@@ -169,6 +169,16 @@ that job and `start-worker`/`stop-worker`/`drain` replies only the unfinished jo
 estimates); `tasks list --active` (table) uses `list_active`. Budgets and the bench
 (`scripts/idle_bench.py`): [docs/design/idle-budget.md](docs/design/idle-budget.md).
 
+## macOS preparation (not a supported worker yet)
+
+See [MACOS-WORKER-STATUS.md](MACOS-WORKER-STATUS.md). The standalone
+`tasks-mac-setup` / `tasks setup` UI renders inert plans and runs fixed local
+preflight probes only on explicit opt-in; it cannot pair, install tools or run
+remote jobs. The full coordinator remains Linux-only pending the native safety
+port. Opt-in relay transport and manual CI/simulator fixtures are preparation,
+not evidence of Mac or cross-internet execution. Nothing here replaces the
+installed runtime automatically.
+
 ## Development
 
 This is an independent Cargo workspace. No app checkout or workspace dependency

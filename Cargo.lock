@@ -4704,6 +4704,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "task-manager-setup"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4823,6 +4834,7 @@ dependencies = [
  "sha2 0.10.9",
  "task-manager-peer",
  "task-manager-platform",
+ "task-manager-setup",
  "tokio",
  "toml",
 ]

@@ -75,7 +75,7 @@ class MacOSFixtureStructure(unittest.TestCase):
         # Validate each literal workflow shell block, without interpreting expressions.
         workflow = WORKFLOW.read_text()
         blocks = re.findall(r"^        run: \|\n((?:          .*\n|\n)+)", workflow, re.M)
-        self.assertEqual(len(blocks), 3)
+        self.assertEqual(len(blocks), 4)
         for block in blocks:
             script = "\n".join(line[10:] for line in block.splitlines())
             subprocess.run(["bash", "-n"], input=script, text=True, check=True)
@@ -85,9 +85,11 @@ class MacOSFixtureStructure(unittest.TestCase):
         trigger = workflow.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
         self.assertEqual(re.findall(r"^  ([\w_]+):", trigger, re.M), ["workflow_dispatch"])
         self.assertIn("default: false", trigger)
-        self.assertEqual(workflow.count("if: ${{ inputs.acknowledge_unverified_template"), 2)
+        self.assertEqual(workflow.count("if: ${{ inputs.acknowledge_unverified_template"), 3)
+        self.assertIn("inputs.acknowledge_unverified_template && inputs.build_worker", workflow)
+        self.assertIn("SETUP ONLY: no worker, pairing or remote execution", workflow)
         actions = re.findall(r"uses: ([^\s]+)", workflow)
-        self.assertEqual(len(actions), 4)
+        self.assertEqual(len(actions), 6)
         for action in actions:
             self.assertRegex(action, r"^actions/(checkout|upload-artifact)@[a-f0-9]{40}$")
         self.assertIn("persist-credentials: false", workflow)
