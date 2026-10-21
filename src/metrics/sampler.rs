@@ -25,26 +25,11 @@ const LOG_READ_PER_TICK: u64 = 1024 * 1024;
 /// Per-stage resource usage written by `__command` (`jobs/ID/STAGE-usage.json`).
 pub const USAGE_SUFFIX: &str = "-usage.json";
 
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct StageUsage {
-    pub cpu_user_s: f64,
-    pub cpu_sys_s: f64,
-    /// getrusage ru_maxrss: the largest single descendant process.
-    pub max_rss_bytes: u64,
-}
+pub use task_manager_platform::ChildUsage as StageUsage;
 
 /// getrusage(RUSAGE_CHILDREN) of the calling process: waited-for descendants.
 pub fn children_usage() -> StageUsage {
-    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
-    if unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut usage) } != 0 {
-        return StageUsage::default();
-    }
-    let secs = |t: libc::timeval| t.tv_sec as f64 + t.tv_usec as f64 / 1e6;
-    StageUsage {
-        cpu_user_s: secs(usage.ru_utime),
-        cpu_sys_s: secs(usage.ru_stime),
-        max_rss_bytes: (usage.ru_maxrss.max(0) as u64) * 1024,
-    }
+    task_manager_platform::children_usage().unwrap_or_default()
 }
 
 /// Usage of one command: CPU as the difference around its wait; max RSS as

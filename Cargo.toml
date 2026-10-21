@@ -8,7 +8,7 @@ publish = false
 # Standalone tooling workspace: do not drag app/media builds into the scheduler.
 # crates/peer: the daemon-to-daemon iroh link (LAN only). experiments/ stay independent.
 [workspace]
-members = ["crates/peer"]
+members = ["crates/peer", "crates/platform"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -20,6 +20,8 @@ libc = "0.2"
 eframe = { version = "0.33", optional = true, default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 # Daemon-to-daemon link (iroh, LAN only); runs in the daemon's own peer thread/runtime.
 task-manager-peer = { path = "crates/peer" }
+# Native identity/headroom primitives, independently checkable without an Apple SDK.
+task-manager-platform = { path = "crates/platform" }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time", "net", "io-util"] }
 # Submission policy file (~/.config/tasks/policy.huml); only dependency: serde.
 huml-rs = "0.3.0"

@@ -1,4 +1,7 @@
 //! Local task ledger and explicit, allowlisted execution.
+/// Native Linux/macOS identity and headroom primitives. This alone does not
+/// enable the macOS worker; see docs/design/macos-platform.md for safety gaps.
+pub use task_manager_platform as platform;
 #[cfg(target_os = "linux")]
 pub mod admission;
 #[cfg(target_os = "linux")]
