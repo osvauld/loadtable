@@ -1643,6 +1643,9 @@ pub fn command(id: i64, stage: &str, supervisor: ProcessIdentity) -> Result<()> 
     if !job.phase.active() {
         return Err("command requires active claimed job".into());
     }
+    if let Some(line) = crate::placement::recorded_line(&state, id) {
+        append_log(&dir, line.as_bytes());
+    }
     if let Some((soft, hard)) = raise_nofile() {
         append_log(
             &dir,
