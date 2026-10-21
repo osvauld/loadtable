@@ -724,3 +724,39 @@ fn gradle_tasks_are_read_past_options_and_project_dirs() {
     )));
     assert!(!gradle_builds_artifact(&v("cargo build")));
 }
+
+#[test]
+fn a_tie_goes_to_the_machine_with_more_compile_slots_free() {
+    let mut host = laptop("metrics-idle");
+    host.jobs.clear();
+    let mut worker = open_worker();
+    worker.jobs.clear();
+    for s in [&mut host, &mut worker] {
+        s.machine
+            .slots
+            .iter_mut()
+            .filter(|slot| slot.kind == SlotKind::Compile)
+            .for_each(|slot| slot.busy = false);
+    }
+    // Both free: the worker still wins the tie.
+    let d = anywhere("cargo build -p never-seen", &host, &[peer(worker.clone())]);
+    assert_eq!(d.target, worker_target(), "{}", d.line());
+    // The worker has a second compile slot and holds one (its wait stays 0): the idle laptop
+    // wins, so it builds up its own history.
+    let mut held = worker
+        .machine
+        .slots
+        .iter()
+        .find(|slot| slot.kind == SlotKind::Compile)
+        .unwrap()
+        .clone();
+    held.busy = true;
+    worker.machine.slots.push(held);
+    let d = anywhere("cargo build -p never-seen", &host, &[peer(worker)]);
+    assert_eq!(
+        score(&d, &worker_target()).total_s,
+        score(&d, &Target::Local).total_s
+    );
+    assert_eq!(d.target, Target::Local, "{}", d.line());
+    assert!(d.reason.contains("more compile slots free"), "{}", d.reason);
+}

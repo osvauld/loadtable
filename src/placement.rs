@@ -16,7 +16,8 @@
 //!   machine's median scaled by the Cargo jobs ratio; with no history anywhere, the same
 //!   guess everywhere, so the wait decides.
 //!
-//! Ties and fully unknown cases go to a worker peer (keeping this machine free). Offline,
+//! Ties go to the machine with more compile slots free, then to a worker peer (keeping this
+//! machine free). Offline,
 //! never reached and stale peers are skipped (with a note), and so is a peer with a
 //! missing-capability mark the command needs (`health::capability`: e.g. a Cargo command
 //! with `bindgen` in its lock file on a peer whose earlier job failed with "Unable to find
@@ -467,6 +468,19 @@ fn waiting(phase: &Phase) -> bool {
     )
 }
 
+/// Share of `snapshot`'s compile slots in use (0 = all free): the tie-break between machines
+/// that would finish at the same time, so an idle laptop is used before a busy worker.
+fn compile_load(snapshot: &Snapshot) -> f64 {
+    let compile = || {
+        snapshot
+            .machine
+            .slots
+            .iter()
+            .filter(|s| s.kind == SlotKind::Compile)
+    };
+    compile().filter(|s| s.busy).count() as f64 / compile().count().max(1) as f64
+}
+
 /// Seconds until `snapshot`'s compile slot is free for a new job, and how that was found:
 /// the holder's remaining ETA plus each compile job queued for the slot (jobs awaiting
 /// approval have no queue position and are not ahead), plus [`BLOCKED_S`] under a blocker.
@@ -810,7 +824,12 @@ pub fn decide(
             cargo_jobs: c.jobs,
         });
     }
-    // Lowest total; on a tie a peer (worker) wins over this machine, then config order.
+    // Lowest total; on a tie the machine with more compile slots free, then a peer (worker)
+    // over this machine, then config order.
+    let load: Vec<f64> = candidates
+        .iter()
+        .map(|c| compile_load(c.snapshot))
+        .collect();
     let best = decision
         .scores
         .iter()
@@ -818,6 +837,7 @@ pub fn decide(
         .min_by(|(i, a), (j, b)| {
             a.total_s
                 .total_cmp(&b.total_s)
+                .then_with(|| load[*i].total_cmp(&load[*j]))
                 .then_with(|| {
                     let local = |s: &Score| matches!(s.target, Target::Local);
                     local(a).cmp(&local(b))
@@ -844,6 +864,9 @@ pub fn decide(
                 .collect::<Vec<_>>()
                 .join("; ");
             format!("no usable worker peer ({why}); running here")
+        }
+        (_, _, true) if load.iter().any(|l| *l != load[best]) => {
+            format!("tie; {} has more compile slots free", chosen.machine)
         }
         (Target::Peer(_), _, true) => format!("tie; {} (worker) preferred", chosen.machine),
         _ => format!("{} sooner", chosen.machine),
