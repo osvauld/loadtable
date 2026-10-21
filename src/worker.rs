@@ -48,23 +48,10 @@ fn signals() {
 }
 
 pub fn identity(pid: u32) -> Result<ProcessIdentity> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
-    // comm can contain spaces and parentheses; fields after the last ')' begin with state.
-    let rest = stat.rsplit_once(')').ok_or("invalid proc stat")?.1;
-    let start_ticks = rest
-        .split_whitespace()
-        .nth(19)
-        .ok_or("missing process start time")?
-        .parse()?;
-    Ok(ProcessIdentity { pid, start_ticks })
+    Ok(task_manager_platform::identity(pid)?)
 }
 pub fn alive(process: &ProcessIdentity) -> bool {
-    identity(process.pid).is_ok_and(|p| p == *process)
-        && fs::read_to_string(format!("/proc/{}/stat", process.pid)).is_ok_and(|stat| {
-            stat.rsplit_once(')')
-                .and_then(|(_, rest)| rest.split_whitespace().next())
-                .is_some_and(|s| s != "Z")
-        })
+    task_manager_platform::alive(process)
 }
 fn state() -> Result<PathBuf> {
     Ok(fs::canonicalize(state_dir())?)

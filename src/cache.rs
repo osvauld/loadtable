@@ -2,9 +2,8 @@
 //! No pruning/deletion, test-result reuse, or submitted environment overrides.
 use crate::Result;
 use serde::{Deserialize, Serialize};
-use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
-use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt, fs::PermissionsExt};
+use std::os::unix::{fs::OpenOptionsExt, fs::PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -51,23 +50,10 @@ pub fn cache_space_with(
     measure(path, thresholds.min_cache_free_bytes)
 }
 fn measure(path: &Path, reserve_bytes: u64) -> Result<DiskSpace> {
-    if !path.is_absolute() {
-        return Err("cache/disk paths must be absolute".into());
-    }
-    let mut existing = path;
-    while !existing.try_exists()? {
-        existing = existing.parent().ok_or("no existing disk ancestor")?;
-    }
-    let name = CString::new(existing.as_os_str().as_bytes())?;
-    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-    if unsafe { libc::statvfs(name.as_ptr(), stat.as_mut_ptr()) } != 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    let stat = unsafe { stat.assume_init() };
+    let measured = task_manager_platform::disk_space(path)?;
     Ok(DiskSpace {
         path: path.to_path_buf(),
-        available_bytes: ((stat.f_bavail as u128) * (stat.f_frsize as u128)).min(u64::MAX as u128)
-            as u64,
+        available_bytes: measured.available_bytes,
         reserve_bytes,
     })
 }
