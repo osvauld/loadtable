@@ -388,6 +388,11 @@ dependencies = [
 [[package]]
 name = "tasks-runner"
 version = "0.1.0"
+dependencies = [
+ "tasks-core",
+ "tasks-platform",
+ "thiserror",
+]
 
 [[package]]
 name = "tasks-timing"

@@ -1,1 +1,28 @@
-//! Job runner: spawns admitted jobs through `Processes`, streams logs, records exit status and handles cancellation. Will do its work via platform traits.
+//! Job runner: turns an admitted job into a running process group and then a
+//! final outcome. It spawns through the platform `Processes` trait, follows the
+//! combined log, enforces cancel, timeout and client-loss policy, and reports
+//! through [`RunEvents`] so it never depends on the ledger.
+
+mod clock;
+mod env;
+mod error;
+mod events;
+mod lease;
+mod linebuf;
+mod logview;
+mod outcome;
+mod policy;
+mod run;
+#[cfg(test)]
+mod testkit;
+
+pub use clock::{Clock, SystemClock};
+pub use env::{ENV_ALLOWLIST, ENV_PREFIX_ALLOWLIST, EnvPolicy, build_env};
+pub use error::RunnerError;
+pub use events::{RunEvents, TimedLine};
+pub use lease::Lease;
+pub use linebuf::{LineSplitter, SplitLimits};
+pub use logview::{Elider, ElisionCaps, LogNotes, cap_log_file, is_important, tail_lines};
+pub use outcome::{End, Outcome};
+pub use policy::{CancelState, CancelToken, Policy, parse_grace_ms};
+pub use run::{JobStart, Runner, build_spawn_spec};
