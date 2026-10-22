@@ -477,7 +477,8 @@ impl Store for SqliteStore {
             "SELECT j.id FROM jobs j WHERE j.phase_tag IN ('queued','waiting')
                AND EXISTS (SELECT 1 FROM job_deps d JOIN jobs p ON p.id = d.after
                            WHERE d.job = j.id
-                             AND p.phase_tag IN ('failed','timed_out','cancelled','interrupted'))
+                             -- Same rule as `dep_failed`: terminal and not passed.
+                             AND p.phase_tag NOT IN ('queued','waiting','running','passed'))
              ORDER BY j.id",
         )
     }

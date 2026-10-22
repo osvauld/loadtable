@@ -158,6 +158,7 @@ pub(crate) fn phase_tag(p: &Phase) -> &'static str {
         Phase::Passed => "passed",
         Phase::Failed { .. } => "failed",
         Phase::TimedOut { .. } => "timed_out",
+        Phase::NotStarted { .. } => "not_started",
         Phase::Cancelled => "cancelled",
         Phase::Interrupted => "interrupted",
     }

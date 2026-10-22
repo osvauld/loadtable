@@ -36,6 +36,8 @@ impl Kind {
 pub enum Placement {
     /// On the submitting machine.
     Here,
+    /// On the submitting machine, explicitly pinned (`--pin`): never rerouted.
+    Pin,
     /// On a named peer.
     Peer(crate::MachineName),
     /// On any capable machine.

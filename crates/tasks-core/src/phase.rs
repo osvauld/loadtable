@@ -52,6 +52,11 @@ pub enum Phase {
         /// Exit code after the stop, if any.
         exit: Option<i32>,
     },
+    /// Ended before the command started, e.g. its checkout could not be synced.
+    NotStarted {
+        /// Why it never started.
+        reason: String,
+    },
     /// Cancelled by a user.
     Cancelled,
     /// Lost because the runner went away.
@@ -66,6 +71,7 @@ impl Phase {
             Phase::Passed
                 | Phase::Failed { .. }
                 | Phase::TimedOut { .. }
+                | Phase::NotStarted { .. }
                 | Phase::Cancelled
                 | Phase::Interrupted
         )
@@ -74,9 +80,10 @@ impl Phase {
     /// True when moving from `self` to `next` is allowed.
     pub fn can_move_to(&self, next: &Phase) -> bool {
         match self {
-            Phase::Queued | Phase::Waiting(_) => {
-                matches!(next, Phase::Waiting(_) | Phase::Running | Phase::Cancelled)
-            }
+            Phase::Queued | Phase::Waiting(_) => matches!(
+                next,
+                Phase::Waiting(_) | Phase::Running | Phase::NotStarted { .. } | Phase::Cancelled
+            ),
             Phase::Running => matches!(
                 next,
                 Phase::Passed
@@ -102,6 +109,9 @@ mod tests {
             Phase::Passed,
             Phase::Failed { exit: Some(1) },
             Phase::TimedOut { exit: Some(143) },
+            Phase::NotStarted {
+                reason: "sync failed".into(),
+            },
             Phase::Cancelled,
             Phase::Interrupted,
         ]
@@ -115,7 +125,10 @@ mod tests {
                     (&from, &to),
                     (
                         Phase::Queued | Phase::Waiting(_),
-                        Phase::Waiting(_) | Phase::Running | Phase::Cancelled
+                        Phase::Waiting(_)
+                            | Phase::Running
+                            | Phase::NotStarted { .. }
+                            | Phase::Cancelled
                     ) | (
                         Phase::Running,
                         Phase::Passed
@@ -133,6 +146,6 @@ mod tests {
     #[test]
     fn terminal() {
         let t: Vec<bool> = all().iter().map(Phase::is_terminal).collect();
-        assert_eq!(t, [false, false, false, true, true, true, true, true]);
+        assert_eq!(t, [false, false, false, true, true, true, true, true, true]);
     }
 }

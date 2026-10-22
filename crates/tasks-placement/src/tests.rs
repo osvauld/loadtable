@@ -410,6 +410,7 @@ fn r141_a_peer_with_a_capability_mark_is_skipped_with_the_evidence() {
 fn r143_requests_parse_from_placement_and_hints() {
     use tasks_core::Placement;
     assert_eq!(Request::from_placement(&Placement::Here), Request::Local);
+    assert_eq!(Request::from_placement(&Placement::Pin), Request::Pin);
     assert_eq!(
         Request::from_placement(&Placement::Peer(n("x"))),
         Request::Peer(n("x"))

@@ -673,6 +673,17 @@ fn r178_blocked(e: &Env) {
         s.request_cancel(running_dependent_ok, "t").unwrap();
     }
 
+    // A job that never started (e.g. sync failed) ends from Queued and blocks the same way.
+    let dep = s.submit(&spec("b", vec![])).unwrap();
+    let waiter = s.submit(&spec("b", vec![dep])).unwrap();
+    let never = Phase::NotStarted {
+        reason: "checkout sync failed".into(),
+    };
+    s.finish(dep, &Finish::from_phase(never.clone())).unwrap();
+    assert_eq!(s.get(dep).unwrap().unwrap().phase, never);
+    assert!(s.blocked_by_failure().unwrap().contains(&waiter));
+    s.request_cancel(waiter, "t").unwrap();
+
     // Transitive cascade, and a passed dependency never blocks.
     let root = s.submit(&spec("c", vec![])).unwrap();
     let mid = s.submit(&spec("c", vec![root])).unwrap();

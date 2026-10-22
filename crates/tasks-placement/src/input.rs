@@ -24,6 +24,7 @@ impl Request {
     pub fn from_placement(p: &Placement) -> Request {
         match p {
             Placement::Here => Request::Local,
+            Placement::Pin => Request::Pin,
             Placement::Peer(n) => Request::Peer(n.clone()),
             Placement::Anywhere => Request::Anywhere,
         }
