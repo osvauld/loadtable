@@ -486,11 +486,17 @@ fn r089_an_autostarted_daemon_does_not_inherit_the_clients_descriptors() {
     let dir = temp("inherit");
     let sock = dir.join("s");
     let out = dir.join("fds");
-    // a descriptor that is NOT close-on-exec, like a lock file leaked by our parent
-    let leaked = rustix::io::dup(std::io::stdin()).unwrap();
-    let n = leaked.as_raw_fd();
+    // a descriptor that is NOT close-on-exec, like a lock file leaked by our parent. It sits
+    // high so it never collides with the descriptor `ls` opens for /proc/self/fd (lowest free).
+    let leaked = rustix::io::fcntl_dupfd_cloexec(std::io::stdin(), 200).unwrap();
     let flags = rustix::io::fcntl_getfd(&leaked).unwrap();
-    assert!(!flags.contains(rustix::io::FdFlags::CLOEXEC));
+    rustix::io::fcntl_setfd(&leaked, flags - rustix::io::FdFlags::CLOEXEC).unwrap();
+    let n = leaked.as_raw_fd();
+    assert!(
+        !rustix::io::fcntl_getfd(&leaked)
+            .unwrap()
+            .contains(rustix::io::FdFlags::CLOEXEC)
+    );
     let st = ProcessStarter {
         program: PathBuf::from("/bin/sh"),
         args: vec![
