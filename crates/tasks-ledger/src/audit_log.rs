@@ -59,6 +59,14 @@ pub mod action {
     pub const JOB_TIMEOUT: &str = "job.timeout";
     /// A submit rule refused a job.
     pub const JOB_REFUSED: &str = "job.refused";
+    /// A checkout snapshot was sent to a peer (tree id, bytes).
+    pub const DATA_SYNC_SENT: &str = "data.sync_sent";
+    /// A checkout snapshot was received from a peer and applied.
+    pub const DATA_SYNC_RECEIVED: &str = "data.sync_received";
+    /// A sync was refused before anything was sent, naming the files and why.
+    pub const DATA_SYNC_REFUSED: &str = "data.sync_refused";
+    /// Sync data was deleted by retention (what, bytes freed).
+    pub const DATA_RETENTION: &str = "data.retention";
     /// The queue was drained.
     pub const QUEUE_DRAIN: &str = "queue.drain";
     /// A drain was lifted.
@@ -85,6 +93,10 @@ pub mod action {
         JOB_CANCELLED,
         JOB_TIMEOUT,
         JOB_REFUSED,
+        DATA_SYNC_SENT,
+        DATA_SYNC_RECEIVED,
+        DATA_SYNC_REFUSED,
+        DATA_RETENTION,
         QUEUE_DRAIN,
         QUEUE_RESUME,
         crate::audit::ACTION_CHECKPOINT,
