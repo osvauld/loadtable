@@ -28,6 +28,7 @@ struct Ledger {
 }
 
 pub fn run() -> Result<()> {
+    tinline_task_manager::runtime_support::require_local_runtime()?;
     let state = state_dir();
     fs::create_dir_all(&state)?;
     if fs::symlink_metadata(&state)?.file_type().is_symlink() {

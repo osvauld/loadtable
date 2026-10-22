@@ -24,7 +24,6 @@ pub mod node;
 pub mod notify;
 pub mod procs;
 
-#[cfg(target_os = "linux")]
 pub mod monitor;
 
 pub use alert::{Alert, AlertBook, Observation, Severity};

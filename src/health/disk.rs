@@ -388,22 +388,13 @@ pub fn statuses(
 }
 
 fn thread_cpu_s() -> f64 {
-    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
-    if unsafe { libc::getrusage(libc::RUSAGE_THREAD, &mut usage) } != 0 {
-        return 0.0;
-    }
-    let secs = |t: libc::timeval| t.tv_sec as f64 + t.tv_usec as f64 / 1e6;
-    secs(usage.ru_utime) + secs(usage.ru_stime)
+    // Preserve the existing scan-summary fallback on an accounting failure.
+    task_manager_platform::thread::cpu_seconds().unwrap_or(0.0)
 }
 
-/// Lowest CPU and idle I/O priority for the calling thread (best effort).
+/// Background priority for the calling thread (best effort, native backend).
 pub fn lower_thread_priority() {
-    unsafe {
-        let tid = libc::syscall(libc::SYS_gettid) as libc::id_t;
-        libc::setpriority(libc::PRIO_PROCESS, tid, 19);
-        // IOPRIO_WHO_PROCESS = 1, IOPRIO_CLASS_IDLE = 3 << 13.
-        libc::syscall(libc::SYS_ioprio_set, 1, tid, 3 << 13);
-    }
+    task_manager_platform::thread::lower_priority();
 }
 
 fn is_output_group(path: &Path) -> bool {

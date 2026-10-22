@@ -1055,7 +1055,6 @@ pub fn record_path(state: &Path, job: i64) -> std::path::PathBuf {
     state.join("placement").join(format!("{job}.json"))
 }
 
-#[cfg(target_os = "linux")]
 pub fn record(state: &Path, job: i64, decision: &Decision) -> std::io::Result<()> {
     crate::peer::records::write_json(&record_path(state, job), decision)
 }

@@ -1,5 +1,8 @@
-//! Native Linux admission. Stable flock inodes interoperate with existing Python
-//! clients; holder/wait notes are diagnostics, never authority. No lock deletion.
+//! Shared Unix admission policy and leases. Stable flock inodes interoperate with existing
+//! Python clients; holder/wait notes are diagnostics, never authority. No lock deletion.
+//! Native pressure acquisition is target-selected and fails closed when unimplemented.
+#[path = "admission/native.rs"]
+mod native;
 use crate::{Result, execution::now, worker};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -529,34 +532,14 @@ pub struct Pressure {
 }
 impl Pressure {
     pub fn read() -> Result<Self> {
-        Self::read_from(Path::new("/proc"))
+        native::pressure()
     }
-    /// Fails closed. A missing/unreadable PSI file is named exactly, with the
-    /// kernel requirement, instead of a bare "No such file or directory".
+    /// Linux reads and cross-platform fixture tests share the same fail-closed parser.
+    #[cfg(any(target_os = "linux", test))]
     fn read_from(proc: &Path) -> Result<Self> {
-        let read = |rel: &str| -> Result<String> {
-            let path = proc.join(rel);
-            fs::read_to_string(&path).map_err(|e| {
-                if rel.starts_with("pressure/") {
-                    format!(
-                        "{}: {e}. Admission requires kernel pressure stall information (PSI): \
-                         a kernel with CONFIG_PSI=y, booted with psi=1 if it was built with \
-                         CONFIG_PSI_DEFAULT_DISABLED=y. Admission fails closed without it",
-                        path.display()
-                    )
-                } else {
-                    format!("{}: {e}", path.display())
-                }
-                .into()
-            })
-        };
-        Self::parse(
-            &read("meminfo")?,
-            &read("pressure/cpu")?,
-            &read("pressure/memory")?,
-            &read("pressure/io")?,
-        )
+        native::read_from(proc)
     }
+    #[cfg(any(target_os = "linux", test))]
     fn parse(memory: &str, cpu: &str, memory_psi: &str, io_psi: &str) -> Result<Self> {
         let kb: u64 = memory
             .lines()

@@ -48,23 +48,17 @@ fn signals() {
 }
 
 pub fn identity(pid: u32) -> Result<ProcessIdentity> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
-    // comm can contain spaces and parentheses; fields after the last ')' begin with state.
-    let rest = stat.rsplit_once(')').ok_or("invalid proc stat")?.1;
-    let start_ticks = rest
-        .split_whitespace()
-        .nth(19)
-        .ok_or("missing process start time")?
-        .parse()?;
-    Ok(ProcessIdentity { pid, start_ticks })
+    let observed = task_manager_platform::process::identity(pid)?;
+    Ok(ProcessIdentity {
+        pid: observed.pid,
+        start_ticks: observed.start_ticks,
+    })
 }
 pub fn alive(process: &ProcessIdentity) -> bool {
-    identity(process.pid).is_ok_and(|p| p == *process)
-        && fs::read_to_string(format!("/proc/{}/stat", process.pid)).is_ok_and(|stat| {
-            stat.rsplit_once(')')
-                .and_then(|(_, rest)| rest.split_whitespace().next())
-                .is_some_and(|s| s != "Z")
-        })
+    task_manager_platform::process::alive(&task_manager_platform::process::Identity {
+        pid: process.pid,
+        start_ticks: process.start_ticks,
+    })
 }
 fn state() -> Result<PathBuf> {
     Ok(fs::canonicalize(state_dir())?)
@@ -152,6 +146,7 @@ pub fn drain_requested() -> Result<()> {
 /// `tasks start-worker`: records the enabled intent (first, so a worker it spawns never
 /// sees a stale stop), then starts a worker if none runs. Returns whether one was spawned.
 pub fn start_requested() -> Result<bool> {
+    crate::runtime_support::require_local_runtime()?;
     let state = state()?;
     if draining(&state) {
         // Approved jobs stay approved; the restarted daemon runs them (`tasks drain --cancel`
@@ -164,6 +159,7 @@ pub fn start_requested() -> Result<bool> {
 
 /// `tasks drain --cancel`: resume now, without the restart.
 pub fn drain_cancelled() -> Result<bool> {
+    crate::runtime_support::require_local_runtime()?;
     set_intent(&state()?, true, "start-worker")?;
     start_detached_inner()
 }
@@ -212,6 +208,7 @@ pub fn start_detached() -> Result<()> {
 }
 
 fn start_detached_inner() -> Result<bool> {
+    crate::runtime_support::require_local_runtime()?;
     let state = state()?;
     // Report invalid TASKS_MIN_* configuration to the requesting client now.
     admission::thresholds()?;
@@ -389,6 +386,7 @@ fn target() -> Result<PathBuf> {
     Ok(fs::canonicalize(path)?)
 }
 pub fn run() -> Result<()> {
+    crate::runtime_support::require_local_runtime()?;
     signals();
     let state = state()?;
     let lock = worker_lock(&state)?;
@@ -1140,6 +1138,7 @@ fn supervise(
 /// Internal stage supervisor: owns only its newly spawned Rust admission group.
 /// stdin retains worker.lock; stdout retains the target lease through cleanup.
 pub fn stage(id: i64, stage: &str, worker: ProcessIdentity) -> Result<()> {
+    crate::runtime_support::require_local_runtime()?;
     signals();
     if !matches!(stage, "build" | "run") {
         return Err("unknown internal stage".into());
@@ -1169,12 +1168,7 @@ pub fn stage(id: i64, stage: &str, worker: ProcessIdentity) -> Result<()> {
     ]);
     // Admission killed by a supervisor crash cannot strand the command unnoticed.
     unsafe {
-        cmd.pre_exec(|| {
-            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
+        cmd.pre_exec(task_manager_platform::process::arm_parent_death_signal);
     }
     // Pass the lease to admission and its command so crash windows stay serialized.
     use std::os::fd::{AsFd, AsRawFd, FromRawFd};
@@ -1271,6 +1265,7 @@ pub fn stage(id: i64, stage: &str, worker: ProcessIdentity) -> Result<()> {
 /// Internal Rust-only admission boundary, the process-group leader for commands.
 /// Existing Python clients coordinate through the same flock files, not RPC.
 pub fn admit(id: i64, stage: &str, supervisor: ProcessIdentity) -> Result<()> {
+    crate::runtime_support::require_local_runtime()?;
     signals();
     if !matches!(stage, "build" | "run") {
         return Err("unknown native admission stage".into());
@@ -1459,18 +1454,13 @@ pub fn admit(id: i64, stage: &str, supervisor: ProcessIdentity) -> Result<()> {
 }
 
 fn signal_group(group: &ProcessIdentity, sig: i32) -> Result<()> {
-    if !identity(group.pid).is_ok_and(|p| p == *group) {
-        return Ok(());
-    }
-    if unsafe { libc::getpgid(group.pid as i32) } != group.pid as i32 {
-        return Err("refusing to signal a group not owned by stage child".into());
-    }
-    if unsafe { libc::kill(-(group.pid as i32), sig) } < 0 {
-        let e = std::io::Error::last_os_error();
-        if e.raw_os_error() != Some(libc::ESRCH) {
-            return Err(e.into());
-        }
-    }
+    task_manager_platform::process::signal_owned_group(
+        &task_manager_platform::process::Identity {
+            pid: group.pid,
+            start_ticks: group.start_ticks,
+        },
+        sig,
+    )?;
     Ok(())
 }
 /// SIGTERM, then SIGKILL after `grace` (TASKS_CANCEL_GRACE_MS) or as soon as the
@@ -1635,6 +1625,7 @@ fn raise_nofile() -> Option<(libc::rlim_t, libc::rlim_t)> {
 /// Admitted command runner. No arbitrary command/spec arguments are accepted.
 /// If its supervisor dies it kills its own dedicated group, not another agent's group.
 pub fn command(id: i64, stage: &str, supervisor: ProcessIdentity) -> Result<()> {
+    crate::runtime_support::require_local_runtime()?;
     let state = state()?;
     let dir = job_dir(&state, id);
     let store = database(&state)?;

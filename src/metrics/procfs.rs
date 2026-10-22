@@ -162,8 +162,7 @@ pub fn job_members(procs: &[ProcStat], supervisor: u32) -> Vec<usize> {
 /// anonymous device, so the pair never matches there. For such a file (device major 0) the
 /// inode number alone is compared against the other major-0 entries.
 pub fn flock_held(held: &HashSet<(u32, u32, u64)>, meta: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    let (major, minor, inode) = (libc::major(meta.dev()), libc::minor(meta.dev()), meta.ino());
+    let (major, minor, inode) = task_manager_platform::fs::file_key(meta);
     held.contains(&(major, minor, inode))
         || (major == 0 && held.iter().any(|&(m, _, i)| m == 0 && i == inode))
 }

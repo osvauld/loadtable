@@ -21,6 +21,7 @@ n0-future = "0.3"
 bytes = "1"
 rand = "0.8"
 libc = "0.2"
+nix = { version = "0.30", default-features = false }
 toml = "0.8"
 
 [dev-dependencies]

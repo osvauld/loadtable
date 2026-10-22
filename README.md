@@ -171,6 +171,10 @@ estimates); `tasks list --active` (table) uses `list_active`. Budgets and the be
 
 ## Development
 
+macOS adaptation is in progress: the headless binary builds, but local runtime is explicitly
+disabled pending native admission and supervision. Shared primitives, checks and remaining
+work: [docs/MACOS.md](docs/MACOS.md).
+
 This is an independent Cargo workspace. No app checkout or workspace dependency
 is required to compile the coordinator. The local repository starts uncommitted,
 with no remote; creating commits/publishing needs explicit authorization.

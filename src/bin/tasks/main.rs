@@ -138,6 +138,13 @@ fn is_broken_pipe(error: &(dyn std::error::Error + 'static)) -> bool {
 
 fn run() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    // Only pure catalog/fixture inspection is accepted on macOS at this boundary
+    // checkpoint. Refuse before ensure_daemon, submission, or any state mutation.
+    let offline_inspection = args.as_slice() == ["catalog"]
+        || (args.len() == 3 && args[0] == "ui" && args[1] == "--fixtures");
+    if !offline_inspection {
+        tinline_task_manager::runtime_support::require_local_runtime()?;
+    }
     let run_now = args.first().is_some_and(|s| s == "run");
     let plain_logs = args.first().is_some_and(|s| s == "logs") && args.len() == 2;
     // start-worker/stop-worker print one confirmation line; --json keeps the full reply.
@@ -1578,6 +1585,7 @@ fn open_ui(fixtures: Option<std::path::PathBuf>) -> Result<()> {
 /// Starts `tasks daemon` detached (own process group, so closing a terminal or window
 /// does not stop the queue). Concurrent starters are safe: the loser fails the lock.
 pub(crate) fn ensure_daemon(socket: &Path) -> Result<()> {
+    tinline_task_manager::runtime_support::require_local_runtime()?;
     if UnixStream::connect(socket).is_ok() {
         return Ok(());
     }
@@ -1598,18 +1606,10 @@ pub(crate) fn ensure_daemon(socket: &Path) -> Result<()> {
     // A client running inside an admitted job holds that job's slot lock descriptors (they
     // are deliberately inherited by the job's processes). A daemon it autostarts outlives the
     // job and must not keep them: mark every inherited descriptor above stdio close-on-exec.
-    // SAFETY: only an async-signal-safe syscall between fork and exec; failure (kernels
-    // before 5.11) leaves the previous behaviour.
+    // SAFETY: the shared native hook uses only async-signal-safe syscalls. Linux
+    // kernels without close_range use the existing helper's fcntl fallback instead.
     unsafe {
-        command.pre_exec(|| {
-            libc::syscall(
-                libc::SYS_close_range,
-                3u32,
-                u32::MAX,
-                libc::CLOSE_RANGE_CLOEXEC,
-            );
-            Ok(())
-        });
+        command.pre_exec(task_manager_platform::process::mark_inherited_fds_cloexec);
     }
     let mut child = command.spawn()?;
     // Reap it if it exits while this process (e.g. the window) is still running.

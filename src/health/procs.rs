@@ -60,7 +60,7 @@ pub fn parse_locks(text: &str) -> Vec<LockEntry> {
 /// (major, minor, inode) of a file as /proc/locks names it.
 pub fn file_id(path: &Path) -> Option<(u32, u32, u64)> {
     let m = std::fs::symlink_metadata(path).ok()?;
-    Some((libc::major(m.dev()), libc::minor(m.dev()), m.ino()))
+    Some(task_manager_platform::fs::file_key(&m))
 }
 
 /// The NUL-separated command line, joined by spaces and bounded. None for a gone process or

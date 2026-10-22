@@ -11,11 +11,10 @@ pub mod testscope;
 pub mod types;
 pub mod warmth;
 
-#[cfg(target_os = "linux")]
+// Snapshot construction and sampler handles are shared Unix code. Native reads inside
+// the sampler remain Linux-specific until the macOS monitoring backend is integrated.
 pub mod sampler;
-#[cfg(target_os = "linux")]
 pub mod slots;
-#[cfg(target_os = "linux")]
 pub mod snapshot;
 
 pub use types::*;

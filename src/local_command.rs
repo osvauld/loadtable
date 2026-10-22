@@ -388,7 +388,6 @@ pub enum Placed {
 }
 /// One non-waiting attempt with this process's cache root, `git` from PATH and
 /// its effective cache reserve. Used by the worker's pre-admission wait.
-#[cfg(target_os = "linux")]
 pub fn try_place_outputs(cwd: &Path, argv: &[String]) -> Result<Placed> {
     try_place_outputs_in(
         cwd,
@@ -402,7 +401,6 @@ pub fn try_place_outputs(cwd: &Path, argv: &[String]) -> Result<Placed> {
 /// outputs before queueing). A reserve shortfall here means space dropped while
 /// the job held/waited for its slot; it fails rather than wait while holding a
 /// shared slot that other jobs may be able to use.
-#[cfg(target_os = "linux")]
 pub fn place_outputs(cwd: &Path, argv: &[String]) -> Result<Placement> {
     match try_place_outputs(cwd, argv)? {
         Placed::Done(placement) => Ok(placement),
@@ -416,7 +414,6 @@ pub fn place_outputs(cwd: &Path, argv: &[String]) -> Result<Placement> {
 }
 /// Plan, then require the reserve only on filesystems that receive new output
 /// (see [`OutputPlan::reserve_paths`]), then create the links.
-#[cfg(target_os = "linux")]
 pub fn try_place_outputs_in(
     cwd: &Path,
     argv: &[String],
@@ -454,7 +451,6 @@ pub fn wait_for_placement(
 /// is not installed, falls back to the nearest ancestor holding a `.git` entry
 /// (directory, or file for linked worktrees/submodules), which is the same
 /// top level for ordinary checkouts. `Ok(None)` outside any Git checkout.
-#[cfg(target_os = "linux")]
 fn git_root(cwd: &Path, git: &std::ffi::OsStr) -> Result<(Option<PathBuf>, Option<String>)> {
     // A missing cwd would otherwise surface as a bare ENOENT from the spawn.
     if !cwd.is_dir() {
@@ -504,7 +500,6 @@ fn git_root(cwd: &Path, git: &std::ffi::OsStr) -> Result<(Option<PathBuf>, Optio
 /// An independent Cargo workspace nested below the Git root (the cwd's own
 /// workspace root) additionally gets its own target link, keyed by its full
 /// canonical path. No environment (CARGO_TARGET_DIR etc.) is set or changed.
-#[cfg(target_os = "linux")]
 fn plan_outputs(
     cwd: &Path,
     argv: &[String],
@@ -569,7 +564,6 @@ impl OutputUse {
         }
     }
 }
-#[cfg(target_os = "linux")]
 fn plan_links(root: &Path, rels: &[&str], plan: &mut OutputPlan) -> Result<()> {
     use sha2::{Digest, Sha256};
     let key = format!("{:x}", Sha256::digest(root.as_os_str().as_encoded_bytes()));
@@ -679,7 +673,6 @@ fn tool_index(argv: &[String], names: &[&str]) -> Option<usize> {
         .contains(&Path::new(argv.get(index)?).file_name()?.to_str()?)
         .then_some(index)
 }
-#[cfg(target_os = "linux")]
 /// Conservative model of Cargo's workspace-root discovery for a canonical cwd,
 /// bounded to the Git root: nearest manifest; its own `[workspace]`; an explicit
 /// `package.workspace`; else the nearest ancestor `[workspace]` that does not

@@ -106,27 +106,10 @@ pub fn adb_serial_for_lock(lock: &str) -> String {
 /// keep an inherited admission lease (lock descriptor) held after the job.
 pub fn without_inherited_fds(cmd: &mut Command) {
     use std::os::unix::process::CommandExt;
-    // SAFETY: only async-signal-safe syscalls (close_range, getrlimit, fcntl).
+    // SAFETY: the native hook uses only async-signal-safe syscalls. An unimplemented
+    // backend returns ENOTSUP; never spawn a detached helper with leaked lease FDs.
     unsafe {
-        cmd.pre_exec(|| {
-            const CLOSE_RANGE_CLOEXEC: libc::c_uint = 1 << 2;
-            if libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, CLOSE_RANGE_CLOEXEC) == 0 {
-                return Ok(());
-            }
-            let mut limit = libc::rlimit {
-                rlim_cur: 0,
-                rlim_max: 0,
-            };
-            let max = if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0 {
-                limit.rlim_cur.min(1 << 16) as i32
-            } else {
-                1024
-            };
-            for fd in 3..max {
-                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
-            }
-            Ok(())
-        });
+        cmd.pre_exec(task_manager_platform::process::mark_inherited_fds_cloexec);
     }
 }
 

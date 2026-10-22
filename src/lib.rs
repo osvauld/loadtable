@@ -1,45 +1,38 @@
 //! Local task ledger and explicit, allowlisted execution.
-#[cfg(target_os = "linux")]
+//!
+//! Policy, persistence and Unix transport modules are shared. Compilation is not runtime
+//! acceptance: native operations must select their backend or reject unsupported hosts.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+compile_error!("task-manager currently targets Linux and macOS only");
 pub mod admission;
-#[cfg(target_os = "linux")]
 pub mod android;
-#[cfg(target_os = "linux")]
 pub mod android_build;
-#[cfg(target_os = "linux")]
 pub mod cache;
-#[cfg(target_os = "linux")]
 pub mod cache_server;
 pub mod catalog;
-#[cfg(target_os = "linux")]
 pub mod device;
 pub mod device_denylist;
 pub mod execution;
 pub mod gc;
 pub mod gc_auto;
 pub mod health;
-#[cfg(target_os = "linux")]
 pub mod lease_audit;
 pub mod ledger;
 pub mod listing;
 pub mod local_command;
 pub mod log_search;
 pub mod metrics;
-#[cfg(target_os = "linux")]
 pub mod peer;
 pub mod peer_link;
 pub mod placement;
 pub mod policy;
-#[cfg(target_os = "linux")]
 pub mod remote_reconcile;
 pub mod reroute;
-#[cfg(target_os = "linux")]
 pub mod retention;
+pub mod runtime_support;
 pub mod snapshot;
-#[cfg(target_os = "linux")]
 pub mod tmp_usage;
-#[cfg(target_os = "linux")]
 pub mod worker;
-#[cfg(target_os = "linux")]
 pub mod workspace_snapshot;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};

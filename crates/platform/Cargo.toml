@@ -1,0 +1,12 @@
+[package]
+name = "task-manager-platform"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
+
+[dependencies]
+# No disk/network/user collection, and no default parallel process refresh.
+sysinfo = { version = "0.37", default-features = false, features = ["system"] }
+nix = { version = "0.30", default-features = false, features = ["signal", "process"] }
+libc = "0.2"

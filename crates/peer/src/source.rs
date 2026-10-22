@@ -15,7 +15,7 @@
 //!   directory is reused) and records `<id>.identity` for the cluster snapshot. A checkout whose
 //!   identity names another peer endpoint is refused.
 //! * **Materializer** (immutable, used for fetched artifacts): path-safe, no-follow `openat`,
-//!   `O_EXCL|O_NOFOLLOW`, exec bit honored, verified after write, `renameat2(RENAME_NOREPLACE)`.
+//!   `O_EXCL|O_NOFOLLOW`, exec bit honored, verified after write, atomic no-replace rename.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::{CStr, CString};
@@ -40,6 +40,10 @@ use crate::{
 
 /// Source-transfer protocol; distinct from iroh-blobs' own ALPN.
 pub const SOURCE_ALPN: &[u8] = b"task-manager/source/0";
+
+#[cfg(test)]
+#[path = "source_portability_tests.rs"]
+mod portability_tests;
 /// Shared with `scripts/worker_source.py`.
 pub const SCHEMA: &str = "task-manager-local-source-manifest-v1";
 pub const SOURCE_DOMAINS: Domains = Domains {
@@ -323,7 +327,7 @@ pub fn parse_files0(bytes: &[u8]) -> Result<Vec<String>, SourceError> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// No-follow filesystem primitives (Linux)
+// No-follow filesystem primitives (Unix); only atomic no-replace rename is OS-specific.
 
 pub(crate) fn cstr(name: &str) -> Result<CString, SourceError> {
     CString::new(name).map_err(|_| SourceError::UnsafePath(format!("NUL in {name:?}")))
@@ -413,8 +417,8 @@ pub(crate) fn read_dir_names(dir: RawFd) -> io::Result<Vec<CString>> {
     unsafe { libc::rewinddir(stream) };
     let mut out = Vec::new();
     let result = loop {
-        // SAFETY: errno is thread-local; reset to tell end-of-stream from an error.
-        unsafe { *libc::__errno_location() = 0 };
+        // Reset thread-local errno portably to distinguish EOF from a readdir error.
+        nix::errno::Errno::clear();
         // SAFETY: stream is valid until closedir below.
         let entry = unsafe { libc::readdir(stream) };
         if entry.is_null() {
@@ -436,6 +440,7 @@ pub(crate) fn read_dir_names(dir: RawFd) -> io::Result<Vec<CString>> {
     result.map(|_| out)
 }
 
+#[cfg(target_os = "linux")]
 fn rename_noreplace(dir: RawFd, from: &CStr, to: &CStr) -> io::Result<()> {
     // SAFETY: raw renameat2 syscall (works on glibc and musl); both names NUL-terminated.
     let ret = unsafe {
@@ -453,6 +458,22 @@ fn rename_noreplace(dir: RawFd, from: &CStr, to: &CStr) -> io::Result<()> {
     } else {
         Ok(())
     }
+}
+
+#[cfg(target_os = "macos")]
+fn rename_noreplace(dir: RawFd, from: &CStr, to: &CStr) -> io::Result<()> {
+    // SAFETY: both names are NUL-terminated and relative to the caller's open directory.
+    // RENAME_EXCL is atomic: an existing destination (including a symlink) is never replaced.
+    cvt(unsafe { libc::renameatx_np(dir, from.as_ptr(), dir, to.as_ptr(), libc::RENAME_EXCL) })
+        .map(drop)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn rename_noreplace(_dir: RawFd, _from: &CStr, _to: &CStr) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "atomic no-replace directory rename is supported only on Linux and macOS",
+    ))
 }
 
 /// Opens a caller-given root directory (the root itself may be reached through symlinks; its
