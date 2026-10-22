@@ -520,7 +520,7 @@ impl Ctx {
     }
 }
 
-pub const TOOL_NAMES: [&str; 11] = [
+pub const TOOL_NAMES: [&str; 12] = [
     "cluster_status",
     "list_jobs",
     "job",
@@ -532,6 +532,7 @@ pub const TOOL_NAMES: [&str; 11] = [
     "search_logs",
     "job_cost",
     "alerts",
+    "submit_steps",
 ];
 
 const PHASES: [&str; 11] = [
@@ -713,6 +714,8 @@ pub fn tools() -> Vec<Value> {
                         "description": "Deliberately build every test target of a filtered test command (e.g. `cargo test -p X NAME` without --lib/--test T). This host's policy refuses such a command by default and the refusal names the targets your filter can be in: prefer naming them. true is recorded on the job."},
                     "pin": {"type": "boolean", "default": false,
                         "description": "Keep the job on the machine chosen at submit: a job still waiting is otherwise moved to an idle worker peer when that clearly finishes it sooner (same job id). placement \"local\" or a named peer also pins."},
+                    "after": {"type": "array", "items": {"type": "integer", "minimum": 1}, "minItems": 1, "maxItems": 64,
+                        "description": "Job ids (older jobs, yours or not) that must PASS before this job may start. It is approved now but not claimed until they all passed; if any ends failed, cancelled or interrupted this job is cancelled. Prefer submit_steps for a whole plan."},
                     "fetch": {"type": "array", "items": {"type": "string"}, "maxItems": 64,
                         "description": "Only for a job that runs on a peer: relative paths in the checkout to copy back after it passes (into ~/build-cache/offload/WHO/JOB_ID here)."},
                 },
@@ -883,6 +886,52 @@ pub fn tools() -> Vec<Value> {
             },
             "annotations": {"readOnlyHint": true, "openWorldHint": false}
         }),
+        json!({
+            "name": "submit_steps",
+            "title": "Run a plan of dependent steps",
+            "description": "Submit a whole plan at once: each step is a `submit` (same rules, \
+                same admission, placement, logs, ETA and cancel) and a step with `after` is \
+                approved now but not started until the steps it names have passed; if one of \
+                them fails, the steps that wait for it are cancelled and independent steps \
+                still run. The plan is stored in the daemon, so it survives this call and \
+                your session: use job_cost / wait_job / job_logs per step id. Use one step \
+                per test target (`cargo test --test NAME`) with a first step that builds \
+                (`cargo test --no-run`), instead of one `bash -c \"cargo test ... | grep ...\"`: \
+                a shell hides the compile progress and the per-target time. Returns the job id \
+                of every step, in dependency order. If a step cannot be submitted the steps \
+                already submitted are cancelled.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "who": {"type": "string", "minLength": 1, "maxLength": 128,
+                        "description": "Your unique agent name; recorded as the owner of every step."},
+                    "cwd": {"type": "string",
+                        "description": "Absolute path of YOUR checkout; every step runs there."},
+                    "steps": {"type": "array", "minItems": 1, "maxItems": 64,
+                        "items": {"type": "object", "additionalProperties": false,
+                            "required": ["name", "argv"],
+                            "properties": {
+                                "name": {"type": "string", "maxLength": 64,
+                                    "description": "Unique in the plan: letters, digits, _ - ."},
+                                "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 256},
+                                "after": {"type": "array", "items": {"type": "string"},
+                                    "description": "Names of steps that must pass first."},
+                                "run": {"type": "boolean", "default": false,
+                                    "description": "Run admission class (already-built command) instead of compile."},
+                                "broad_test": {"type": "boolean", "default": false,
+                                    "description": "As for submit."}
+                            }},
+                        "description": "The steps."},
+                    "pin": {"type": "boolean", "default": false,
+                        "description": "As for submit: keep every step on the machine chosen at submit."},
+                    "placement": submit_placement_schema(),
+                },
+                "required": ["who", "cwd", "steps"],
+                "additionalProperties": false
+            },
+            "annotations": {"readOnlyHint": false, "destructiveHint": true,
+                            "idempotentHint": false, "openWorldHint": false}
+        }),
     ]
 }
 
@@ -906,6 +955,7 @@ pub fn call_tool(daemon: &Daemon, name: &str, args: &Map<String, Value>, ctx: &C
             "job" => job(daemon, &args),
             "job_logs" => job_logs(daemon, &args),
             "submit" => submit(daemon, &args, ctx),
+            "submit_steps" => submit_steps(daemon, &args, ctx),
             "cancel" => cancel(daemon, &args),
             "wait_job" => wait_job(daemon, &args, ctx),
             "who_is_compiling" => crate::mcp_compute::who_is_compiling(daemon, &args),
@@ -1684,6 +1734,18 @@ fn submit(daemon: &Daemon, args: &Args, ctx: &Ctx) -> Result<Outcome> {
             .collect::<Result<_>>()?,
         Some(_) => return Err("fetch must be an array of relative paths".into()),
     };
+    let after: Vec<i64> = match args.get("after") {
+        None => vec![],
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|v| {
+                v.as_i64()
+                    .filter(|n| *n >= 1)
+                    .ok_or_else(|| "after must be an array of job ids".into())
+            })
+            .collect::<Result<_>>()?,
+        Some(_) => return Err("after must be an array of job ids".into()),
+    };
     let request = match args.str("placement")? {
         None => placement::Request::Anywhere,
         Some(text) => placement::Request::parse(text)?,
@@ -1757,6 +1819,14 @@ fn submit(daemon: &Daemon, args: &Args, ctx: &Ctx) -> Result<Outcome> {
         && let Err(e) = placement::record(&daemon.state(), id, decision)
     {
         eprintln!("tasks mcp: could not record the placement of job {id}: {e}");
+    }
+    if !after.is_empty()
+        && let Err(e) = daemon.ok(Action::After(id, after.clone()))
+    {
+        return Err(format!(
+            "job {id} was submitted but could not be made to wait for {after:?} ({e}); it is NOT approved. Cancel it with cancel {{\"id\": {id}, \"who\": \"{who}\"}}; do not resubmit blindly"
+        )
+        .into());
     }
     // Before approval: reroute never sees the job unpinned.
     if let Some(why) = pin_why
@@ -1847,6 +1917,95 @@ fn submit(daemon: &Daemon, args: &Args, ctx: &Ctx) -> Result<Outcome> {
         outcome.structured["alerts"] = json!(alerts);
     }
     Ok(outcome)
+}
+
+/// `submit_steps`: every step of a validated plan becomes one `submit`, in dependency order, with
+/// `after` set to the job ids of the steps it names.
+fn submit_steps(daemon: &Daemon, args: &Args, ctx: &Ctx) -> Result<Outcome> {
+    let who = args.str("who")?.unwrap_or_default();
+    let cwd = args.str("cwd")?.unwrap_or_default();
+    let steps = args.get("steps").cloned().unwrap_or(Value::Null);
+    let plan = tinline_task_manager::steps::Plan::parse(&json!({ "steps": steps }).to_string())?;
+    let mut ids: Vec<Option<i64>> = vec![None; plan.steps.len()];
+    let fail = |daemon: &Daemon, ids: &[Option<i64>], why: String| -> Result<Outcome> {
+        let started: Vec<i64> = ids.iter().flatten().copied().collect();
+        for id in &started {
+            let _ = daemon.ok(Action::Cancel(*id));
+        }
+        Err(format!(
+            "{why}; cancelled the {} step(s) already submitted ({started:?}); nothing from this plan is left running",
+            started.len()
+        )
+        .into())
+    };
+    for i in plan.order() {
+        let step = &plan.steps[i];
+        let after: Vec<i64> = step
+            .after
+            .iter()
+            .filter_map(|name| plan.steps.iter().position(|s| &s.name == name))
+            .filter_map(|j| ids[j])
+            .collect();
+        let mut map = Map::new();
+        map.insert("who".into(), json!(who));
+        map.insert("cwd".into(), json!(cwd));
+        map.insert("argv".into(), json!(step.argv));
+        map.insert(
+            "class".into(),
+            json!(if step.run { "run" } else { "compile" }),
+        );
+        map.insert("broad_test".into(), json!(step.broad_test));
+        for key in ["placement", "pin"] {
+            if let Some(v) = args.get(key) {
+                map.insert(key.into(), v.clone());
+            }
+        }
+        if !after.is_empty() {
+            map.insert("after".into(), json!(after));
+        }
+        let one = Args::new("submit", &map)?;
+        match submit(daemon, &one, ctx) {
+            Ok(outcome) => ids[i] = outcome.structured["job_id"].as_i64(),
+            Err(e) => {
+                return fail(
+                    daemon,
+                    &ids,
+                    format!("step {:?} was not submitted: {e}", step.name),
+                );
+            }
+        }
+        if ids[i].is_none() {
+            return fail(
+                daemon,
+                &ids,
+                format!("step {:?} returned no job id", step.name),
+            );
+        }
+    }
+    let rows: Vec<Value> = plan
+        .steps
+        .iter()
+        .zip(&ids)
+        .map(|(s, id)| json!({"name": s.name, "job_id": id, "after": s.after}))
+        .collect();
+    let mut text = format!("submitted {} step(s) for {who}:\n", rows.len());
+    for (s, id) in plan.steps.iter().zip(&ids) {
+        let waits = if s.after.is_empty() {
+            "starts now".to_string()
+        } else {
+            format!("after {}", s.after.join(", "))
+        };
+        text.push_str(&format!(
+            "  {:<14} job {:<6} {waits}\n",
+            s.name,
+            id.unwrap_or(0)
+        ));
+    }
+    text.push_str("Next: wait_job / job_logs / job_cost per job id; cancel {\"id\", \"who\"} cancels a step and the steps that wait for it.");
+    Ok(Outcome {
+        text,
+        structured: json!({"steps": rows}),
+    })
 }
 
 fn cancel(daemon: &Daemon, args: &Args) -> Result<Outcome> {
