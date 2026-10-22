@@ -23,7 +23,7 @@ mod types;
 pub use error::PlatformError;
 pub use fds::close_on_exec_inherited;
 pub use service::{render_launchd_plist, render_systemd_unit};
-pub use slots::{FlockSlots, SlotGuard};
+pub use slots::{FlockSlots, SlotGuard, slot_lock_path};
 pub use traits::{Disk, Memory, Pressure, Processes, Service, SlotLocks};
 pub use types::{
     Child, GroupId, InstallPlan, Level, MemorySnapshot, PressureSnapshot, PressureThresholds,
