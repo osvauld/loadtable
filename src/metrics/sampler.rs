@@ -967,6 +967,7 @@ impl Sampler {
         let blockers = s.blockers.clone();
         drop(s);
         let worker_running = crate::worker::running(&self.state_dir);
+        let stopped = crate::worker::stopped_reason(&self.state_dir, now as i64);
         snapshot::assemble(snapshot::Inputs {
             now,
             machine,
@@ -976,6 +977,7 @@ impl Sampler {
             scan: &scan,
             blockers: &blockers,
             worker_running,
+            stopped,
         })
     }
 }

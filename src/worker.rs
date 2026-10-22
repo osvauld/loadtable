@@ -131,6 +131,27 @@ pub fn draining(state: &Path) -> bool {
     intent(state).is_some_and(|i| !i.enabled && i.by == DRAIN)
 }
 
+/// Why approved jobs are not being claimed on purpose, for the queue text: who switched claiming
+/// off, how long ago, and how to resume. None when claiming is not switched off.
+pub fn stopped_reason(state: &Path, now: i64) -> Option<String> {
+    let i = intent(state).filter(|i| !i.enabled)?;
+    let ago = now.saturating_sub(i.changed_at).max(0);
+    let ago = if ago >= 3600 {
+        format!("{}h{:02}m", ago / 3600, ago % 3600 / 60)
+    } else {
+        format!("{}m", ago / 60)
+    };
+    Some(if i.by == DRAIN {
+        format!(
+            "operator drain for a daemon restart, since {ago} ago (tasks drain --cancel resumes)"
+        )
+    } else {
+        format!(
+            "claiming stopped by tasks stop-worker, since {ago} ago (tasks start-worker resumes)"
+        )
+    })
+}
+
 /// `tasks drain`: like stop-worker, but resumed by the next daemon start.
 pub fn drain_requested() -> Result<()> {
     set_intent(&state()?, false, DRAIN)
@@ -1630,6 +1651,9 @@ pub fn command(id: i64, stage: &str, supervisor: ProcessIdentity) -> Result<()> 
     if !job.phase.active() {
         return Err("command requires active claimed job".into());
     }
+    if let Some(line) = crate::placement::recorded_line(&state, id) {
+        append_log(&dir, line.as_bytes());
+    }
     if let Some((soft, hard)) = raise_nofile() {
         append_log(
             &dir,
@@ -2143,6 +2167,36 @@ fn run_android(state: &Path, dir: &Path, job: &crate::Job, stage: &str) -> Resul
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_stopped_queue_says_who_stopped_it_and_how_to_resume() {
+        let dir = std::env::temp_dir().join(format!("stopped-reason-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(stopped_reason(&dir, 1000), None);
+        save(
+            &dir.join(INTENT_FILE),
+            &ExecutionIntent {
+                enabled: false,
+                changed_at: 1000,
+                by: DRAIN.into(),
+            },
+        )
+        .unwrap();
+        let drain = stopped_reason(&dir, 1000 + 2 * 3600 + 5 * 60).unwrap();
+        assert!(
+            drain.contains("drain") && drain.contains("2h05m"),
+            "{drain}"
+        );
+        assert!(drain.contains("tasks drain --cancel"), "{drain}");
+        set_intent(&dir, false, "stop-worker").unwrap();
+        let stop = stopped_reason(&dir, 1000 + 120).unwrap();
+        assert!(
+            stop.contains("stop-worker") && stop.contains("tasks start-worker"),
+            "{stop}"
+        );
+        set_intent(&dir, true, "start-worker").unwrap();
+        assert_eq!(stopped_reason(&dir, 5000), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
     #[test]
     fn a_jobs_busy_ledger_or_lost_supervisor_does_not_stop_the_worker_claiming() {
         let busy = rusqlite::Error::SqliteFailure(

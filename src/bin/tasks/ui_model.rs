@@ -762,11 +762,11 @@ pub fn pressure_words(machine: &Machine) -> (String, Level) {
         let (text, level) = if lower.contains("available memory") {
             ("low free memory", Level::Bad)
         } else if lower.contains("memory") {
-            ("memory high", Level::Bad)
+            ("memory stalls", Level::Bad)
         } else if lower.contains("i/o") {
-            ("I/O high", Level::Bad)
+            ("I/O stalls", Level::Bad)
         } else if lower.contains("cpu") {
-            ("CPU high", Level::Warn)
+            ("CPU contended", Level::Warn)
         } else if lower.contains("disk") {
             ("disk low", Level::Bad)
         } else {

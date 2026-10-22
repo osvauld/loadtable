@@ -60,6 +60,8 @@ pub struct Inputs<'a> {
     pub scan: &'a Scan,
     pub blockers: &'a Blockers,
     pub worker_running: bool,
+    /// Why claiming is switched off on purpose (`worker::stopped_reason`), if it is.
+    pub stopped: Option<String>,
 }
 
 /// Every non-terminal job plus the newest [`FINISHED_JOBS`] finished ones, by id.
@@ -187,6 +189,7 @@ fn queue(job: &Job, resource: &Resource, inputs: &Inputs) -> Option<Queue> {
     };
     match job.phase {
         Phase::Queued => return simple(format!("approval (tasks approve-command {id})")),
+        Phase::Approved if inputs.stopped.is_some() => return simple(inputs.stopped.clone()?),
         Phase::Approved if !inputs.worker_running => {
             return simple("worker not running (tasks start-worker)".into());
         }
