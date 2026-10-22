@@ -9,3 +9,8 @@ publish.workspace = true
 [lints]
 workspace = true
 
+
+[dependencies]
+tasks-core.workspace = true
+tasks-platform.workspace = true
+thiserror.workspace = true
