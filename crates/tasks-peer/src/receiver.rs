@@ -72,6 +72,13 @@ pub trait JobRunner: Send + Sync {
     fn read_log(&self, peer: &PeerId, id: RemoteJobId, offset: u64, max: usize) -> Vec<u8>;
     /// Cancels; `None` when unknown.
     fn cancel(&self, peer: &PeerId, id: RemoteJobId) -> Option<CancelState>;
+    /// True while a job of `peer` that has not ended runs in (or waits to run in) the synced
+    /// copy under `tree`. The receiver then refuses a re-sync of that copy with
+    /// [`Refusal::Busy`], so a live job never sees its files replaced.
+    fn checkout_busy(&self, peer: &PeerId, tree: &std::path::Path) -> bool {
+        let _ = (peer, tree);
+        false
+    }
 }
 
 /// The daemon's status, for the status request.
@@ -206,6 +213,13 @@ impl Receiver {
                 Some(state) => Body::CancelAck { remote, state },
                 None => Body::Refuse(Refusal::UnknownJob { remote }),
             },
+            Body::SyncHaveRequest { checkout, .. } | Body::SyncManifestPage { checkout, .. }
+                if self
+                    .runner
+                    .checkout_busy(from, &self.store.tree_root(from, &checkout)) =>
+            {
+                Body::Refuse(Refusal::Busy { checkout })
+            }
             Body::SyncHaveRequest { checkout, hashes } => {
                 match self.store.have(from, &checkout, &hashes) {
                     Ok(present) => Body::SyncHave { present },

@@ -224,6 +224,7 @@ pub struct Forward {
     sync_report: Option<SyncReport>,
     last_error: String,
     lost_since: Option<Duration>,
+    busy_since: Option<Duration>,
     notes: Vec<String>,
 }
 
@@ -259,6 +260,7 @@ impl Forward {
             sync_report: None,
             last_error: String::new(),
             lost_since: None,
+            busy_since: None,
             notes: Vec::new(),
         }
     }
@@ -443,11 +445,14 @@ impl Forward {
         if now < self.next_try {
             return;
         }
-        let result = (|| -> Result<SyncReport, String> {
+        let result = (|| -> Result<SyncReport, (String, bool)> {
             let report = build_manifest(&self.job.root, io.lister, &self.policy.sync_limits)
-                .map_err(|e| e.to_string())?;
-            self.connect(io).map_err(|e| e.to_string())?;
-            let conn = self.conn.as_mut().ok_or("no connection")?;
+                .map_err(|e| (e.to_string(), false))?;
+            self.connect(io).map_err(|e| (e.to_string(), false))?;
+            let conn = self
+                .conn
+                .as_mut()
+                .ok_or(("no connection".to_string(), false))?;
             push_checkout(
                 conn.as_mut(),
                 &self.checkout,
@@ -457,15 +462,51 @@ impl Forward {
                     .unwrap_or(0)
                     .wrapping_add(attempt as u64),
             )
-            .map_err(|e: SyncError| e.to_string())
+            .map_err(|e: SyncError| {
+                let busy = matches!(
+                    &e,
+                    SyncError::Peer(PeerError::Refused(Refusal::Busy { .. }))
+                );
+                (e.to_string(), busy)
+            })
         })();
         match result {
+            // The peer still runs an earlier job from this checkout: wait for it without
+            // spending a sync attempt, but not for ever, and nothing has been submitted.
+            Err((e, true)) => {
+                self.conn = None;
+                let since = *self.busy_since.get_or_insert(now);
+                if now.saturating_sub(since) >= self.policy.lost_grace {
+                    // Not `nothing_submitted`: the live job on the peer may be this very job,
+                    // submitted before a daemon restart whose reply was never recorded.
+                    // Running it here as well could run it twice, so it is interrupted.
+                    let sync = self.sync_report.take();
+                    self.finish(ForwardResult {
+                        phase: Phase::Interrupted,
+                        reason: format!(
+                            "{} stayed busy with a live job of this checkout for {:?} ({e}); the job was not submitted again, and it may be that job's earlier submission, so it is not run elsewhere",
+                            self.job.peer, self.policy.lost_grace
+                        ),
+                        outcome: None,
+                        samples: Vec::new(),
+                        nothing_submitted: false,
+                        remote: None,
+                        sync,
+                    });
+                } else {
+                    if since == now {
+                        self.notes.push(format!("{e}; waiting"));
+                    }
+                    self.next_try = now + self.policy.reattach_interval;
+                }
+            }
             Ok(rep) => {
+                self.busy_since = None;
                 self.notes.push(format!("synced: {}", rep.line()));
                 self.sync_report = Some(rep);
                 self.state = ForwardState::Submitting;
             }
-            Err(e) if attempt < self.policy.sync_attempts => {
+            Err((e, _)) if attempt < self.policy.sync_attempts => {
                 self.notes
                     .push(format!("sync attempt {attempt} failed ({e}); retrying"));
                 self.conn = None;
@@ -474,7 +515,7 @@ impl Forward {
                     attempt: attempt + 1,
                 };
             }
-            Err(e) => self.finish_unsubmitted(
+            Err((e, _)) => self.finish_unsubmitted(
                 Phase::Failed { exit: None },
                 format!(
                     "sync to {} failed after {attempt} attempts: {e}; nothing was submitted",

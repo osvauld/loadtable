@@ -124,6 +124,13 @@ pub enum Refusal {
         /// What.
         detail: String,
     },
+    /// A job from this checkout is still live here, so its copy cannot be replaced yet. Retry
+    /// when that job has ended (the origin's checkout lock normally prevents this).
+    #[error("checkout {checkout} has a live job on this peer; its copy cannot be re-synced now")]
+    Busy {
+        /// The checkout.
+        checkout: CheckoutId,
+    },
     /// The peer failed internally.
     #[error("peer error: {detail}")]
     Internal {
