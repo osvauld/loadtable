@@ -8,7 +8,7 @@ use crate::{
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use tasks_core::{DeviceId, JobId, SlotKind};
-use tasks_platform::{Disk, Memory, Pressure, SlotGuard, SlotLocks};
+use tasks_platform::{Disk, Memory, Pressure, PressureThresholds, SlotGuard, SlotLocks};
 
 /// Which slots exist on this machine and who is known to hold them.
 #[derive(Debug, Clone, Default)]
@@ -60,13 +60,15 @@ pub struct Admitter<'a> {
     pub state_path: PathBuf,
     /// Machine policy, passed in.
     pub thresholds: Thresholds,
+    /// PSI percentages that map to a memory [`Level`](tasks_platform::Level), passed in.
+    pub psi: PressureThresholds,
 }
 
 impl Admitter<'_> {
     /// Measures the machine now. A failed reading is an error, so admission fails closed.
     pub fn readings(&self) -> Result<Readings, AdmissionError> {
         Ok(Readings {
-            pressure: self.pressure.snapshot()?,
+            pressure: self.pressure.snapshot(&self.psi)?,
             available_memory: self.memory.snapshot()?.available_bytes,
             cache_free: self.disk.free_bytes(&self.cache_path)?,
             state_free: self.disk.free_bytes(&self.state_path)?,
@@ -165,9 +167,9 @@ mod tests {
     use super::*;
     use crate::Verdict;
     use crate::testkit::Fake;
-    use crate::testkit::{thresholds, waiter};
+    use crate::testkit::{psi, thresholds, waiter};
     use std::sync::Mutex;
-    use tasks_platform::{Level, PlatformError, PressureSnapshot};
+    use tasks_platform::{Level, PlatformError, PressureSnapshot, PressureThresholds};
 
     fn admitter<'a>(f: &'a Fake, p: &'a dyn Pressure) -> Admitter<'a> {
         Admitter {
@@ -178,6 +180,7 @@ mod tests {
             cache_path: "/cache".into(),
             state_path: "/state".into(),
             thresholds: thresholds(),
+            psi: psi(),
         }
     }
 
@@ -188,6 +191,8 @@ mod tests {
     fn calm() -> PressureSnapshot {
         PressureSnapshot {
             memory: Level::Normal,
+            memory_some: None,
+            memory_full: None,
             cpu: Some(5.0),
             io: Some(5.0),
         }
@@ -196,17 +201,17 @@ mod tests {
     /// Returns the queued readings in order, then repeats the last.
     struct Script(Mutex<Vec<PressureSnapshot>>);
     impl Pressure for Script {
-        fn snapshot(&self) -> Result<PressureSnapshot, PlatformError> {
+        fn snapshot(&self, _: &PressureThresholds) -> Result<PressureSnapshot, PlatformError> {
             let mut v = self
                 .0
                 .lock()
-                .map_err(|_| PlatformError::Parse("poisoned".into()))?;
+                .map_err(|_| PlatformError::parse("script", "poisoned"))?;
             if v.len() > 1 {
                 Ok(v.remove(0))
             } else {
                 v.first()
                     .copied()
-                    .ok_or(PlatformError::Parse("empty".into()))
+                    .ok_or(PlatformError::parse("script", "empty"))
             }
         }
     }

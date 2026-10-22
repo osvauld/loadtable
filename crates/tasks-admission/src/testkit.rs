@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use tasks_core::{JobId, SlotKind};
 use tasks_platform::{
     Disk, FlockSlots, Level, Memory, MemorySnapshot, PlatformError, Pressure, PressureSnapshot,
-    SlotGuard, SlotLocks,
+    PressureThresholds, SlotGuard, SlotLocks,
 };
 
 const GIB: u64 = 1 << 30;
@@ -34,8 +34,19 @@ pub fn thresholds() -> Thresholds {
 pub fn pressure() -> PressureSnapshot {
     PressureSnapshot {
         memory: Level::Normal,
+        memory_some: None,
+        memory_full: None,
         cpu: Some(5.0),
         io: Some(5.0),
+    }
+}
+
+pub fn psi() -> PressureThresholds {
+    PressureThresholds {
+        memory_some_warn: 10.0,
+        memory_some_critical: 40.0,
+        memory_full_warn: 5.0,
+        memory_full_critical: 20.0,
     }
 }
 
@@ -109,7 +120,7 @@ impl Memory for Fake {
     }
 }
 impl Pressure for Fake {
-    fn snapshot(&self) -> Result<PressureSnapshot, PlatformError> {
+    fn snapshot(&self, _: &PressureThresholds) -> Result<PressureSnapshot, PlatformError> {
         Ok(self.pressure)
     }
 }

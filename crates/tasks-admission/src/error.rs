@@ -23,7 +23,7 @@ mod tests {
     fn messages_name_the_cause() {
         let e = AdmissionError::NoShortLane(SlotKind::Device);
         assert!(e.to_string().contains("Device"));
-        let p = AdmissionError::from(PlatformError::Parse("bad".into()));
+        let p = AdmissionError::from(PlatformError::parse("test", "bad"));
         assert!(p.to_string().contains("bad"));
     }
 }

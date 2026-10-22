@@ -2,8 +2,8 @@
 
 use tasks_timing::{CargoParser, Event, GradleParser, PhaseKind, TaskOutcome, Timeline};
 
-const CARGO: &str = include_str!("fixtures/cargo-test-4254.log");
-const GRADLE: &str = include_str!("fixtures/gradle-304.log");
+const CARGO: &str = include_str!("fixtures/cargo-test-4254.txt");
+const GRADLE: &str = include_str!("fixtures/gradle-304.txt");
 
 fn secs_in(line: &str) -> Option<f64> {
     let rest = line.split("finished in ").nth(1)?;
