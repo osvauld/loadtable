@@ -256,7 +256,14 @@ fn queue(job: &Job, resource: &Resource, inputs: &Inputs) -> Option<Queue> {
         .and_then(|i| i.checked_sub(1))
         .map(|i| same[i])
         .or_else(|| same.last().copied().filter(|_| mine.is_none()));
-    let waiting_for = if let Some(b) = blocker {
+    // A forwarded job stays queued while its checkout is in use (peer::checkout_gate); the lock
+    // probe is the worker's, here only the ledger part is known, keyed by the job's cwd.
+    let checkout = (label == "offload")
+        .then(|| crate::peer::checkout_gate::blocker(job, &job.spec.source, inputs.all_jobs, false))
+        .flatten();
+    let waiting_for = if let Some(c) = checkout {
+        Some(c)
+    } else if let Some(b) = blocker {
         Some(b)
     } else if let Some(text) = holders(kind) {
         Some(text)
