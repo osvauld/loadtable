@@ -33,6 +33,10 @@ pub const STATE_FREE_ENV: &str = "TASKS_MIN_STATE_FREE_MIB";
 /// request, 1..=64. Default 2. Raising it never changes the injected default of 2.
 pub const MAX_CARGO_JOBS_ENV: &str = "TASKS_MAX_CARGO_JOBS";
 pub const DEFAULT_MAX_CARGO_JOBS: u64 = 2;
+/// Seconds a job's log and CPU must both stay still after a terminal failure line before the
+/// job is ended as stuck, 30..=3600. Default 300. See `worker::stuck_job_line`.
+pub const STUCK_JOB_ENV: &str = "TASKS_STUCK_JOB_SECONDS";
+pub const DEFAULT_STUCK_JOB_SECONDS: u64 = 300;
 /// Opt-in, more lenient CPU PSI some avg10 limit (whole percent, 40..=100) for
 /// RUN slots only. Default 40, the shared CPU gate. It can never tighten below
 /// 40 and never relaxes memory, memory/I/O PSI or compile admission.
@@ -89,6 +93,13 @@ const CARGO_JOBS_LIMIT: Limit = Limit {
     unit_name: "jobs",
     floor: 1,
     max: 64,
+};
+const STUCK_JOB_LIMIT: Limit = Limit {
+    env: STUCK_JOB_ENV,
+    unit: 1,
+    unit_name: "seconds",
+    floor: 30,
+    max: 3600,
 };
 impl Limit {
     fn parse(&self, raw: Option<OsString>, default: u64) -> Result<u64> {
@@ -406,6 +417,10 @@ pub struct AdmissionPolicy {
     /// to at most this (1..=16, and never above the cap). A lone job keeps the normal cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cargo_jobs_when_busy: Option<u64>,
+    /// Quiet seconds (30..=3600) after a terminal failure line, with no log bytes and no CPU in
+    /// the job's process group, before the job is ended as stuck. `TASKS_STUCK_JOB_SECONDS` wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stuck_job_seconds: Option<u64>,
 }
 
 const MAX_POLICY_CARGO_JOBS: u64 = 16;
@@ -434,12 +449,22 @@ impl AdmissionPolicy {
     pub fn cargo_jobs_when_busy(&self) -> std::result::Result<Option<u64>, String> {
         cargo_jobs_key("cargo_jobs_when_busy", self.cargo_jobs_when_busy)
     }
+    pub fn stuck_job_seconds(&self) -> std::result::Result<Option<u64>, String> {
+        match self.stuck_job_seconds {
+            None => Ok(None),
+            Some(n) if (STUCK_JOB_LIMIT.floor..=STUCK_JOB_LIMIT.max).contains(&n) => Ok(Some(n)),
+            Some(n) => Err(format!(
+                "admission::stuck_job_seconds: {n} is outside 30..=3600"
+            )),
+        }
+    }
     /// Every invalid value of this section, one message each.
     pub fn errors(&self) -> Vec<String> {
         [
             self.slots().err(),
             self.cargo_jobs_cap().err(),
             self.cargo_jobs_when_busy().err(),
+            self.stuck_job_seconds().err(),
         ]
         .into_iter()
         .flatten()
@@ -465,6 +490,35 @@ pub fn resolve_max_cargo_jobs(
         Ok(Some(n)) => (n, "file", error),
         _ => (DEFAULT_MAX_CARGO_JOBS, "default", error),
     }
+}
+
+/// The stuck-job quiet window and where it comes from: `TASKS_STUCK_JOB_SECONDS` ("env"), else
+/// `admission::stuck_job_seconds` ("file"), else the default. An invalid value is an error
+/// message and is skipped (the next source applies).
+pub fn resolve_stuck_job_seconds(
+    get: &dyn Fn(&str) -> Option<OsString>,
+    policy: &AdmissionPolicy,
+) -> (u64, &'static str, Option<String>) {
+    let mut error = None;
+    if let Some(raw) = get(STUCK_JOB_ENV) {
+        match STUCK_JOB_LIMIT.parse(Some(raw), DEFAULT_STUCK_JOB_SECONDS) {
+            Ok(n) => return (n, "env", None),
+            Err(e) => error = Some(format!("{e}; ignored")),
+        }
+    }
+    match policy.stuck_job_seconds() {
+        Ok(Some(n)) => (n, "file", error),
+        _ => (DEFAULT_STUCK_JOB_SECONDS, "default", error),
+    }
+}
+
+/// The stuck-job window in force for this process (environment, policy file, default).
+pub fn stuck_job_seconds() -> u64 {
+    resolve_stuck_job_seconds(
+        &|name| std::env::var_os(name),
+        &crate::policy::effective().policy.admission,
+    )
+    .0
 }
 
 /// The `-j` a Cargo job may use while `busy` (another compile-class job runs here), given the

@@ -821,6 +821,37 @@ fn cargo_jobs_policy_keys_are_bounded_and_the_environment_wins() {
 }
 
 #[test]
+fn stuck_job_seconds_is_bounded_and_the_environment_wins() {
+    let stuck = |n| AdmissionPolicy {
+        stuck_job_seconds: n,
+        ..Default::default()
+    };
+    assert_eq!(stuck(Some(30)).errors(), Vec::<String>::new());
+    assert_eq!(stuck(Some(3600)).errors(), Vec::<String>::new());
+    for bad in [0, 29, 3601] {
+        assert_eq!(
+            stuck(Some(bad)).errors(),
+            [format!(
+                "admission::stuck_job_seconds: {bad} is outside 30..=3600"
+            )]
+        );
+    }
+    let resolve = |pairs: &[(&str, &str)], p| resolve_stuck_job_seconds(&lookup(pairs), &p);
+    assert_eq!(resolve(&[], stuck(None)), (300, "default", None));
+    assert_eq!(resolve(&[], stuck(Some(60))), (60, "file", None));
+    assert_eq!(
+        resolve(&[(STUCK_JOB_ENV, "90")], stuck(Some(60))),
+        (90, "env", None)
+    );
+    for bad in ["0", "29", "x", ""] {
+        let (n, source, error) = resolve(&[(STUCK_JOB_ENV, bad)], stuck(Some(60)));
+        assert_eq!((n, source), (60, "file"), "{bad}");
+        assert!(error.unwrap().contains(STUCK_JOB_ENV));
+    }
+    assert_eq!(resolve(&[], stuck(Some(5))).0, 300);
+}
+
+#[test]
 fn a_busy_machine_lowers_cargo_jobs_but_a_lone_job_keeps_the_cap() {
     // (requested, cap, when_busy, busy) -> lowered jobs
     let lowered =
