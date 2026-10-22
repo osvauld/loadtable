@@ -71,8 +71,9 @@ mod tests {
         let flags = fcntl_getfd(&dup).unwrap();
         fcntl_setfd(&dup, flags - FdFlags::CLOEXEC).unwrap();
         assert!(!fcntl_getfd(&dup).unwrap().contains(FdFlags::CLOEXEC));
-        let changed = close_on_exec_inherited().unwrap();
-        assert!(changed >= 1);
+        // Tests run in parallel and another one may scrub first, so check our descriptor's
+        // flag rather than the count this call changed.
+        close_on_exec_inherited().unwrap();
         assert!(fcntl_getfd(&dup).unwrap().contains(FdFlags::CLOEXEC));
         // A second call has nothing left to change for our descriptor.
         let again = fcntl_dupfd_cloexec(file.as_fd(), 3).unwrap();
