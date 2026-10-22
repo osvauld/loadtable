@@ -1,0 +1,34 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+rustix = { version = "1", features = ["fs", "process"] }
+rusqlite = "0.37"
+anyhow = "1"
+tasks-core = { path = "crates/tasks-core" }
+tasks-platform = { path = "crates/tasks-platform" }
+tasks-ledger = { path = "crates/tasks-ledger" }
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+indexing_slicing = "warn"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"

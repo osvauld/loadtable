@@ -1,0 +1,18 @@
+[package]
+name = "tasks-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tasks2"
+path = "src/main.rs"
+
+[dependencies]
+tasks-core.workspace = true
+anyhow.workspace = true
