@@ -16,6 +16,7 @@ pub mod receiver;
 pub mod store;
 pub mod sync;
 pub mod transport;
+pub mod trust;
 
 #[cfg(feature = "iroh")]
 pub mod iroh;

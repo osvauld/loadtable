@@ -3,7 +3,10 @@
 
 use crate::ids::{PeerId, RemoteJobId};
 use crate::proto::{self, Body, Refusal};
-use crate::transport::{Connection, EventStream, Handler, PeerError, StreamPoll, Transport};
+use crate::transport::{
+    Closer, Connection, DialHints, EventStream, Handler, LinkInfo, PeerError, StreamPoll,
+    Transport,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -20,6 +23,7 @@ struct NetState {
     drop_replies: BTreeSet<&'static str>,
     log: Vec<(PeerId, String)>,
     cut_epoch: u64,
+    link: Option<LinkInfo>,
 }
 
 /// A set of fake peers that can be taken down, stalled and cut.
@@ -88,6 +92,10 @@ impl FakeNet {
             s.drop_replies.remove(kind);
         }
     }
+    /// What every connection reports as its path and round-trip time.
+    pub fn set_link_info(&self, info: Option<LinkInfo>) {
+        lock(&self.inner).link = info;
+    }
     /// The requests seen so far as `(to, kind)`.
     pub fn requests(&self) -> Vec<(PeerId, String)> {
         lock(&self.inner).log.clone()
@@ -116,11 +124,35 @@ impl Transport for FakeTransport {
                 detail: "no route".to_string(),
             });
         }
+        let handler = s.handlers.get(peer).cloned();
+        drop(s);
+        // The serving side learns who connected (the proven identity is `me`) and gets a way to
+        // shut the connection, as the real transport gives it.
+        let closed: Arc<Mutex<Option<String>>> = Arc::default();
+        let id = handler.as_ref().map_or(0, |h| {
+            let flag = closed.clone();
+            let closer: Closer = Arc::new(move |why: &str| {
+                let mut g = flag.lock().unwrap_or_else(|e| e.into_inner());
+                g.get_or_insert_with(|| why.to_string());
+            });
+            h.connection_opened(&self.me, closer)
+        });
         Ok(Box::new(FakeConnection {
             me: self.me.clone(),
             to: peer.clone(),
             net: self.net.clone(),
+            closed,
+            id,
         }))
+    }
+
+    fn connect_hinted(
+        &self,
+        peer: &PeerId,
+        _hints: &DialHints,
+        timeout: Duration,
+    ) -> Result<Box<dyn Connection>, PeerError> {
+        self.connect(peer, timeout)
     }
 }
 
@@ -128,10 +160,29 @@ struct FakeConnection {
     me: PeerId,
     to: PeerId,
     net: FakeNet,
+    closed: Arc<Mutex<Option<String>>>,
+    id: u64,
+}
+
+impl Drop for FakeConnection {
+    fn drop(&mut self) {
+        let handler = lock(&self.net.inner).handlers.get(&self.to).cloned();
+        if let Some(h) = handler {
+            h.connection_closed(&self.me, self.id, "peer left");
+        }
+    }
 }
 
 impl FakeConnection {
     fn handler(&self) -> Result<Arc<dyn Handler>, PeerError> {
+        if let Some(why) = self
+            .closed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            return Err(PeerError::LinkLost(format!("closed by the peer: {why}")));
+        }
         let s = lock(&self.net.inner);
         if s.down.contains(&self.to) {
             return Err(PeerError::LinkLost("peer went away".to_string()));
@@ -187,7 +238,12 @@ impl Connection for FakeConnection {
             to: self.to.clone(),
             cut_epoch: s.cut_epoch,
             left: s.break_streams_after,
+            closed: self.closed.clone(),
         }))
+    }
+
+    fn link_info(&self) -> LinkInfo {
+        lock(&self.net.inner).link.unwrap_or(LinkInfo::UNKNOWN)
     }
 }
 
@@ -197,10 +253,14 @@ struct FakeStream {
     to: PeerId,
     cut_epoch: u64,
     left: Option<usize>,
+    closed: Arc<Mutex<Option<String>>>,
 }
 
 impl EventStream for FakeStream {
     fn poll(&mut self) -> Result<StreamPoll, PeerError> {
+        if let Some(why) = self.closed.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            return Err(PeerError::LinkLost(format!("closed by the peer: {why}")));
+        }
         {
             let s = lock(&self.net.inner);
             if s.down.contains(&self.to) {

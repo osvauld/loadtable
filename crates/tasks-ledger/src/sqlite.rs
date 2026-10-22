@@ -90,12 +90,15 @@ impl SqliteStore {
         })
     }
 
-    fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
+    pub(crate) fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
         self.conn.lock().map_err(|_| LedgerError::Poisoned)
     }
 
     /// Runs `f` in one short immediate transaction and commits when it returns `Ok`.
-    fn write<T>(&self, f: impl FnOnce(&Transaction<'_>, i64) -> Result<T>) -> Result<T> {
+    pub(crate) fn write<T>(
+        &self,
+        f: impl FnOnce(&Transaction<'_>, i64) -> Result<T>,
+    ) -> Result<T> {
         let now = self.clock.now_ms();
         let mut conn = self.lock()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;

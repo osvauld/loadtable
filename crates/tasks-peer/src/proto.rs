@@ -4,6 +4,7 @@
 //! older version, an unknown message or an oversized frame is answered with a
 //! named [`Refusal`]; decoding never panics and never waits for more input.
 
+use crate::trust::wire::{PairDone, PairRedeem, PresentAck};
 use crate::ids::{CheckoutId, Hash, RemoteJobId, SubmitKey, hexbytes};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -16,7 +17,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// The oldest version this build still understands.
 pub const MIN_PROTOCOL_VERSION: u32 = 1;
 /// ALPN for the iroh transport.
-pub const ALPN: &[u8] = b"tasks-peer/1";
+pub const ALPN: &[u8] = b"tasks/1";
 
 /// Largest data payload of one log, blob or fetch message (before hex).
 pub const MAX_CHUNK_BYTES: usize = 128 * 1024;
@@ -130,6 +131,27 @@ pub enum Refusal {
     Busy {
         /// The checkout.
         checkout: CheckoutId,
+    },
+    /// No valid grant covers this connection: none presented, or it is unknown, expired,
+    /// revoked or bound to another device. The reason names which.
+    #[error("not authorised: {reason}")]
+    Unauthorized {
+        /// Why.
+        reason: String,
+    },
+    /// The peer's grants do not allow this request.
+    #[error("role denied: this request needs {need}; the peer holds {have:?}")]
+    RoleDenied {
+        /// The role the request needs.
+        need: String,
+        /// The roles the peer holds.
+        have: Vec<String>,
+    },
+    /// A pairing step was refused.
+    #[error("pairing refused: {reason}")]
+    PairingRefused {
+        /// Why.
+        reason: String,
     },
     /// The peer failed internally.
     #[error("peer error: {detail}")]
@@ -667,6 +689,34 @@ pub enum Body {
         /// True when this reaches the end of the file.
         eof: bool,
     },
+    /// First frame of a connection: the grants this machine holds from the peer.
+    Present {
+        /// Grant tokens (`g1.…`).
+        grants: Vec<String>,
+    },
+    /// The presented grants were accepted.
+    PresentAck(PresentAck),
+    /// Pairing: ask for a challenge to sign.
+    PairBegin,
+    /// Pairing: the challenge.
+    PairChallenge {
+        /// 32 random bytes, lowercase hex.
+        challenge: String,
+    },
+    /// Pairing: redeem an invite.
+    PairRedeem(PairRedeem),
+    /// Pairing: redeemed; the grants minted for the redeemer.
+    PairDone(PairDone),
+    /// Renew a grant over the live connection.
+    Renew {
+        /// The grant being renewed.
+        grant: String,
+    },
+    /// The renewed grant.
+    Renewed {
+        /// The new token.
+        grant: String,
+    },
     /// A named refusal.
     Refuse(Refusal),
 }
@@ -807,7 +857,71 @@ mod tests {
             },
             Body::Ok,
             Body::Refuse(Refusal::HashMismatch),
+            Body::Present {
+                grants: vec!["g1.a.b".into()],
+            },
+            Body::PresentAck(PresentAck {
+                did: "did:key:zA".into(),
+                name: "nixos".into(),
+                roles: vec![crate::trust::Role::Submit],
+                expires: 9,
+            }),
+            Body::PairBegin,
+            Body::PairChallenge {
+                challenge: "00".repeat(32),
+            },
+            Body::PairRedeem(PairRedeem {
+                invite: "i1.a.b".into(),
+                did: "did:key:zB".into(),
+                name: "kurukkan".into(),
+                challenge_sig: "00".repeat(64),
+                relay: None,
+                direct_addrs: vec!["192.168.1.5:1".into()],
+                reverse: vec![],
+            }),
+            Body::PairDone(PairDone {
+                did: "did:key:zA".into(),
+                name: "nixos".into(),
+                node_id: "ab".repeat(32),
+                grants: vec!["g1.c.d".into()],
+            }),
+            Body::Renew {
+                grant: "g1.a.b".into(),
+            },
+            Body::Renewed {
+                grant: "g1.e.f".into(),
+            },
+            Body::Refuse(Refusal::Unauthorized {
+                reason: "expired".into(),
+            }),
+            Body::Refuse(Refusal::RoleDenied {
+                need: "submit".into(),
+                have: vec!["observe".into()],
+            }),
+            Body::Refuse(Refusal::PairingRefused {
+                reason: "spent".into(),
+            }),
         ]
+    }
+
+    // R-239
+    #[test]
+    fn r239_trust_wire_shapes_are_stable() {
+        let b = Body::Refuse(Refusal::Unauthorized {
+            reason: "grant revoked".into(),
+        });
+        assert_eq!(
+            String::from_utf8(encode(&b).unwrap()).unwrap(),
+            r#"{"v":1,"body":{"type":"refuse","code":"unauthorized","reason":"grant revoked"}}"#
+        );
+        let b = Body::Present {
+            grants: vec!["g1.x.y".into()],
+        };
+        assert_eq!(
+            String::from_utf8(encode(&b).unwrap()).unwrap(),
+            r#"{"v":1,"body":{"type":"present","grants":["g1.x.y"]}}"#
+        );
+        assert_eq!(ALPN, b"tasks/1");
     }
 
     #[test]

@@ -10,6 +10,7 @@ mod record;
 mod request;
 mod retry;
 mod sqlite;
+mod trust;
 #[cfg(test)]
 mod suite;
 
@@ -26,6 +27,7 @@ pub use request::{
 };
 pub use retry::{RetryPolicy, retry_busy};
 pub use sqlite::{OpenOptions, SqliteStore};
+pub use trust::{GrantDirection, GrantRecord, MemoryTrust, PeerRecord, TrustLedger};
 
 use std::path::Path;
 use std::time::Duration;
