@@ -1,0 +1,69 @@
+# tasks2 machine policy. Every line shows the default; uncomment to change.
+# Environment variables of the daemon win over this file.
+# A bad value refuses the whole file and the daemon runs on the defaults.
+
+[slots]
+# compile = 2   # env TASKS_COMPILE_SLOTS
+# run = 4   # env TASKS_RUN_SLOTS
+# offload = 4   # env TASKS_OFFLOAD_SLOTS
+# short_lane = 1   # env TASKS_SHORT_LANE_SLOTS
+# short_job_max_secs = 60   # env TASKS_SHORT_JOB_MAX_SECS
+
+[pressure.compile]
+# max_cpu = 40   # env TASKS_COMPILE_MAX_CPU
+# max_io = 40   # env TASKS_COMPILE_MAX_IO
+# max_memory = "normal"   # env TASKS_COMPILE_MAX_MEMORY
+
+[pressure.run]
+# max_cpu = 80   # env TASKS_RUN_MAX_CPU
+# max_io = 80   # env TASKS_RUN_MAX_IO
+# max_memory = "normal"   # env TASKS_RUN_MAX_MEMORY
+
+[pressure.offload]
+# max_memory = "normal"   # env TASKS_OFFLOAD_MAX_MEMORY
+
+[memory]
+# min_available_gib = 2   # env TASKS_MIN_AVAILABLE_GIB
+# some_warn = 10   # env TASKS_MEMORY_SOME_WARN
+# some_critical = 40   # env TASKS_MEMORY_SOME_CRITICAL
+# full_warn = 5   # env TASKS_MEMORY_FULL_WARN
+# full_critical = 20   # env TASKS_MEMORY_FULL_CRITICAL
+
+[disk]
+# cache_reserve_gib = 20   # env TASKS_CACHE_RESERVE_GIB
+# state_reserve_gib = 1   # env TASKS_STATE_RESERVE_GIB
+
+[runner]
+# cancel_grace_ms = 300   # env TASKS_CANCEL_GRACE_MS
+# wall_timeout_secs = "off"   # env TASKS_WALL_TIMEOUT_SECS
+# idle_timeout_secs = "off"   # env TASKS_IDLE_TIMEOUT_SECS
+
+[logs]
+# soft_cap_mib = 64   # env TASKS_LOG_SOFT_CAP_MIB
+# hard_cap_mib = 1024   # env TASKS_LOG_HARD_CAP_MIB
+
+[retention]
+# max_finished_jobs = 20000   # env TASKS_RETAIN_JOBS
+# max_job_age_days = 60   # env TASKS_RETAIN_JOB_DAYS
+# max_sample_age_days = 365   # env TASKS_RETAIN_SAMPLE_DAYS
+# max_samples_per_key = 200   # env TASKS_RETAIN_SAMPLES_PER_KEY
+
+[cargo]
+# max_jobs = 2   # env TASKS_MAX_CARGO_JOBS
+# jobs_when_busy = 1   # env TASKS_CARGO_JOBS_WHEN_BUSY
+
+[stuck]
+# seconds = 300   # env TASKS_STUCK_JOB_SECONDS
+
+[alerts]
+# slot_grace_secs = 120   # env TASKS_ALERT_SLOT_GRACE_SECS
+# memory_secs = 60   # env TASKS_ALERT_MEMORY_SECS
+# audit_secs = 300   # env TASKS_AUDIT_SECS
+
+[daemon]
+# tick_ms = 1000   # env TASKS_TICK_MS
+# nofile_target = 65536   # env TASKS_NOFILE_TARGET
+
+[machine]
+# devices = []   # env TASKS_DEVICES
+# tools = []   # env TASKS_TOOLS

@@ -24,6 +24,9 @@ toml = "0.9"
 sha2 = "0.10"
 tempfile = "3"
 tasks-runner = { path = "crates/tasks-runner" }
+tasks-admission = { path = "crates/tasks-admission" }
+tasks-placement = { path = "crates/tasks-placement" }
+tasks-policy = { path = "crates/tasks-policy" }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
