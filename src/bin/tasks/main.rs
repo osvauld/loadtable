@@ -38,6 +38,7 @@ use tinline_task_manager::{
 const USAGE: &str = "usage: tasks [ui [--fixtures DIR]]  # DIR: cluster snapshot files; demo, contacts nothing
        tasks list  # full JSON response (unchanged, for scripts)
        tasks list [--who OWNER] [--active] [--limit N] [--json | --table | --brief]
+         # --active: PHASE also shows `running → PEER #REMOTE (phase)` and `waiting_run: what it waits for`
          # with any option: compact table by default (--active adds live lock holders); --json = filtered JSON
        tasks submit SPEC.json | approve JOB_ID | cancel JOB_ID
        tasks prioritize JOB_ID --reason TEXT [--who OWNER]  # urgent: skips the queue, never preempts; audited
@@ -1507,9 +1508,30 @@ fn list(args: &[String]) -> Result<()> {
     }
     let now = tinline_task_manager::execution::now();
     let home = std::env::var("HOME").ok();
+    // `--active` also says where a forwarded job is and what a queued job waits for; both come
+    // from data the daemon already has (peer link records, the status snapshot), best effort.
+    let notes = if options.active {
+        let links = tinline_task_manager::peer::records::outbound_links(
+            &tinline_task_manager::peer::records::Paths::new(&state_dir()),
+        );
+        let waiting =
+            tinline_task_manager::request_status(&socket, std::time::Duration::from_secs(5))
+                .ok()
+                .and_then(|r| r.status)
+                .map(|s| {
+                    s.jobs
+                        .into_iter()
+                        .filter_map(|j| Some((j.id, j.queue?.waiting_for?)))
+                        .collect()
+                })
+                .unwrap_or_default();
+        display::phase_notes(&response.jobs, &links, &waiting)
+    } else {
+        Default::default()
+    };
     print!(
         "{}",
-        display::job_table(&response.jobs, now, home.as_deref())
+        display::job_table_with(&response.jobs, now, home.as_deref(), &notes)
     );
     if options.active {
         match tinline_task_manager::admission::status() {

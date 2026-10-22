@@ -486,3 +486,101 @@ fn start_and_stop_worker_print_one_line_not_the_ledger() {
     assert!(stop.contains("execution stopped"), "{stop}");
     assert!(stop.contains("until tasks start-worker"), "{stop}");
 }
+
+fn link(local: i64, remote: Option<i64>, phase: Option<&str>, stage: &str) -> OutboundLink {
+    OutboundLink {
+        version: 1,
+        local_job_id: local,
+        peer: "nixos".into(),
+        peer_endpoint: "e".into(),
+        key: "k".into(),
+        owner: "o".into(),
+        checkout: None,
+        sub: String::new(),
+        stage: stage.into(),
+        remote_job_id: remote,
+        remote_phase: phase.map(String::from),
+        remote_state: None,
+        exit: None,
+        sync_s: None,
+        run_s: None,
+        fetch_s: None,
+        fetch_dest: None,
+        blobs_sent: None,
+        cancel_sent: false,
+        ledger_linked: false,
+        started_at: 0.0,
+        updated_at: 0.0,
+        error: None,
+    }
+}
+
+#[test]
+fn active_table_names_the_remote_job_and_what_a_queued_job_waits_for() {
+    let jobs = vec![
+        job(
+            1,
+            "a",
+            "/w",
+            Phase::Running,
+            &["tasks", "x"],
+            Resource::Offload,
+        ),
+        job(
+            2,
+            "a",
+            "/w",
+            Phase::Running,
+            &["tasks", "x"],
+            Resource::Offload,
+        ),
+        job(
+            3,
+            "a",
+            "/w",
+            Phase::WaitingRun,
+            &["tasks", "x"],
+            Resource::Offload,
+        ),
+        job(4, "a", "/w", Phase::Building, &["true"], Resource::Compile),
+        job(5, "a", "/w", Phase::Passed, &["true"], Resource::Run),
+    ];
+    let links = [
+        link(1, Some(1346), Some("building"), "running"),
+        link(2, None, None, "syncing"),
+        link(5, Some(9), Some("passed"), "done"),
+    ];
+    let waiting = HashMap::from([
+        (3, "this checkout in use by #1".to_string()),
+        (5, "stale".to_string()),
+    ]);
+    let notes = phase_notes(&jobs, &links, &waiting);
+    assert_eq!(notes[&1], "running → nixos #1346 (building)");
+    assert_eq!(notes[&2], "running → nixos (syncing)");
+    assert_eq!(notes[&3], "waiting_run: this checkout in use by #1");
+    assert!(!notes.contains_key(&4) && !notes.contains_key(&5));
+    let table = job_table_with(&jobs, NOW, None, &notes);
+    let lines: Vec<_> = table.lines().collect();
+    assert!(
+        lines[1].contains("running → nixos #1346 (building)"),
+        "{table}"
+    );
+    // The wider PHASE column keeps every later column aligned.
+    // The header is ASCII, so the byte offset of EXIT is also its character column.
+    let exit = lines[0].find("EXIT").expect("EXIT header");
+    assert!(lines[0].starts_with("   ID PHASE"), "{table}");
+    for line in &lines[1..] {
+        let field: String = line.chars().skip(exit).take(4).collect();
+        assert!(field.starts_with(['-', '0']), "{field:?} in {table}");
+    }
+}
+
+#[test]
+fn table_without_notes_is_unchanged() {
+    let jobs = vec![job(1, "a", "/w", Phase::Running, &["true"], Resource::Run)];
+    assert_eq!(
+        job_table(&jobs, NOW, None),
+        job_table_with(&jobs, NOW, None, &HashMap::new())
+    );
+    assert!(job_table(&jobs, NOW, None).starts_with("   ID PHASE         EXIT"));
+}

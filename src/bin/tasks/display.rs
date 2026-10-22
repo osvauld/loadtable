@@ -1,7 +1,9 @@
 //! Human-facing CLI presentation: compact job tables, the submit line, shared-cwd
 //! warnings and live lock holders. Display only: the stored and executed argv, the
 //! ledger and every `--json` response are left exactly as they are.
+use std::collections::HashMap;
 use tinline_task_manager::local_command::{self, Recipe, Resource};
+use tinline_task_manager::peer::records::OutboundLink;
 use tinline_task_manager::{Job, Phase};
 
 /// `NAME=value` arguments with a longer value (typically PATH) are abbreviated.
@@ -174,16 +176,68 @@ pub fn timing(job: &Job, now: i64) -> (String, String, String) {
 }
 
 pub fn job_table(jobs: &[Job], now: i64, home: Option<&str>) -> String {
+    job_table_with(jobs, now, home, &HashMap::new())
+}
+
+/// Minimum PHASE column width; longer annotated phases widen the whole column.
+const PHASE_WIDTH: usize = 13;
+
+/// PHASE column text per job id for `tasks list --active`: the local phase plus where the job
+/// really is. A forwarded job shows its peer link (`running → nixos #1346 (building)`); a queued
+/// job shows what it waits for (`waiting_run: this checkout in use by #4043`). `waiting` maps a
+/// job id to the snapshot's queue `waiting_for`; `links` are the live outbound peer records.
+pub fn phase_notes(
+    jobs: &[Job],
+    links: &[OutboundLink],
+    waiting: &HashMap<i64, String>,
+) -> HashMap<i64, String> {
+    let mut notes = HashMap::new();
+    for job in jobs.iter().filter(|j| !j.phase.terminal()) {
+        let phase = phase_name(&job.phase);
+        let link = links.iter().find(|l| l.local_job_id == job.id && !l.done());
+        let text = if let Some(l) = link {
+            let remote = l
+                .remote_job_id
+                .map_or(String::new(), |id| format!(" #{id}"));
+            let state = l.remote_phase.as_deref().unwrap_or(l.stage.as_str());
+            format!("{phase} → {}{remote} ({state})", l.peer)
+        } else if let Some(why) = waiting.get(&job.id) {
+            format!("{phase}: {why}")
+        } else {
+            continue;
+        };
+        notes.insert(job.id, text);
+    }
+    notes
+}
+
+/// [`job_table`] with `notes` ([`phase_notes`]) replacing the PHASE text of the jobs they name.
+pub fn job_table_with(
+    jobs: &[Job],
+    now: i64,
+    home: Option<&str>,
+    notes: &HashMap<i64, String>,
+) -> String {
+    let phase_of = |job: &Job| {
+        notes
+            .get(&job.id)
+            .cloned()
+            .unwrap_or_else(|| phase_name(&job.phase))
+    };
+    let width = jobs
+        .iter()
+        .map(|j| chars(&phase_of(j)))
+        .fold(PHASE_WIDTH, usize::max);
     let mut out = format!(
-        "{:>5} {:<13} {:<4} {:<20} {:<12} {:>7} {:>8} {:>8} {:<TABLE_CWD$} COMMAND\n",
+        "{:>5} {:<width$} {:<4} {:<20} {:<12} {:>7} {:>8} {:>8} {:<TABLE_CWD$} COMMAND\n",
         "ID", "PHASE", "EXIT", "OWNER", "RESOURCE", "AGE", "WAIT", "RUN", "CWD"
     );
     for job in jobs {
         let (age, wait, run) = timing(job, now);
         out.push_str(&format!(
-            "{:>5} {:<13} {:<4} {:<20} {:<12} {:>7} {:>8} {:>8} {:<TABLE_CWD$} {}\n",
+            "{:>5} {:<width$} {:<4} {:<20} {:<12} {:>7} {:>8} {:>8} {:<TABLE_CWD$} {}\n",
             job.id,
-            phase_name(&job.phase),
+            phase_of(job),
             exit_label(job),
             truncate_end(&job.spec.owner, 20),
             truncate_end(&resource_label(job), 12),

@@ -1495,6 +1495,14 @@ pub fn admit(id: i64, stage: &str, supervisor: ProcessIdentity) -> Result<()> {
             .filter(|e| e.urgent())
             .map(|_| admission::urgent_time(submitted_at))
     };
+    // A forwarded job queues here, slot-free, while its checkout is in use (peer::checkout_gate).
+    let gate = matches!(kind, admission::Kind::Offload)
+        .then(|| crate::peer::checkout_gate::Gate::for_job(&job))
+        .flatten();
+    let hold = || {
+        gate.as_ref()
+            .and_then(|g| g.check(|| store.jobs().unwrap_or_default()))
+    };
     let Some(lease) = admission::acquire_offload_prio(
         kind,
         fetches,
@@ -1505,6 +1513,7 @@ pub fn admit(id: i64, stage: &str, supervisor: ProcessIdentity) -> Result<()> {
         ),
         since,
         urgent,
+        hold,
         || STOP.load(Ordering::SeqCst) || !alive(&supervisor) || !alive(worker) || stop_waiting(),
     )?
     else {

@@ -1078,10 +1078,12 @@ pub fn acquire_offload_since(
     since: Option<std::time::SystemTime>,
     stop: impl Fn() -> bool,
 ) -> Result<Option<Lease>> {
-    acquire_offload_prio(kind, fetches, who, cmd, since, || None, stop)
+    acquire_offload_prio(kind, fetches, who, cmd, since, || None, || None, stop)
 }
 /// [`acquire_offload_since`] that also asks `urgent` every couple of seconds while waiting; once
 /// it returns a time (a priority decision arrived), the waiter moves to that place in line.
+/// `hold` is an extra wait reason (a forwarded job's busy checkout); `None` admits.
+#[allow(clippy::too_many_arguments)]
 pub fn acquire_offload_prio(
     kind: Kind,
     fetches: bool,
@@ -1089,6 +1091,7 @@ pub fn acquire_offload_prio(
     cmd: &str,
     since: Option<std::time::SystemTime>,
     urgent: impl Fn() -> Option<std::time::SystemTime>,
+    hold: impl Fn() -> Option<String>,
     stop: impl Fn() -> bool,
 ) -> Result<Option<Lease>> {
     let offload = matches!(kind, Kind::Offload);
@@ -1096,6 +1099,7 @@ pub fn acquire_offload_prio(
         offload
             .then(|| live_offload_disk_blocker(fetches))
             .flatten()
+            .or_else(&hold)
     };
     acquire_gated_prio(
         &root()?,
