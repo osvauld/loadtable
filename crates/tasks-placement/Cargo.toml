@@ -11,3 +11,5 @@ workspace = true
 
 [dependencies]
 tasks-core.workspace = true
+tasks-timing.workspace = true
+thiserror.workspace = true

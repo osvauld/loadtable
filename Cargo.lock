@@ -361,6 +361,8 @@ name = "tasks-placement"
 version = "0.1.0"
 dependencies = [
  "tasks-core",
+ "tasks-timing",
+ "thiserror",
 ]
 
 [[package]]
