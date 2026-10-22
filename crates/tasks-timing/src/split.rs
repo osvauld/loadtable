@@ -3,10 +3,10 @@
 use crate::error::TimingError;
 use crate::estimate::Estimate;
 use crate::exe::{ExeKind, TestExe};
-use crate::recipe::basename;
+use crate::recipe::{RecipeKey, basename};
 use std::collections::{BTreeMap, BTreeSet};
 use tasks_core::plan::{Plan, Step};
-use tasks_core::{Kind, Requirements, StepHints};
+use tasks_core::{Kind, Requirements, SplitOrigin, StepHints};
 
 /// Flags (with a value, if the bool is true) that select which targets run.
 const SELECTORS: &[(&str, bool)] = &[
@@ -122,6 +122,10 @@ pub fn split_cargo_test(
         requirements: Requirements::default(),
         hints: StepHints::default(),
     }];
+    // each piece records its run time under the unsplit command's recipe plus its label
+    let unsplit = RecipeKey::from_argv(argv, &[])
+        .first()
+        .map(ToString::to_string);
     let mut used: BTreeSet<String> = BTreeSet::from(["build".to_string()]);
     for exe in test_executables {
         let (prefix, sel): (&str, Vec<String>) = match exe.kind {
@@ -147,13 +151,20 @@ pub fn split_cargo_test(
         }
         argv.extend(sel);
         argv.extend(tail.iter().cloned());
+        let hints = StepHints {
+            split: unsplit.as_ref().map(|recipe| SplitOrigin {
+                recipe: recipe.clone(),
+                target: label_of(&name),
+            }),
+            ..StepHints::default()
+        };
         steps.push(Step {
             name,
             argv,
             after: vec!["build".into()],
             kind: Kind::Test,
             requirements: Requirements::default(),
-            hints: StepHints::default(),
+            hints,
         });
     }
     let plan = Plan { steps };

@@ -15,11 +15,11 @@ use std::time::Duration;
 use tasks_core::plan::Plan;
 use tasks_core::{DeviceId, JobId, JobSpec, Kind, Owner, Phase, Placement};
 use tasks_daemon::api::{
-    ErrorCode, JobView, LogSearchQuery, LogView, MAX_CONTEXT, MAX_TAIL_LINES, Request, Response,
-    StatusSnapshot, WaiterView,
+    ErrorCode, HistoryView, JobView, LogSearchQuery, LogView, MAX_CONTEXT, MAX_TAIL_LINES, Request,
+    Response, StatusSnapshot, WaiterView,
 };
 use tasks_policy::PolicyFs;
-use tasks_policy::submit_rules::{self, BroadTestMode, KnownTargets, PlacementClass, SubmitRules};
+use tasks_policy::submit_rules::{self, PlacementClass};
 use tasks_timing::{History, RecipeKey};
 
 /// How long `run` waits between log polls.
@@ -59,9 +59,7 @@ pub struct Ctx<'a> {
     pub read_input: &'a dyn Fn(&Path) -> std::io::Result<String>,
     /// The file system the repo run policy is read from.
     pub policy_fs: &'a dyn PolicyFs,
-    /// Timing history, when the daemon can serve it.
-    // needs daemon: a history API (samples and targets per recipe/machine), so that `policy
-    // suggest` can read the ledger's timing history. Until then this stays None.
+    /// Timing history to use instead of asking the daemon for it (`None` asks the daemon).
     pub history: Option<&'a dyn History>,
 }
 
@@ -140,90 +138,10 @@ pub fn resolve_owner(ctx: &Ctx<'_>, who: Option<&str>) -> Result<Owner, CliError
     })
 }
 
-fn broad_mode(ctx: &mut Ctx<'_>) -> BroadTestMode {
-    match (ctx.env)("TASKS_BROAD_TEST") {
-        None => BroadTestMode::default(),
-        // needs daemon: the broad_test policy value should come from the daemon's machine
-        // policy (and be shown by `admission`); until then the client's environment decides.
-        Some(v) => BroadTestMode::parse(&v).unwrap_or_else(|e| {
-            ctx.note(&format!(
-                "tasks: warning: TASKS_BROAD_TEST ignored ({e}); broad cargo tests are refused"
-            ));
-            BroadTestMode::default()
-        }),
-    }
-}
-
-/// Test targets of the package a `cargo test` names, counted from the layout on disk. Only
-/// used to word the refusal; `None` when the package cannot be found.
-pub fn scan_known_targets(cwd: &Path, packages: &[String]) -> Option<KnownTargets> {
-    let mut dirs = vec![];
-    match packages {
-        [] => dirs.push(cwd.to_path_buf()),
-        [p] => {
-            dirs.push(cwd.join("crates").join(p));
-            dirs.push(cwd.join(p));
-        }
-        _ => return None,
-    }
-    let dir = dirs.into_iter().find(|d| d.join("Cargo.toml").is_file())?;
-    let names = |sub: &str| -> Vec<String> {
-        let mut v: Vec<String> = std::fs::read_dir(dir.join(sub))
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|e| {
-                let p = e.path();
-                if p.extension().is_some_and(|x| x == "rs") && p.is_file() {
-                    p.file_stem().map(|s| s.to_string_lossy().into_owned())
-                } else if p.join("main.rs").is_file() {
-                    p.file_name().map(|s| s.to_string_lossy().into_owned())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        v.sort();
-        v
-    };
-    let tests = names("tests");
-    let bins = names("src/bin").len() + usize::from(dir.join("src/main.rs").is_file());
-    let lib = usize::from(dir.join("src/lib.rs").is_file());
-    Some(KnownTargets {
-        total: lib + bins + tests.len(),
-        test_names: tests,
-    })
-}
-
-/// Applies the shared submit rules to one command. Refusals become an error; warnings print.
-fn apply_rules(
-    ctx: &mut Ctx<'_>,
-    argv: &[String],
-    escape: bool,
-    placement: &Placement,
-) -> Result<(), CliError> {
-    let mode = broad_mode(ctx);
-    let packages = submit_rules::packages_of(argv);
-    let known = scan_known_targets(&ctx.cwd, &packages);
-    let verdict = submit_rules::check(&SubmitRules {
-        argv,
-        broad_test_escape: escape,
-        broad_mode: mode,
-        known: known.as_ref(),
-        max_cargo_jobs: None,
-    });
-    if !verdict.allowed() {
-        let text = verdict
-            .refusals
-            .iter()
-            .map(|r| r.message.clone())
-            .collect::<Vec<_>>()
-            .join("\n");
-        return Err(CliError::Refused(text));
-    }
-    for w in &verdict.warnings {
-        ctx.note(&format!("tasks: warning: {w}"));
-    }
+/// Notes about where the job will run. The submit rules themselves (broad `cargo test`, denied
+/// devices, the Cargo jobs cap) are the daemon's: it answers every front end the same way
+/// (R-190, R-191, R-210), and a refusal comes back as the daemon's `refused` error (exit 2).
+fn placement_note(ctx: &mut Ctx<'_>, argv: &[String], placement: &Placement) {
     if *placement == Placement::Anywhere
         && let PlacementClass::StaysLocal(why) = submit_rules::placement_class(argv)
     {
@@ -231,29 +149,13 @@ fn apply_rules(
             "tasks: note: --anywhere has no effect here, the job stays on this machine: {why}"
         ));
     }
-    Ok(())
 }
 
 /// Builds the job from the arguments, after the shared submit rules (R-190, R-191).
 pub fn build_spec(ctx: &mut Ctx<'_>, a: &RunArgs) -> Result<JobSpec, CliError> {
     let placement = a.place.placement(a.device.as_deref())?;
     let owner = resolve_owner(ctx, a.who.as_deref())?;
-    if a.timeout.is_some() {
-        // needs daemon: a `timeout_secs` field on JobSpec (the supervisor enforces it, R-095's
-        // sibling for wall-clock limits). Wrapping the command in `timeout` would change the
-        // recipe and the ETA history, so the flag is refused rather than ignored.
-        return Err(CliError::Refused(
-            "--timeout is not supported by this daemon yet (a job has no timeout field); wrap the work in your own command, or cancel with `tasks2 cancel`".into(),
-        ));
-    }
-    apply_rules(ctx, &a.command, a.broad_test, &placement)?;
-    if let Some(d) = a.device.as_deref()
-        && submit_rules::denied_device(&[d.to_string()]).is_some()
-    {
-        return Err(CliError::Refused(format!(
-            "refused: device {d} is on the denylist and is never used"
-        )));
-    }
+    placement_note(ctx, &a.command, &placement);
     let kind = if a.device.is_some() {
         Kind::Device
     } else {
@@ -270,6 +172,10 @@ pub fn build_spec(ctx: &mut Ctx<'_>, a: &RunArgs) -> Result<JobSpec, CliError> {
         requirements: tasks_core::Requirements::default(),
         placement,
         after: Vec::new(),
+        // the daemon enforces the limit; wrapping the command in `timeout` would change the
+        // recipe and the ETA history
+        timeout_secs: a.timeout,
+        broad_test_escape: a.broad_test,
     };
     spec.requirements.device = a.device.clone().map(DeviceId);
     spec.validate()
@@ -816,6 +722,8 @@ pub fn stat_rows(jobs: &[JobView]) -> Vec<render::StatRow> {
             secs.sort_by(f64::total_cmp);
             render::StatRow {
                 recipe,
+                machine: None,
+                target: None,
                 runs,
                 passed,
                 median_secs: percentile(&secs, 0.5),
@@ -827,9 +735,85 @@ pub fn stat_rows(jobs: &[JobView]) -> Vec<render::StatRow> {
     rows
 }
 
+/// Asks the daemon for timing history; `recipes` and `machines` narrow it (empty means all).
+fn fetch_history(
+    ctx: &Ctx<'_>,
+    recipes: Vec<String>,
+    machines: Vec<String>,
+    max_samples: Option<usize>,
+) -> Result<HistoryView, CliError> {
+    match ctx.client.call(&Request::History {
+        recipes,
+        machines,
+        max_samples,
+    })? {
+        Response::History(h) => Ok(h),
+        other => Err(CliError::Failed(format!(
+            "unexpected reply to history: {other:?}"
+        ))),
+    }
+}
+
+/// Rows of `stats` from the daemon's timing history: one per recipe and machine for the whole
+/// job, and with `targets` one per test target below it. Cancelled samples are left out
+/// (R-013); a series with nothing else is not shown.
+pub fn history_rows(
+    h: &HistoryView,
+    recipe_filter: Option<&str>,
+    targets: bool,
+) -> Vec<render::StatRow> {
+    let mut rows = Vec::new();
+    for r in h
+        .recipes
+        .iter()
+        .filter(|r| recipe_filter.is_none_or(|f| r.recipe.contains(f)))
+    {
+        for m in &r.machines {
+            for s in m.series.iter().filter(|s| targets || s.target.is_none()) {
+                let mut secs: Vec<f64> = s
+                    .samples
+                    .iter()
+                    .filter(|v| v.outcome != "cancelled")
+                    .map(|v| v.secs)
+                    .collect();
+                if secs.is_empty() {
+                    continue;
+                }
+                let passed = s.samples.iter().filter(|v| v.outcome == "passed").count();
+                secs.sort_by(f64::total_cmp);
+                rows.push(render::StatRow {
+                    recipe: r.recipe.clone(),
+                    machine: Some(m.machine.clone()),
+                    target: s.target.clone(),
+                    runs: secs.len(),
+                    passed,
+                    median_secs: percentile(&secs, 0.5),
+                    p90_secs: percentile(&secs, 0.9),
+                });
+            }
+        }
+    }
+    rows.sort_by(|a, b| {
+        b.runs.cmp(&a.runs).then_with(|| {
+            (&a.recipe, &a.machine, &a.target).cmp(&(&b.recipe, &b.machine, &b.target))
+        })
+    });
+    rows
+}
+
 fn stats(ctx: &mut Ctx<'_>, a: &StatsArgs) -> Result<i32, CliError> {
-    // needs daemon: a stats/history API with per-machine, per-target samples; until then this
-    // is computed from the finished jobs `list` returns.
+    if a.who.is_none() {
+        let machines = a.machine.clone().into_iter().collect();
+        let per_series = a.limit.clamp(1, tasks_daemon::api::MAX_HISTORY_SAMPLES);
+        let h = fetch_history(ctx, Vec::new(), machines, Some(per_series))?;
+        if h.truncated {
+            ctx.note("tasks: the daemon cut the history at its size limit; narrow it with --machine or --recipe");
+        }
+        let rows = history_rows(&h, a.recipe.as_deref(), a.targets);
+        ctx.out.write_all(render::stats(&rows).as_bytes())?;
+        return Ok(EXIT_OK);
+    }
+    // an owner filter needs the jobs: the history keeps no owners
     let resp = ctx.client.call(&Request::List {
         owner: a.who.clone(),
         active_only: false,
@@ -853,10 +837,10 @@ fn cancel(
     reason: Option<&str>,
 ) -> Result<i32, CliError> {
     let owner = resolve_owner(ctx, who)?;
-    // needs daemon: a `reason` field on Request::Cancel; for now it is only echoed here.
     let resp = ctx.client.call(&Request::Cancel {
         id: JobId(id),
         who: owner.as_str().to_string(),
+        reason: reason.map(str::to_string),
     });
     let resp = match resp {
         Ok(r) => r,
@@ -895,12 +879,15 @@ fn ack(ctx: &Ctx<'_>, req: &Request) -> Result<(), CliError> {
 }
 
 fn drain(ctx: &mut Ctx<'_>, cancel: bool) -> Result<i32, CliError> {
-    ack(ctx, &Request::Drain { cancel })?;
+    // who drained is recorded for the queue line of `status` (R-189); a shell with no owner
+    // can still drain, the daemon then says "unknown"
+    let who = resolve_owner(ctx, None)
+        .ok()
+        .map(|o| o.as_str().to_string());
+    ack(ctx, &Request::Drain { cancel, who })?;
     if cancel {
         writeln!(ctx.out, "resumed: queued jobs start again")?;
     } else {
-        // needs daemon: who drained and when (status shows only the flag), so the queue line
-        // can say who stopped it and how long ago (R-189).
         writeln!(
             ctx.out,
             "draining: no new job starts until `tasks2 resume` or the next daemon start; running jobs finish"
@@ -954,10 +941,7 @@ fn steps(ctx: &mut Ctx<'_>, a: &StepsArgs) -> Result<i32, CliError> {
     let placement = a.place.placement(None)?;
     let owner = resolve_owner(ctx, a.who.as_deref())?;
     for s in &plan.steps {
-        apply_rules(ctx, &s.argv, a.broad_test, &placement).map_err(|e| match e {
-            CliError::Refused(m) => CliError::Refused(format!("step {:?}: {m}", s.name)),
-            other => other,
-        })?;
+        placement_note(ctx, &s.argv, &placement);
     }
     let resp = ctx.client.call(&Request::SubmitPlan {
         plan,
@@ -965,6 +949,7 @@ fn steps(ctx: &mut Ctx<'_>, a: &StepsArgs) -> Result<i32, CliError> {
         cwd: ctx.cwd.clone(),
         env: Vec::new(),
         placement,
+        broad_test: a.broad_test,
     })?;
     let Response::PlanSubmitted { plan_id, jobs } = resp else {
         return Err(CliError::Failed(format!(
@@ -985,6 +970,7 @@ fn suite_run(ctx: &mut Ctx<'_>, a: &SuiteRunArgs) -> Result<i32, CliError> {
         env: Vec::new(),
         placement,
         quick: a.quick,
+        broad_test: a.broad_test,
     })?;
     let Response::PlanSubmitted { plan_id, jobs } = resp else {
         return Err(CliError::Failed(format!(
@@ -1052,12 +1038,6 @@ pub fn suggest_report(
 
 fn policy_suggest(ctx: &mut Ctx<'_>) -> Result<i32, CliError> {
     let loaded = tasks_policy::load(ctx.policy_fs, &ctx.cwd).map_err(policy_error)?;
-    let Some(history) = ctx.history else {
-        // needs daemon: a history API; suggestions are computed from measured samples.
-        return Err(CliError::Client(ClientError::Setup(
-            "policy suggest needs the daemon's timing history, which its API does not serve yet (needs daemon: history); `tasks2 stats` shows run times from finished jobs meanwhile".into(),
-        )));
-    };
     let machine = match ctx.client.call(&Request::Hello)? {
         Response::Hello(h) => h.machine,
         other => {
@@ -1066,7 +1046,35 @@ fn policy_suggest(ctx: &mut Ctx<'_>) -> Result<i32, CliError> {
             )));
         }
     };
-    let text = suggest_report(&loaded, history, &[machine])?;
+    let text = match ctx.history {
+        Some(history) => suggest_report(&loaded, history, &[machine])?,
+        None => {
+            // only the recipes the policy's steps run can be suggested for
+            let mut recipes: Vec<String> = loaded
+                .policy
+                .suites
+                .values()
+                .flat_map(|s| s.steps.iter())
+                .filter_map(|d| {
+                    RecipeKey::from_argv(&d.command, &[])
+                        .first()
+                        .map(ToString::to_string)
+                })
+                .collect();
+            recipes.sort();
+            recipes.dedup();
+            let h = fetch_history(
+                ctx,
+                recipes,
+                vec![machine.clone()],
+                Some(tasks_daemon::api::MAX_HISTORY_SAMPLES),
+            )?;
+            if h.truncated {
+                ctx.note("tasks: the daemon cut the history at its size limit; suggestions may miss samples");
+            }
+            suggest_report(&loaded, &h.to_history(), &[machine])?
+        }
+    };
     ctx.out.write_all(text.as_bytes())?;
     Ok(EXIT_OK)
 }

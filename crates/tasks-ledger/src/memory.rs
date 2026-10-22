@@ -219,10 +219,15 @@ impl Store for MemoryStore {
         Ok(())
     }
 
-    fn request_cancel(&self, id: JobId, by: &str) -> Result<CancelOutcome> {
+    fn request_cancel_with(
+        &self,
+        id: JobId,
+        by: &str,
+        reason: Option<&str>,
+    ) -> Result<CancelOutcome> {
         let now = self.clock.now_ms();
         let mut s = self.lock()?;
-        let out = apply_cancel(s.job(id)?, by, now);
+        let out = apply_cancel(s.job(id)?, by, reason, now);
         if !matches!(out, CancelOutcome::AlreadyFinished(_)) {
             s.changes += 1;
         }
@@ -313,6 +318,26 @@ impl Store for MemoryStore {
         s.samples.push((key.clone(), *sample));
         s.changes += 1;
         Ok(())
+    }
+
+    fn sample_keys(&self, recipes: &[String], limit: usize) -> Result<Vec<SampleKey>> {
+        let s = self.lock()?;
+        let keys: std::collections::BTreeSet<(String, String, Option<String>)> = s
+            .samples
+            .iter()
+            .map(|(k, _)| k)
+            .filter(|k| recipes.is_empty() || recipes.contains(&k.recipe))
+            .map(|k| (k.recipe.clone(), k.machine.clone(), k.target.clone()))
+            .collect();
+        Ok(keys
+            .into_iter()
+            .take(limit)
+            .map(|(recipe, machine, target)| SampleKey {
+                recipe,
+                target,
+                machine,
+            })
+            .collect())
     }
 
     fn prune(&self, policy: &RetentionPolicy) -> Result<PruneReport> {

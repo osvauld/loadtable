@@ -496,6 +496,8 @@ impl Rig {
             requirements: Requirements::default(),
             placement: Placement::Here,
             after: vec![],
+            timeout_secs: None,
+            broad_test_escape: false,
         }
     }
 

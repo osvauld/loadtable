@@ -179,6 +179,7 @@ fn r063_cancel_during_the_disk_wait_creates_nothing() {
     let reply = ok(r.sch.handle(Request::Cancel {
         id,
         who: "o".into(),
+        reason: None,
     }));
     assert!(matches!(reply, Response::Cancelled { result, .. } if result == "cancelled"));
     assert_eq!(r.phase(id), Phase::Cancelled);
@@ -190,12 +191,18 @@ fn r063_cancel_during_the_disk_wait_creates_nothing() {
 #[test]
 fn r018_drain_stops_claims_until_it_is_cancelled() {
     let r = Rig::new();
-    ok(r.sch.handle(Request::Drain { cancel: false }));
+    ok(r.sch.handle(Request::Drain {
+        cancel: false,
+        who: None,
+    }));
     let id = r.submit(&r.spec("o", &["make", "x"], Kind::Run));
     assert!(r.tick().started.is_empty());
     assert!(matches!(r.phase(id), Phase::Waiting(_)));
     assert_eq!(r.procs.spawn_count(), 0);
-    ok(r.sch.handle(Request::Drain { cancel: true }));
+    ok(r.sch.handle(Request::Drain {
+        cancel: true,
+        who: None,
+    }));
     assert_eq!(r.tick().started, vec![id]);
 }
 
@@ -236,12 +243,14 @@ fn r107_r108_cancel_is_owner_checked_and_stops_a_running_group() {
     let e = err(r.sch.handle(Request::Cancel {
         id,
         who: "intruder".into(),
+        reason: None,
     }));
     assert_eq!(e.code, ErrorCode::NotOwner);
     assert_eq!(r.phase(id), Phase::Running);
     let reply = ok(r.sch.handle(Request::Cancel {
         id,
         who: "owner".into(),
+        reason: None,
     }));
     assert!(matches!(reply, Response::Cancelled { result, .. } if result == "requested"));
     assert_eq!(r.until_done(id), Phase::Cancelled);
@@ -249,7 +258,8 @@ fn r107_r108_cancel_is_owner_checked_and_stops_a_running_group() {
     assert_eq!(
         err(r.sch.handle(Request::Cancel {
             id: JobId(999),
-            who: "x".into()
+            who: "x".into(),
+            reason: None,
         }))
         .code,
         ErrorCode::NotFound
@@ -271,6 +281,7 @@ fn dependents_of_failed_jobs_are_cancelled_and_plans_submit_in_one_call() {
         cwd: r.dir.path().to_path_buf(),
         env: vec![],
         placement: Placement::Here,
+        broad_test: false,
     })) else {
         panic!("plan expected");
     };
@@ -760,6 +771,7 @@ fn suites_expand_from_the_repo_policy_and_unknown_ones_are_refused() {
         env: vec![],
         placement: Placement::Here,
         quick: false,
+        broad_test: false,
     };
     let Response::PlanSubmitted { jobs, .. } = ok(r.sch.handle(req("s"))) else {
         panic!("plan expected");
@@ -770,7 +782,7 @@ fn suites_expand_from_the_repo_policy_and_unknown_ones_are_refused() {
 
 // ---------------------------------------------------------------- forwarding
 
-fn peer_view() -> MachineView {
+pub(crate) fn peer_view() -> MachineView {
     MachineView {
         machine: Machine {
             name: MachineName("nixos".into()),
@@ -900,6 +912,7 @@ fn cancelling_a_real_running_job_stops_its_group_quickly() {
     ok(r.sch.handle(Request::Cancel {
         id,
         who: "o".into(),
+        reason: None,
     }));
     assert_eq!(r.until_done(id), Phase::Cancelled);
     assert!(t0.elapsed() < Duration::from_secs(3));
@@ -907,7 +920,7 @@ fn cancelling_a_real_running_job_stops_its_group_quickly() {
 
 // ---------------------------------------------------------------- the socket server
 
-fn daemon_options(dir: &TempDir, procs: &Arc<FakeProcs>) -> DaemonOptions {
+pub(crate) fn daemon_options(dir: &TempDir, procs: &Arc<FakeProcs>) -> DaemonOptions {
     let cfg = crate::config::DaemonConfig {
         state_dir: dir.path().join("state"),
         config_dir: dir.path().join("config"),
@@ -930,7 +943,7 @@ fn daemon_options(dir: &TempDir, procs: &Arc<FakeProcs>) -> DaemonOptions {
     o
 }
 
-fn call(sock: &Path, req: &Request) -> Reply {
+pub(crate) fn call(sock: &Path, req: &Request) -> Reply {
     let line = serde_json::to_string(&RequestEnvelope {
         v: PROTOCOL_VERSION,
         request: req.clone(),
@@ -1006,6 +1019,8 @@ fn the_socket_serves_requests_refuses_bad_ones_and_survives_a_closed_client() {
         requirements: Default::default(),
         placement: Placement::Here,
         after: vec![],
+        timeout_secs: None,
+        broad_test_escape: false,
     };
     {
         let mut s = UnixStream::connect(&sock).unwrap();
@@ -1049,6 +1064,8 @@ fn startup_reconciles_the_ledger_and_honours_the_persisted_execution_intent() {
             requirements: Default::default(),
             placement: Placement::Here,
             after: vec![],
+            timeout_secs: None,
+            broad_test_escape: false,
         };
         let id = store.submit(&spec).unwrap();
         store
@@ -1135,8 +1152,13 @@ impl Store for Flaky {
     ) -> tasks_ledger::Result<()> {
         self.inner.finish_recording(id, outcome, sample)
     }
-    fn request_cancel(&self, id: JobId, by: &str) -> tasks_ledger::Result<CancelOutcome> {
-        self.inner.request_cancel(id, by)
+    fn request_cancel_with(
+        &self,
+        id: JobId,
+        by: &str,
+        reason: Option<&str>,
+    ) -> tasks_ledger::Result<CancelOutcome> {
+        self.inner.request_cancel_with(id, by, reason)
     }
     fn set_forward(
         &self,
@@ -1170,6 +1192,13 @@ impl Store for Flaky {
     }
     fn record_sample(&self, key: &SampleKey, sample: &Sample) -> tasks_ledger::Result<()> {
         self.inner.record_sample(key, sample)
+    }
+    fn sample_keys(
+        &self,
+        recipes: &[String],
+        limit: usize,
+    ) -> tasks_ledger::Result<Vec<SampleKey>> {
+        self.inner.sample_keys(recipes, limit)
     }
     fn prune(&self, policy: &RetentionPolicy) -> tasks_ledger::Result<PruneReport> {
         self.inner.prune(policy)

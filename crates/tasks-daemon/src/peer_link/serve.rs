@@ -18,7 +18,7 @@ use tasks_peer::proto::{
     WireSample,
 };
 use tasks_peer::receiver::{
-    AllowAll, Allowlist, FinishedJob, JobRunner, JobView, Receiver, StatusSource,
+    Allowlist, FinishedJob, JobRunner, JobView, Receiver, StatusSource, SubmitPolicy,
 };
 use tasks_peer::store::{CheckoutStore, StoreLimits};
 use tasks_peer::{PeerId, RemoteJobId, SubmitKey};
@@ -227,11 +227,33 @@ pub fn build_receiver(sch: &Arc<Scheduler>, store_dir: std::path::PathBuf) -> Ar
         Arc::new(CheckoutStore::new(store_dir, StoreLimits::default())),
         Arc::new(DaemonRunner::new(sch.clone())),
         Arc::new(DaemonStatus::new(sch.clone())),
-        // open choice: the daemon has no device denylist or broad-test rule of its own yet
-        // (R-153 stays at the peer crate); the generic spec rules still apply in the receiver
-        Arc::new(AllowAll),
+        // the receiving peer applies the same rules as the local API (R-153)
+        Arc::new(DaemonRules::new(sch.clone())),
         FetchPolicy::default(),
     ))
+}
+
+/// The submit rules of this daemon as the receiver's policy: a forwarded job gets the answer a
+/// local submission would (device denylist, broad-test refusal or warning, R-153). Cargo
+/// parallelism above this machine's cap is not refused: the job is lowered to the cap when it
+/// starts, as for any job here (R-137).
+pub struct DaemonRules {
+    sch: Arc<Scheduler>,
+}
+
+impl DaemonRules {
+    /// The rules of `sch`.
+    pub fn new(sch: Arc<Scheduler>) -> DaemonRules {
+        DaemonRules { sch }
+    }
+}
+
+impl SubmitPolicy for DaemonRules {
+    fn check(&self, spec: &JobSpec) -> Result<(), String> {
+        self.sch
+            .check_spec(spec, crate::submit::Via::Peer)
+            .map(|_warnings| ())
+    }
 }
 
 /// The scheduler's slots, queue and pressure as the peer-visible status.

@@ -7,6 +7,7 @@ use crate::api::{
 use crate::logs::{self, LogError, Matcher};
 use crate::scheduler::Scheduler;
 use crate::status::job_view;
+use crate::submit::Via;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -19,6 +20,8 @@ use tasks_ledger::{
 use tasks_policy::{Executables, ExpandOptions, RealFs, Timing};
 use tasks_timing::{History, RecipeKey};
 
+/// Longest cancel reason, in characters.
+const MAX_CANCEL_REASON: usize = 500;
 const DEFAULT_GREP_MATCHES: usize = 200;
 const MAX_GREP_MATCHES: usize = 5000;
 const DEFAULT_GREP_BYTES: usize = 256 * 1024;
@@ -86,7 +89,11 @@ impl Scheduler {
                 cwd,
                 env,
                 placement,
-            } => self.submit_plan(&plan, &owner, cwd, env, placement),
+                broad_test,
+            } => {
+                let ctx = Self::plan_context(&owner, cwd, env, placement, broad_test)?;
+                self.submit_plan(&plan, ctx)
+            }
             Request::SubmitSuite {
                 name,
                 owner,
@@ -94,7 +101,11 @@ impl Scheduler {
                 env,
                 placement,
                 quick,
-            } => self.submit_suite(&name, &owner, cwd, env, placement, quick),
+                broad_test,
+            } => {
+                let ctx = Self::plan_context(&owner, cwd, env, placement, broad_test)?;
+                self.submit_suite(&name, ctx, quick)
+            }
             Request::List {
                 owner,
                 active_only,
@@ -109,14 +120,18 @@ impl Scheduler {
             }
             Request::Logs { id, view } => self.logs(id, view),
             Request::LogSearch { query } => self.log_search(&query),
-            Request::Cancel { id, who } => self.cancel(id, &who),
+            Request::Cancel { id, who, reason } => self.cancel(id, &who, reason.as_deref()),
             Request::Status => Ok(Response::Status(Box::new(self.status()))),
             Request::Estimate { argv, kind } => Ok(self.estimate(&argv, kind)),
-            Request::Drain { cancel } => {
-                self.draining.store(!cancel, Ordering::SeqCst);
-                self.wake.notify();
+            Request::Drain { cancel, who } => {
+                self.set_drain(!cancel, who);
                 Ok(Response::Ack)
             }
+            Request::History {
+                recipes,
+                machines,
+                max_samples,
+            } => self.history_view(&recipes, &machines, max_samples),
             Request::Execution { enabled } => {
                 std::fs::write(
                     self.cfg.intent_path(),
@@ -152,30 +167,59 @@ impl Scheduler {
         Owner::new(name).map_err(|e| ApiError::new(ErrorCode::Refused, format!("owner: {e}")))
     }
 
+    /// Starts or ends a drain, remembering who asked and when. A second drain keeps the first
+    /// requester; a resume forgets it.
+    fn set_drain(&self, on: bool, who: Option<String>) {
+        let now = self.clock.now_ms();
+        {
+            let mut d = crate::scheduler::lock(&self.drained);
+            if !on {
+                *d = None;
+            } else if d.is_none() || !self.draining.load(Ordering::SeqCst) {
+                *d = Some((who.unwrap_or_else(|| "unknown".to_string()), now));
+            }
+        }
+        self.draining.store(on, Ordering::SeqCst);
+        self.wake.notify();
+    }
+
+    /// The shared submit rules for a spec (R-191, R-210, R-091); a refusal is `Refused`.
+    fn rules(&self, spec: &JobSpec, what: &str) -> Result<(), ApiError> {
+        self.check_spec(spec, Via::Local)
+            .map(|_warnings| ())
+            .map_err(|text| ApiError::new(ErrorCode::Refused, format!("{what}{text}")))
+    }
+
     fn submit(&self, spec: JobSpec) -> Out {
         Self::owner(spec.owner.as_str())?;
         spec.validate()
             .map_err(|e| ApiError::new(ErrorCode::Refused, format!("invalid job: {e}")))?;
+        self.rules(&spec, "")?;
         let id = retry_busy(&API_RETRY, &sleep, || self.ledger.submit(&spec))
             .map_err(|e| ledger_error(&e))?;
         self.wake.notify();
         Ok(Response::Submitted { id })
     }
 
-    fn submit_plan(
-        &self,
-        plan: &Plan,
+    /// What a plan's or suite's steps share, with the owner validated.
+    fn plan_context(
         owner: &str,
         cwd: PathBuf,
         env: Vec<(String, String)>,
         placement: Placement,
-    ) -> Out {
-        let ctx = PlanContext {
+        broad_test: bool,
+    ) -> Result<PlanContext, ApiError> {
+        Ok(PlanContext {
             owner: Self::owner(owner)?,
             cwd,
             env,
             placement,
-        };
+            broad_test_escape: broad_test,
+        })
+    }
+
+    fn submit_plan(&self, plan: &Plan, ctx: PlanContext) -> Out {
+        self.check_plan(&ctx, plan)?;
         let done = retry_busy(&API_RETRY, &sleep, || self.ledger.submit_plan(&ctx, plan))
             .map_err(|e| ledger_error(&e))?;
         self.wake.notify();
@@ -185,21 +229,8 @@ impl Scheduler {
         })
     }
 
-    fn submit_suite(
-        &self,
-        name: &str,
-        owner: &str,
-        cwd: PathBuf,
-        env: Vec<(String, String)>,
-        placement: Placement,
-        quick: bool,
-    ) -> Out {
-        let ctx = PlanContext {
-            owner: Self::owner(owner)?,
-            cwd: cwd.clone(),
-            env,
-            placement,
-        };
+    fn submit_suite(&self, name: &str, ctx: PlanContext, quick: bool) -> Out {
+        let cwd = ctx.cwd.clone();
         let loaded = tasks_policy::load(&RealFs, &cwd)
             .map_err(|e| ApiError::new(ErrorCode::Refused, e.to_string()))?;
         let machines = vec![self.cfg.machine.clone()];
@@ -213,6 +244,7 @@ impl Scheduler {
         };
         let expansion = tasks_policy::expand(&loaded.policy, name, &Executables::new(), &opts)
             .map_err(|e| ApiError::new(ErrorCode::Refused, e.to_string()))?;
+        self.check_plan(&ctx, &expansion.plan)?;
         let done = retry_busy(&API_RETRY, &sleep, || {
             self.ledger.submit_plan(&ctx, &expansion.plan)
         })
@@ -222,6 +254,32 @@ impl Scheduler {
             plan_id: done.plan_id,
             jobs: done.jobs,
         })
+    }
+
+    /// Applies the submit rules to every step of a plan, as the specs the ledger will store.
+    fn check_plan(&self, ctx: &PlanContext, plan: &Plan) -> Result<(), ApiError> {
+        for step in &plan.steps {
+            let spec = JobSpec {
+                owner: ctx.owner.clone(),
+                argv: step.argv.clone(),
+                cwd: ctx.cwd.clone(),
+                env: ctx.env.clone(),
+                kind: step.kind,
+                requirements: step.requirements.clone(),
+                placement: ctx.placement.clone(),
+                after: Vec::new(),
+                timeout_secs: step.hints.timeout_secs,
+                broad_test_escape: ctx.broad_test_escape,
+            };
+            spec.validate().map_err(|e| {
+                ApiError::new(
+                    ErrorCode::Refused,
+                    format!("step {:?}: invalid job: {e}", step.name),
+                )
+            })?;
+            self.rules(&spec, &format!("step {:?}: ", step.name))?;
+        }
+        Ok(())
     }
 
     fn list(
@@ -400,7 +458,13 @@ impl Scheduler {
         })
     }
 
-    fn cancel(&self, id: JobId, who: &str) -> Out {
+    fn cancel(&self, id: JobId, who: &str, reason: Option<&str>) -> Out {
+        if reason.is_some_and(|r| r.chars().count() > MAX_CANCEL_REASON) {
+            return Err(ApiError::new(
+                ErrorCode::BadRequest,
+                format!("the cancel reason is longer than {MAX_CANCEL_REASON} characters"),
+            ));
+        }
         let rec = self.record(id)?;
         // R-108: only the owner cancels
         if rec.spec.owner.as_str() != who {
@@ -413,8 +477,10 @@ impl Scheduler {
                 ),
             ));
         }
-        let outcome = retry_busy(&API_RETRY, &sleep, || self.ledger.request_cancel(id, who))
-            .map_err(|e| ledger_error(&e))?;
+        let outcome = retry_busy(&API_RETRY, &sleep, || {
+            self.ledger.request_cancel_with(id, who, reason)
+        })
+        .map_err(|e| ledger_error(&e))?;
         let result = match outcome {
             CancelOutcome::Cancelled => "cancelled",
             CancelOutcome::Requested => {

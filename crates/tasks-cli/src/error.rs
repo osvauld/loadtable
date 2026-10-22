@@ -77,7 +77,10 @@ pub fn code_for_api(code: ErrorCode) -> i32 {
             EXIT_USAGE
         }
         ErrorCode::UnsupportedVersion | ErrorCode::ResponseTooLarge => EXIT_UNREACHABLE,
-        ErrorCode::Busy | ErrorCode::LedgerUnavailable | ErrorCode::Internal => EXIT_FAILURE,
+        ErrorCode::Busy
+        | ErrorCode::ConnectionLimit
+        | ErrorCode::LedgerUnavailable
+        | ErrorCode::Internal => EXIT_FAILURE,
     }
 }
 

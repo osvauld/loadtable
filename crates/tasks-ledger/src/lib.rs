@@ -90,7 +90,17 @@ pub trait Store {
         self.finish_recording(id, outcome, Some((key, sample)))
     }
     /// Records a cancel request and who made it (R-6.2). An unstarted job is cancelled at once.
-    fn request_cancel(&self, id: JobId, by: &str) -> Result<CancelOutcome>;
+    fn request_cancel(&self, id: JobId, by: &str) -> Result<CancelOutcome> {
+        self.request_cancel_with(id, by, None)
+    }
+    /// Like `request_cancel`, also recording why. The first request's requester and reason are
+    /// kept; a later one changes nothing.
+    fn request_cancel_with(
+        &self,
+        id: JobId,
+        by: &str,
+        reason: Option<&str>,
+    ) -> Result<CancelOutcome>;
     /// True when a cancel was requested. A ledger error is an `Err`, never `Ok(true)` (R-001).
     fn cancel_requested(&self, id: JobId) -> Result<bool> {
         self.get(id)?
@@ -168,6 +178,10 @@ pub trait Store {
 
     /// Stores one timing sample; invalid samples are refused (R-013).
     fn record_sample(&self, key: &SampleKey, sample: &Sample) -> Result<()>;
+    /// The distinct keys that have samples, sorted by recipe, machine, then target (the
+    /// whole-job series first), at most `limit`. `recipes` narrows to those recipes; empty
+    /// means all. Lets an API enumerate history without knowing the recipes in advance.
+    fn sample_keys(&self, recipes: &[String], limit: usize) -> Result<Vec<SampleKey>>;
     /// Removes old finished jobs and samples. Running and queued jobs, finished jobs that an
     /// unfinished job depends on, and the newest job id are always kept.
     fn prune(&self, policy: &RetentionPolicy) -> Result<PruneReport>;

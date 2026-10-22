@@ -104,15 +104,7 @@ pub fn is_read_only(req: &Request) -> bool {
             | Request::LogSearch { .. }
             | Request::Status
             | Request::Estimate { .. }
-    )
-}
-
-/// Submissions answer `busy` only for "too many connections", before the request is read, so
-/// the request was not processed and may be sent again (R-101).
-fn busy_means_not_processed(req: &Request) -> bool {
-    matches!(
-        req,
-        Request::Submit { .. } | Request::SubmitPlan { .. } | Request::SubmitSuite { .. }
+            | Request::History { .. }
     )
 }
 
@@ -375,7 +367,9 @@ impl Client for UnixClient {
             match self.attempt(&line, cap, remaining, &mut started) {
                 Attempt::Reply(Ok(r)) => return Ok(r),
                 Attempt::Reply(Err(e)) => {
-                    if e.code == ErrorCode::Busy && busy_means_not_processed(req) && again {
+                    // R-101: only `connection_limit` says the request was never read. `busy`
+                    // is a real answer (a shutdown refused while jobs run) and is not resent.
+                    if e.code == ErrorCode::ConnectionLimit && again {
                         std::thread::sleep(self.timeouts.pause);
                         continue;
                     }

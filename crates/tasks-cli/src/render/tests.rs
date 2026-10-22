@@ -315,6 +315,69 @@ fn r189_a_held_queue_says_it_is_held_and_how_to_resume() {
     assert!(!t.contains("worker not running"));
 }
 
+#[test]
+fn r189_a_drained_queue_says_who_stopped_it_how_long_ago_and_how_to_resume() {
+    let mut s = snapshot();
+    s.daemon.draining = true;
+    s.daemon.drained_by = Some("alice".into());
+    s.daemon.drained_at_ms = Some(s.daemon.now_ms - 125_000);
+    let t = status(&s);
+    assert!(
+        t.contains("queue: DRAINING: stopped by alice, 2m05s ago, resume with `tasks2 resume`"),
+        "{t}"
+    );
+    // a daemon that did not record it keeps the plain line
+    s.daemon.drained_by = None;
+    assert!(status(&s).contains("queue: DRAINING: no new job starts"));
+}
+
+#[test]
+fn r186_a_forwarded_row_shows_the_remote_phase_beside_the_local_one() {
+    let mut j = job(
+        10,
+        "lead",
+        "/w",
+        Phase::Waiting(tasks_core::WaitReason::Placement("syncing".into())),
+        "cargo test",
+    );
+    j.forwarded_to = Some(("nixos".into(), Some(1474)));
+    j.remote_phase = Some(Phase::Waiting(tasks_core::WaitReason::Slot(
+        tasks_core::SlotKind::Compile,
+    )));
+    assert_eq!(phase_label(&j), "waiting → nixos #1474 (remote waiting)");
+    j.phase = Phase::Running;
+    j.remote_phase = Some(Phase::Running);
+    j.summary = Some("building".into());
+    assert_eq!(
+        phase_label(&j),
+        "running → nixos #1474 (remote running, building)"
+    );
+    let t = job_table(&[j.clone()], NOW, None, &[], TableOptions::default());
+    assert!(
+        t.contains("running → nixos #1474 (remote running, building)"),
+        "{t}"
+    );
+    assert!(job_detail(&j, NOW, None).contains("remote:    running"));
+    // a finished local row keeps the remote result without the stale summary
+    j.phase = Phase::Interrupted;
+    j.remote_phase = Some(Phase::Passed);
+    assert_eq!(phase_label(&j), "interrupted → nixos #1474 (remote passed)");
+}
+
+#[test]
+fn r108_a_cancelled_job_shows_why_in_the_table_and_in_detail() {
+    let mut j = job(3, "a", "/w", Phase::Cancelled, "cargo test");
+    j.cancel_requested_by = Some("a".into());
+    j.cancel_reason = Some("wrong branch".into());
+    j.timeout_secs = Some(90);
+    assert_eq!(phase_label(&j), "cancelled (wrong branch)");
+    let d = job_detail(&j, NOW, None);
+    assert!(d.contains("cancel requested by a: wrong branch"), "{d}");
+    assert!(d.contains("timeout:   1m30s"), "{d}");
+    j.cancel_reason = None;
+    assert_eq!(phase_label(&j), "cancelled");
+}
+
 // R-045, R-231, R-219
 #[test]
 fn r231_admission_reports_the_daemons_lock_dir_and_flags_a_disagreeing_shell() {
@@ -364,6 +427,8 @@ fn estimate_and_stats_render() {
     );
     let s = stats(&[StatRow {
         recipe: "cargo check".into(),
+        machine: None,
+        target: None,
         runs: 3,
         passed: 2,
         median_secs: 10.0,
@@ -373,6 +438,6 @@ fn estimate_and_stats_render() {
         s.contains("RUNS") && s.contains("    3      2      10s      30s  cargo check"),
         "{s}"
     );
-    assert_eq!(stats(&[]), "(no finished jobs)\n");
+    assert_eq!(stats(&[]), "(no timing samples)\n");
     assert_eq!(fmt_bytes(512 << 20), "512 MiB");
 }

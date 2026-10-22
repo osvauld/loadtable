@@ -65,6 +65,9 @@
 # tick_ms = 1000   # env TASKS_TICK_MS
 # nofile_target = 65536   # env TASKS_NOFILE_TARGET
 
+[submit]
+# broad_test = "refuse"   # env TASKS_BROAD_TEST
+
 [machine]
 # devices = []   # env TASKS_DEVICES
 # tools = []   # env TASKS_TOOLS

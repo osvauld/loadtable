@@ -122,7 +122,7 @@ impl SqliteStore {
 const COLS: &str = "id, spec, hints, plan_id, step_name, phase, wait_text, submitted_at_ms, \
     started_at_ms, finished_at_ms, machine, exit_code, signal, timeout, summary, lease_pgid, \
     lease_start, log_path, fwd_peer, fwd_job, remote_phase, cancel_by, cancel_at_ms, fwd_key, \
-    origin_peer, origin_key";
+    origin_peer, origin_key, cancel_reason";
 
 struct Raw {
     id: i64,
@@ -151,6 +151,7 @@ struct Raw {
     fwd_key: Option<String>,
     origin_peer: Option<String>,
     origin_key: Option<String>,
+    cancel_reason: Option<String>,
 }
 
 fn raw(r: &Row<'_>) -> rusqlite::Result<Raw> {
@@ -181,6 +182,7 @@ fn raw(r: &Row<'_>) -> rusqlite::Result<Raw> {
         fwd_key: r.get(23)?,
         origin_peer: r.get(24)?,
         origin_key: r.get(25)?,
+        cancel_reason: r.get(26)?,
     })
 }
 
@@ -243,6 +245,7 @@ fn record(r: Raw) -> Result<JobRecord> {
         cancel: r.cancel_by.map(|by| CancelRequest {
             by,
             at_ms: r.cancel_at.unwrap_or(0),
+            reason: r.cancel_reason,
         }),
     })
 }
@@ -290,8 +293,8 @@ fn write_record(tx: &Connection, r: &JobRecord) -> Result<()> {
              finished_at_ms = ?5, machine = ?6, exit_code = ?7, signal = ?8, timeout = ?9,
              summary = ?10, lease_pgid = ?11, lease_start = ?12, log_path = ?13, fwd_peer = ?14,
              fwd_job = ?15, remote_phase = ?16, cancel_by = ?17, cancel_at_ms = ?18,
-             fwd_key = ?19
-         WHERE id = ?20",
+             fwd_key = ?19, cancel_reason = ?20
+         WHERE id = ?21",
         params![
             serde_json::to_string(&r.phase)?,
             phase_tag(&r.phase),
@@ -317,6 +320,7 @@ fn write_record(tx: &Connection, r: &JobRecord) -> Result<()> {
             r.cancel.as_ref().map(|c| c.by.clone()),
             r.cancel.as_ref().map(|c| c.at_ms),
             fwd_key,
+            r.cancel.as_ref().and_then(|c| c.reason.clone()),
             r.id.0,
         ],
     )?;
@@ -538,8 +542,13 @@ impl Store for SqliteStore {
         })
     }
 
-    fn request_cancel(&self, id: JobId, by: &str) -> Result<CancelOutcome> {
-        self.modify(id, |r, now| Ok(apply_cancel(r, by, now)))
+    fn request_cancel_with(
+        &self,
+        id: JobId,
+        by: &str,
+        reason: Option<&str>,
+    ) -> Result<CancelOutcome> {
+        self.modify(id, |r, now| Ok(apply_cancel(r, by, reason, now)))
     }
 
     fn set_forward(
@@ -634,6 +643,44 @@ impl Store for SqliteStore {
     fn record_sample(&self, key: &SampleKey, sample: &Sample) -> Result<()> {
         validate_sample(sample)?;
         self.write(|tx, _| insert_sample(tx, key, sample))
+    }
+
+    fn sample_keys(&self, recipes: &[String], limit: usize) -> Result<Vec<SampleKey>> {
+        let conn = self.lock()?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut out: Vec<SampleKey> = Vec::new();
+        // NULL sorts first in SQLite, which puts the whole-job series before its targets
+        let sql = if recipes.is_empty() {
+            "SELECT DISTINCT recipe, machine, target FROM samples
+             ORDER BY recipe, machine, target LIMIT ?1"
+        } else {
+            "SELECT DISTINCT recipe, machine, target FROM samples WHERE recipe = ?2
+             ORDER BY recipe, machine, target LIMIT ?1"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let mut collect = |rows: rusqlite::Rows<'_>| -> Result<()> {
+            let mut rows = rows;
+            while let Some(r) = rows.next()? {
+                out.push(SampleKey {
+                    recipe: r.get(0)?,
+                    machine: r.get(1)?,
+                    target: r.get(2)?,
+                });
+            }
+            Ok(())
+        };
+        if recipes.is_empty() {
+            collect(stmt.query(params![limit])?)?;
+        } else {
+            for recipe in recipes {
+                collect(stmt.query(params![limit, recipe])?)?;
+            }
+        }
+        out.sort_by(|a, b| {
+            (&a.recipe, &a.machine, &a.target).cmp(&(&b.recipe, &b.machine, &b.target))
+        });
+        out.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+        Ok(out)
     }
 
     fn prune(&self, policy: &RetentionPolicy) -> Result<PruneReport> {
@@ -822,6 +869,8 @@ mod tests {
             requirements: Requirements::default(),
             placement: Placement::Anywhere,
             after: vec![],
+            timeout_secs: None,
+            broad_test_escape: false,
         }
     }
 

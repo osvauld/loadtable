@@ -69,6 +69,19 @@ const CASES: &[Case] = &[
         "r152_forward_key_is_kept_and_an_origin_is_unique",
         r152_forward_key_and_origin,
     ),
+    (
+        "r095_a_plan_steps_timeout_hint_fills_the_spec_and_the_escape_is_carried",
+        r095_plan_timeout_fills_spec,
+    ),
+    ("sample_keys_enumerate_history", sample_keys_enumerate),
+    (
+        "r108_a_cancel_keeps_its_requester_and_reason",
+        r108_cancel_reason,
+    ),
+    (
+        "r186_placement_waits_are_their_own_reason",
+        r186_placement_wait,
+    ),
     ("r022_r026_list_filters", list_filters),
     ("retention_prunes_only_old_finished_work", retention),
     ("r025_change_token_moves_on_commit", change_token),
@@ -92,6 +105,8 @@ fn spec(owner: &str, after: Vec<JobId>) -> JobSpec {
         requirements: Requirements::default(),
         placement: Placement::Anywhere,
         after,
+        timeout_secs: None,
+        broad_test_escape: false,
     }
 }
 
@@ -128,6 +143,7 @@ fn ctx() -> PlanContext {
         cwd: PathBuf::from("/work"),
         env: vec![("A".into(), "1".into())],
         placement: Placement::Here,
+        broad_test_escape: false,
     }
 }
 
@@ -455,6 +471,114 @@ fn wait_text(e: &Env) {
         s.set_wait(JobId(50), WaitReason::Disk, "x"),
         Err(LedgerError::NotFound(_))
     ));
+}
+
+// Keys come back sorted, whole-job series first, narrowed by recipe and bounded.
+fn sample_keys_enumerate(e: &Env) {
+    let s = &*e.store;
+    let mk = |recipe: &str, machine: &str, target: Option<&str>| SampleKey {
+        recipe: recipe.into(),
+        target: target.map(str::to_string),
+        machine: machine.into(),
+    };
+    for k in [
+        mk("b", "m1", Some("test:y")),
+        mk("b", "m1", None),
+        mk("a", "m2", None),
+        mk("a", "m1", Some("test:x")),
+        mk("a", "m1", Some("test:x")),
+    ] {
+        s.record_sample(&k, &sample(1.0, 5)).unwrap();
+    }
+    let all = s.sample_keys(&[], 100).unwrap();
+    assert_eq!(
+        all,
+        vec![
+            mk("a", "m1", Some("test:x")),
+            mk("a", "m2", None),
+            mk("b", "m1", None),
+            mk("b", "m1", Some("test:y")),
+        ]
+    );
+    assert_eq!(s.sample_keys(&[], 2).unwrap(), all[..2].to_vec());
+    assert_eq!(
+        s.sample_keys(&["b".to_string()], 100).unwrap(),
+        all[2..].to_vec()
+    );
+    assert!(
+        s.sample_keys(&["none".to_string()], 100)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+// The reason given with the first cancel request is kept with the job, running or not.
+fn r108_cancel_reason(e: &Env) {
+    let s = &*e.store;
+    let queued = s.submit(&spec("a", vec![])).unwrap();
+    assert_eq!(
+        s.request_cancel_with(queued, "a", Some("wrong branch"))
+            .unwrap(),
+        CancelOutcome::Cancelled
+    );
+    let r = s.get(queued).unwrap().unwrap();
+    assert_eq!(
+        r.cancel.as_ref().and_then(|c| c.reason.as_deref()),
+        Some("wrong branch")
+    );
+    assert!(r.summary.unwrap().contains("wrong branch"));
+    let running = s.submit(&spec("a", vec![])).unwrap();
+    s.start(running, &info()).unwrap();
+    assert_eq!(
+        s.request_cancel_with(running, "a", Some("first")).unwrap(),
+        CancelOutcome::Requested
+    );
+    s.request_cancel_with(running, "b", Some("second")).unwrap();
+    let c = s.get(running).unwrap().unwrap().cancel.unwrap();
+    assert_eq!((c.by.as_str(), c.reason.as_deref()), ("a", Some("first")));
+    // a plain cancel has no reason
+    let plain = s.submit(&spec("a", vec![])).unwrap();
+    s.request_cancel(plain, "a").unwrap();
+    assert_eq!(s.get(plain).unwrap().unwrap().cancel.unwrap().reason, None);
+}
+
+// The placement wait is stored as itself, not as pressure, and survives a reread.
+fn r186_placement_wait(e: &Env) {
+    let s = &*e.store;
+    let id = s.submit(&spec("a", vec![])).unwrap();
+    let text = "waiting for nixos: checkout sync";
+    s.set_wait(id, WaitReason::Placement(text.into()), text)
+        .unwrap();
+    let r = s.get(id).unwrap().unwrap();
+    assert_eq!(r.phase, Phase::Waiting(WaitReason::Placement(text.into())));
+    assert_eq!(r.wait_text.as_deref(), Some(text));
+    assert_eq!(ids(&s.list(&ListFilter::default()).unwrap()), vec![id]);
+    assert_eq!(s.ready().unwrap(), vec![id]);
+}
+
+// A step's `timeout_secs` hint becomes the spec's limit; a plain submit keeps its own.
+fn r095_plan_timeout_fills_spec(e: &Env) {
+    let s = &*e.store;
+    let mut slow = step("slow", &[]);
+    slow.hints.timeout_secs = Some(90);
+    let plain = step("plain", &[]);
+    let plan = Plan {
+        steps: vec![slow, plain],
+    };
+    let mut c = ctx();
+    c.broad_test_escape = true;
+    let done = s.submit_plan(&c, &plan).unwrap();
+    let get = |name: &str| {
+        let id = done.jobs.iter().find(|(n, _)| n == name).unwrap().1;
+        s.get(id).unwrap().unwrap()
+    };
+    assert_eq!(get("slow").spec.timeout_secs, Some(90));
+    assert_eq!(get("plain").spec.timeout_secs, None);
+    assert!(get("slow").spec.broad_test_escape && get("plain").spec.broad_test_escape);
+    let mut own = spec("a", vec![]);
+    own.timeout_secs = Some(5);
+    let id = s.submit(&own).unwrap();
+    assert_eq!(s.get(id).unwrap().unwrap().spec.timeout_secs, Some(5));
 }
 
 // Requirements 6.12: cancelling a waiting job must not take admission or start the command.

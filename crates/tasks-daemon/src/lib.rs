@@ -12,9 +12,12 @@ pub mod cargo_jobs;
 pub mod config;
 pub mod entry;
 pub mod error;
+#[cfg(test)]
+mod follow_tests;
 mod forwarded;
 pub mod forwarder;
 mod handler;
+mod history;
 pub mod holders;
 pub mod logs;
 pub mod machine_policy;
@@ -30,6 +33,7 @@ pub mod server;
 pub mod startup;
 mod status;
 pub mod stuck;
+pub mod submit;
 mod supervise;
 #[cfg(test)]
 mod testkit;

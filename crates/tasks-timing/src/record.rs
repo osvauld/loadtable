@@ -91,6 +91,49 @@ pub fn samples_from_timeline(job: &JobResult, timeline: &Timeline) -> Vec<(Sampl
     out
 }
 
+/// The sample of one piece of a command split by test target, filed under the recipe of the
+/// unsplit command plus the piece's target label, so the next split learns per target.
+///
+/// The seconds are the timeline's own measurement of that target when it has one (the test
+/// run without the compile), otherwise the whole piece's wall time. The pollution rules are
+/// those of [`samples_from_timeline`]: probes and runs that failed compiling leave nothing.
+pub fn split_piece_sample(
+    job: &JobResult,
+    timeline: &Timeline,
+    unsplit_recipe: &str,
+    label: &str,
+) -> Option<(SampleKey, Sample)> {
+    if !job.kind.counts_for_eta() || timeline.failed_in_compile() {
+        return None;
+    }
+    let secs = timeline
+        .phases()
+        .iter()
+        .find(|p| matches!(p.kind, PhaseKind::Target(_)) && p.name == label && p.end_ms.is_some())
+        .map_or(job.secs, |p| {
+            p.duration_ms(timeline.last_ms()) as f64 / 1000.0
+        });
+    Some((
+        SampleKey {
+            recipe: unsplit_recipe.to_string(),
+            target: Some(label.to_string()),
+            machine: job.machine.clone(),
+        },
+        Sample {
+            secs,
+            cache: job.cache,
+            outcome: if job.cancelled {
+                Outcome::Cancelled
+            } else if job.passed {
+                Outcome::Passed
+            } else {
+                Outcome::Failed
+            },
+            at_ms: job.at_ms,
+        },
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,6 +191,37 @@ mod tests {
         assert_eq!(v.len(), 2);
         assert_eq!(v[1].0.target.as_deref(), Some("test:a"));
         assert_eq!(v[1].1.secs, 5.0);
+    }
+
+    #[test]
+    fn r114_a_split_piece_is_filed_under_the_unsplit_recipe_and_its_label() {
+        let j = job(Kind::Test, Cache::Warm, false, true);
+        let (k, s) = split_piece_sample(&j, &tl(false), "cargo test pkg=x", "test:a").unwrap();
+        assert_eq!(
+            (k.recipe.as_str(), k.target.as_deref(), k.machine.as_str()),
+            ("cargo test pkg=x", Some("test:a"), "m")
+        );
+        // the timeline measured the target at 5 s of the job's 6 s
+        assert_eq!((s.secs, s.outcome), (5.0, Outcome::Passed));
+        // no such target in the timeline: the piece's wall time stands in
+        let (_, s) = split_piece_sample(&j, &tl(false), "r", "lib:other").unwrap();
+        assert_eq!(s.secs, 6.0);
+        let failed = job(Kind::Test, Cache::Warm, false, false);
+        let (_, s) = split_piece_sample(&failed, &tl(false), "r", "test:a").unwrap();
+        assert_eq!(s.outcome, Outcome::Failed);
+        let cancelled = job(Kind::Test, Cache::Warm, true, false);
+        let (_, s) = split_piece_sample(&cancelled, &tl(false), "r", "test:a").unwrap();
+        assert_eq!(s.outcome, Outcome::Cancelled);
+        assert!(
+            split_piece_sample(
+                &job(Kind::Probe, Cache::Warm, false, true),
+                &tl(false),
+                "r",
+                "t"
+            )
+            .is_none()
+        );
+        assert!(split_piece_sample(&failed, &tl(true), "r", "test:a").is_none());
     }
 
     #[test]

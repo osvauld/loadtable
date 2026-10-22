@@ -112,7 +112,10 @@ fn r230_three_same_checkout_forwards_and_an_unrelated_one_all_complete_and_no_wa
             rec.wait_text
         );
     }
-    assert_eq!(r.record(a1).phase, Phase::Running);
+    // the driver submits to the peer just before it records the start: wait for that write
+    within("a1 recorded as running", || {
+        r.record(a1).phase == Phase::Running
+    });
     // a1 and b race to the peer; a1's remote id is its position in the peer's submissions
     let at = keys
         .iter()

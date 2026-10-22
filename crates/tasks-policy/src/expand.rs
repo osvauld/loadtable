@@ -175,6 +175,8 @@ pub fn expand(
                 isolate: note.is_some_and(|n| n.isolate),
                 long: note.is_some_and(|n| n.long),
                 tools: suite.tools.clone(),
+                // set by `split_cargo_test`; the suite's hints must not lose it
+                split: p.hints.split.clone(),
             };
             steps.push(p);
         }

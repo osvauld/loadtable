@@ -229,6 +229,9 @@ pub struct SuiteRunArgs {
     /// Where the steps may run.
     #[command(flatten)]
     pub place: PlaceArgs,
+    /// Allow broad `cargo test` steps.
+    #[arg(long)]
+    pub broad_test: bool,
 }
 
 /// `suite` subcommands.
@@ -263,12 +266,23 @@ pub struct SplitArgs {
 /// Arguments of `stats`.
 #[derive(Args, Debug, Clone)]
 pub struct StatsArgs {
-    /// Only this owner.
+    /// Only this owner. The timing history has no owners, so this reads the finished jobs
+    /// instead (whole commands only, no targets).
     #[arg(long, value_name = "OWNER")]
     pub who: Option<String>,
-    /// Finished jobs to look at (default 500).
+    /// Newest samples (or finished jobs with --who) to look at per series (default 500, at
+    /// most 200 samples per series from the history).
     #[arg(long, value_name = "N", default_value_t = 500)]
     pub limit: usize,
+    /// Only recipes containing this text.
+    #[arg(long, value_name = "TEXT")]
+    pub recipe: Option<String>,
+    /// Only this machine.
+    #[arg(long, value_name = "MACHINE")]
+    pub machine: Option<String>,
+    /// Also show each test target's times.
+    #[arg(long)]
+    pub targets: bool,
 }
 
 /// `execution` subcommands.
@@ -309,7 +323,7 @@ pub enum Command {
         /// The asking owner (default: $TASKS_WHO, then $USER).
         #[arg(long, value_name = "OWNER")]
         who: Option<String>,
-        /// Why (shown here; the daemon does not record it yet).
+        /// Why; kept with the job and shown by `get` and `list`.
         #[arg(long)]
         reason: Option<String>,
     },

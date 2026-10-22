@@ -111,15 +111,28 @@ pub fn phase_tag(p: &Phase) -> &'static str {
 /// Phase plus where a forward runs and its remote job (R-186).
 pub fn phase_label(j: &JobView) -> String {
     let mut s = phase_tag(&j.phase).to_string();
+    if j.phase == Phase::Cancelled
+        && let Some(why) = j.cancel_reason.as_ref().filter(|w| !w.is_empty())
+    {
+        let _ = write!(s, " ({})", truncate_end(why, 30));
+    }
     if let Some((peer, remote)) = &j.forwarded_to {
         let _ = write!(s, " → {peer}");
         if let Some(r) = remote {
             let _ = write!(s, " #{r}");
         }
+        // what the peer says about the job, beside the local phase (R-015, R-186)
+        let mut notes = Vec::new();
+        if let Some(rp) = &j.remote_phase {
+            notes.push(format!("remote {}", phase_tag(rp)));
+        }
         if !j.phase.is_terminal()
             && let Some(t) = j.summary.as_ref().filter(|t| !t.is_empty())
         {
-            let _ = write!(s, " ({})", truncate_end(t, 30));
+            notes.push(truncate_end(t, 30));
+        }
+        if !notes.is_empty() {
+            let _ = write!(s, " ({})", notes.join(", "));
         }
     }
     s
@@ -331,7 +344,20 @@ pub fn job_detail(j: &JobView, now_ms: i64, waiter: Option<&WaiterView>) -> Stri
         let _ = writeln!(out, "  plan:      {plan} step {step}");
     }
     if let Some(w) = &j.cancel_requested_by {
-        let _ = writeln!(out, "  cancel requested by {w}");
+        match &j.cancel_reason {
+            Some(why) => {
+                let _ = writeln!(out, "  cancel requested by {w}: {why}");
+            }
+            None => {
+                let _ = writeln!(out, "  cancel requested by {w}");
+            }
+        }
+    }
+    if let Some(t) = j.timeout_secs {
+        let _ = writeln!(out, "  timeout:   {}", fmt_precise(t as f64));
+    }
+    if let Some(rp) = &j.remote_phase {
+        let _ = writeln!(out, "  remote:    {}", phase_tag(rp));
     }
     if let Some(n) = wait_note(j, waiter) {
         let _ = writeln!(out, "  {n}");
@@ -435,9 +461,19 @@ fn slots_section(out: &mut String, s: &StatusSnapshot) {
 fn queue_state(out: &mut String, s: &StatusSnapshot) {
     let d = &s.daemon;
     if d.draining {
-        out.push_str(
-            "queue: DRAINING: no new job starts until the daemon restarts; `tasks2 resume` resumes it\n",
-        );
+        match (&d.drained_by, d.drained_at_ms) {
+            // R-189: who stopped it, how long ago and how to resume, not "worker not running"
+            (Some(who), Some(at)) => {
+                let ago = fmt_precise(((d.now_ms - at).max(0) / 1000) as f64);
+                let _ = writeln!(
+                    out,
+                    "queue: DRAINING: stopped by {who}, {ago} ago, resume with `tasks2 resume` (no new job starts until then or the next daemon start)"
+                );
+            }
+            _ => out.push_str(
+                "queue: DRAINING: no new job starts until the daemon restarts; `tasks2 resume` resumes it\n",
+            ),
+        }
     }
     if !d.execution_enabled {
         out.push_str(
@@ -598,6 +634,10 @@ pub fn admission(s: &StatusSnapshot, client_lock_dir: Option<&Path>) -> String {
 pub struct StatRow {
     /// The recipe.
     pub recipe: String,
+    /// The machine the samples come from; `None` when rows come from finished jobs.
+    pub machine: Option<String>,
+    /// The test target of a per-target row (`test:lifecycle`); `None` for the whole job.
+    pub target: Option<String>,
     /// Finished runs.
     pub runs: usize,
     /// Passed runs.
@@ -608,10 +648,21 @@ pub struct StatRow {
     pub p90_secs: f64,
 }
 
+fn row_label(r: &StatRow) -> String {
+    let mut s = truncate_end(&r.recipe, 90);
+    if let Some(m) = &r.machine {
+        let _ = write!(s, "  @{m}");
+    }
+    if let Some(t) = &r.target {
+        let _ = write!(s, "  > {t}");
+    }
+    s
+}
+
 /// `tasks2 stats` table.
 pub fn stats(rows: &[StatRow]) -> String {
     if rows.is_empty() {
-        return "(no finished jobs)\n".to_string();
+        return "(no timing samples)\n".to_string();
     }
     let mut out = format!(
         "{:>5} {:>6} {:>8} {:>8}  RECIPE\n",
@@ -625,7 +676,7 @@ pub fn stats(rows: &[StatRow]) -> String {
             r.passed,
             fmt_precise(r.median_secs),
             fmt_precise(r.p90_secs),
-            truncate_end(&r.recipe, 90)
+            row_label(r)
         );
     }
     out

@@ -111,6 +111,8 @@ impl World {
             requirements: Requirements::default(),
             placement: Placement::Peer(MachineName("nixos".into())),
             after: vec![],
+            timeout_secs: None,
+            broad_test_escape: false,
         }
     }
 

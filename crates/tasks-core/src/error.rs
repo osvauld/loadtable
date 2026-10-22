@@ -26,6 +26,9 @@ pub enum CoreError {
     /// More than 64 `after` entries.
     #[error("too many dependencies: {0} (max 64)")]
     TooManyDeps(usize),
+    /// The wall-clock limit is zero or above [`crate::MAX_TIMEOUT_SECS`].
+    #[error("timeout of {0} s is outside 1..={max} s", max = crate::MAX_TIMEOUT_SECS)]
+    BadTimeout(u64),
     /// argv names a denied device.
     #[error("argv mentions denied device {0}")]
     DeniedDevice(String),
