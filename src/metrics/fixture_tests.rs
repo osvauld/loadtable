@@ -585,6 +585,7 @@ fn build(s: &Scenario) -> Snapshot {
         scan: &scan,
         blockers: &s.blockers,
         worker_running: true,
+        stopped: None,
     })
 }
 
