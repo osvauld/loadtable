@@ -365,6 +365,29 @@ pub fn strip_jobs(argv: &[String]) -> Vec<String> {
     out
 }
 
+/// The parallelism a direct Cargo command asks for (`-j N`, `-jN`, `--jobs N`, `--jobs=N`, or a
+/// `CARGO_BUILD_JOBS=` assignment in an `env` prefix; a flag wins), `None` when it asks for none.
+pub fn requested_jobs(argv: &[String]) -> Option<u64> {
+    let cargo = cargo_index(argv)?;
+    let mut jobs = argv[..cargo]
+        .iter()
+        .rev()
+        .find_map(|w| w.strip_prefix("CARGO_BUILD_JOBS="))
+        .and_then(|v| v.parse().ok());
+    let mut rest = argv[cargo + 1..].iter();
+    while let Some(word) = rest.next() {
+        let value = match word.as_str() {
+            "--" => break,
+            "-j" | "--jobs" => rest.next().map(String::as_str),
+            w => w.strip_prefix("--jobs=").or_else(|| w.strip_prefix("-j")),
+        };
+        if let Some(n) = value.and_then(|v| v.parse().ok()) {
+            jobs = Some(n);
+        }
+    }
+    jobs
+}
+
 /// A Cargo command with the user's parallelism replaced by `CARGO_BUILD_JOBS=jobs` in an
 /// `env` prefix (merged into an existing one). Anything that is not a plain `cargo` or
 /// `env NAME=value... cargo` command is returned unchanged.

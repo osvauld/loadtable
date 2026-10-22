@@ -1521,6 +1521,49 @@ fn drain<R: Read + Send + 'static>(mut reader: R, dir: PathBuf) -> std::thread::
 }
 
 const DEFAULT_CARGO_BUILD_JOBS: &str = "2";
+/// `admission::cargo_jobs_when_busy`: while another compile-class job holds a slot on this
+/// machine, a Cargo command's `-j` (or the injected default) above `min(cap, when_busy)` is
+/// replaced by it. A lone job, and any other command, runs as submitted.
+fn lower_busy_jobs(
+    dir: &Path,
+    resource: &crate::local_command::Resource,
+    argv: Vec<String>,
+) -> Vec<String> {
+    use crate::local_command::Resource;
+    if *resource != Resource::Compile || !crate::placement::is_cargo(&argv) {
+        return argv;
+    }
+    let Ok(Some(when_busy)) = crate::policy::effective()
+        .policy
+        .admission
+        .cargo_jobs_when_busy()
+    else {
+        return argv;
+    };
+    let Ok(thresholds) = admission::Thresholds::from_env() else {
+        return argv;
+    };
+    let others = admission::other_compile_jobs_running(unsafe { libc::getppid() } as u32);
+    let default = DEFAULT_CARGO_BUILD_JOBS.parse().unwrap_or(2);
+    let Some(jobs) = admission::lowered_cargo_jobs(
+        crate::placement::requested_jobs(&argv),
+        default,
+        thresholds.max_cargo_jobs,
+        Some(when_busy),
+        others > 0,
+    ) else {
+        return argv;
+    };
+    append_log(
+        dir,
+        format!(
+            "tasks: {others} other compile job(s) running; Cargo -j lowered to {jobs} \
+             (admission::cargo_jobs_when_busy)\n"
+        )
+        .as_bytes(),
+    );
+    crate::placement::apply_jobs(&argv, jobs)
+}
 /// The only daemon environment variables an admitted command inherits.
 const PASSTHROUGH_ENV: [&str; 12] = [
     "HOME",
@@ -1728,6 +1771,7 @@ fn run_command(state: &Path, dir: &Path, job: &crate::Job, stage: &str) -> Resul
             )
             .as_bytes(),
         );
+        let argv = lower_busy_jobs(dir, &recipe.resource, argv);
         let mut cmd = sanitized(Path::new(&argv[0]));
         cmd.args(&argv[1..]).current_dir(&job.spec.source);
         // tasks-offload names its per-job sidecar after this (cluster-snapshot.md).

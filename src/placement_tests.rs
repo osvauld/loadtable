@@ -779,3 +779,15 @@ fn the_recorded_decision_becomes_one_job_log_line_with_each_machine_s_wait() {
     assert_eq!(line.matches("wait ").count(), 2, "{line}");
     assert!(line.ends_with('\n'));
 }
+
+#[test]
+fn requested_jobs_reads_flags_and_the_env_prefix() {
+    let jobs = |text: &str| requested_jobs(&words(text));
+    assert_eq!(jobs("cargo test"), None);
+    assert_eq!(jobs("cargo test -j 4"), Some(4));
+    assert_eq!(jobs("cargo test --jobs=5 -p x"), Some(5));
+    assert_eq!(jobs("env CARGO_BUILD_JOBS=6 cargo check"), Some(6));
+    assert_eq!(jobs("env CARGO_BUILD_JOBS=6 cargo check -j3"), Some(3));
+    assert_eq!(jobs("cargo test -- -j 9"), None, "the harness's own flag");
+    assert_eq!(jobs("make -j 4"), None);
+}
