@@ -1,5 +1,11 @@
 //! Scripted stdio sessions end to end against a scripted daemon (R-194, R-195).
 #![allow(missing_docs)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 mod common;
 

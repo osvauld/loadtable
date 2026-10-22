@@ -1,5 +1,11 @@
 //! One group of tests per tool, against a scripted daemon.
 #![allow(missing_docs)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 mod common;
 

@@ -96,8 +96,8 @@ impl ToolResult {
             "content": [{"type": "text", "text": self.text}],
             "structuredContent": self.structured,
         });
-        if self.is_error {
-            v["isError"] = Value::Bool(true);
+        if let (true, Some(o)) = (self.is_error, v.as_object_mut()) {
+            o.insert("isError".into(), Value::Bool(true));
         }
         v
     }

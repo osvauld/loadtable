@@ -1,4 +1,10 @@
 #![allow(dead_code, missing_docs)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 //! Helpers shared by the integration tests.
 
 use serde_json::{Value, json};
