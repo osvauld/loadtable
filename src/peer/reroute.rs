@@ -8,13 +8,13 @@
 //! Each round runs on a blocking thread with its own ledger connection and talks to this
 //! daemon through its socket (status) like every other client; nothing here holds the
 //! request threads' store lock.
-use super::records::{Paths, inbound_records};
+use super::records::{OutboundLink, Paths, inbound_records, read_json};
 use super::runtime::Shared;
 use crate::peer_link::{PeersReport, STREAM_OFFLINE};
 use crate::placement::{self, Peer};
 use crate::reroute::{
-    self, Action as Verb, Candidate, Claim, ENABLE_ENV, Policy, Reroute, STATE_MOVING,
-    TEST_TICKS_ENV, Verdict,
+    self, Action as Verb, Candidate, Claim, ENABLE_ENV, Forwarded, Policy, PullAction, PullVerdict,
+    Reroute, STATE_MOVING, STATE_PULLED_BACK, TEST_TICKS_ENV, Verdict,
 };
 use crate::{Job, Store};
 use serde::Serialize;
@@ -45,10 +45,11 @@ pub fn start(shared: &Arc<Shared>, report: &Arc<Mutex<PeersReport>>) {
         return;
     }
     log(format!(
-        "reroute: on: re-scoring waiting jobs every {}s; a job moves when a peer finishes it >= {}x and >= {} sooner{}",
+        "reroute: on: re-scoring waiting jobs every {}s; a job moves when a peer finishes it >= {}x and >= {} sooner; pull-back {}{}",
         policy.interval.as_secs_f64(),
         policy.min_ratio,
         placement::duration(policy.min_gain_s),
+        if policy.pull_back { "on" } else { "off" },
         if policy.force { " [TEST FORCE]" } else { "" }
     ));
     let ticks = test_ticks_dir();
@@ -115,8 +116,14 @@ async fn periodic(shared: Arc<Shared>, report: Arc<Mutex<PeersReport>>, policy: 
     let mut holders: HashMap<i64, (f64, Instant)> = HashMap::new();
     // Jobs whose first "stays" verdict was logged (one line per job, not one per round).
     let mut told: HashSet<i64> = HashSet::new();
+    let mut last_pull: Option<Instant> = None;
+    let mut told_pull: HashSet<i64> = HashSet::new();
     loop {
         tokio::time::sleep(PROBE).await;
+        if policy.pull_back && last_pull.is_none_or(|t| t.elapsed() >= policy.interval) {
+            last_pull = Some(Instant::now());
+            pull_back_round(&shared, &report, &policy, &mut told_pull).await;
+        }
         let now_online = online_peers(&report);
         let came_online: Vec<String> = now_online.difference(&online).cloned().collect();
         online = now_online;
@@ -194,6 +201,9 @@ async fn ticked(
                 Ok(None) => serde_json::json!({"skipped": true}),
                 Err(e) => serde_json::json!({"error": e}),
             };
+            if policy.pull_back {
+                pull_back_round(&shared, &report, &policy, &mut HashSet::new()).await;
+            }
             let tmp = dir.join(format!("{name}.tmp"));
             if std::fs::write(&tmp, serde_json::to_vec_pretty(&body).unwrap_or_default()).is_ok() {
                 let _ = std::fs::rename(&tmp, dir.join(format!("{name}.done")));
@@ -400,4 +410,203 @@ fn move_one(
         reroute::flush_pending_line(state, store, job.id);
     }
     Ok(claim)
+}
+
+// ---- pull-back ----------------------------------------------------------------------------------
+
+/// The running forwards of this machine (bridges of `tasks peer-forward`), with what the link
+/// and placement records say about them.
+fn forwards(state: &Path, store: &Store) -> crate::Result<Vec<(Forwarded, Job)>> {
+    let mut out = vec![];
+    for job in store.building_jobs()? {
+        if !job.execution.as_ref().is_some_and(|e| e.local_command) {
+            continue;
+        }
+        let link: Option<OutboundLink> = read_json(&Paths::new(state).link(job.id));
+        let remote = link.map_or((None, None, None), |l| {
+            (l.remote_job_id, l.remote_phase, l.remote_state)
+        });
+        let requested = placement::recorded(state, job.id)
+            .and_then(|r| r["requested"].as_str().map(str::to_owned));
+        let pinned = reroute::pinned(state, job.id);
+        if let Some(f) = Forwarded::from_job(&job, pinned, requested, remote) {
+            out.push((f, job));
+        }
+    }
+    Ok(out)
+}
+
+/// One pull-back pass: decides on a blocking thread, then for a pull cancels the peer's copy
+/// over the peer link and only on a CONFIRMED cancel restores the local spec. Any doubt leaves
+/// the job as it is (the bridge keeps following the peer's copy): never run twice.
+async fn pull_back_round(
+    shared: &Arc<Shared>,
+    report: &Arc<Mutex<PeersReport>>,
+    policy: &Policy,
+    told: &mut HashSet<i64>,
+) {
+    let (s, r, p) = (Arc::clone(shared), Arc::clone(report), policy.clone());
+    let decided = tokio::task::spawn_blocking(move || pull_back_decide(&s, &r, &p)).await;
+    let (verdicts, jobs, here) = match decided {
+        Ok(Ok(Some(d))) => d,
+        Ok(Ok(None)) => return,
+        Ok(Err(e)) => return (shared.log)(format!("reroute: pull-back round failed: {e}")),
+        Err(_) => return,
+    };
+    for v in &verdicts {
+        let PullAction::Pull {
+            peer,
+            argv,
+            blocker,
+        } = &v.action
+        else {
+            if told.insert(v.job) {
+                (shared.log)(format!("reroute: forwarded job {} {}", v.job, v.line));
+            }
+            continue;
+        };
+        let Some(job) = jobs.iter().find(|j| j.id == v.job).cloned() else {
+            continue;
+        };
+        let state = shared.paths.state.clone();
+        // Before the cancel: the worker must wait for the spec change when the bridge ends.
+        let marker = reroute::pull_back_marker(&state, job.id);
+        if std::fs::write(&marker, b"").is_err() {
+            continue;
+        }
+        let cancelled = super::forward::propagate_cancel(shared, job.id).await;
+        let link = read_json::<OutboundLink>(&shared.paths.link(job.id));
+        if !cancel_confirmed(&cancelled, link.as_ref()) {
+            let _ = std::fs::remove_file(&marker);
+            (shared.log)(format!(
+                "reroute: job {} stays on {peer}: the cancel of its copy is not confirmed ({}); nothing restored",
+                job.id,
+                cancelled
+                    .err()
+                    .unwrap_or_else(|| "no terminal phase".into())
+            ));
+            continue;
+        }
+        let (line, argv, peer, blocker, reason, id, here) = (
+            format!(
+                "tasks: pulled back from {peer}: {blocker}; running here (compile slot free)\n"
+            ),
+            argv.clone(),
+            peer.clone(),
+            blocker.clone(),
+            v.line.clone(),
+            job.id,
+            here.clone(),
+        );
+        let (here_s, there_s) = (v.here_s, v.there_s);
+        let claimed = tokio::task::spawn_blocking(move || -> crate::Result<Claim> {
+            let mut store = Store::open(&state.join("tasks.sqlite"))?;
+            let pulled = reroute::pulled_spec(&job.spec, &argv)?;
+            let record = Reroute {
+                state: STATE_PULLED_BACK.into(),
+                moved_from: peer,
+                moved_to: here,
+                reason,
+                at: crate::execution::now(),
+                moves: 0,
+                local_s: Some(here_s),
+                peer_s: Some(there_s),
+                remote_job_id: None,
+                note: Some(blocker),
+                returned_at: None,
+                log_pending: false,
+                original_spec: None,
+            };
+            let claim = store.claim_pull_back(id, &job.spec, &pulled, &record)?;
+            if claim == Claim::Claimed {
+                let _ = reroute::append_job_log(&state, id, &line);
+            }
+            let _ = std::fs::remove_file(reroute::pull_back_marker(&state, id));
+            Ok(claim)
+        })
+        .await;
+        (shared.log)(match claimed {
+            Ok(Ok(Claim::Claimed)) => format!("reroute: job {id}: {}", v.line),
+            Ok(Ok(Claim::Refused(why))) => format!(
+                "reroute: job {id}: its copy on the peer was cancelled but the pull-back was refused ({why})"
+            ),
+            Ok(Err(e)) => format!("reroute: job {id}: pull-back failed after the cancel: {e}"),
+            Err(e) => format!("reroute: job {id}: pull-back failed after the cancel: {e}"),
+        });
+    }
+}
+
+/// Whether the peer's copy is certainly cancelled: the cancel call succeeded AND the link
+/// record shows the remote job terminal as `cancelled` (not passed/failed, not still live).
+/// Anything else is uncertain and restores nothing.
+fn cancel_confirmed(call: &Result<(), String>, link: Option<&OutboundLink>) -> bool {
+    call.is_ok()
+        && link.is_some_and(|l| {
+            l.remote_state.as_deref() == Some("terminal")
+                && l.remote_phase.as_deref() == Some("cancelled")
+        })
+}
+
+type Decided = (Vec<PullVerdict>, Vec<Job>, String);
+
+fn pull_back_decide(
+    shared: &Shared,
+    report: &Mutex<PeersReport>,
+    policy: &Policy,
+) -> crate::Result<Option<Decided>> {
+    let state = &shared.paths.state;
+    let store = Store::open(&state.join("tasks.sqlite"))?;
+    let found = forwards(state, &store)?;
+    if !found
+        .iter()
+        .any(|(f, _)| reroute::pull_back_ineligible(f).is_none())
+    {
+        return Ok(None);
+    }
+    let local = crate::request_status(&shared.socket, Duration::from_secs(30))?
+        .status
+        .ok_or("daemon returned no status")?;
+    let peers = peers_of(&fresh(report));
+    let local_jobs =
+        crate::admission::submission_max_cargo_jobs().unwrap_or(placement::DEFAULT_JOBS);
+    let list: Vec<Forwarded> = found.iter().map(|(f, _)| f.clone()).collect();
+    let verdicts = reroute::decide_pull_back(&list, &local, local_jobs, &peers, policy);
+    let jobs = found.into_iter().map(|(_, j)| j).collect();
+    Ok(Some((verdicts, jobs, local.machine.id)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn link(state: &str, phase: &str) -> OutboundLink {
+        OutboundLink {
+            remote_state: Some(state.into()),
+            remote_phase: Some(phase.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn only_a_confirmed_cancel_lets_the_job_come_back() {
+        let ok = Ok(());
+        assert!(cancel_confirmed(&ok, Some(&link("terminal", "cancelled"))));
+        // Uncertain: the call failed, the record is missing, or the copy is not cancelled.
+        let err = Err("cancel of job 77 on nixos: timed out".to_string());
+        assert!(!cancel_confirmed(
+            &err,
+            Some(&link("terminal", "cancelled"))
+        ));
+        assert!(!cancel_confirmed(&ok, None));
+        assert!(!cancel_confirmed(
+            &ok,
+            Some(&link("attached", "waiting_build"))
+        ));
+        assert!(!cancel_confirmed(
+            &ok,
+            Some(&link("uncertain", "cancelled"))
+        ));
+        // It finished on the peer meanwhile: the bridge delivers that result.
+        assert!(!cancel_confirmed(&ok, Some(&link("terminal", "passed"))));
+    }
 }
