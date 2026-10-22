@@ -355,6 +355,40 @@ New in v2 (design `DESIGN-peers-sync-audit.md` §2-§5). R-174 (LAN-only config,
 | R-267 | `peers` and `peers revoke` render the table, JSON and the empty case. | `r267_*` | any |
 | R-268 | `identity show` needs no daemon; the backup phrase goes only to a terminal, never JSON; a missing identity says when it appears. | `r268_*` | any |
 
+## 16. Audit
+
+New in v2 (design `DESIGN-peers-sync-audit.md` §8). The `audit` table is an append-only hash chain in the ledger (schema 6); `AuditLedger` is its storage trait (SQLite and in-memory), `AuditLog` the signing writer. Actions are dotted strings (`job.cancelled`, `grant.revoked`, ...) with a known set in `tasks_ledger::action::KNOWN`, so data-transfer and pressure events (design steps 3 and 4) add names without a schema or API change. Retention defaults to 90 days (`audit.retention_days`), checkpoints every 100 rows (`audit.checkpoint_every`).
+
+| id | behaviour that must hold | source | platform |
+|---|---|---|---|
+| R-269 | Schema 5 upgrades to 6 keeping jobs, peers, grants and spent nonces. | `tasks-ledger` `r269_a_v5_database_upgrades_to_v6_and_keeps_its_jobs_and_trust_rows` | any |
+| R-270 | A clean chain verifies from genesis; an edited row is found at that row, and recomputing that row's own hash only moves the break to the next row. | `r270_*` | any |
+| R-271 | A deleted row is a gap; deleting the oldest rows without the prune record that accounts for them is reported as missing history. | `r271_*` | any |
+| R-272 | Reordered rows, in memory or by swapping sequence numbers in SQL, are found. | `r272_reordered_rows_are_found` | any |
+| R-273 | Pruning writes a record carrying the hash of the last pruned row, then deletes the prefix in the same transaction; verify works from the oldest survivor, also after a second prune; a doctored prune record is found. | `r273_*` | any |
+| R-274 | A checkpoint row carries the head hash and a signature by the machine key, every N rows (also across a restart) or on demand; verify reports how far signatures reach. | `r274_*` | any |
+| R-275 | A forged signature and a checkpoint signed by another machine are named failures (`bad_signature`, `unexpected_signer`); a daemon without a key writes checkpoints that vouch for nothing. | `r275_*` | any |
+| R-276 | No token, ticket, key, mnemonic or command line is stored: secret-named keys and token-shaped text are redacted, long text is cut, details are bounded, and a full pairing leaves none of its secrets in any row. | `r276_*` (ledger and peer), `r290_a_job_leaves_submitted_started_and_ended_rows_without_its_arguments` | any |
+| R-277 | A repeating event (a refused peer retrying) is throttled per key and the next row counts what was dropped; connection opens and closes are never recorded, so link probes cannot flood the chain. | `r277_*` (ledger and peer) | any |
+| R-278 | Pairing, grant issue/renewal/revoke and refusals reach the audit log through the `TrustEvents` sink, 50 probes add no row. | `r278_pairing_grants_and_revocation_are_audited_and_probes_are_not` | any |
+| R-279 | A cancel records who asked and why (once; a repeat or a refused non-owner adds nothing), a running job's request and then its end, a dependency failure as the requester, and a peer cancelling its job as the actor. | `r279_*` | any |
+| R-280 | A job received from a peer is recorded with the paired peer's DID as actor and peer (looked up from the trust ledger) and the owner as given; an unpaired node keeps its node id and this machine as actor; a forward records the peer's DID once. | `r280_*` | any |
+| R-281 | A failing audit write never fails the action it describes; the error is kept for the daemon to show. | `r281_a_failing_store_does_not_fail_the_caller_and_the_error_is_kept` | any |
+| R-282 | `audit` filters by time, job, peer (name or DID), action or family, limits rows, names this machine and its peers; `audit_verify` reports ok, the signed reach or the first break; older requests without the new fields parse. | `r282_*` | any |
+| R-283 | `tasks2 audit` sends its filters, prints oldest first or as JSON lines, parses durations, unix seconds and UTC dates; `audit verify` prints ok or the first break and exits 0 or 1; `audit checkpoint` signs on demand. | `r283_*` (cli and args) | any |
+| R-284 | The MCP `audit` tool is read-only, closed-schema, bounded, and rejects unknown arguments and bad times before asking the daemon. | `r284_*` | any |
+| R-285 | The Audit tab asks for the filter typed (action family, peer, job) and shows time, action, actor, owner, job, peer and details; a bad job id is said so; errors are text. | `tasks-ui` `r285_*`, `screenshots` | any |
+| R-286 | `audit.retention_days` (default 90, `off` keeps all) and `audit.checkpoint_every` (default 100) are machine policy keys with env overrides and bounds. | `r286_audit_retention_is_ninety_days_by_default_and_can_be_changed_or_turned_off` | any |
+| R-287 | A job refused by a submit rule (local or from a peer) is recorded with the rule id (R-191, R-210, R-091) and, for a peer, its DID; never the command line. | `r287_*` | any |
+| R-288 | Drain and resume record who, once per change. | `r288_drain_and_resume_record_who_and_a_repeat_adds_nothing` | any |
+| R-289 | A timeout records which limit (wall or idle) and then the end with its wall time. | `r289_a_timeout_is_recorded_with_which_limit_and_then_the_end` | any |
+| R-290 | A job leaves submitted, started and ended rows (owner, program, kind, placement, phase, exit); an end the ledger refuses adds none. | `r290_*` | any |
+| R-291 | Audit rows persist across a reopen and the chain continues. | `r291_rows_persist_across_a_reopen_and_the_chain_continues` | any |
+| R-292 | The hourly maintenance prunes rows older than the policy's retention and the chain still verifies. | `r292_old_rows_are_pruned_by_the_policys_retention_and_the_chain_still_verifies` | any |
+| R-293 | Peer link probes that find nothing new add no row; up, down and direct-to-relay changes add one each; a flapping link is capped per minute. | `r293_*` | any |
+| R-294 | A real daemon audits into the ledger, signs checkpoints with its identity, and keeps and extends the chain across a restart. | `r294_a_real_daemon_audits_to_the_ledger_signs_checkpoints_and_keeps_rows_across_a_restart` | any |
+| R-295 | Queries filter by time, job, peer or actor, and action or family (`job` matches `job.*`, not `jo`), newest first. | `r295_queries_filter_by_time_job_peer_and_action_family` | any |
+
 ## Not to carry over (compatibility shims)
 
 - **Legacy ledger migration** (`execution.rs` `legacy_ledger_migration_does_not_approve_backlog`): the new ledger starts with its own schema. If a migration exists at all, keep only its invariant: an imported backlog is never auto-approved.
