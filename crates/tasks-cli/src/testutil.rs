@@ -284,6 +284,7 @@ pub fn status_snapshot() -> StatusSnapshot {
             memory_full: None,
             cpu: Some(40.0),
             io: None,
+            memory_total: None,
             available_memory: Some(8 << 30),
             cache_free: Some(100 << 30),
             state_free: None,

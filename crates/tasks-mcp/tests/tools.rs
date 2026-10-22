@@ -1013,6 +1013,7 @@ fn snapshot() -> tasks_daemon::api::StatusSnapshot {
             cpu: Some(40.0),
             io: None,
             available_memory: Some(8 << 30),
+            memory_total: None,
             cache_free: Some(50 << 30),
             state_free: None,
             compile_blocker: Some("cpu pressure 40%".into()),
@@ -1035,6 +1036,7 @@ fn snapshot() -> tasks_daemon::api::StatusSnapshot {
             state: "up".into(),
             last_seen_ago_secs: Some(1),
             detail: String::new(),
+            machine: None,
         }],
     }
 }

@@ -701,6 +701,9 @@ pub struct PressureView {
     pub io: Option<f32>,
     /// Available memory in bytes.
     pub available_memory: Option<u64>,
+    /// Total memory in bytes, when the machine reported it.
+    #[serde(default)]
+    pub memory_total: Option<u64>,
     /// Free bytes where cache output lands.
     pub cache_free: Option<u64>,
     /// Free bytes where state lives.
@@ -737,6 +740,44 @@ pub struct PeerView {
     pub last_seen_ago_secs: Option<u64>,
     /// The last probe's error, or empty.
     pub detail: String,
+    /// What the peer last said about itself, when it ever answered. It can be old: read it
+    /// with `state` and `last_seen_ago_secs`.
+    #[serde(default)]
+    pub machine: Option<PeerMachineView>,
+}
+
+/// What a peer last reported about itself: facts, slots, queue depth and pressure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerMachineView {
+    /// Logical cores.
+    pub cores: u32,
+    /// Total memory in bytes.
+    pub memory_bytes: u64,
+    /// Slot usage by kind (`compile`, `run`, `offload`, `device`).
+    pub slots: Vec<PeerSlotView>,
+    /// Jobs waiting on the peer.
+    pub waiting: u32,
+    /// Jobs running on the peer.
+    pub running: u32,
+    /// CPU pressure percent, when known.
+    pub cpu_pct: Option<u8>,
+    /// Memory pressure percent, when known.
+    pub memory_pct: Option<u8>,
+    /// I/O pressure percent, when known.
+    pub io_pct: Option<u8>,
+    /// What blocks a new compile job there, or empty.
+    pub pressure_summary: String,
+}
+
+/// One peer slot kind.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerSlotView {
+    /// Slot kind name.
+    pub kind: String,
+    /// Slots of this kind.
+    pub total: u32,
+    /// Slots held.
+    pub used: u32,
 }
 
 /// The status snapshot.
@@ -1031,6 +1072,22 @@ mod tests {
         };
         assert_eq!(h.samples(&key).unwrap(), vec![s]);
         assert_eq!(h.targets("r").unwrap(), ["test:a"]);
+    }
+
+    #[test]
+    fn older_status_json_without_the_ui_fields_still_parses() {
+        let peer: PeerView = serde_json::from_str(
+            r#"{"name":"nixos","node_id":"n","state":"up","last_seen_ago_secs":1,"detail":""}"#,
+        )
+        .unwrap();
+        assert_eq!(peer.machine, None);
+        let p: PressureView = serde_json::from_str(
+            r#"{"memory":"normal","memory_some":null,"memory_full":null,"cpu":null,"io":null,
+                "available_memory":null,"cache_free":null,"state_free":null,
+                "compile_blocker":null,"warning":null}"#,
+        )
+        .unwrap();
+        assert_eq!(p.memory_total, None);
     }
 
     #[test]

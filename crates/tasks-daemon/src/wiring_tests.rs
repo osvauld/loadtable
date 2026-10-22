@@ -495,6 +495,7 @@ fn r222_stale_and_offline_peers_alert_after_the_grace_period_and_clear() {
         state,
         last_seen_ago_secs: ago,
         detail: "connect timed out".into(),
+        status: None,
     };
     *f.links.lock().unwrap() = vec![report(LinkState::Up, Some(1))];
     r.tick();

@@ -4,6 +4,7 @@ use crate::api::{
     DaemonView, JobView, MAX_STATUS_WAITERS, PeerView, PressureView, RunningView, SlotGroupView,
     SlotView, StatusSnapshot, WaiterView,
 };
+use crate::api::{PeerMachineView, PeerSlotView};
 use crate::queue_estimate::start_offsets;
 use crate::scheduler::{RunningJob, Scheduler, lock, shorten};
 use std::collections::BTreeMap;
@@ -13,6 +14,29 @@ use tasks_admission::{Lane, check_gates, kind_name};
 use tasks_core::{Phase, SlotKind};
 use tasks_ledger::{JobRecord, ListFilter};
 use tasks_timing::progress;
+
+/// What a peer last reported about itself, as the status snapshot shows it.
+fn peer_machine_view(s: &tasks_peer::proto::PeerStatus) -> PeerMachineView {
+    PeerMachineView {
+        cores: s.machine.cores,
+        memory_bytes: s.machine.memory_bytes,
+        slots: s
+            .slots
+            .iter()
+            .map(|x| PeerSlotView {
+                kind: kind_name(x.kind).to_string(),
+                total: x.total,
+                used: x.used,
+            })
+            .collect(),
+        waiting: s.queue.waiting,
+        running: s.queue.running,
+        cpu_pct: s.pressure.cpu_pct,
+        memory_pct: s.pressure.memory_pct,
+        io_pct: s.pressure.io_pct,
+        pressure_summary: s.pressure.summary.clone(),
+    }
+}
 
 /// A job row for the API. The environment is left out on purpose.
 pub fn job_view(r: &JobRecord) -> JobView {
@@ -236,6 +260,7 @@ impl Scheduler {
                     state: l.state.name().to_string(),
                     last_seen_ago_secs: l.last_seen_ago_secs,
                     detail: l.detail,
+                    machine: l.status.map(|s| peer_machine_view(&s)),
                 })
                 .collect(),
         }
@@ -251,6 +276,7 @@ impl Scheduler {
                 cpu: r.pressure.cpu,
                 io: r.pressure.io,
                 available_memory: Some(r.available_memory),
+                memory_total: admitter.memory.snapshot().ok().map(|m| m.total_bytes),
                 cache_free: Some(r.cache_free),
                 state_free: Some(r.state_free),
                 compile_blocker: check_gates(
@@ -270,11 +296,63 @@ impl Scheduler {
                 cpu: None,
                 io: None,
                 available_memory: None,
+                memory_total: None,
                 cache_free: None,
                 state_free: None,
                 compile_blocker: Some(format!("cannot measure the machine: {e}")),
                 warning: Some(e.to_string()),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod peer_view_tests {
+    use super::*;
+    use tasks_peer::proto::{PeerStatus, PressureSummary, QueueSummary, SlotStatus};
+
+    #[test]
+    fn a_peers_last_report_reaches_the_status_view() {
+        let machine = tasks_core::Machine {
+            name: tasks_core::MachineName("nixos".into()),
+            os: tasks_core::Os::Linux,
+            arch: tasks_core::Arch::current(),
+            cores: 16,
+            memory_bytes: 64 << 30,
+            tools: Default::default(),
+            devices: Default::default(),
+        };
+        let v = peer_machine_view(&PeerStatus {
+            machine,
+            slots: vec![SlotStatus {
+                kind: SlotKind::Compile,
+                total: 4,
+                used: 3,
+            }],
+            queue: QueueSummary {
+                waiting: 2,
+                running: 3,
+            },
+            pressure: PressureSummary {
+                cpu_pct: Some(40),
+                memory_pct: None,
+                io_pct: Some(0),
+                summary: "memory stalls".into(),
+            },
+        });
+        assert_eq!(
+            (v.cores, v.memory_bytes, v.waiting, v.running),
+            (16, 64 << 30, 2, 3)
+        );
+        assert_eq!(
+            (v.slots[0].kind.as_str(), v.slots[0].total, v.slots[0].used),
+            ("compile", 4, 3)
+        );
+        // unknown stays unknown; a measured zero stays zero
+        assert_eq!(
+            (v.cpu_pct, v.memory_pct, v.io_pct),
+            (Some(40), None, Some(0))
+        );
+        assert_eq!(v.pressure_summary, "memory stalls");
     }
 }

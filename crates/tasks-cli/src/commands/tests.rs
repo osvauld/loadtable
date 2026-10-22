@@ -1507,8 +1507,9 @@ fn r114_stats_come_from_the_history_per_machine_and_leave_out_cancelled_samples(
 fn r199_ui_and_mcp_fail_with_built_without_and_exit_2() {
     let c = never_called();
     for name in ["ui", "mcp"] {
-        if name == "mcp" && crate::MCP_BUILT {
-            // with the feature the command serves stdio; `crate::mcp` has its own tests
+        if (name == "mcp" && crate::MCP_BUILT) || (name == "ui" && crate::UI_BUILT) {
+            // with the feature the command serves stdio or opens a window; the front ends
+            // have their own tests
             continue;
         }
         let r = Harness::default().run(&c, &[name]);
