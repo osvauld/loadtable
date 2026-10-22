@@ -39,7 +39,11 @@ fn r233_the_keystore_is_created_once_mode_0600_and_reopens_to_the_same_identity(
     let d = dir();
     let first = Keystore::open_or_create(d.path()).unwrap();
     assert!(first.created());
-    let mode = std::fs::metadata(first.path()).unwrap().permissions().mode() & 0o777;
+    let mode = std::fs::metadata(first.path())
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
     assert_eq!(mode, 0o600);
     let second = Keystore::open_or_create(d.path()).unwrap();
     assert!(!second.created());

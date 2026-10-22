@@ -52,7 +52,12 @@ pub struct Keystore {
 
 impl std::fmt::Debug for Keystore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Keystore({}, {})", self.path.display(), self.identity.did())
+        write!(
+            f,
+            "Keystore({}, {})",
+            self.path.display(),
+            self.identity.did()
+        )
     }
 }
 
@@ -141,9 +146,7 @@ impl Keystore {
                 entropy: hex::encode(&*entropy),
             },
         };
-        let text = Zeroizing::new(
-            serde_json::to_string_pretty(&file).map_err(|e| io(path, e))?,
-        );
+        let text = Zeroizing::new(serde_json::to_string_pretty(&file).map_err(|e| io(path, e))?);
         let tmp = path.with_extension("json.tmp");
         let _ = std::fs::remove_file(&tmp);
         let mut f = std::fs::OpenOptions::new()

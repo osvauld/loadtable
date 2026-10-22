@@ -102,10 +102,7 @@ impl PeerRuntimeFactory for IrohFactory {
         );
         let mut opts = PeerLinkOptions::new(&cfg.machine, Vec::new());
         opts.source = Some(Arc::new(NodePeers(rt.node.clone())));
-        let link = PeerLink::new(
-            TrustedTransport::new(raw, rt.node.clone()),
-            opts,
-        );
+        let link = PeerLink::new(TrustedTransport::new(raw, rt.node.clone()), opts);
         let node = rt.node.clone();
         let endpoint = host.endpoint.clone();
         let handle = host.rt.handle().clone();

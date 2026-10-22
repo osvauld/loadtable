@@ -31,8 +31,6 @@ mod runjob;
 pub mod scheduler;
 pub mod server;
 pub mod startup;
-pub mod trust_control;
-pub mod trust_runtime;
 mod status;
 pub mod stuck;
 pub mod submit;
@@ -41,6 +39,8 @@ mod supervise;
 mod testkit;
 #[cfg(test)]
 mod tests;
+pub mod trust_control;
+pub mod trust_runtime;
 #[cfg(test)]
 mod trust_tests;
 #[cfg(test)]

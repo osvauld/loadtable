@@ -4,8 +4,8 @@
 //! older version, an unknown message or an oversized frame is answered with a
 //! named [`Refusal`]; decoding never panics and never waits for more input.
 
-use crate::trust::wire::{PairDone, PairRedeem, PresentAck};
 use crate::ids::{CheckoutId, Hash, RemoteJobId, SubmitKey, hexbytes};
+use crate::trust::wire::{PairDone, PairRedeem, PresentAck};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use tasks_core::{JobSpec, Machine, Phase, SlotKind};

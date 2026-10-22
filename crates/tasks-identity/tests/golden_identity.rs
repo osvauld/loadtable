@@ -3,9 +3,7 @@
 //! from the other two, these fail. Do NOT regenerate. The ECIES vector is not copied because this
 //! crate does not seal to the encryption key yet.
 
-use tasks_identity::{
-    Identity, Signer, did_from_public_key, hex, public_key_from_did, verify,
-};
+use tasks_identity::{Identity, Signer, did_from_public_key, hex, public_key_from_did, verify};
 
 const PHRASE: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";

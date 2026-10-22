@@ -139,7 +139,8 @@ pub fn pair(ctx: &mut Ctx<'_>, action: &PairCommand) -> Result<i32, CliError> {
                 roles,
                 both_ways: *both_ways,
                 ttl_secs,
-            })? else {
+            })?
+            else {
                 return Err(CliError::Failed("unexpected reply to pair invite".into()));
             };
             writeln!(ctx.out, "{}", v.ticket)?;
@@ -187,7 +188,9 @@ pub fn peers(
     json: bool,
 ) -> Result<i32, CliError> {
     if let Some(PeersCommand::Revoke { name }) = action {
-        let Response::Revoked(r) = ctx.client.call(&Request::PeerRevoke { name: name.clone() })?
+        let Response::Revoked(r) = ctx
+            .client
+            .call(&Request::PeerRevoke { name: name.clone() })?
         else {
             return Err(CliError::Failed("unexpected reply to peers revoke".into()));
         };
@@ -216,7 +219,9 @@ pub fn peers(
     }
     let now = (ctx.now_ms)() / 1000;
     let rows: Vec<[String; 7]> = peers.iter().map(|p| peer_row(p, now)).collect();
-    let head = ["NAME", "DID", "WE MAY", "THEY MAY", "EXPIRES", "PATH", "RTT"];
+    let head = [
+        "NAME", "DID", "WE MAY", "THEY MAY", "EXPIRES", "PATH", "RTT",
+    ];
     let mut widths = head.map(str::len);
     for r in &rows {
         for (w, c) in widths.iter_mut().zip(r.iter()) {
@@ -245,7 +250,10 @@ fn peer_row(p: &PeerTrustView, now: i64) -> [String; 7] {
         if v.is_empty() {
             "-".to_string()
         } else {
-            v.iter().map(|r| r.role.as_str()).collect::<Vec<_>>().join(",")
+            v.iter()
+                .map(|r| r.role.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
         }
     };
     let expires = if p.revoked {
@@ -270,7 +278,8 @@ fn peer_row(p: &PeerTrustView, now: i64) -> [String; 7] {
         roles(&p.roles_in),
         expires,
         p.path.clone(),
-        p.rtt_ms.map_or_else(|| "-".to_string(), |r| format!("{r} ms")),
+        p.rtt_ms
+            .map_or_else(|| "-".to_string(), |r| format!("{r} ms")),
     ]
 }
 
@@ -308,7 +317,13 @@ mod tests {
         InviteView, PairedView, PeerTrustView, RevokeView, RoleView,
     };
 
-    fn peer(name: &str, out: &[&str], inn: &[&str], exp: Option<u64>, revoked: bool) -> PeerTrustView {
+    fn peer(
+        name: &str,
+        out: &[&str],
+        inn: &[&str],
+        exp: Option<u64>,
+        revoked: bool,
+    ) -> PeerTrustView {
         let roles = |v: &[&str]| {
             v.iter()
                 .map(|r| RoleView {
@@ -337,7 +352,17 @@ mod tests {
         assert_eq!(parse_ttl("15m").unwrap(), 900);
         assert_eq!(parse_ttl("2h").unwrap(), 7200);
         assert_eq!(parse_ttl("45").unwrap(), 45);
-        for bad in ["", "m", "0", "0m", "-5m", "1d", "abc", "1.5h", "99999999999999999999h"] {
+        for bad in [
+            "",
+            "m",
+            "0",
+            "0m",
+            "-5m",
+            "1d",
+            "abc",
+            "1.5h",
+            "99999999999999999999h",
+        ] {
             assert!(matches!(parse_ttl(bad), Err(CliError::Usage(_))), "{bad}");
         }
     }
@@ -357,12 +382,28 @@ mod tests {
         let h = Harness::default();
         let r = h.run(
             &client,
-            &["pair", "invite", "--role", "submit,observe", "--both-ways", "--ttl", "15m"],
+            &[
+                "pair",
+                "invite",
+                "--role",
+                "submit,observe",
+                "--both-ways",
+                "--ttl",
+                "15m",
+            ],
         );
         assert_eq!(r.code, 0, "{}", r.err);
         assert_eq!(r.out, "tasks1.abc\n", "stdout carries the ticket alone");
-        assert!(r.err.contains("works once") && r.err.contains("15 m"), "{}", r.err);
-        assert!(r.err.contains("both ways") && r.err.contains("tasks2 pair accept"), "{}", r.err);
+        assert!(
+            r.err.contains("works once") && r.err.contains("15 m"),
+            "{}",
+            r.err
+        );
+        assert!(
+            r.err.contains("both ways") && r.err.contains("tasks2 pair accept"),
+            "{}",
+            r.err
+        );
         match &client.requests()[0] {
             Request::PairInvite {
                 roles,
@@ -454,7 +495,13 @@ mod tests {
         let client = Arc::new(FakeClient::from_fn(move |_| {
             Ok(Response::Peers {
                 peers: vec![
-                    peer("nixos", &["submit", "observe"], &["observe"], Some(exp), false),
+                    peer(
+                        "nixos",
+                        &["submit", "observe"],
+                        &["observe"],
+                        Some(exp),
+                        false,
+                    ),
                     peer("old", &[], &[], None, true),
                 ],
             })
@@ -463,16 +510,33 @@ mod tests {
         let r = h.run(&client, &["peers"]);
         assert_eq!(r.code, 0, "{}", r.err);
         let lines: Vec<&str> = r.out.lines().collect();
-        assert!(lines[0].starts_with("NAME") && lines[0].contains("WE MAY") && lines[0].contains("RTT"));
+        assert!(
+            lines[0].starts_with("NAME") && lines[0].contains("WE MAY") && lines[0].contains("RTT")
+        );
         assert!(lines[1].starts_with("nixos"), "{}", r.out);
         assert!(lines[1].contains("did:key:z6MknncV…TfcYvs"), "{}", r.out);
-        assert!(lines[1].contains("submit,observe") && lines[1].contains("in 364 d"), "{}", r.out);
-        assert!(lines[1].contains("direct") && lines[1].contains("3 ms"), "{}", r.out);
-        assert!(lines[2].contains("revoked") && lines[2].contains('-'), "{}", r.out);
+        assert!(
+            lines[1].contains("submit,observe") && lines[1].contains("in 364 d"),
+            "{}",
+            r.out
+        );
+        assert!(
+            lines[1].contains("direct") && lines[1].contains("3 ms"),
+            "{}",
+            r.out
+        );
+        assert!(
+            lines[2].contains("revoked") && lines[2].contains('-'),
+            "{}",
+            r.out
+        );
         // JSON carries the full DID
         let r = h.run(&client, &["peers", "--json"]);
         let v: serde_json::Value = serde_json::from_str(r.out.trim()).unwrap();
-        assert_eq!(v[0]["did"], "did:key:z6MknncVmedphgDSbQoYLyNaFRFdB2WtyjxcFdKV6zTfcYvs");
+        assert_eq!(
+            v[0]["did"],
+            "did:key:z6MknncVmedphgDSbQoYLyNaFRFdB2WtyjxcFdKV6zTfcYvs"
+        );
         assert_eq!(v[0]["roles_out"][0]["role"], "submit");
     }
 
@@ -492,7 +556,10 @@ mod tests {
         let r = h.run(&client, &["peers"]);
         assert!(r.out.contains("tasks2 pair invite") && r.out.contains("tasks2 pair accept"));
         let r = h.run(&client, &["peers", "revoke", "nixos"]);
-        assert_eq!(r.out, "revoked 2 grant(s) of nixos; 1 live connection(s) closed\n");
+        assert_eq!(
+            r.out,
+            "revoked 2 grant(s) of nixos; 1 live connection(s) closed\n"
+        );
     }
 
     #[test]
@@ -517,7 +584,10 @@ mod tests {
     fn id_args(d: &Path, extra: &[&str]) -> (IdentityCommand, Option<std::path::PathBuf>) {
         let mnemonic = extra.contains(&"--mnemonic");
         let json = extra.contains(&"--json");
-        (IdentityCommand::Show { mnemonic, json }, Some(d.to_path_buf()))
+        (
+            IdentityCommand::Show { mnemonic, json },
+            Some(d.to_path_buf()),
+        )
     }
 
     fn env(k: &str) -> Option<String> {
@@ -530,7 +600,10 @@ mod tests {
         let (d, did) = state_with_identity();
         let (cmd, sd) = id_args(d.path(), &[]);
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        assert_eq!(identity(&cmd, sd.as_deref(), &env, false, &mut out, &mut err), 0);
+        assert_eq!(
+            identity(&cmd, sd.as_deref(), &env, false, &mut out, &mut err),
+            0
+        );
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains(&did), "{out}");
         assert!(out.contains("name     "), "{out}");
@@ -561,7 +634,11 @@ mod tests {
         let code = identity(&cmd, sd.as_deref(), &env, false, &mut out, &mut err);
         assert_eq!(code, 2);
         assert!(out.is_empty());
-        assert!(String::from_utf8(err.clone()).unwrap().contains("only to a terminal"));
+        assert!(
+            String::from_utf8(err.clone())
+                .unwrap()
+                .contains("only to a terminal")
+        );
         assert!(!String::from_utf8(err).unwrap().contains(&phrase));
         // a terminal: printed, with the warning on stderr
         let (mut out, mut err) = (Vec::new(), Vec::new());
@@ -581,14 +658,19 @@ mod tests {
         let h = Harness::default();
         let client = Arc::new(FakeClient::from_fn(|_| unreachable_reply()));
         let state = d.path().display().to_string();
-        let r = h.run(&client, &["--state-dir", &state, "identity", "show", "--mnemonic"]);
+        let r = h.run(
+            &client,
+            &["--state-dir", &state, "identity", "show", "--mnemonic"],
+        );
         assert_eq!(r.code, 2);
         assert!(!r.out.contains(&phrase) && !r.err.contains(&phrase));
         assert!(client.requests().is_empty(), "identity needs no daemon");
     }
 
     fn unreachable_reply() -> Result<Response, crate::client::ClientError> {
-        Err(crate::client::ClientError::BadReply("no daemon expected".into()))
+        Err(crate::client::ClientError::BadReply(
+            "no daemon expected".into(),
+        ))
     }
 
     // R-268
@@ -600,6 +682,10 @@ mod tests {
         let code = identity(&cmd, sd.as_deref(), &env, false, &mut out, &mut err);
         assert_eq!(code, 1);
         assert!(out.is_empty());
-        assert!(String::from_utf8(err).unwrap().contains("created when the daemon first starts"));
+        assert!(
+            String::from_utf8(err)
+                .unwrap()
+                .contains("created when the daemon first starts")
+        );
     }
 }

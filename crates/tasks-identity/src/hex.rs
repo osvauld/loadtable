@@ -5,8 +5,12 @@ pub fn encode(bytes: &[u8]) -> String {
     const D: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
-        s.push(char::from(D.get(usize::from(b >> 4)).copied().unwrap_or(b'0')));
-        s.push(char::from(D.get(usize::from(b & 15)).copied().unwrap_or(b'0')));
+        s.push(char::from(
+            D.get(usize::from(b >> 4)).copied().unwrap_or(b'0'),
+        ));
+        s.push(char::from(
+            D.get(usize::from(b & 15)).copied().unwrap_or(b'0'),
+        ));
     }
     s
 }

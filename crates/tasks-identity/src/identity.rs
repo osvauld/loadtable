@@ -114,8 +114,7 @@ impl Identity {
 
     /// Signs with the device key (proof that the holder of the node key is this machine).
     pub fn sign_with_device(&self, message: &[u8]) -> [u8; 64] {
-        SigningKey::from_bytes(&self.inner.device_secret)
-            .sign_bytes(message)
+        SigningKey::from_bytes(&self.inner.device_secret).sign_bytes(message)
     }
 
     #[cfg(test)]

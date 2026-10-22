@@ -1019,7 +1019,10 @@ mod tests {
         assert_eq!(p.peers().relay, crate::peers_config::RelaySetting::Default);
         assert_eq!(p.slot_count(SlotKind::Run), 4);
         let all = p.problems.join("\n");
-        assert!(all.contains("peers.nixos: peers are no longer configured here"), "{all}");
+        assert!(
+            all.contains("peers.nixos: peers are no longer configured here"),
+            "{all}"
+        );
         assert!(all.contains("refused as a whole"), "{all}");
         // the grace is an ordinary setting with an environment override
         let p = MachinePolicy::from_text(None, &env1("TASKS_ALERT_PEER_GRACE_SECS", "5"));

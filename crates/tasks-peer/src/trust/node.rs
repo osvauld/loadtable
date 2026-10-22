@@ -478,10 +478,7 @@ impl TrustNode {
         let now = self.now();
         let challenge = {
             let mut st = self.st();
-            let (c, at) = st
-                .challenges
-                .remove(from)
-                .ok_or(TrustError::NoChallenge)?;
+            let (c, at) = st.challenges.remove(from).ok_or(TrustError::NoChallenge)?;
             if at + self.policy.challenge_ttl_secs <= now {
                 return Err(TrustError::NoChallenge);
             }
@@ -784,7 +781,13 @@ impl TrustNode {
                 "the inviter returned grants that differ from the invite".to_string(),
             ));
         }
-        self.save_peer(&name, &c.iss, &ticket.node_id, ticket.relay, ticket.direct_addrs)?;
+        self.save_peer(
+            &name,
+            &c.iss,
+            &ticket.node_id,
+            ticket.relay,
+            ticket.direct_addrs,
+        )?;
         for g in &got {
             self.supersede(&c.iss, GrantDirection::Held, g.claims.role)?;
             self.store_grant(g, GrantDirection::Held, &c.iss, &ticket.node_id)?;

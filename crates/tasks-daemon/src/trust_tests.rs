@@ -4,8 +4,8 @@
 use crate::api::{ErrorCode, Reply, Request, Response};
 use crate::forwarder::{LinkQuality, LinkReport, LinkState};
 use crate::peer_link::PeerLink;
-use crate::testkit::{FakeForwarder, PeerWorld, Rig, StubTrust, peer_view};
 use crate::testkit::TempDir;
+use crate::testkit::{FakeForwarder, PeerWorld, Rig, StubTrust, peer_view};
 use crate::tests::{call, daemon_options};
 use crate::trust_control::{ExpiringView, NodeTrust, TrustControl};
 use crate::trust_runtime::NodePeers;
@@ -69,7 +69,10 @@ fn r263_the_first_start_creates_the_identity_and_every_start_keeps_it() {
     assert_eq!(first.name, "testbox");
     assert_eq!(first.node_id.len(), 64);
     let public = tasks_identity::read_public(&state).unwrap();
-    assert_eq!((public.did.as_str(), public.node_id.as_str()), (first.did.as_str(), first.node_id.as_str()));
+    assert_eq!(
+        (public.did.as_str(), public.node_id.as_str()),
+        (first.did.as_str(), first.node_id.as_str())
+    );
     // a second daemon on the same state is refused before it touches the keystore
     let before = std::fs::read(&key).unwrap();
     assert!(crate::Daemon::start(daemon_options(&dir, &procs)).is_err());
@@ -123,19 +126,28 @@ fn r260_the_api_pairs_two_daemons_lists_the_peer_and_revokes_it() {
     );
     worker.sch.set_trust(Arc::new(NodeTrust::new(
         wn.clone(),
-        Some(Arc::new(TrustedTransport::new(net.transport(&wid), wn.clone()))),
+        Some(Arc::new(TrustedTransport::new(
+            net.transport(&wid),
+            wn.clone(),
+        ))),
         Arc::new(SelfAddr::default()),
     )));
     laptop.sch.set_trust(Arc::new(NodeTrust::new(
         ln.clone(),
-        Some(Arc::new(TrustedTransport::new(net.transport(&lid), ln.clone()))),
+        Some(Arc::new(TrustedTransport::new(
+            net.transport(&lid),
+            ln.clone(),
+        ))),
         Arc::new(SelfAddr::default()),
     )));
     // identity
     let Response::Identity(id) = ok(worker.sch.handle(Request::Identity)) else {
         panic!()
     };
-    assert_eq!((id.did.as_str(), id.node_id.as_str()), (wn.did(), wid.as_str()));
+    assert_eq!(
+        (id.did.as_str(), id.node_id.as_str()),
+        (wn.did(), wid.as_str())
+    );
     // a bad role is a named refusal
     let Reply::Err(e) = worker.sch.handle(Request::PairInvite {
         roles: vec!["root".into()],
@@ -163,10 +175,17 @@ fn r260_the_api_pairs_two_daemons_lists_the_peer_and_revokes_it() {
     };
     assert_eq!((p.name.as_str(), p.did.as_str()), ("nixos", wn.did()));
     // the ticket is single use
-    let Reply::Err(e) = laptop.sch.handle(Request::PairAccept { ticket: inv.ticket }) else {
+    let Reply::Err(e) = laptop
+        .sch
+        .handle(Request::PairAccept { ticket: inv.ticket })
+    else {
         panic!("a second redemption must be refused")
     };
-    assert!(e.message.contains("already redeemed") || e.message.contains("name"), "{}", e.message);
+    assert!(
+        e.message.contains("already redeemed") || e.message.contains("name"),
+        "{}",
+        e.message
+    );
     // peers on both sides
     let Response::Peers { peers } = ok(laptop.sch.handle(Request::Peers)) else {
         panic!()
@@ -193,7 +212,9 @@ fn r260_the_api_pairs_two_daemons_lists_the_peer_and_revokes_it() {
         panic!()
     };
     assert_eq!((r.revoked, r.name.as_str()), (4, "kurukkan"));
-    let Reply::Err(e) = worker.sch.handle(Request::PeerRevoke { name: "nobody".into() }) else {
+    let Reply::Err(e) = worker.sch.handle(Request::PeerRevoke {
+        name: "nobody".into(),
+    }) else {
         panic!()
     };
     assert!(e.message.contains("no paired peer"), "{}", e.message);
@@ -223,7 +244,12 @@ fn r258_status_shows_each_peer_with_did_roles_expiry_path_and_round_trip() {
     let r = Rig::with_forwarder(f.clone());
     let stub = Arc::new(StubTrust::default());
     stub.set_peers(vec![
-        peer_view("nixos", "did:key:zNixos", &["submit", "observe"], &["observe"]),
+        peer_view(
+            "nixos",
+            "did:key:zNixos",
+            &["submit", "observe"],
+            &["observe"],
+        ),
         peer_view("phone", "did:key:zPhone", &[], &["submit"]),
     ]);
     r.sch.set_trust(stub);
@@ -290,7 +316,11 @@ fn r259_a_grant_inside_seven_days_alerts_and_clears_when_renewed() {
     }]);
     r.tick();
     let st = r.sch.status();
-    let a = st.alerts.iter().find(|a| a.id == "grant-nixos-held-submit").unwrap();
+    let a = st
+        .alerts
+        .iter()
+        .find(|a| a.id == "grant-nixos-held-submit")
+        .unwrap();
     assert_eq!(a.level, "critical");
     assert!(a.message.contains("has expired"));
     // an issued grant names the peer that must renew it
@@ -302,8 +332,12 @@ fn r259_a_grant_inside_seven_days_alerts_and_clears_when_renewed() {
     }]);
     r.tick();
     let st = r.sch.status();
-    assert!(st.alerts.iter().any(|a| a.id == "grant-kurukkan-issued-observe"
-        && a.message.contains("has not renewed")));
+    assert!(
+        st.alerts
+            .iter()
+            .any(|a| a.id == "grant-kurukkan-issued-observe"
+                && a.message.contains("has not renewed"))
+    );
     assert!(!st.alerts.iter().any(|a| a.id == "grant-nixos-held-submit"));
     // renewed: the grant leaves the list and the alert clears
     stub.set_expiring(vec![]);
@@ -333,10 +367,18 @@ fn r261_a_job_is_forwarded_through_the_admission_gate_and_stops_when_the_peer_is
     worker.procs.output(b"built behind the gate\n");
     let receiver =
         crate::peer_link::serve::build_receiver(&worker.sch, worker.dir.path().join("peer-store"));
-    net.serve(&wid, Arc::new(TrustedHandler::new(wn.clone(), receiver)) as Arc<dyn Handler>);
+    net.serve(
+        &wid,
+        Arc::new(TrustedHandler::new(wn.clone(), receiver)) as Arc<dyn Handler>,
+    );
     // pairing: the worker invites, the laptop redeems
     let ticket = wn
-        .invite(&[tasks_peer::trust::Role::Submit], false, None, &SelfAddr::default())
+        .invite(
+            &[tasks_peer::trust::Role::Submit],
+            false,
+            None,
+            &SelfAddr::default(),
+        )
         .unwrap();
     let laptop_tr = TrustedTransport::new(net.transport(&lid), ln.clone());
     ln.accept(
@@ -396,9 +438,17 @@ fn r261_a_revoked_peer_goes_inactive_in_the_forwarder_and_shows_why() {
     let worker = Rig::new();
     let receiver =
         crate::peer_link::serve::build_receiver(&worker.sch, worker.dir.path().join("peer-store"));
-    net.serve(&wid, Arc::new(TrustedHandler::new(wn.clone(), receiver)) as Arc<dyn Handler>);
+    net.serve(
+        &wid,
+        Arc::new(TrustedHandler::new(wn.clone(), receiver)) as Arc<dyn Handler>,
+    );
     let t = wn
-        .invite(&[tasks_peer::trust::Role::Submit], false, None, &SelfAddr::default())
+        .invite(
+            &[tasks_peer::trust::Role::Submit],
+            false,
+            None,
+            &SelfAddr::default(),
+        )
         .unwrap();
     ln.accept(
         &t.to_text().unwrap(),

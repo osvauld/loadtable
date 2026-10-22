@@ -4,8 +4,7 @@
 use crate::ids::{PeerId, RemoteJobId};
 use crate::proto::{self, Body, Refusal};
 use crate::transport::{
-    Closer, Connection, DialHints, EventStream, Handler, LinkInfo, PeerError, StreamPoll,
-    Transport,
+    Closer, Connection, DialHints, EventStream, Handler, LinkInfo, PeerError, StreamPoll, Transport,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -258,7 +257,12 @@ struct FakeStream {
 
 impl EventStream for FakeStream {
     fn poll(&mut self) -> Result<StreamPoll, PeerError> {
-        if let Some(why) = self.closed.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        if let Some(why) = self
+            .closed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
             return Err(PeerError::LinkLost(format!("closed by the peer: {why}")));
         }
         {

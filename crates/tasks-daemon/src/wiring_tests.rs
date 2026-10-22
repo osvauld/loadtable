@@ -554,7 +554,12 @@ fn r222_stale_and_offline_peers_alert_after_the_grace_period_and_clear() {
 fn r259_paired_peers_without_a_peer_transport_alert_at_once() {
     let r = Rig::new();
     let stub = Arc::new(crate::testkit::StubTrust::default());
-    stub.set_peers(vec![crate::testkit::peer_view("nixos", "did:key:zN", &["submit"], &[])]);
+    stub.set_peers(vec![crate::testkit::peer_view(
+        "nixos",
+        "did:key:zN",
+        &["submit"],
+        &[],
+    )]);
     r.sch.set_trust(stub);
     r.tick();
     let st = r.sch.status();

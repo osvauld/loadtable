@@ -288,9 +288,9 @@ impl Scheduler {
         use crate::forwarder::LinkState;
         let links = self.forwarder.links();
         let mut out = Vec::new();
-        let paired_out = self
-            .trust()
-            .map_or(0, |t| t.peers().iter().filter(|p| !p.roles_out.is_empty()).count());
+        let paired_out = self.trust().map_or(0, |t| {
+            t.peers().iter().filter(|p| !p.roles_out.is_empty()).count()
+        });
         if links.is_empty() && paired_out > 0 {
             out.push((
                 "peers-unavailable".to_string(),

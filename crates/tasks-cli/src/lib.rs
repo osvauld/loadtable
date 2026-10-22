@@ -14,9 +14,9 @@ pub mod fake;
 pub mod mcp;
 pub mod render;
 pub mod runtime;
-pub mod trust;
 #[cfg(test)]
 mod testutil;
+pub mod trust;
 
 use args::{Cli, Command};
 use clap::Parser;

@@ -77,7 +77,10 @@ fn machine_on(
     .unwrap();
     let probe = Arc::new(Probe::default());
     let id = PeerId::new(&node.node_id()).unwrap();
-    net.serve(&id, Arc::new(TrustedHandler::new(node.clone(), probe.clone())));
+    net.serve(
+        &id,
+        Arc::new(TrustedHandler::new(node.clone(), probe.clone())),
+    );
     M {
         id,
         ident,
@@ -90,7 +93,13 @@ fn machine_on(
 
 fn machine(name: &str, net: &FakeNet, clock: &Arc<ManualClock>) -> M {
     let (ident, _) = generate().unwrap();
-    machine_on(name, net, clock, Arc::new(ident), Arc::new(MemoryTrust::new()))
+    machine_on(
+        name,
+        net,
+        clock,
+        Arc::new(ident),
+        Arc::new(MemoryTrust::new()),
+    )
 }
 
 fn world() -> (FakeNet, Arc<ManualClock>, M, M) {
@@ -109,7 +118,12 @@ fn pair(net: &FakeNet, worker: &M, laptop: &M, roles: &[Role], both: bool) -> Pa
     let ticket = worker.node.invite(roles, both, None, &addr()).unwrap();
     laptop
         .node
-        .accept(&ticket.to_text().unwrap(), &tr(net, laptop), &SelfAddr::default(), TIMEOUT)
+        .accept(
+            &ticket.to_text().unwrap(),
+            &tr(net, laptop),
+            &SelfAddr::default(),
+            TIMEOUT,
+        )
         .unwrap()
 }
 
@@ -188,10 +202,10 @@ fn r239_a_grant_round_trips_and_every_tamper_is_caught() {
         TrustError::BadSignature
     );
     for junk in ["", "g1.", "g1.a.b", "x1.a.b", "g1.%%%.%%%"] {
-        assert!(matches!(
-            Grant::parse(junk),
-            Err(TrustError::Malformed(_))
-        ), "{junk}");
+        assert!(
+            matches!(Grant::parse(junk), Err(TrustError::Malformed(_))),
+            "{junk}"
+        );
     }
 }
 
@@ -276,7 +290,15 @@ fn r240_a_newer_ticket_version_is_refused_by_name() {
         "{err:?}"
     );
     assert!(err.to_string().contains("newer"));
-    for junk in ["", "tasks", "tasks.", "tasks1", "tasks1.%%%", "osv1.abc", "tasks1.e30"] {
+    for junk in [
+        "",
+        "tasks",
+        "tasks.",
+        "tasks1",
+        "tasks1.%%%",
+        "osv1.abc",
+        "tasks1.e30",
+    ] {
         assert!(Ticket::from_text(junk).is_err(), "{junk}");
     }
     let huge = format!("tasks1.{}", "A".repeat(9000));
@@ -291,11 +313,17 @@ fn r240_a_newer_ticket_version_is_refused_by_name() {
 fn r240_visible_fields_that_disagree_with_the_signed_invite_are_an_error() {
     let (_, _, worker, _) = world();
     let now = T0_MS as u64 / 1000;
-    let good = worker.node.invite(&[Role::Submit], false, None, &addr()).unwrap();
+    let good = worker
+        .node
+        .invite(&[Role::Submit], false, None, &addr())
+        .unwrap();
     let (other, _) = generate().unwrap();
     let mut t = good.clone();
     t.node_did = other.did().to_string();
-    assert_eq!(t.verify(now).unwrap_err(), TrustError::TicketMismatch { field: "node_did" });
+    assert_eq!(
+        t.verify(now).unwrap_err(),
+        TrustError::TicketMismatch { field: "node_did" }
+    );
     let mut t = good.clone();
     t.device_public_key = tasks_identity::hex::encode(&other.device_public_key());
     assert_eq!(
@@ -306,10 +334,16 @@ fn r240_visible_fields_that_disagree_with_the_signed_invite_are_an_error() {
     );
     let mut t = good.clone();
     t.node_id = tasks_identity::hex::encode(&other.device_public_key());
-    assert_eq!(t.verify(now).unwrap_err(), TrustError::TicketMismatch { field: "node_id" });
+    assert_eq!(
+        t.verify(now).unwrap_err(),
+        TrustError::TicketMismatch { field: "node_id" }
+    );
     let mut t = good.clone();
     t.name = "evil".into();
-    assert_eq!(t.verify(now).unwrap_err(), TrustError::TicketMismatch { field: "name" });
+    assert_eq!(
+        t.verify(now).unwrap_err(),
+        TrustError::TicketMismatch { field: "name" }
+    );
     assert!(good.verify(now).is_ok());
 }
 
@@ -318,7 +352,12 @@ fn r240_visible_fields_that_disagree_with_the_signed_invite_are_an_error() {
 fn r245_ticket_lifetimes_are_bounded_and_expire() {
     let (_, clock, worker, _) = world();
     let a = SelfAddr::default();
-    assert!(worker.node.invite(&[Role::Submit], false, Some(0), &a).is_err());
+    assert!(
+        worker
+            .node
+            .invite(&[Role::Submit], false, Some(0), &a)
+            .is_err()
+    );
     assert!(
         worker
             .node
@@ -326,7 +365,10 @@ fn r245_ticket_lifetimes_are_bounded_and_expire() {
             .is_err()
     );
     assert!(worker.node.invite(&[], false, None, &a).is_err());
-    let t = worker.node.invite(&[Role::Submit], false, Some(60), &a).unwrap();
+    let t = worker
+        .node
+        .invite(&[Role::Submit], false, Some(60), &a)
+        .unwrap();
     let now = clock.now_ms() as u64 / 1000;
     assert!(t.verify(now + 59).is_ok());
     assert!(matches!(
@@ -341,7 +383,13 @@ fn r245_ticket_lifetimes_are_bounded_and_expire() {
 #[test]
 fn r242_pairing_dials_proves_and_mints_a_grant_bound_to_the_redeemers_device() {
     let (net, _, worker, laptop) = world();
-    let paired = pair(&net, &worker, &laptop, &[Role::Submit, Role::Observe], false);
+    let paired = pair(
+        &net,
+        &worker,
+        &laptop,
+        &[Role::Submit, Role::Observe],
+        false,
+    );
     assert_eq!(paired.name, "nixos");
     assert_eq!(paired.did, worker.node.did());
     // the worker issued one grant per role, bound to the laptop's device key
@@ -369,16 +417,21 @@ fn r242_pairing_dials_proves_and_mints_a_grant_bound_to_the_redeemers_device() {
         .filter(|g| g.direction == GrantDirection::Held)
         .collect();
     assert_eq!(held.len(), 2);
-    assert!(laptop
-        .ledger
-        .grants()
-        .unwrap()
-        .iter()
-        .all(|g| g.direction == GrantDirection::Held));
+    assert!(
+        laptop
+            .ledger
+            .grants()
+            .unwrap()
+            .iter()
+            .all(|g| g.direction == GrantDirection::Held)
+    );
     // both sides know the other by name and DID
     assert_eq!(worker.ledger.peers().unwrap()[0].name, "kurukkan");
     assert_eq!(worker.ledger.peers().unwrap()[0].did, laptop.node.did());
-    assert_eq!(laptop.ledger.peers().unwrap()[0].relay.as_deref(), Some("https://relay.example/"));
+    assert_eq!(
+        laptop.ledger.peers().unwrap()[0].relay.as_deref(),
+        Some("https://relay.example/")
+    );
     // and the laptop can now talk to the worker
     let t = tr(&net, &laptop);
     let mut c = t.connect(&worker.id, TIMEOUT).unwrap();
@@ -412,7 +465,10 @@ fn r243_a_both_ways_ticket_grants_each_side_the_roles_on_the_other() {
 #[test]
 fn r244_a_ticket_works_once_also_after_the_inviter_restarts() {
     let (net, clock, worker, laptop) = world();
-    let ticket = worker.node.invite(&[Role::Submit], false, None, &addr()).unwrap();
+    let ticket = worker
+        .node
+        .invite(&[Role::Submit], false, None, &addr())
+        .unwrap();
     let text = ticket.to_text().unwrap();
     laptop
         .node
@@ -427,7 +483,13 @@ fn r244_a_ticket_works_once_also_after_the_inviter_restarts() {
     assert!(err.to_string().contains("already redeemed"), "{err}");
     assert!(third.ledger.grants().unwrap().is_empty());
     // the worker restarts on the same ledger: the nonce is still spent
-    let worker2 = machine_on("nixos", &net, &clock, worker.ident.clone(), worker.ledger.clone());
+    let worker2 = machine_on(
+        "nixos",
+        &net,
+        &clock,
+        worker.ident.clone(),
+        worker.ledger.clone(),
+    );
     let fourth = machine("fourth", &net, &clock);
     let err = fourth
         .node
@@ -435,18 +497,23 @@ fn r244_a_ticket_works_once_also_after_the_inviter_restarts() {
         .unwrap_err();
     assert!(err.to_string().contains("already redeemed"), "{err}");
     assert_eq!(worker2.ledger.peers().unwrap().len(), 1);
-    assert!(worker2
-        .events
-        .events()
-        .iter()
-        .all(|e| !matches!(e, TrustEvent::TicketRedeemed { .. })));
+    assert!(
+        worker2
+            .events
+            .events()
+            .iter()
+            .all(|e| !matches!(e, TrustEvent::TicketRedeemed { .. }))
+    );
 }
 
 // R-245
 #[test]
 fn r245_an_expired_ticket_is_refused_by_the_redeemer_and_by_the_inviter() {
     let (net, clock, worker, laptop) = world();
-    let ticket = worker.node.invite(&[Role::Submit], false, Some(60), &addr()).unwrap();
+    let ticket = worker
+        .node
+        .invite(&[Role::Submit], false, Some(60), &addr())
+        .unwrap();
     let text = ticket.to_text().unwrap();
     clock.advance(61_000);
     let err = laptop
@@ -477,25 +544,53 @@ fn r245_an_expired_ticket_is_refused_by_the_redeemer_and_by_the_inviter() {
 #[test]
 fn r245_pair_reset_invalidates_every_unredeemed_ticket_and_new_ones_work() {
     let (net, _, worker, laptop) = world();
-    let old1 = worker.node.invite(&[Role::Submit], false, None, &addr()).unwrap();
-    let old2 = worker.node.invite(&[Role::Observe], false, None, &addr()).unwrap();
+    let old1 = worker
+        .node
+        .invite(&[Role::Submit], false, None, &addr())
+        .unwrap();
+    let old2 = worker
+        .node
+        .invite(&[Role::Observe], false, None, &addr())
+        .unwrap();
     assert_eq!(worker.node.reset_tickets().unwrap(), 1);
     for t in [&old1, &old2] {
         let err = laptop
             .node
-            .accept(&t.to_text().unwrap(), &tr(&net, &laptop), &SelfAddr::default(), TIMEOUT)
+            .accept(
+                &t.to_text().unwrap(),
+                &tr(&net, &laptop),
+                &SelfAddr::default(),
+                TIMEOUT,
+            )
             .unwrap_err();
         assert!(err.to_string().contains("pair reset"), "{err}");
     }
     assert!(worker.ledger.grants().unwrap().is_empty());
-    let fresh = worker.node.invite(&[Role::Submit], false, None, &addr()).unwrap();
+    let fresh = worker
+        .node
+        .invite(&[Role::Submit], false, None, &addr())
+        .unwrap();
     laptop
         .node
-        .accept(&fresh.to_text().unwrap(), &tr(&net, &laptop), &SelfAddr::default(), TIMEOUT)
+        .accept(
+            &fresh.to_text().unwrap(),
+            &tr(&net, &laptop),
+            &SelfAddr::default(),
+            TIMEOUT,
+        )
         .unwrap();
     // the epoch survives a restart
-    let worker2 = machine_on("nixos", &net, &Arc::new(ManualClock::new(T0_MS)), worker.ident.clone(), worker.ledger.clone());
-    let again = worker2.node.invite(&[Role::Submit], false, None, &addr()).unwrap();
+    let worker2 = machine_on(
+        "nixos",
+        &net,
+        &Arc::new(ManualClock::new(T0_MS)),
+        worker.ident.clone(),
+        worker.ledger.clone(),
+    );
+    let again = worker2
+        .node
+        .invite(&[Role::Submit], false, None, &addr())
+        .unwrap();
     let c = Invite::parse(&again.invite_token).unwrap();
     assert_eq!(c.claims.epoch, 1);
 }
@@ -504,7 +599,10 @@ fn r245_pair_reset_invalidates_every_unredeemed_ticket_and_new_ones_work() {
 #[test]
 fn r246_a_failed_attempt_does_not_burn_the_ticket() {
     let (net, _, worker, laptop) = world();
-    let ticket = worker.node.invite(&[Role::Submit], false, None, &addr()).unwrap();
+    let ticket = worker
+        .node
+        .invite(&[Role::Submit], false, None, &addr())
+        .unwrap();
     // an attacker holding the ticket text but not the DID key it claims
     let (victim, _) = generate().unwrap();
     let (me, _) = generate().unwrap();
@@ -528,7 +626,12 @@ fn r246_a_failed_attempt_does_not_burn_the_ticket() {
     // the real laptop still redeems it
     laptop
         .node
-        .accept(&ticket.to_text().unwrap(), &tr(&net, &laptop), &SelfAddr::default(), TIMEOUT)
+        .accept(
+            &ticket.to_text().unwrap(),
+            &tr(&net, &laptop),
+            &SelfAddr::default(),
+            TIMEOUT,
+        )
         .unwrap();
     assert!(worker.events.events().iter().any(|e| matches!(
         e,
@@ -540,7 +643,10 @@ fn r246_a_failed_attempt_does_not_burn_the_ticket() {
 #[test]
 fn r246_a_redemption_needs_a_fresh_challenge_each_time() {
     let (net, _, worker, laptop) = world();
-    let ticket = worker.node.invite(&[Role::Submit], false, None, &addr()).unwrap();
+    let ticket = worker
+        .node
+        .invite(&[Role::Submit], false, None, &addr())
+        .unwrap();
     let mut c = raw_connect(&net, &laptop.id, &worker);
     // no PairBegin first
     let redeem = |sig: [u8; 64]| wire::PairRedeem {
@@ -553,7 +659,9 @@ fn r246_a_redemption_needs_a_fresh_challenge_each_time() {
         reverse: vec![],
     };
     let r = c.request(Body::PairRedeem(redeem([0; 64])));
-    assert!(matches!(refusal(r), Refusal::PairingRefused { reason } if reason.contains("challenge")));
+    assert!(
+        matches!(refusal(r), Refusal::PairingRefused { reason } if reason.contains("challenge"))
+    );
     // a signature over one challenge does not satisfy the next
     let Ok(Body::PairChallenge { challenge }) = c.request(Body::PairBegin) else {
         panic!()
@@ -578,26 +686,47 @@ fn r246_a_redemption_needs_a_fresh_challenge_each_time() {
 #[test]
 fn r246_the_answering_machine_must_be_the_one_the_ticket_names() {
     let (net, clock, worker, laptop) = world();
-    let ticket = worker.node.invite(&[Role::Submit], false, None, &addr()).unwrap();
+    let ticket = worker
+        .node
+        .invite(&[Role::Submit], false, None, &addr())
+        .unwrap();
     // an impostor answers at the worker's node id
     let impostor = machine("impostor", &net, &clock);
     net.serve(
         &worker.id,
-        Arc::new(TrustedHandler::new(impostor.node.clone(), impostor.probe.clone())),
+        Arc::new(TrustedHandler::new(
+            impostor.node.clone(),
+            impostor.probe.clone(),
+        )),
     );
     let err = laptop
         .node
-        .accept(&ticket.to_text().unwrap(), &tr(&net, &laptop), &SelfAddr::default(), TIMEOUT)
+        .accept(
+            &ticket.to_text().unwrap(),
+            &tr(&net, &laptop),
+            &SelfAddr::default(),
+            TIMEOUT,
+        )
         .unwrap_err();
     assert!(matches!(err, TrustError::NotAuthorised(_)), "{err:?}");
     assert!(laptop.ledger.peers().unwrap().is_empty());
     assert!(laptop.ledger.grants().unwrap().is_empty());
     // a ticket from this very machine is refused before any dialing
-    let own = laptop.node.invite(&[Role::Submit], false, None, &addr()).unwrap();
-    assert!(laptop
+    let own = laptop
         .node
-        .accept(&own.to_text().unwrap(), &tr(&net, &laptop), &SelfAddr::default(), TIMEOUT)
-        .is_err());
+        .invite(&[Role::Submit], false, None, &addr())
+        .unwrap();
+    assert!(
+        laptop
+            .node
+            .accept(
+                &own.to_text().unwrap(),
+                &tr(&net, &laptop),
+                &SelfAddr::default(),
+                TIMEOUT
+            )
+            .is_err()
+    );
 }
 
 // ---- admission --------------------------------------------------------------------------
@@ -612,13 +741,18 @@ fn r247_nothing_is_read_before_a_grant_is_presented() {
         Body::Hello(Hello::local("x")),
         Body::StatusRequest,
         submit_body(),
-        Body::Renew { grant: "g1.x.y".into() },
+        Body::Renew {
+            grant: "g1.x.y".into(),
+        },
     ] {
         // a refusal closes the connection, so each message gets a fresh one
         let mut c = raw_connect(&net, &sid, &worker);
         let reason = unauthorized_reason(c.request(msg));
         assert!(reason.contains("no grant"), "{reason}");
-        assert!(matches!(c.request(Body::StatusRequest), Err(PeerError::LinkLost(_))));
+        assert!(matches!(
+            c.request(Body::StatusRequest),
+            Err(PeerError::LinkLost(_))
+        ));
     }
     let mut c = raw_connect(&net, &sid, &worker);
     assert!(matches!(
@@ -628,7 +762,10 @@ fn r247_nothing_is_read_before_a_grant_is_presented() {
     assert_eq!(worker.probe.calls.load(Ordering::SeqCst), 0);
     assert!(worker.events.events().iter().any(|e| matches!(
         e,
-        TrustEvent::ConnectionRefused { side: Side::Served, .. }
+        TrustEvent::ConnectionRefused {
+            side: Side::Served,
+            ..
+        }
     )));
 }
 
@@ -637,10 +774,16 @@ fn r247_nothing_is_read_before_a_grant_is_presented() {
 fn r247_a_machine_without_a_grant_cannot_even_connect_through_the_trusted_transport() {
     let (net, _, worker, laptop) = world();
     let r = tr(&net, &laptop).connect(&worker.id, TIMEOUT);
-    assert!(matches!(r, Err(PeerError::Refused(Refusal::Unauthorized { .. }))));
+    assert!(matches!(
+        r,
+        Err(PeerError::Refused(Refusal::Unauthorized { .. }))
+    ));
     assert!(laptop.events.events().iter().any(|e| matches!(
         e,
-        TrustEvent::ConnectionRefused { side: Side::Dialed, .. }
+        TrustEvent::ConnectionRefused {
+            side: Side::Dialed,
+            ..
+        }
     )));
 }
 
@@ -649,11 +792,15 @@ fn r247_a_machine_without_a_grant_cannot_even_connect_through_the_trusted_transp
 fn r248_a_stolen_grant_is_useless_from_another_device() {
     let (net, _, worker, laptop) = world();
     pair(&net, &worker, &laptop, &[Role::Submit], false);
-    let token = laptop.node.held_for(&worker.node.node_id())[0].text().to_string();
+    let token = laptop.node.held_for(&worker.node.node_id())[0]
+        .text()
+        .to_string();
     let (thief, _) = generate().unwrap();
     let tid = PeerId::new(&tasks_identity::hex::encode(&thief.device_public_key())).unwrap();
     let mut c = raw_connect(&net, &tid, &worker);
-    let reason = unauthorized_reason(c.request(Body::Present { grants: vec![token] }));
+    let reason = unauthorized_reason(c.request(Body::Present {
+        grants: vec![token],
+    }));
     assert!(reason.contains("bound to device"), "{reason}");
     assert!(matches!(
         c.request(submit_body()),
@@ -676,11 +823,16 @@ fn r248_unknown_foreign_and_garbage_grants_are_each_refused_with_their_reason() 
         unauthorized_reason(c.request(Body::Present { grants: tokens }))
     };
     // validly signed by the worker but never recorded
-    let unrecorded = Grant::issue(&*worker.ident, claims_for(&worker.ident, &laptop.ident, Role::Admin, now)).unwrap();
+    let unrecorded = Grant::issue(
+        &*worker.ident,
+        claims_for(&worker.ident, &laptop.ident, Role::Admin, now),
+    )
+    .unwrap();
     assert!(present(vec![unrecorded.text().to_string()]).contains("no such grant"));
     // signed by some other machine
     let (other, _) = generate().unwrap();
-    let foreign = Grant::issue(&other, claims_for(&other, &laptop.ident, Role::Submit, now)).unwrap();
+    let foreign =
+        Grant::issue(&other, claims_for(&other, &laptop.ident, Role::Submit, now)).unwrap();
     assert!(present(vec![foreign.text().to_string()]).contains("not to this machine"));
     // junk and nothing at all
     assert!(!present(vec!["garbage".into()]).is_empty());
@@ -694,7 +846,10 @@ fn r248_a_grant_past_its_expiry_is_refused() {
     pair(&net, &worker, &laptop, &[Role::Submit], false);
     clock.advance(366 * DAY);
     let r = tr(&net, &laptop).connect(&worker.id, TIMEOUT);
-    assert!(matches!(r, Err(PeerError::Refused(Refusal::Unauthorized { .. }))));
+    assert!(matches!(
+        r,
+        Err(PeerError::Refused(Refusal::Unauthorized { .. }))
+    ));
     // presenting the expired token directly gives the server's reason
     let g = Grant::parse(&worker.ledger.grants().unwrap()[0].token).unwrap();
     let mut c = raw_connect(&net, &laptop.id, &worker);
@@ -730,7 +885,10 @@ fn r249_each_request_is_checked_against_the_grants_role() {
     // observe: status and hello yes; submit/cancel/sync/fetch no
     let mut c = tr(&net, &observer).connect(&worker.id, TIMEOUT).unwrap();
     assert!(matches!(c.request(Body::StatusRequest), Ok(Body::Ok)));
-    assert!(matches!(c.request(Body::Hello(Hello::local("w"))), Ok(Body::Ok)));
+    assert!(matches!(
+        c.request(Body::Hello(Hello::local("w"))),
+        Ok(Body::Ok)
+    ));
     let r = refusal(c.request(submit_body()));
     assert!(
         matches!(&r, Refusal::RoleDenied { need, have } if need == "submit" && have == &["observe"]),
@@ -752,7 +910,13 @@ fn r249_each_request_is_checked_against_the_grants_role() {
 fn r250_revoking_fails_the_next_request_closes_the_live_connection_and_deletes_nothing() {
     let (net, clock, worker, laptop) = world();
     let other = machine("other", &net, &clock);
-    pair(&net, &worker, &laptop, &[Role::Submit, Role::Observe], false);
+    pair(
+        &net,
+        &worker,
+        &laptop,
+        &[Role::Submit, Role::Observe],
+        false,
+    );
     pair(&net, &worker, &other, &[Role::Submit], false);
     let mut live = tr(&net, &laptop).connect(&worker.id, TIMEOUT).unwrap();
     let mut keep = tr(&net, &other).connect(&worker.id, TIMEOUT).unwrap();
@@ -769,7 +933,10 @@ fn r250_revoking_fails_the_next_request_closes_the_live_connection_and_deletes_n
     );
     // a new connection with the same grants fails with the reason
     let r = tr(&net, &laptop).connect(&worker.id, TIMEOUT);
-    assert!(matches!(r, Err(PeerError::Refused(Refusal::Unauthorized { .. }))));
+    assert!(matches!(
+        r,
+        Err(PeerError::Refused(Refusal::Unauthorized { .. }))
+    ));
     // the other peer is untouched
     assert!(matches!(keep.request(submit_body()), Ok(Body::Ok)));
     // revoking deletes nothing: the rows stay, marked revoked
@@ -797,9 +964,18 @@ fn r250_a_revoked_grant_stays_revoked_after_a_restart() {
     let (net, clock, worker, laptop) = world();
     pair(&net, &worker, &laptop, &[Role::Submit], false);
     worker.node.revoke_peer("kurukkan").unwrap();
-    let worker2 = machine_on("nixos", &net, &clock, worker.ident.clone(), worker.ledger.clone());
+    let worker2 = machine_on(
+        "nixos",
+        &net,
+        &clock,
+        worker.ident.clone(),
+        worker.ledger.clone(),
+    );
     let r = tr(&net, &laptop).connect(&worker2.id, TIMEOUT);
-    assert!(matches!(r, Err(PeerError::Refused(Refusal::Unauthorized { .. }))));
+    assert!(matches!(
+        r,
+        Err(PeerError::Refused(Refusal::Unauthorized { .. }))
+    ));
     let p = &worker2.node.peers()[0];
     assert!(p.revoked && p.inbound.is_empty());
 }
@@ -850,7 +1026,9 @@ fn r252_only_the_issuer_renews_and_only_a_presented_unexpired_grant() {
     pair(&net, &worker, &laptop, &[Role::Submit], false);
     let other = machine("other", &net, &clock);
     pair(&net, &worker, &other, &[Role::Submit], false);
-    let theirs = other.node.held_for(&worker.node.node_id())[0].text().to_string();
+    let theirs = other.node.held_for(&worker.node.node_id())[0]
+        .text()
+        .to_string();
     // the laptop's connection cannot renew the other machine's grant
     let mut c = tr(&net, &laptop).connect(&worker.id, TIMEOUT).unwrap();
     let r = refusal(c.request(Body::Renew { grant: theirs }));
@@ -870,7 +1048,10 @@ fn r253_grants_inside_the_alert_window_are_listed_until_they_are_renewed() {
     clock.advance((365 - 6) * DAY);
     let e = laptop.node.expiring();
     assert_eq!(e.len(), 2, "one held, one issued: {e:?}");
-    assert!(e.iter().all(|g| g.peer == "nixos" && g.left_secs <= 7 * 86_400));
+    assert!(
+        e.iter()
+            .all(|g| g.peer == "nixos" && g.left_secs <= 7 * 86_400)
+    );
     assert!(e.iter().any(|g| g.direction == "held"));
     // a successful connection renews the held grant and clears its entry
     drop(tr(&net, &laptop).connect(&worker.id, TIMEOUT).unwrap());
@@ -916,9 +1097,17 @@ fn r254_every_trust_event_goes_through_the_one_sink() {
 #[test]
 fn r254_refused_redemptions_carry_their_reason_code() {
     let (net, _, worker, laptop) = world();
-    let t = worker.node.invite(&[Role::Submit], false, None, &addr()).unwrap();
+    let t = worker
+        .node
+        .invite(&[Role::Submit], false, None, &addr())
+        .unwrap();
     worker.node.reset_tickets().unwrap();
-    let _ = laptop.node.accept(&t.to_text().unwrap(), &tr(&net, &laptop), &SelfAddr::default(), TIMEOUT);
+    let _ = laptop.node.accept(
+        &t.to_text().unwrap(),
+        &tr(&net, &laptop),
+        &SelfAddr::default(),
+        TIMEOUT,
+    );
     let refused: Vec<_> = worker
         .events
         .events()
@@ -928,7 +1117,10 @@ fn r254_refused_redemptions_carry_their_reason_code() {
             _ => None,
         })
         .collect();
-    assert_eq!(refused, [("ticket_reset".to_string(), Some(laptop.node.node_id()))]);
+    assert_eq!(
+        refused,
+        [("ticket_reset".to_string(), Some(laptop.node.node_id()))]
+    );
     assert!(laptop.events.actions().contains(&"pair.ticket_refused"));
 }
 
@@ -937,7 +1129,13 @@ fn r254_refused_redemptions_carry_their_reason_code() {
 fn r255_peers_show_did_name_roles_each_way_and_expiry() {
     let (net, _, worker, laptop) = world();
     assert!(laptop.node.peers().is_empty());
-    pair(&net, &worker, &laptop, &[Role::Submit, Role::Observe], false);
+    pair(
+        &net,
+        &worker,
+        &laptop,
+        &[Role::Submit, Role::Observe],
+        false,
+    );
     let p = laptop.node.peers();
     assert_eq!(p.len(), 1);
     assert_eq!(p[0].name, "nixos");
@@ -951,7 +1149,10 @@ fn r255_peers_show_did_name_roles_each_way_and_expiry() {
     let w = worker.node.peers();
     assert!(w[0].outbound.is_empty() && w[0].inbound.len() == 2);
     assert_eq!(laptop.node.paired_peers().len(), 1);
-    assert!(worker.node.paired_peers().is_empty(), "the worker holds no grant from the laptop");
+    assert!(
+        worker.node.paired_peers().is_empty(),
+        "the worker holds no grant from the laptop"
+    );
     laptop.node.revoke_peer("nixos").unwrap();
     assert!(laptop.node.paired_peers().is_empty());
     assert!(laptop.node.peers()[0].revoked);
@@ -971,12 +1172,23 @@ fn r256_a_name_belongs_to_one_did_and_re_pairing_replaces_older_grants() {
     assert_eq!(laptop.node.peers().len(), 1);
     // a different machine that calls itself "kurukkan" is refused
     let imposter = machine("kurukkan", &net, &clock);
-    let t = worker.node.invite(&[Role::Submit], false, None, &addr()).unwrap();
+    let t = worker
+        .node
+        .invite(&[Role::Submit], false, None, &addr())
+        .unwrap();
     let err = imposter
         .node
-        .accept(&t.to_text().unwrap(), &tr(&net, &imposter), &SelfAddr::default(), TIMEOUT)
+        .accept(
+            &t.to_text().unwrap(),
+            &tr(&net, &imposter),
+            &SelfAddr::default(),
+            TIMEOUT,
+        )
         .unwrap_err();
-    assert!(matches!(err, TrustError::NotAuthorised(m) if m.contains("already used")), "name taken");
+    assert!(
+        matches!(err, TrustError::NotAuthorised(m) if m.contains("already used")),
+        "name taken"
+    );
     assert_eq!(worker.node.peers().len(), 1);
 }
 

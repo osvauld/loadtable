@@ -10,9 +10,9 @@ mod record;
 mod request;
 mod retry;
 mod sqlite;
-mod trust;
 #[cfg(test)]
 mod suite;
+mod trust;
 
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use error::LedgerError;

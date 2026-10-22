@@ -26,9 +26,13 @@ impl TrustEvents for StderrEvents {
                 format!("pairing refused ({code}): {reason}")
             }
             TrustEvent::TicketRedeemed {
-                peer_name, peer_did, ..
+                peer_name,
+                peer_did,
+                ..
             } => format!("ticket redeemed by {peer_name} ({peer_did})"),
-            TrustEvent::TicketsReset { epoch } => format!("unredeemed tickets reset (epoch {epoch})"),
+            TrustEvent::TicketsReset { epoch } => {
+                format!("unredeemed tickets reset (epoch {epoch})")
+            }
             TrustEvent::GrantRevoked {
                 direction,
                 peer_did,

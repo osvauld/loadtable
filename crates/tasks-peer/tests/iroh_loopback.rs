@@ -8,11 +8,13 @@ use std::sync::Arc;
 use std::time::Duration;
 use tasks_identity::generate;
 use tasks_ledger::{MemoryTrust, SystemClock};
-use tasks_peer::iroh::{EndpointAddrs, EndpointOptions, IrohTransport, RelayChoice, endpoint, serve};
+use tasks_peer::iroh::{
+    EndpointAddrs, EndpointOptions, IrohTransport, RelayChoice, endpoint, serve,
+};
 use tasks_peer::proto::{Body, Refusal};
 use tasks_peer::transport::{PathKind, PeerError, Transport};
 use tasks_peer::trust::{
-    AddressBook, NoEvents, Role, SelfAddr, AddrSource, TrustNode, TrustPolicy, TrustedHandler,
+    AddrSource, AddressBook, NoEvents, Role, SelfAddr, TrustNode, TrustPolicy, TrustedHandler,
     TrustedTransport,
 };
 use tasks_peer::{Handler, PeerId, RemoteJobId};
@@ -84,32 +86,56 @@ fn r262_two_real_endpoints_pair_forward_one_request_and_a_revoke_closes_the_conn
 
     // a stranger without a grant is turned away at the first frame
     let nobody = laptop.transport.connect(&wid, t);
-    assert!(matches!(nobody, Err(PeerError::Refused(Refusal::Unauthorized { .. }))));
+    assert!(matches!(
+        nobody,
+        Err(PeerError::Refused(Refusal::Unauthorized { .. }))
+    ));
 
     let addrs = EndpointAddrs(worker.ep.clone()).current();
-    assert!(!addrs.direct_addrs.is_empty(), "loopback addresses are known");
+    assert!(
+        !addrs.direct_addrs.is_empty(),
+        "loopback addresses are known"
+    );
     let ticket = worker
         .node
         .invite(&[Role::Submit], false, None, &addrs)
         .unwrap();
     laptop
         .node
-        .accept(&ticket.to_text().unwrap(), &laptop.transport, &SelfAddr::default(), t)
+        .accept(
+            &ticket.to_text().unwrap(),
+            &laptop.transport,
+            &SelfAddr::default(),
+            t,
+        )
         .unwrap();
     // the ticket is single use
-    let again = laptop
-        .node
-        .accept(&ticket.to_text().unwrap(), &laptop.transport, &SelfAddr::default(), t);
+    let again = laptop.node.accept(
+        &ticket.to_text().unwrap(),
+        &laptop.transport,
+        &SelfAddr::default(),
+        t,
+    );
     assert!(again.is_err());
 
     let mut c = laptop.transport.connect(&wid, t).unwrap();
-    assert!(matches!(c.request(Body::Cancel { remote: RemoteJobId(1) }), Ok(Body::Ok)));
+    assert!(matches!(
+        c.request(Body::Cancel {
+            remote: RemoteJobId(1)
+        }),
+        Ok(Body::Ok)
+    ));
     assert_eq!(c.link_info().path, PathKind::Direct);
 
     let report = worker.node.revoke_peer("kurukkan").unwrap();
     assert_eq!(report.revoked, 1);
     std::thread::sleep(Duration::from_millis(300));
-    assert!(c.request(Body::Cancel { remote: RemoteJobId(1) }).is_err());
+    assert!(
+        c.request(Body::Cancel {
+            remote: RemoteJobId(1)
+        })
+        .is_err()
+    );
     assert!(laptop.transport.connect(&wid, t).is_err());
     rt.block_on(async {
         worker.ep.close().await;

@@ -10,8 +10,8 @@
 use crate::ids::{PeerId, RemoteJobId};
 use crate::proto::{self, ALPN, Body, MAX_CONTROL_BYTES, MAX_FRAME_BYTES, Refusal};
 use crate::transport::{
-    Closer, Connection, DialHints, EventStream, Handler, LinkInfo, PathKind, PeerError,
-    StreamPoll, Transport,
+    Closer, Connection, DialHints, EventStream, Handler, LinkInfo, PathKind, PeerError, StreamPoll,
+    Transport,
 };
 use crate::trust::{AddrSource, AddressBook, SelfAddr};
 use iroh::endpoint::{NetReportConfig, PortmapperConfig, RecvStream, SendStream, presets};
@@ -70,10 +70,12 @@ pub async fn endpoint(secret: SecretKey, opts: &EndpointOptions) -> Result<Endpo
     let mut b = match &opts.relay {
         RelayChoice::Default => Endpoint::builder(presets::N0),
         RelayChoice::Custom(url) => {
-            let u: RelayUrl = url.parse().map_err(|e: iroh::RelayUrlParseError| IrohError::Relay {
-                url: url.clone(),
-                detail: e.to_string(),
-            })?;
+            let u: RelayUrl =
+                url.parse()
+                    .map_err(|e: iroh::RelayUrlParseError| IrohError::Relay {
+                        url: url.clone(),
+                        detail: e.to_string(),
+                    })?;
             Endpoint::builder(presets::N0).relay_mode(RelayMode::custom([u]))
         }
         RelayChoice::Disabled => Endpoint::builder(presets::Minimal)
@@ -83,7 +85,10 @@ pub async fn endpoint(secret: SecretKey, opts: &EndpointOptions) -> Result<Endpo
             .net_report_config(NetReportConfig::minimal()),
     };
     if let Some(bind) = opts.bind {
-        b = b.clear_ip_transports().bind_addr(bind).map_err(|e| err(&e))?;
+        b = b
+            .clear_ip_transports()
+            .bind_addr(bind)
+            .map_err(|e| err(&e))?;
     }
     b.secret_key(secret)
         .alpns(vec![ALPN.to_vec()])

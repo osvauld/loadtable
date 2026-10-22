@@ -213,7 +213,12 @@ mod tests {
             .query_row("SELECT count(*) FROM jobs", [], |r| r.get(0))
             .unwrap();
         assert_eq!(jobs, 1);
-        for table in ["trust_peers", "trust_grants", "trust_spent_nonces", "trust_meta"] {
+        for table in [
+            "trust_peers",
+            "trust_grants",
+            "trust_spent_nonces",
+            "trust_meta",
+        ] {
             let n: i64 = c
                 .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
                 .unwrap();

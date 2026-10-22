@@ -193,12 +193,18 @@ impl TrustControl for NodeTrust {
     fn accept(&self, ticket: &str) -> Result<PairedView, String> {
         let Some(t) = &self.transport else {
             return Err(
-                "this build has no peer transport; rebuild with --features iroh to pair".to_string(),
+                "this build has no peer transport; rebuild with --features iroh to pair"
+                    .to_string(),
             );
         };
         let p = self
             .node
-            .accept(ticket, t.as_ref(), &self.addrs.current(), Duration::from_secs(20))
+            .accept(
+                ticket,
+                t.as_ref(),
+                &self.addrs.current(),
+                Duration::from_secs(20),
+            )
             .map_err(fail)?;
         Ok(PairedView {
             name: p.name,
@@ -212,11 +218,7 @@ impl TrustControl for NodeTrust {
     }
 
     fn peers(&self) -> Vec<PeerTrustView> {
-        let quality = self
-            .quality
-            .lock()
-            .map(|g| g.clone())
-            .unwrap_or_default();
+        let quality = self.quality.lock().map(|g| g.clone()).unwrap_or_default();
         self.node
             .peers()
             .into_iter()

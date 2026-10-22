@@ -118,7 +118,10 @@ mod tests {
         assert_eq!(c.relay, RelaySetting::Off);
         assert_eq!(c.bind, Some("192.168.1.5:7843".parse().unwrap()));
         let (c, _) = parse("[peers]\nrelay = \"https://relay.example.org/\"\n");
-        assert_eq!(c.relay, RelaySetting::Custom("https://relay.example.org/".into()));
+        assert_eq!(
+            c.relay,
+            RelaySetting::Custom("https://relay.example.org/".into())
+        );
     }
 
     // R-257
