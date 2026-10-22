@@ -284,6 +284,7 @@ pub fn status_snapshot() -> StatusSnapshot {
             compile_blocker: Some("memory stalls 12% over 10%".into()),
             warning: None,
         },
+        peers: Vec::new(),
         alerts: vec![AlertView {
             id: "a".into(),
             level: "warn".into(),
