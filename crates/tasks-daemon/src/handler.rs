@@ -90,7 +90,10 @@ impl Scheduler {
                 env,
                 placement,
                 broad_test,
-            } => self.submit_plan(&plan, &owner, cwd, env, placement, broad_test),
+            } => {
+                let ctx = Self::plan_context(&owner, cwd, env, placement, broad_test)?;
+                self.submit_plan(&plan, ctx)
+            }
             Request::SubmitSuite {
                 name,
                 owner,
@@ -99,7 +102,10 @@ impl Scheduler {
                 placement,
                 quick,
                 broad_test,
-            } => self.submit_suite(&name, &owner, cwd, env, placement, quick, broad_test),
+            } => {
+                let ctx = Self::plan_context(&owner, cwd, env, placement, broad_test)?;
+                self.submit_suite(&name, ctx, quick)
+            }
             Request::List {
                 owner,
                 active_only,
@@ -195,22 +201,24 @@ impl Scheduler {
         Ok(Response::Submitted { id })
     }
 
-    fn submit_plan(
-        &self,
-        plan: &Plan,
+    /// What a plan's or suite's steps share, with the owner validated.
+    fn plan_context(
         owner: &str,
         cwd: PathBuf,
         env: Vec<(String, String)>,
         placement: Placement,
         broad_test: bool,
-    ) -> Out {
-        let ctx = PlanContext {
+    ) -> Result<PlanContext, ApiError> {
+        Ok(PlanContext {
             owner: Self::owner(owner)?,
             cwd,
             env,
             placement,
             broad_test_escape: broad_test,
-        };
+        })
+    }
+
+    fn submit_plan(&self, plan: &Plan, ctx: PlanContext) -> Out {
         self.check_plan(&ctx, plan)?;
         let done = retry_busy(&API_RETRY, &sleep, || self.ledger.submit_plan(&ctx, plan))
             .map_err(|e| ledger_error(&e))?;
@@ -221,23 +229,8 @@ impl Scheduler {
         })
     }
 
-    fn submit_suite(
-        &self,
-        name: &str,
-        owner: &str,
-        cwd: PathBuf,
-        env: Vec<(String, String)>,
-        placement: Placement,
-        quick: bool,
-        broad_test: bool,
-    ) -> Out {
-        let ctx = PlanContext {
-            owner: Self::owner(owner)?,
-            cwd: cwd.clone(),
-            env,
-            placement,
-            broad_test_escape: broad_test,
-        };
+    fn submit_suite(&self, name: &str, ctx: PlanContext, quick: bool) -> Out {
+        let cwd = ctx.cwd.clone();
         let loaded = tasks_policy::load(&RealFs, &cwd)
             .map_err(|e| ApiError::new(ErrorCode::Refused, e.to_string()))?;
         let machines = vec![self.cfg.machine.clone()];
