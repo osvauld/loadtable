@@ -175,6 +175,7 @@ pub fn timing(job: &Job, now: i64) -> (String, String, String) {
     )
 }
 
+#[cfg(any(test, feature = "mcp"))]
 pub fn job_table(jobs: &[Job], now: i64, home: Option<&str>) -> String {
     job_table_with(jobs, now, home, &HashMap::new())
 }
@@ -211,7 +212,7 @@ pub fn phase_notes(
     notes
 }
 
-/// [`job_table`] with `notes` ([`phase_notes`]) replacing the PHASE text of the jobs they name.
+/// Compact job table with `notes` ([`phase_notes`]) replacing the PHASE text of the jobs they name.
 pub fn job_table_with(
     jobs: &[Job],
     now: i64,

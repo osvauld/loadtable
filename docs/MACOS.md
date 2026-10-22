@@ -7,7 +7,25 @@ when built with UI); other commands reject before connecting to a daemon, creati
 submitting jobs. No macOS daemon, GUI, scheduler, recovery or local execution acceptance is
 claimed.
 
-## Latest dev synchronization
+## Latest dev synchronization: checkout gate and pull-back
+
+Merged `origin/dev` through `0e3da48` into `dev-macos` without conflicts (merge
+`054a1b4`). This retains checkout-aware forwarding before offload-slot acquisition,
+active-list remote-job/wait annotations, and pressure-aware pull-back rerouting.
+The Mac admission candidate, direct-child ownership primitive and runtime guards remain.
+
+Native selected validation passed 162 tests: the prior 117-case selection, 25 rerouting
+model/ledger tests, 4 checkout-gate tests, 1 confirmed-cancel rule test and 15 CLI display
+tests. Zero failed/ignored. Headless/default-feature checks, platform all-target Clippy
+and headless library/CLI/example/boundary Clippy passed. Initial headless Clippy found
+that the incoming CLI change left the old table wrapper used only by MCP/tests; it is
+now compiled only for those callers. No blanket dead-code allowance was added.
+
+These model/ledger tests do not establish real peer cancellation/reconnect/no-duplicate
+acceptance. Linux-only metrics tests, live Linux worker regression and actual remote
+pull-back remain unrun. No service/config/key changes or runtime activation occurred.
+
+## Earlier dev synchronization
 
 Merged `origin/dev` through `8244b7b` into `dev-macos` (merge `80367c2`), retaining
 our admission candidate and direct-child ownership work. Incoming shared changes include
