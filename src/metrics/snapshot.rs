@@ -278,6 +278,7 @@ fn job_view(job: &Job, inputs: &Inputs, history: &History) -> JobView {
     let extras = inputs.extras.get(&job.id).cloned().unwrap_or_default();
     let argv = history::argv(job);
     let (command, kind_key) = history::names(job);
+    let coarse = history::coarse_key(job);
     let resource = history::resource(job);
     let cargo = super::command::is_cargo(&argv);
     let execution = job.execution.as_ref();
@@ -319,7 +320,7 @@ fn job_view(job: &Job, inputs: &Inputs, history: &History) -> JobView {
         test_targets_built: extras.test_targets_so_far.filter(|&n| n > 0),
     });
     let estimate = (!terminal)
-        .then(|| history.estimate(&kind_key, warmth, job.id))
+        .then(|| history.estimate_with(&kind_key, Some(&coarse), warmth, job.id))
         .flatten()
         .map(|eta| {
             let done: f64 = execution
