@@ -8,6 +8,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -291,8 +292,61 @@ pub fn logs(id: i64) -> Result<LogTail> {
     })
 }
 
+/// Most important lines kept from an elided middle (the first and the last half of them
+/// when there are more), each cut to `IMPORTANT_LINE` bytes: bounds the stored extra text.
+const IMPORTANT_KEPT: usize = 200;
+const IMPORTANT_LINE: usize = 300;
+
+/// A line an agent needs even from the elided middle of a long log: a cargo test binary
+/// (`Running`), its `test result:`, failures, panics and compiler errors.
+fn important(line: &str) -> bool {
+    let start = line.trim_start();
+    start.starts_with("Running ")
+        || start.starts_with("test result:")
+        || start.starts_with("error[")
+        || start.starts_with("error:")
+        || line.contains(" FAILED")
+        || line.contains("panicked at")
+        || line.contains("BUILD FAILED")
+}
+
+/// The important lines of `middle` (line-aligned bytes): the first and last
+/// `IMPORTANT_KEPT / 2` when there are more than `IMPORTANT_KEPT`, how many were found, and
+/// how many lines the text has.
+fn important_lines(middle: &[u8]) -> (Vec<String>, Vec<String>, usize, usize) {
+    let half = IMPORTANT_KEPT / 2;
+    let (mut first, mut last) = (Vec::new(), VecDeque::new());
+    let (mut found, mut lines) = (0, 0);
+    for raw in middle.split_inclusive(|b| *b == b'\n') {
+        lines += 1;
+        let text = String::from_utf8_lossy(raw);
+        let line = text.trim_end_matches(['\n', '\r']);
+        if !important(line) {
+            continue;
+        }
+        found += 1;
+        let mut end = line.len().min(IMPORTANT_LINE);
+        while !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        let kept = line[..end].to_owned();
+        if first.len() < half {
+            first.push(kept);
+        } else {
+            if last.len() == half {
+                last.pop_front();
+            }
+            last.push_back(kept);
+        }
+    }
+    (first, last.into(), found, lines)
+}
+
 /// The whole text when it fits in `head + tail` bytes, else the first `head` and last `tail`
-/// bytes (cut at line boundaries) around one marker line naming the omitted byte count.
+/// bytes (cut at line boundaries) around one marker line naming the omitted byte and line
+/// counts, followed by the important lines of the omitted part (see [`important`]; at most
+/// `IMPORTANT_KEPT` lines of `IMPORTANT_LINE` bytes, so the result stays within
+/// `head + tail + IMPORTANT_KEPT * (IMPORTANT_LINE + 1)` plus the marker lines).
 pub fn head_and_tail(file: &mut File, len: u64, head: u64, tail: u64) -> Result<String> {
     let mut read = |from: u64, n: u64| -> Result<Vec<u8>> {
         file.seek(SeekFrom::Start(from))?;
@@ -312,10 +366,34 @@ pub fn head_and_tail(file: &mut File, len: u64, head: u64, tail: u64) -> Result<
         last.drain(..=start);
     }
     let omitted = len - first.len() as u64 - last.len() as u64;
+    let middle = read(first.len() as u64, omitted)?;
+    let (kept_first, kept_last, found, lines) = important_lines(&middle);
     let mut text = String::from_utf8_lossy(&first).into_owned();
     text.push_str(&format!(
-        "\n[... tasks: {omitted} bytes of this log omitted here (head and tail shown); the full retained log is the job's job.log ...]\n\n"
+        "\n[... tasks: {omitted} bytes of this log omitted here ({lines} lines; head and tail shown); the full retained log is the job's job.log ...]\n"
     ));
+    if found > 0 {
+        text.push_str(&format!(
+            "[... tasks: {found} important lines (Running, test result:, FAILED, panicked at, error) of the omitted part follow ...]\n"
+        ));
+        for line in &kept_first {
+            text.push_str(line);
+            text.push('\n');
+        }
+        let skipped = found - kept_first.len() - kept_last.len();
+        if skipped > 0 {
+            text.push_str(&format!(
+                "[... tasks: {skipped} more important lines omitted here (first {} and last {} kept) ...]\n",
+                kept_first.len(),
+                kept_last.len()
+            ));
+        }
+        for line in &kept_last {
+            text.push_str(line);
+            text.push('\n');
+        }
+    }
+    text.push('\n');
     text.push_str(&String::from_utf8_lossy(&last));
     Ok(text)
 }
@@ -707,6 +785,18 @@ fn execute(
                 id,
                 Phase::Cancelled,
                 "Cancelled; owned stage process group stopped",
+            )?;
+            return Ok(());
+        }
+        if let Ok(line) =
+            fs::read_to_string(job_dir(state, id).join(format!("{stage}-{STUCK_MARKER}")))
+        {
+            store.finish(
+                id,
+                Phase::Failed,
+                &format!(
+                    "{stage} failed: stuck-job (exit={STUCK_JOB_EXIT_CODE}): process group ended after the command printed a terminal failure and went quiet; {line}"
+                ),
             )?;
             return Ok(());
         }
@@ -1216,6 +1306,8 @@ pub fn stage(id: i64, stage: &str, worker: ProcessIdentity) -> Result<()> {
     // retried. Only a committed cancel, a stop signal, worker loss, or a ledger
     // unreadable past its deadline stops the group.
     let mut probe = CancelProbe::default();
+    let mut watch = StuckWatch::new(admission::stuck_job_seconds());
+    let mut stuck = false;
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
@@ -1235,6 +1327,13 @@ pub fn stage(id: i64, stage: &str, worker: ProcessIdentity) -> Result<()> {
                 }
             }
         };
+        let reason = reason.or_else(|| {
+            let line = watch.check(&dir, group.pid)?;
+            append_log(&dir, format!("{line}\n").as_bytes());
+            let _ = fs::write(dir.join(format!("{stage}-{STUCK_MARKER}")), &line);
+            stuck = true;
+            Some("stuck job".to_string())
+        });
         if let Some(reason) = reason {
             append_log(
                 &dir,
@@ -1260,7 +1359,11 @@ pub fn stage(id: i64, stage: &str, worker: ProcessIdentity) -> Result<()> {
                     stage: stage.into(),
                     wait_seconds: 0.0,
                     seconds: None,
-                    exit_code: status.code(),
+                    exit_code: if stuck {
+                        Some(STUCK_JOB_EXIT_CODE)
+                    } else {
+                        status.code()
+                    },
                     signal: status.signal(),
                 },
                 artifacts: vec![],
@@ -1467,6 +1570,131 @@ pub fn admit(id: i64, stage: &str, supervisor: ProcessIdentity) -> Result<()> {
     Ok(())
 }
 
+/// Exit status recorded for a job ended by the stuck-job detector (not a real command status).
+const STUCK_JOB_EXIT_CODE: i32 = 125;
+/// Per-stage marker file (`<stage>-stuck-job.txt`) holding the stuck-job log line.
+const STUCK_MARKER: &str = "stuck-job.txt";
+/// How much of the log's end is searched for a terminal failure line.
+const STUCK_TAIL: u64 = 64 * 1024;
+const STUCK_SAMPLE: Duration = Duration::from_secs(5);
+/// Lines that mean the build already failed for good. A failing test (`panicked`) is not one:
+/// cargo test goes on to run the other test binaries.
+const TERMINAL_FAILURES: [&str; 3] = [
+    "BUILD FAILED",
+    "FAILURE: Build failed with an exception",
+    "error: could not compile",
+];
+
+/// Pure stuck-job rule: the log tail has a terminal failure line, nothing was logged for
+/// `quiet_secs` (>= `threshold`), and the process group's CPU stayed flat over that time.
+/// Returns the line to log. Quiet alone, or a log without a terminal failure, never fires.
+pub fn stuck_job_line(
+    tail: &str,
+    quiet_secs: u64,
+    cpu_flat: bool,
+    threshold: u64,
+) -> Option<String> {
+    if !cpu_flat || quiet_secs < threshold {
+        return None;
+    }
+    let failure = tail
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| TERMINAL_FAILURES.iter().any(|t| l.contains(t)))?;
+    let failure: String = failure.chars().take(200).collect();
+    Some(format!(
+        "tasks: stuck-job: {failure} seen {quiet_secs} s ago, no output and no CPU since; ending the job as failed (admission::stuck_job_seconds)"
+    ))
+}
+
+/// Total utime+stime (including reaped children) of every process in group `pgid`, in clock
+/// ticks. `None` when /proc is unreadable or the group is empty: no evidence either way.
+fn group_cpu_ticks(pgid: u32) -> Option<u64> {
+    let mut total = 0u64;
+    let mut found = false;
+    for entry in fs::read_dir("/proc").ok()?.flatten() {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+        {
+            continue;
+        }
+        let Ok(stat) = fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        // Fields after the parenthesised name: state ppid pgrp ... utime(11) stime(12) cutime cstime.
+        let Some(rest) = stat.rsplit_once(')').map(|(_, r)| r) else {
+            continue;
+        };
+        let f: Vec<&str> = rest.split_whitespace().collect();
+        if f.get(2).and_then(|g| g.parse::<u32>().ok()) != Some(pgid) {
+            continue;
+        }
+        found = true;
+        total += (11..15)
+            .filter_map(|i| f.get(i).and_then(|v| v.parse::<u64>().ok()))
+            .sum::<u64>();
+    }
+    found.then_some(total)
+}
+
+/// Tracks a running stage's log growth and group CPU for [`stuck_job_line`].
+struct StuckWatch {
+    threshold: u64,
+    len: u64,
+    changed: Instant,
+    cpu: Option<(u64, Instant)>,
+    next: Instant,
+}
+impl StuckWatch {
+    fn new(threshold: u64) -> Self {
+        let now = Instant::now();
+        Self {
+            threshold,
+            len: 0,
+            changed: now,
+            cpu: None,
+            next: now + STUCK_SAMPLE,
+        }
+    }
+    /// Samples every few seconds; the line to log once the job is stuck.
+    fn check(&mut self, dir: &Path, pgid: u32) -> Option<String> {
+        let now = Instant::now();
+        if now < self.next {
+            return None;
+        }
+        self.next = now + STUCK_SAMPLE;
+        let log = dir.join("job.log");
+        let len = fs::metadata(&log).ok()?.len();
+        if len != self.len {
+            self.len = len;
+            self.changed = now;
+        }
+        // Any CPU growth (or a shrinking total, as members exit) restarts the flat window.
+        match (group_cpu_ticks(pgid), self.cpu) {
+            (None, _) => self.cpu = None,
+            (Some(t), Some((base, _))) if t == base => {}
+            (Some(t), _) => self.cpu = Some((t, now)),
+        }
+        let quiet = now.duration_since(self.changed).as_secs();
+        let flat = self
+            .cpu
+            .is_some_and(|(_, since)| now.duration_since(since).as_secs() >= self.threshold);
+        if quiet < self.threshold || !flat {
+            return None;
+        }
+        let mut f = File::open(&log).ok()?;
+        f.seek(SeekFrom::Start(len.saturating_sub(STUCK_TAIL)))
+            .ok()?;
+        let mut tail = Vec::new();
+        f.read_to_end(&mut tail).ok()?;
+        stuck_job_line(&String::from_utf8_lossy(&tail), quiet, true, self.threshold)
+    }
+}
+
 fn signal_group(group: &ProcessIdentity, sig: i32) -> Result<()> {
     task_manager_platform::process::signal_owned_group(group, sig)?;
     Ok(())
@@ -1511,6 +1739,49 @@ fn drain<R: Read + Send + 'static>(mut reader: R, dir: PathBuf) -> std::thread::
 }
 
 const DEFAULT_CARGO_BUILD_JOBS: &str = "2";
+/// `admission::cargo_jobs_when_busy`: while another compile-class job holds a slot on this
+/// machine, a Cargo command's `-j` (or the injected default) above `min(cap, when_busy)` is
+/// replaced by it. A lone job, and any other command, runs as submitted.
+fn lower_busy_jobs(
+    dir: &Path,
+    resource: &crate::local_command::Resource,
+    argv: Vec<String>,
+) -> Vec<String> {
+    use crate::local_command::Resource;
+    if *resource != Resource::Compile || !crate::placement::is_cargo(&argv) {
+        return argv;
+    }
+    let Ok(Some(when_busy)) = crate::policy::effective()
+        .policy
+        .admission
+        .cargo_jobs_when_busy()
+    else {
+        return argv;
+    };
+    let Ok(thresholds) = admission::Thresholds::from_env() else {
+        return argv;
+    };
+    let others = admission::other_compile_jobs_running(unsafe { libc::getppid() } as u32);
+    let default = DEFAULT_CARGO_BUILD_JOBS.parse().unwrap_or(2);
+    let Some(jobs) = admission::lowered_cargo_jobs(
+        crate::placement::requested_jobs(&argv),
+        default,
+        thresholds.max_cargo_jobs,
+        Some(when_busy),
+        others > 0,
+    ) else {
+        return argv;
+    };
+    append_log(
+        dir,
+        format!(
+            "tasks: {others} other compile job(s) running; Cargo -j lowered to {jobs} \
+             (admission::cargo_jobs_when_busy)\n"
+        )
+        .as_bytes(),
+    );
+    crate::placement::apply_jobs(&argv, jobs)
+}
 /// The only daemon environment variables an admitted command inherits.
 const PASSTHROUGH_ENV: [&str; 12] = [
     "HOME",
@@ -1719,6 +1990,7 @@ fn run_command(state: &Path, dir: &Path, job: &crate::Job, stage: &str) -> Resul
             )
             .as_bytes(),
         );
+        let argv = lower_busy_jobs(dir, &recipe.resource, argv);
         let mut cmd = sanitized(Path::new(&argv[0]));
         cmd.args(&argv[1..]).current_dir(&job.spec.source);
         // tasks-offload names its per-job sidecar after this (cluster-snapshot.md).
@@ -2158,6 +2430,37 @@ fn run_android(state: &Path, dir: &Path, job: &crate::Job, stage: &str) -> Resul
 
 #[cfg(test)]
 mod tests {
+    const GRADLE_OOM: &str = "> Task :app:mergeDebugResources FAILED\n\nFAILURE: Build failed with an exception.\n\n* What went wrong:\nExecution failed for task ':app:mergeDebugResources'.\n> java.lang.OutOfMemoryError: Java heap space\n\nBUILD FAILED in 4m 2s\n";
+    #[test]
+    fn stuck_job_fires_on_a_gradle_oom_log_that_went_quiet_with_flat_cpu() {
+        let line = stuck_job_line(GRADLE_OOM, 300, true, 300).unwrap();
+        assert!(line.starts_with("tasks: stuck-job: BUILD FAILED in 4m 2s seen 300 s ago"));
+        assert!(line.ends_with("(admission::stuck_job_seconds)"));
+        assert!(line.contains("no output and no CPU since; ending the job as failed"));
+    }
+    #[test]
+    fn stuck_job_ignores_cargo_test_failures_quiet_alone_and_moving_cpu() {
+        let cargo_test = "test a ... FAILED\nthread 'a' panicked at src/lib.rs:1:1:\nfailures:\n    a\ntest result: FAILED. 0 passed; 1 failed\n";
+        assert_eq!(stuck_job_line(cargo_test, 9999, true, 300), None);
+        // Quiet and flat, but nothing failed: a long silent compile.
+        assert_eq!(
+            stuck_job_line("Compiling foo v0.1.0\n", 9999, true, 300),
+            None
+        );
+        // Terminal failure, flat CPU, but not quiet long enough.
+        assert_eq!(stuck_job_line(GRADLE_OOM, 299, true, 300), None);
+        // Terminal failure and quiet, but the group is still burning CPU (or /proc unreadable).
+        assert_eq!(stuck_job_line(GRADLE_OOM, 9999, false, 300), None);
+        let cargo_compile = "error: could not compile `x` (lib) due to 1 previous error\n";
+        assert!(stuck_job_line(cargo_compile, 300, true, 300).is_some());
+    }
+    #[test]
+    fn group_cpu_ticks_reads_the_own_group_and_misses_an_empty_one() {
+        let own = unsafe { libc::getpgrp() } as u32;
+        assert!(group_cpu_ticks(own).is_some());
+        assert_eq!(group_cpu_ticks(u32::MAX - 1), None);
+    }
+
     #[test]
     fn a_stopped_queue_says_who_stopped_it_and_how_to_resume() {
         let dir = std::env::temp_dir().join(format!("stopped-reason-{}", std::process::id()));
@@ -2306,6 +2609,75 @@ mod tests {
         // Short logs are returned whole, without a marker.
         let small = head_and_tail(&mut File::open(&path).unwrap(), 40, 1024, 2048).unwrap();
         assert_eq!(small, text[..40]);
+        fs::remove_dir_all(state).unwrap();
+    }
+    #[test]
+    fn elided_middle_keeps_important_lines_in_order() {
+        let state = temp_state("headtailkeep");
+        let path = state.join("job.log");
+        let mut text = String::from("head line\n");
+        for i in 0..5_000 {
+            text.push_str(&format!("   Compiling filler{i}\n"));
+        }
+        text.push_str("     Running unittests src/lib.rs (target/debug/deps/a-1)\n");
+        text.push_str("test a::b ... FAILED\n");
+        text.push_str("thread 'a::b' panicked at src/a.rs:9:5:\n");
+        text.push_str("error[E0308]: mismatched types\n");
+        text.push_str("warning: unused variable: `x`\n");
+        text.push_str(&format!(
+            "test result: FAILED. 1 passed; {}\n",
+            "x".repeat(500)
+        ));
+        for i in 0..5_000 {
+            text.push_str(&format!("   Compiling more{i}\n"));
+        }
+        text.push_str("BUILD FAILED in 3s\n");
+        fs::write(&path, &text).unwrap();
+        let len = text.len() as u64;
+        let shown = head_and_tail(&mut File::open(&path).unwrap(), len, 1024, 2048).unwrap();
+        let at = |needle: &str| {
+            shown
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle}: {shown}"))
+        };
+        let marker = at("bytes of this log omitted");
+        assert!(marker < at("Running unittests"));
+        assert!(at("Running unittests") < at("test a::b ... FAILED"));
+        assert!(at("test a::b ... FAILED") < at("panicked at src/a.rs"));
+        assert!(at("panicked at src/a.rs") < at("error[E0308]"));
+        assert!(at("error[E0308]") < at("test result: FAILED. 1 passed;"));
+        assert!(at("test result: FAILED. 1 passed;") < at("BUILD FAILED"));
+        assert!(!shown.contains("unused variable"));
+        // The long result line is cut; the marker counts the dropped lines.
+        assert!(!shown.contains(&"x".repeat(300)));
+        assert!(shown.contains(" lines; head and tail shown)"), "{shown}");
+        assert_eq!(shown.matches("bytes of this log omitted").count(), 1);
+        assert!(shown.len() < 1024 + 2048 + 1500, "{}", shown.len());
+        fs::remove_dir_all(state).unwrap();
+    }
+    #[test]
+    fn many_important_lines_keep_first_and_last_halves() {
+        let state = temp_state("headtailcap");
+        let path = state.join("job.log");
+        let mut text = "head\n".repeat(100);
+        for i in 0..1_000 {
+            text.push_str(&format!("test t{i} ... FAILED\n"));
+        }
+        text.push_str(&"filler line\n".repeat(10_000));
+        fs::write(&path, &text).unwrap();
+        let len = text.len() as u64;
+        let shown = head_and_tail(&mut File::open(&path).unwrap(), len, 64, 256).unwrap();
+        let kept = shown.matches("... FAILED").count();
+        assert_eq!(kept, IMPORTANT_KEPT, "{shown}");
+        assert!(shown.contains("test t0 ... FAILED"));
+        assert!(shown.contains("test t99 ... FAILED"));
+        assert!(!shown.contains("test t100 ... FAILED"));
+        assert!(shown.contains("test t999 ... FAILED"));
+        assert!(
+            shown.contains("800 more important lines omitted"),
+            "{shown}"
+        );
+        assert!(shown.len() < 64 + 256 + IMPORTANT_KEPT * (IMPORTANT_LINE + 1) + 600);
         fs::remove_dir_all(state).unwrap();
     }
     #[test]

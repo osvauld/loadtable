@@ -102,6 +102,20 @@ pub struct Effective {
     pub broad_test_source: String,
     /// Errors in the file or the environment; the defaults (or the valid parts) apply.
     pub errors: Vec<String>,
+    /// The Cargo jobs cap in force: `TASKS_MAX_CARGO_JOBS`, else `admission::max_cargo_jobs`,
+    /// else the default.
+    #[serde(default = "default_cargo_jobs")]
+    pub max_cargo_jobs: u64,
+    /// `default`, `file` or `env` (`TASKS_MAX_CARGO_JOBS`).
+    #[serde(default = "default_cargo_jobs_source")]
+    pub max_cargo_jobs_source: String,
+}
+
+fn default_cargo_jobs() -> u64 {
+    crate::admission::DEFAULT_MAX_CARGO_JOBS
+}
+fn default_cargo_jobs_source() -> String {
+    "default".into()
 }
 
 impl Effective {
@@ -126,6 +140,16 @@ impl Effective {
             out.push_str(&format!(
                 "policy: reroute {set} (from file; TASKS_REROUTE* variables win)\n"
             ));
+        }
+        out.push_str(&format!(
+            "policy: max_cargo_jobs={} (from {})",
+            self.max_cargo_jobs, self.max_cargo_jobs_source
+        ));
+        match self.policy.admission.cargo_jobs_when_busy {
+            Some(n) => out.push_str(&format!(
+                ", cargo_jobs_when_busy={n} (from file; applies while another compile job runs)\n"
+            )),
+            None => out.push('\n'),
         }
         for e in &self.errors {
             out.push_str(&format!("policy ERROR: {e}\n"));
@@ -228,7 +252,13 @@ pub fn load_with(get: &dyn Fn(&str) -> Option<OsString>) -> Effective {
             Err(e) => errors.push(format!("{BROAD_TEST_ENV}: {e}; ignored")),
         }
     }
+    errors.extend(policy.admission.errors());
+    let (max_cargo_jobs, max_cargo_jobs_source, error) =
+        crate::admission::resolve_max_cargo_jobs(get, &policy.admission);
+    errors.extend(error);
     Effective {
+        max_cargo_jobs,
+        max_cargo_jobs_source: max_cargo_jobs_source.into(),
         policy,
         path,
         file_present,
@@ -477,5 +507,60 @@ mod tests {
             matches!(check(&e, &v("cargo build"), cwd, false), Verdict::Warn(w) if w[0].contains("policy error"))
         );
         assert!(matches!(check(&e, &broad, cwd, false), Verdict::Refused(_)));
+    }
+
+    #[test]
+    fn the_cargo_jobs_keys_parse_show_their_source_and_the_environment_wins() {
+        let t = Temp::new("cargo-jobs");
+        let file = t.file(
+            "p.huml",
+            "%HUML v0.2.0\nadmission::\n  max_cargo_jobs: 6\n  cargo_jobs_when_busy: 3\n",
+        );
+        let path = file.to_str().unwrap();
+        let from_file = load_with(&env(&[(POLICY_ENV, path)]));
+        assert_eq!(
+            (
+                from_file.max_cargo_jobs,
+                from_file.max_cargo_jobs_source.as_str()
+            ),
+            (6, "file")
+        );
+        assert_eq!(from_file.policy.admission.cargo_jobs_when_busy, Some(3));
+        let summary = from_file.summary();
+        assert!(
+            summary.contains("max_cargo_jobs=6 (from file)")
+                && summary.contains("cargo_jobs_when_busy=3"),
+            "{summary}"
+        );
+        let from_env = load_with(&env(&[(POLICY_ENV, path), ("TASKS_MAX_CARGO_JOBS", "9")]));
+        assert_eq!(
+            (
+                from_env.max_cargo_jobs,
+                from_env.max_cargo_jobs_source.as_str()
+            ),
+            (9, "env")
+        );
+        assert!(from_env.summary().contains("max_cargo_jobs=9 (from env)"));
+        let none = load_with(&env(&[(POLICY_ENV, "/nonexistent/p.huml")]));
+        assert_eq!(
+            (none.max_cargo_jobs, none.max_cargo_jobs_source.as_str()),
+            (2, "default")
+        );
+        assert!(none.summary().contains("max_cargo_jobs=2 (from default)"));
+        // Out of range is reported like compile_slots, and the default applies.
+        let bad = t.file(
+            "bad.huml",
+            "%HUML v0.2.0\nadmission::\n  max_cargo_jobs: 17\n",
+        );
+        let bad = load_with(&env(&[(POLICY_ENV, bad.to_str().unwrap())]));
+        assert_eq!(bad.max_cargo_jobs, 2);
+        assert!(
+            bad.errors
+                .iter()
+                .any(|e| e.contains("admission::max_cargo_jobs: 17 is outside 1..=16")),
+            "{:?}",
+            bad.errors
+        );
+        assert!(parse("%HUML v0.2.0\nadmission::\n  cargo_jobs:  2\n").is_err());
     }
 }

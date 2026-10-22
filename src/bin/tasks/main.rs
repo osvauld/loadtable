@@ -8,6 +8,7 @@ mod display;
 mod doctor;
 mod follow;
 mod gc;
+mod grep;
 #[cfg(feature = "ui")]
 mod log_view;
 #[cfg(feature = "mcp")]
@@ -41,6 +42,8 @@ const USAGE: &str = "usage: tasks [ui [--fixtures DIR]]  # DIR: cluster snapshot
        tasks submit SPEC.json | approve JOB_ID | cancel JOB_ID
        tasks prioritize JOB_ID --reason TEXT [--who OWNER]  # urgent: skips the queue, never preempts; audited
        tasks logs JOB_ID [--json]  # plain log text by default; --json preserves v2 response
+       tasks logs JOB_ID --grep PATTERN [--context N] [--fixed] [--ignore-case]
+         # matching lines of the whole retained log as LINE:TEXT (context as LINE-TEXT); exit 1 if none
        tasks run [--who OWNER] [--run | --offload | --device SERIAL] [--follow] -- COMMAND [ARGS...]
          # --run: already-built command, run slot; --device: exclusive device lock (never with --run)
          # --offload: tasks-offload/offload-portable-desktop.sh client only; own slots, no CPU PSI gate
@@ -178,6 +181,7 @@ fn run() -> Result<()> {
         Some("peer") => return peer_command(&args[1..]),
         Some("setup") => return tinline_task_manager::setup::cli::run(&args[1..]),
         Some("gc") => return gc::run(&args[1..]),
+        Some("logs") if args.iter().any(|a| a == "--grep") => return grep::run(&args[1..]),
         Some("mcp") => return mcp_command(&args[1..]),
         Some("place") => return place_command(&args[1..]),
         Some("catalog") if args.len() == 1 => {

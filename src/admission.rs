@@ -40,6 +40,10 @@ pub const STATE_FREE_ENV: &str = "TASKS_MIN_STATE_FREE_MIB";
 /// request, 1..=64. Default 2. Raising it never changes the injected default of 2.
 pub const MAX_CARGO_JOBS_ENV: &str = "TASKS_MAX_CARGO_JOBS";
 pub const DEFAULT_MAX_CARGO_JOBS: u64 = 2;
+/// Seconds a job's log and CPU must both stay still after a terminal failure line before the
+/// job is ended as stuck, 30..=3600. Default 300. See `worker::stuck_job_line`.
+pub const STUCK_JOB_ENV: &str = "TASKS_STUCK_JOB_SECONDS";
+pub const DEFAULT_STUCK_JOB_SECONDS: u64 = 300;
 /// Opt-in, more lenient CPU PSI some avg10 limit (whole percent, 40..=100) for
 /// RUN slots only. Default 40, the shared CPU gate. It can never tighten below
 /// 40 and never relaxes memory, memory/I/O PSI or compile admission.
@@ -96,6 +100,13 @@ const CARGO_JOBS_LIMIT: Limit = Limit {
     unit_name: "jobs",
     floor: 1,
     max: 64,
+};
+const STUCK_JOB_LIMIT: Limit = Limit {
+    env: STUCK_JOB_ENV,
+    unit: 1,
+    unit_name: "seconds",
+    floor: 30,
+    max: 3600,
 };
 impl Limit {
     fn parse(&self, raw: Option<OsString>, default: u64) -> Result<u64> {
@@ -168,8 +179,14 @@ impl Thresholds {
                 .parse(get(RUN_CPU_ENV), d.run_cpu_some_avg10_max_pct)?,
         })
     }
+    /// The environment, then the policy file's `admission::max_cargo_jobs` (read fresh), then
+    /// the default, for the Cargo jobs cap; the other values come from the environment alone.
     pub fn from_env() -> Result<Self> {
-        Self::from_lookup(|name| std::env::var_os(name))
+        let mut t = Self::from_lookup(|name| std::env::var_os(name))?;
+        if std::env::var_os(MAX_CARGO_JOBS_ENV).is_none() {
+            t.max_cargo_jobs = crate::policy::effective().max_cargo_jobs;
+        }
+        Ok(t)
     }
     pub fn overridden(get: impl Fn(&str) -> Option<OsString>) -> bool {
         [
@@ -235,7 +252,7 @@ pub fn thresholds() -> Result<Thresholds> {
 pub fn submission_max_cargo_jobs() -> Result<u64> {
     let (report, _) = report_thresholds(
         &crate::state_dir(),
-        thresholds(),
+        Thresholds::from_env(),
         Thresholds::overridden(|name| std::env::var_os(name)),
     )?;
     Ok(report.effective.max_cargo_jobs)
@@ -265,6 +282,13 @@ pub struct ThresholdReport {
     pub offload_slots: usize,
     pub recorded_by_pid: Option<u32>,
     pub recorded_at: Option<i64>,
+    /// Where `max_cargo_jobs` comes from: "default", "file" (`admission::max_cargo_jobs`),
+    /// "env" (`TASKS_MAX_CARGO_JOBS`) or "worker-record" (this shell resolves another value).
+    #[serde(default = "default_source")]
+    pub max_cargo_jobs_source: String,
+}
+fn default_source() -> String {
+    "default".into()
 }
 impl ThresholdReport {
     pub fn new(source: &str, effective: Thresholds, record: Option<&Record>) -> Self {
@@ -280,6 +304,7 @@ impl ThresholdReport {
             offload_slots: OFFLOAD_SLOTS,
             recorded_by_pid: record.map(|r| r.pid),
             recorded_at: record.map(|r| r.recorded_at),
+            max_cargo_jobs_source: default_source(),
         }
     }
 }
@@ -392,6 +417,26 @@ pub struct AdmissionPolicy {
     /// Concurrent compile-class jobs (1..=8). Each takes `p2p-build.lock` or `p2p-build-N.lock`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compile_slots: Option<u64>,
+    /// Largest explicit Cargo `-j` a command may request (1..=16). `TASKS_MAX_CARGO_JOBS` wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cargo_jobs: Option<u64>,
+    /// While another compile-class job runs here, a newly started Cargo job's `-j` is lowered
+    /// to at most this (1..=16, and never above the cap). A lone job keeps the normal cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cargo_jobs_when_busy: Option<u64>,
+    /// Quiet seconds (30..=3600) after a terminal failure line, with no log bytes and no CPU in
+    /// the job's process group, before the job is ended as stuck. `TASKS_STUCK_JOB_SECONDS` wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stuck_job_seconds: Option<u64>,
+}
+
+const MAX_POLICY_CARGO_JOBS: u64 = 16;
+fn cargo_jobs_key(key: &str, value: Option<u64>) -> std::result::Result<Option<u64>, String> {
+    match value {
+        None => Ok(None),
+        Some(n) if (1..=MAX_POLICY_CARGO_JOBS).contains(&n) => Ok(Some(n)),
+        Some(n) => Err(format!("admission::{key}: {n} is outside 1..=16")),
+    }
 }
 
 impl AdmissionPolicy {
@@ -405,6 +450,107 @@ impl AdmissionPolicy {
             Some(n) => Err(format!("admission::compile_slots: {n} is outside 1..=8")),
         }
     }
+    pub fn cargo_jobs_cap(&self) -> std::result::Result<Option<u64>, String> {
+        cargo_jobs_key("max_cargo_jobs", self.max_cargo_jobs)
+    }
+    pub fn cargo_jobs_when_busy(&self) -> std::result::Result<Option<u64>, String> {
+        cargo_jobs_key("cargo_jobs_when_busy", self.cargo_jobs_when_busy)
+    }
+    pub fn stuck_job_seconds(&self) -> std::result::Result<Option<u64>, String> {
+        match self.stuck_job_seconds {
+            None => Ok(None),
+            Some(n) if (STUCK_JOB_LIMIT.floor..=STUCK_JOB_LIMIT.max).contains(&n) => Ok(Some(n)),
+            Some(n) => Err(format!(
+                "admission::stuck_job_seconds: {n} is outside 30..=3600"
+            )),
+        }
+    }
+    /// Every invalid value of this section, one message each.
+    pub fn errors(&self) -> Vec<String> {
+        [
+            self.slots().err(),
+            self.cargo_jobs_cap().err(),
+            self.cargo_jobs_when_busy().err(),
+            self.stuck_job_seconds().err(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+}
+
+/// The Cargo jobs cap and where it comes from: `TASKS_MAX_CARGO_JOBS` ("env"), else the policy
+/// key ("file"), else the default. An invalid value is an error message and is skipped (the
+/// next source applies), so a typo never raises the cap.
+pub fn resolve_max_cargo_jobs(
+    get: &dyn Fn(&str) -> Option<OsString>,
+    policy: &AdmissionPolicy,
+) -> (u64, &'static str, Option<String>) {
+    let mut error = None;
+    if let Some(raw) = get(MAX_CARGO_JOBS_ENV) {
+        match CARGO_JOBS_LIMIT.parse(Some(raw), DEFAULT_MAX_CARGO_JOBS) {
+            Ok(n) => return (n, "env", None),
+            Err(e) => error = Some(format!("{e}; ignored")),
+        }
+    }
+    match policy.cargo_jobs_cap() {
+        Ok(Some(n)) => (n, "file", error),
+        _ => (DEFAULT_MAX_CARGO_JOBS, "default", error),
+    }
+}
+
+/// The stuck-job quiet window and where it comes from: `TASKS_STUCK_JOB_SECONDS` ("env"), else
+/// `admission::stuck_job_seconds` ("file"), else the default. An invalid value is an error
+/// message and is skipped (the next source applies).
+pub fn resolve_stuck_job_seconds(
+    get: &dyn Fn(&str) -> Option<OsString>,
+    policy: &AdmissionPolicy,
+) -> (u64, &'static str, Option<String>) {
+    let mut error = None;
+    if let Some(raw) = get(STUCK_JOB_ENV) {
+        match STUCK_JOB_LIMIT.parse(Some(raw), DEFAULT_STUCK_JOB_SECONDS) {
+            Ok(n) => return (n, "env", None),
+            Err(e) => error = Some(format!("{e}; ignored")),
+        }
+    }
+    match policy.stuck_job_seconds() {
+        Ok(Some(n)) => (n, "file", error),
+        _ => (DEFAULT_STUCK_JOB_SECONDS, "default", error),
+    }
+}
+
+/// The stuck-job window in force for this process (environment, policy file, default).
+pub fn stuck_job_seconds() -> u64 {
+    resolve_stuck_job_seconds(
+        &|name| std::env::var_os(name),
+        &crate::policy::effective().policy.admission,
+    )
+    .0
+}
+
+/// The `-j` a Cargo job may use while `busy` (another compile-class job runs here), given the
+/// jobs it asked for (`None`: the injected default) and the policy: `min(cap, when_busy)`,
+/// applied only when it lowers the request. `None` leaves the command alone.
+pub fn lowered_cargo_jobs(
+    requested: Option<u64>,
+    default: u64,
+    cap: u64,
+    when_busy: Option<u64>,
+    busy: bool,
+) -> Option<u64> {
+    let limit = cap.min(when_busy.filter(|_| busy)?);
+    (requested.unwrap_or(default) > limit).then_some(limit)
+}
+
+/// Compile-class jobs, other than the one whose admission process is `own_pid`, holding a
+/// compile slot now (a live holder note each).
+pub fn other_compile_jobs_running(own_pid: u32) -> usize {
+    let Ok(root) = root() else { return 0 };
+    compile_slot_names(compile_slots())
+        .iter()
+        .filter_map(|name| read_note(&root.join(name).with_extension("holder")).ok())
+        .filter(|n| n.pid != own_pid && n.alive())
+        .count()
 }
 
 /// Lock file names of the compile slots; the first keeps its historical name.
@@ -1123,6 +1269,13 @@ pub fn status() -> Result<Status> {
     let state = crate::state_dir();
     let (lock_dir, lock_warnings) =
         report_lock_dir(&state, root(), std::env::var_os(LOCK_DIR_ENV).is_some())?;
+    let policy = crate::policy::effective();
+    let mut report = report;
+    report.max_cargo_jobs_source = if report.effective.max_cargo_jobs == policy.max_cargo_jobs {
+        policy.max_cargo_jobs_source.clone()
+    } else {
+        "worker-record".into()
+    };
     let mut status = status_with(&lock_dir.path, Pressure::read()?, report, warnings)?;
     status.warnings.extend(lock_warnings);
     status.lock_dir = Some(lock_dir);
@@ -1131,7 +1284,6 @@ pub fn status() -> Result<Status> {
         crate::cache::cache_root().and_then(|cache| crate::cache::cache_space_with(&cache, &t));
     let state_disk = crate::cache::state_space_with(&state, &t);
     with_disks(&mut status, cache_disk, state_disk);
-    let policy = crate::policy::effective();
     status
         .warnings
         .extend(policy.errors.iter().map(|e| format!("policy ERROR: {e}")));
