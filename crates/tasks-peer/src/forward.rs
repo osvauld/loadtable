@@ -179,7 +179,7 @@ pub enum ForwardState {
         reason: String,
     },
     /// Over.
-    Done(ForwardResult),
+    Done(Box<ForwardResult>),
 }
 
 /// The end of a forward.
@@ -276,7 +276,7 @@ impl Forward {
     /// The result, once over.
     pub fn result(&self) -> Option<&ForwardResult> {
         match &self.state {
-            ForwardState::Done(r) => Some(r),
+            ForwardState::Done(r) => Some(r.as_ref()),
             _ => None,
         }
     }
@@ -382,7 +382,7 @@ impl Forward {
         self.locks.release(&self.checkout, self.owner);
         self.conn = None;
         self.stream = None;
-        self.state = ForwardState::Done(r);
+        self.state = ForwardState::Done(Box::new(r));
     }
 
     fn finish_unsubmitted(&mut self, phase: Phase, reason: String) {

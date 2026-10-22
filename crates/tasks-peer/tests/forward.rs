@@ -1,4 +1,11 @@
 //! The origin-side state machine over the fake transport (R-149..R-151, R-157, R-161, R-230).
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::needless_range_loop
+)]
 mod common;
 use common::*;
 use std::collections::BTreeMap;

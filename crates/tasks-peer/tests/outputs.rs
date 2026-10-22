@@ -1,4 +1,10 @@
 //! Fetching outputs back (R-159, REQUIREMENTS 7.13).
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod common;
 use common::*;
 use std::fs;
@@ -7,7 +13,7 @@ use std::time::Duration;
 use tasks_peer::fake::FakeRunner;
 use tasks_peer::outputs::{FetchPolicy, fetch};
 use tasks_peer::proto::MAX_CHUNK_BYTES;
-use tasks_peer::transport::{Connection as _, Transport};
+use tasks_peer::transport::Transport;
 use tasks_peer::{CheckoutId, Handler};
 
 struct Synced {

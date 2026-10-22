@@ -1,4 +1,10 @@
 //! Checkout sync end to end over the fake transport (R-155, R-156, R-160, R-176).
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod common;
 use common::*;
 use std::fs;
@@ -6,7 +12,7 @@ use std::os::unix::fs::PermissionsExt;
 use tasks_peer::manifest::{StaticLister, SyncLimits, build_manifest};
 use tasks_peer::proto::{Body, FileEntry, MAX_CHUNK_BYTES, Refusal};
 use tasks_peer::sync::{DirSource, SyncReport, push_checkout};
-use tasks_peer::transport::{Connection as _, PeerError, Transport};
+use tasks_peer::transport::{PeerError, Transport};
 use tasks_peer::{CheckoutId, Hash};
 
 fn sync(w: &World, session: u64) -> Result<SyncReport, tasks_peer::sync::SyncError> {

@@ -1,4 +1,10 @@
 //! The receiving side: allowlist, policy, idempotent submit, version refusal (R-152..R-154).
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod common;
 use common::*;
 use std::sync::Arc;
