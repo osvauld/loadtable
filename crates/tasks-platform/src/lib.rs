@@ -5,6 +5,7 @@ mod disk;
 mod error;
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
+mod fds;
 mod groups;
 #[cfg(target_os = "linux")]
 pub mod linux;
@@ -20,6 +21,7 @@ mod traits;
 mod types;
 
 pub use error::PlatformError;
+pub use fds::close_on_exec_inherited;
 pub use service::{render_launchd_plist, render_systemd_unit};
 pub use slots::{FlockSlots, SlotGuard};
 pub use traits::{Disk, Memory, Pressure, Processes, Service, SlotLocks};
