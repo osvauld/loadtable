@@ -151,6 +151,54 @@ writing, pack generation, pack receipt and tree checkout. A step where gix prove
 a real gap may fall back to the `git` command behind the same trait, named in the code.
 `git2` (libgit2) is not used: it needs a C build and cannot make thin packs.
 
+### As built (step 3)
+
+`crates/tasks-peer/src/sync/`. Where the build differs from or fills in the text above:
+
+- **Snapshot** (`GixSnapshot`, gix 0.73 pinned). There is no per-sync copy of the user's index.
+  The tasks store keeps one bare repository per *repo* (all worktrees of a repo share it;
+  `objects/info/alternates` names the user's object directory) and one index per checkout, the
+  snapshot cache, rewritten after every successful snapshot. A file is read only when its `lstat`
+  differs from the cache, or from the user's index when the cache has no entry. The tracked set is
+  the user's index; untracked, non-ignored files come from gix's ignore-aware directory walk.
+  Blobs are the exact bytes on disk (no clean filters, so no CRLF conversion or LFS); an entry
+  whose mtime is within a second of the snapshot is recorded unverified (git's racily-clean rule)
+  and read once more next time.
+- **Wire**. `SyncOffer` (checkout, repo) answers with the worker's recent snapshots
+  (`SyncHave`: commit, tree, extras tree). If the worker holds the exact tree nothing is
+  packed. Otherwise the origin wraps the tree in a commit whose parent is the worker's newest
+  snapshot it still has (so `pack-objects --thin` has an edge base to delta against), builds the
+  pack excluding everything the worker's snapshots reach, and sends it as `SyncPackChunk`
+  frames of at most 128 KiB over the connection's request/reply, hashing as it goes. `SyncApply`
+  carries tree, extras tree, commit, HEAD, dirty count, pack length and SHA-256. The pack is not
+  a dedicated iroh stream: one transport trait serves every message, and a stream needs a trait
+  change in the fake and iroh adapters (recommended for step 4 with the transfer cgroup; chunks
+  cost one round trip each).
+- **Extras** are a second tree (`extras_tree`) of the allowlisted ignored files, sent in the same
+  pack and applied through its own index, so a file that leaves the allowlist is removed and
+  nothing else ever is. `[sync] extra = [...]` in `.tasks/run-policy.toml` (`tasks-policy`).
+- **Worker**. `<peer>/mirrors/<repo>.git` (bare) and `<peer>/<checkout>/{tree,index,
+  index.extras,state.json}`. Apply is `read-tree --reset -u` into `tree/`, so a file is removed
+  only if the previous index listed it, a file a job modified is restored, and untracked build
+  outputs stay; untracked files or directories in the way of a path the new tree adds are
+  cleared first (not through symlinks). Refs `refs/tasks/<checkout>/<ms>` keep the last eight
+  snapshots of a checkout alive in the mirror.
+- **gix and the `git` command**. gix: opening repos, the index, the directory walk with ignore
+  rules, blob/tree/commit writing, object existence, pruning walks, mirror creation. `git`
+  command (named in `git_cli.rs`): `pack-objects --thin` (no thin-pack generation in gix-pack),
+  `index-pack --fix-thin` (gix-pack needs its `streaming-input` feature, which `gix` only enables
+  with a network client), `read-tree --reset -u` (gix has no two-way tree update that restores
+  and removes by index), refs, `ls-tree`, `diff-tree` and `gc`. Both machines therefore need
+  `git` on `PATH` for transfer; nothing links libgit2 or a C library.
+- **Gate**. `SyncGate::enter(SyncPhase)` is called before snapshotting, pack building and apply;
+  the default admits at once. Step 4 implements it on admission so that transfers wait for the
+  I/O gate. Not wired to admission yet.
+- **Retention**. `SyncStore::sweep` (hourly, from the scheduler's maintenance): working copies
+  idle `sync.idle_days` (7), mirrors no copy uses, `git gc` per mirror every `sync.gc_days` (7).
+  `OriginSync::prune`: loose objects not reachable from the newest snapshot of any checkout.
+  Each deletion is a `SyncEvent::Deleted` with bytes freed, audited as `data.retention`; sync
+  traffic is `data.sync_sent` / `data.sync_received`, refusals `data.sync_refused`.
+
 ## 7. Logs
 
 - A job's stdout/stderr go through a pipe into its log file; no fsync per write (already
