@@ -8,6 +8,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -288,8 +289,61 @@ pub fn logs(id: i64) -> Result<LogTail> {
     })
 }
 
+/// Most important lines kept from an elided middle (the first and the last half of them
+/// when there are more), each cut to `IMPORTANT_LINE` bytes: bounds the stored extra text.
+const IMPORTANT_KEPT: usize = 200;
+const IMPORTANT_LINE: usize = 300;
+
+/// A line an agent needs even from the elided middle of a long log: a cargo test binary
+/// (`Running`), its `test result:`, failures, panics and compiler errors.
+fn important(line: &str) -> bool {
+    let start = line.trim_start();
+    start.starts_with("Running ")
+        || start.starts_with("test result:")
+        || start.starts_with("error[")
+        || start.starts_with("error:")
+        || line.contains(" FAILED")
+        || line.contains("panicked at")
+        || line.contains("BUILD FAILED")
+}
+
+/// The important lines of `middle` (line-aligned bytes): the first and last
+/// `IMPORTANT_KEPT / 2` when there are more than `IMPORTANT_KEPT`, how many were found, and
+/// how many lines the text has.
+fn important_lines(middle: &[u8]) -> (Vec<String>, Vec<String>, usize, usize) {
+    let half = IMPORTANT_KEPT / 2;
+    let (mut first, mut last) = (Vec::new(), VecDeque::new());
+    let (mut found, mut lines) = (0, 0);
+    for raw in middle.split_inclusive(|b| *b == b'\n') {
+        lines += 1;
+        let text = String::from_utf8_lossy(raw);
+        let line = text.trim_end_matches(['\n', '\r']);
+        if !important(line) {
+            continue;
+        }
+        found += 1;
+        let mut end = line.len().min(IMPORTANT_LINE);
+        while !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        let kept = line[..end].to_owned();
+        if first.len() < half {
+            first.push(kept);
+        } else {
+            if last.len() == half {
+                last.pop_front();
+            }
+            last.push_back(kept);
+        }
+    }
+    (first, last.into(), found, lines)
+}
+
 /// The whole text when it fits in `head + tail` bytes, else the first `head` and last `tail`
-/// bytes (cut at line boundaries) around one marker line naming the omitted byte count.
+/// bytes (cut at line boundaries) around one marker line naming the omitted byte and line
+/// counts, followed by the important lines of the omitted part (see [`important`]; at most
+/// `IMPORTANT_KEPT` lines of `IMPORTANT_LINE` bytes, so the result stays within
+/// `head + tail + IMPORTANT_KEPT * (IMPORTANT_LINE + 1)` plus the marker lines).
 pub fn head_and_tail(file: &mut File, len: u64, head: u64, tail: u64) -> Result<String> {
     let mut read = |from: u64, n: u64| -> Result<Vec<u8>> {
         file.seek(SeekFrom::Start(from))?;
@@ -309,10 +363,34 @@ pub fn head_and_tail(file: &mut File, len: u64, head: u64, tail: u64) -> Result<
         last.drain(..=start);
     }
     let omitted = len - first.len() as u64 - last.len() as u64;
+    let middle = read(first.len() as u64, omitted)?;
+    let (kept_first, kept_last, found, lines) = important_lines(&middle);
     let mut text = String::from_utf8_lossy(&first).into_owned();
     text.push_str(&format!(
-        "\n[... tasks: {omitted} bytes of this log omitted here (head and tail shown); the full retained log is the job's job.log ...]\n\n"
+        "\n[... tasks: {omitted} bytes of this log omitted here ({lines} lines; head and tail shown); the full retained log is the job's job.log ...]\n"
     ));
+    if found > 0 {
+        text.push_str(&format!(
+            "[... tasks: {found} important lines (Running, test result:, FAILED, panicked at, error) of the omitted part follow ...]\n"
+        ));
+        for line in &kept_first {
+            text.push_str(line);
+            text.push('\n');
+        }
+        let skipped = found - kept_first.len() - kept_last.len();
+        if skipped > 0 {
+            text.push_str(&format!(
+                "[... tasks: {skipped} more important lines omitted here (first {} and last {} kept) ...]\n",
+                kept_first.len(),
+                kept_last.len()
+            ));
+        }
+        for line in &kept_last {
+            text.push_str(line);
+            text.push('\n');
+        }
+    }
+    text.push('\n');
     text.push_str(&String::from_utf8_lossy(&last));
     Ok(text)
 }
@@ -2315,6 +2393,75 @@ mod tests {
         // Short logs are returned whole, without a marker.
         let small = head_and_tail(&mut File::open(&path).unwrap(), 40, 1024, 2048).unwrap();
         assert_eq!(small, text[..40]);
+        fs::remove_dir_all(state).unwrap();
+    }
+    #[test]
+    fn elided_middle_keeps_important_lines_in_order() {
+        let state = temp_state("headtailkeep");
+        let path = state.join("job.log");
+        let mut text = String::from("head line\n");
+        for i in 0..5_000 {
+            text.push_str(&format!("   Compiling filler{i}\n"));
+        }
+        text.push_str("     Running unittests src/lib.rs (target/debug/deps/a-1)\n");
+        text.push_str("test a::b ... FAILED\n");
+        text.push_str("thread 'a::b' panicked at src/a.rs:9:5:\n");
+        text.push_str("error[E0308]: mismatched types\n");
+        text.push_str("warning: unused variable: `x`\n");
+        text.push_str(&format!(
+            "test result: FAILED. 1 passed; {}\n",
+            "x".repeat(500)
+        ));
+        for i in 0..5_000 {
+            text.push_str(&format!("   Compiling more{i}\n"));
+        }
+        text.push_str("BUILD FAILED in 3s\n");
+        fs::write(&path, &text).unwrap();
+        let len = text.len() as u64;
+        let shown = head_and_tail(&mut File::open(&path).unwrap(), len, 1024, 2048).unwrap();
+        let at = |needle: &str| {
+            shown
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle}: {shown}"))
+        };
+        let marker = at("bytes of this log omitted");
+        assert!(marker < at("Running unittests"));
+        assert!(at("Running unittests") < at("test a::b ... FAILED"));
+        assert!(at("test a::b ... FAILED") < at("panicked at src/a.rs"));
+        assert!(at("panicked at src/a.rs") < at("error[E0308]"));
+        assert!(at("error[E0308]") < at("test result: FAILED. 1 passed;"));
+        assert!(at("test result: FAILED. 1 passed;") < at("BUILD FAILED"));
+        assert!(!shown.contains("unused variable"));
+        // The long result line is cut; the marker counts the dropped lines.
+        assert!(!shown.contains(&"x".repeat(300)));
+        assert!(shown.contains(" lines; head and tail shown)"), "{shown}");
+        assert_eq!(shown.matches("bytes of this log omitted").count(), 1);
+        assert!(shown.len() < 1024 + 2048 + 1500, "{}", shown.len());
+        fs::remove_dir_all(state).unwrap();
+    }
+    #[test]
+    fn many_important_lines_keep_first_and_last_halves() {
+        let state = temp_state("headtailcap");
+        let path = state.join("job.log");
+        let mut text = "head\n".repeat(100);
+        for i in 0..1_000 {
+            text.push_str(&format!("test t{i} ... FAILED\n"));
+        }
+        text.push_str(&"filler line\n".repeat(10_000));
+        fs::write(&path, &text).unwrap();
+        let len = text.len() as u64;
+        let shown = head_and_tail(&mut File::open(&path).unwrap(), len, 64, 256).unwrap();
+        let kept = shown.matches("... FAILED").count();
+        assert_eq!(kept, IMPORTANT_KEPT, "{shown}");
+        assert!(shown.contains("test t0 ... FAILED"));
+        assert!(shown.contains("test t99 ... FAILED"));
+        assert!(!shown.contains("test t100 ... FAILED"));
+        assert!(shown.contains("test t999 ... FAILED"));
+        assert!(
+            shown.contains("800 more important lines omitted"),
+            "{shown}"
+        );
+        assert!(shown.len() < 64 + 256 + IMPORTANT_KEPT * (IMPORTANT_LINE + 1) + 600);
         fs::remove_dir_all(state).unwrap();
     }
     #[test]
