@@ -3061,6 +3061,7 @@ dependencies = [
  "signal-hook",
  "tasks-core",
  "tasks-daemon",
+ "tasks-mcp",
  "tasks-platform",
  "tasks-policy",
  "tasks-timing",
@@ -3106,6 +3107,20 @@ dependencies = [
  "serde_json",
  "tasks-core",
  "tasks-timing",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "tasks-mcp"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tasks-core",
+ "tasks-daemon",
+ "tasks-policy",
+ "tasks-timing",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 

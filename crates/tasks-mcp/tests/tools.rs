@@ -1,0 +1,1056 @@
+//! One group of tests per tool, against a scripted daemon.
+#![allow(missing_docs)]
+
+mod common;
+
+use common::*;
+use serde_json::json;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tasks_core::JobId;
+use tasks_core::{Kind, Phase, Placement};
+use tasks_daemon::api::{ApiError, ErrorCode, GrepGroup, GrepLine, LogView, Request, Response};
+use tasks_mcp::cancel::CancelToken;
+use tasks_mcp::tools::Outcome;
+use tasks_mcp::{DaemonError, FakeDaemon};
+
+fn submitted(id: i64) -> Arc<FakeDaemon> {
+    fake(move |r| match r {
+        Request::Submit { .. } => Ok(Response::Submitted { id: JobId(id) }),
+        Request::List { .. } => Ok(Response::Jobs {
+            jobs: vec![],
+            truncated: false,
+        }),
+        _ => Err(DaemonError::Failed(format!("unexpected {r:?}"))),
+    })
+}
+
+fn submits(d: &FakeDaemon) -> Vec<tasks_core::JobSpec> {
+    d.requests()
+        .into_iter()
+        .filter_map(|r| match r {
+            Request::Submit { spec } => Some(spec),
+            _ => None,
+        })
+        .collect()
+}
+
+// ---- submit ------------------------------------------------------------------------------
+
+// R-193
+#[test]
+fn r193_submit_routes_through_the_submit_request_with_the_tasks_run_spec() {
+    let d = submitted(7);
+    let r = call(
+        &tools_with(&d),
+        "submit",
+        json!({"argv": ["cargo", "test", "-p", "x", "--lib"], "who": "agent-1", "placement": "pin"}),
+    );
+    assert!(!r.is_error, "{}", r.text);
+    assert_eq!(r.structured["id"], 7);
+    assert!(r.text.contains("submitted job 7"));
+    let specs = submits(&d);
+    assert_eq!(specs.len(), 1);
+    let s = &specs[0];
+    assert_eq!(s.owner.as_str(), "agent-1");
+    assert_eq!(s.cwd, std::path::PathBuf::from("/w"));
+    assert_eq!(s.argv, argv("cargo test -p x --lib"));
+    assert_eq!(s.placement, Placement::Pin);
+    assert_eq!(s.kind, Kind::Test);
+}
+
+// R-193
+#[test]
+fn r193_submission_policy_is_the_tasks_run_policy() {
+    // the shared rules: a broad cargo test is refused, with the same wording as `tasks2 run`
+    let d = never_called();
+    let r = call(
+        &tools_with(&d),
+        "submit",
+        json!({"argv": ["cargo", "test", "-p", "x", "some_filter"]}),
+    );
+    assert_eq!(error_kind(&r), "refused");
+    assert!(r.text.contains("--lib"), "{}", r.text);
+    assert!(d.requests().is_empty());
+}
+
+// R-191
+#[test]
+fn r191_broad_test_escape_and_warn_mode() {
+    let d = submitted(1);
+    let r = call(
+        &tools_with(&d),
+        "submit",
+        json!({"argv": ["cargo", "test", "-p", "x", "some_filter"], "broad_test": true}),
+    );
+    assert!(!r.is_error, "{}", r.text);
+    assert!(r.text.contains("note:"), "{}", r.text);
+    assert_eq!(r.structured["notes"].as_array().map(Vec::len), Some(1));
+
+    let d = submitted(2);
+    let mut cfg = config();
+    cfg.broad_mode = tasks_policy::submit_rules::BroadTestMode::Warn;
+    let tools = tasks_mcp::Tools::new(d.clone() as Arc<dyn tasks_mcp::Daemon>, cfg);
+    let r = call(
+        &tools,
+        "submit",
+        json!({"argv": ["cargo", "test", "-p", "x", "f"]}),
+    );
+    assert!(!r.is_error, "{}", r.text);
+}
+
+// R-193
+#[test]
+fn r193_arguments_are_checked_before_any_daemon_request() {
+    let bad = [
+        json!({"argv": []}),
+        json!({"argv": ["echo"], "who": "bad name"}),
+        json!({"argv": ["echo"], "cwd": "relative/dir"}),
+        json!({"argv": ["echo"], "placement": "pin", "peer": "nixos"}),
+        json!({"argv": ["echo"], "placement": "elsewhere"}),
+        json!({"argv": ["echo"], "device": "emu-1", "placement": "anywhere"}),
+        json!({"argv": ["echo"], "device": "emu-1", "peer": "nixos"}),
+        json!({"argv": ["echo"], "timeout_s": 5}),
+        json!({"argv": ["echo"], "after": [0]}),
+        json!({"argv": ["echo"], "surprise": 1}),
+        json!({"cwd": "/w"}),
+        json!({"argv": "echo hi"}),
+    ];
+    for args in bad {
+        let d = never_called();
+        let r = call(&tools_with(&d), "submit", args.clone());
+        assert!(r.is_error, "{args} was accepted: {}", r.text);
+        assert!(d.requests().is_empty(), "{args} reached the daemon");
+    }
+}
+
+// R-210
+#[test]
+fn r210_a_denied_device_is_refused_in_any_case_and_never_reaches_the_daemon() {
+    for args in [
+        json!({"argv": ["adb", "-s", "zd22257p6g", "shell"]}),
+        json!({"argv": ["adb", "-s", "ZD22257P6G", "shell"]}),
+        json!({"argv": ["true"], "device": "zd22257P6g"}),
+    ] {
+        let d = never_called();
+        let r = call(&tools_with(&d), "submit", args);
+        assert_eq!(error_kind(&r), "refused", "{}", r.text);
+        assert!(d.requests().is_empty());
+    }
+}
+
+#[test]
+fn a_device_job_holds_a_device_slot() {
+    let d = submitted(3);
+    let r = call(
+        &tools_with(&d),
+        "submit",
+        json!({"argv": ["adb", "-s", "9BWAY1LSDC", "shell"], "device": "9BWAY1LSDC"}),
+    );
+    assert!(!r.is_error, "{}", r.text);
+    let s = &submits(&d)[0];
+    assert_eq!(s.kind, Kind::Device);
+    assert_eq!(
+        s.requirements.device.as_ref().map(|d| d.0.as_str()),
+        Some("9BWAY1LSDC")
+    );
+}
+
+#[test]
+fn placement_peer_and_anywhere_reach_the_spec() {
+    for (args, want) in [
+        (json!({"argv": ["true"], "peer": "nixos"}), "peer nixos"),
+        (
+            json!({"argv": ["cargo", "check"], "placement": "anywhere"}),
+            "anywhere",
+        ),
+        (json!({"argv": ["true"]}), "here"),
+    ] {
+        let d = submitted(1);
+        let r = call(&tools_with(&d), "submit", args);
+        assert_eq!(r.structured["placement"], want, "{}", r.text);
+    }
+}
+
+#[test]
+fn anywhere_on_a_local_only_command_is_a_note_not_an_error() {
+    let d = submitted(1);
+    let r = call(
+        &tools_with(&d),
+        "submit",
+        json!({"argv": ["cargo", "build"], "placement": "anywhere"}),
+    );
+    assert!(!r.is_error, "{}", r.text);
+    assert!(r.text.contains("stays on this machine"), "{}", r.text);
+}
+
+#[test]
+fn the_owner_defaults_to_the_server_environment() {
+    let d = submitted(1);
+    let r = call(&tools_with(&d), "submit", json!({"argv": ["true"]}));
+    assert!(!r.is_error);
+    assert_eq!(submits(&d)[0].owner.as_str(), "me");
+    // and without any default the call says what to pass
+    let d = never_called();
+    let mut cfg = config();
+    cfg.default_who = None;
+    let t = tasks_mcp::Tools::new(d.clone() as Arc<dyn tasks_mcp::Daemon>, cfg);
+    let r = call(&t, "submit", json!({"argv": ["true"]}));
+    assert_eq!(error_kind(&r), "invalid_arguments");
+    assert!(r.text.contains("who"));
+}
+
+// R-187
+#[test]
+fn r187_other_owners_in_the_same_cwd_are_a_warning_not_a_block() {
+    let d = fake(|r| match r {
+        Request::List { .. } => Ok(Response::Jobs {
+            jobs: vec![job(4, "someone", Phase::Running, "cargo build")],
+            truncated: false,
+        }),
+        Request::Submit { .. } => Ok(Response::Submitted { id: JobId(5) }),
+        _ => Err(DaemonError::Failed("unexpected".into())),
+    });
+    let r = call(&tools_with(&d), "submit", json!({"argv": ["true"]}));
+    assert!(!r.is_error);
+    assert!(r.text.contains("someone"), "{}", r.text);
+}
+
+// R-099, R-100
+#[test]
+fn r099_a_lost_submit_reply_is_reconciled_and_never_resent() {
+    let d = fake(|r| match r {
+        Request::Submit { .. } => Err(DaemonError::ReplyLost("closed".into())),
+        Request::List { owner: Some(_), .. } => Ok(Response::Jobs {
+            jobs: vec![job(9, "me", Phase::Queued, "true now")],
+            truncated: false,
+        }),
+        Request::List { .. } => Ok(Response::Jobs {
+            jobs: vec![],
+            truncated: false,
+        }),
+        _ => Err(DaemonError::Failed("unexpected".into())),
+    });
+    // submitted_at_ms of the fake job is NOW - 100s: too old, so no match yet
+    let r = call(
+        &tools_with(&d),
+        "submit",
+        json!({"argv": ["true", "now"], "cwd": "/w"}),
+    );
+    assert!(r.is_error);
+    assert!(r.text.contains("Do NOT resubmit"), "{}", r.text);
+    assert_eq!(submits(&d).len(), 1, "never resent");
+
+    // a recent exact match is found
+    let d = fake(|r| match r {
+        Request::Submit { .. } => Err(DaemonError::ReplyLost("closed".into())),
+        Request::List { owner: Some(_), .. } => {
+            let mut j = job(9, "me", Phase::Queued, "true now");
+            j.submitted_at_ms = NOW;
+            Ok(Response::Jobs {
+                jobs: vec![j],
+                truncated: false,
+            })
+        }
+        Request::List { .. } => Ok(Response::Jobs {
+            jobs: vec![],
+            truncated: false,
+        }),
+        _ => Err(DaemonError::Failed("unexpected".into())),
+    });
+    let r = call(&tools_with(&d), "submit", json!({"argv": ["true", "now"]}));
+    assert!(!r.is_error, "{}", r.text);
+    assert_eq!(r.structured["id"], 9);
+    assert_eq!(submits(&d).len(), 1);
+
+    // two identical jobs are ambiguous: say where to look
+    let d = fake(|r| match r {
+        Request::Submit { .. } => Err(DaemonError::ReplyLost("closed".into())),
+        Request::List { owner: Some(_), .. } => {
+            let mut a = job(9, "me", Phase::Queued, "true now");
+            a.submitted_at_ms = NOW;
+            let mut b = a.clone();
+            b.id = JobId(10);
+            Ok(Response::Jobs {
+                jobs: vec![a, b],
+                truncated: false,
+            })
+        }
+        _ => Ok(Response::Jobs {
+            jobs: vec![],
+            truncated: false,
+        }),
+    });
+    let r = call(&tools_with(&d), "submit", json!({"argv": ["true", "now"]}));
+    assert!(r.is_error);
+    assert!(
+        r.text.contains("9, 10") && r.text.contains("Do NOT resubmit"),
+        "{}",
+        r.text
+    );
+}
+
+#[test]
+fn a_busy_or_refusing_daemon_is_a_clean_tool_error() {
+    let d = fake(|r| match r {
+        Request::Submit { .. } => Err(DaemonError::Refused(ApiError::new(
+            ErrorCode::Refused,
+            "no such repo",
+        ))),
+        _ => Ok(Response::Jobs {
+            jobs: vec![],
+            truncated: false,
+        }),
+    });
+    let r = call(&tools_with(&d), "submit", json!({"argv": ["true"]}));
+    assert_eq!(error_kind(&r), "refused");
+    assert_eq!(r.text, "no such repo");
+}
+
+// R-194
+#[test]
+fn r194_daemon_down_is_a_clean_tool_error() {
+    let d = fake(|_| {
+        Err(DaemonError::Unreachable(
+            "cannot start the daemon: no luck".into(),
+        ))
+    });
+    for (name, args) in [
+        ("status", json!({})),
+        ("list", json!({})),
+        ("get", json!({"id": 1})),
+        ("submit", json!({"argv": ["true"]})),
+    ] {
+        let r = call(&tools_with(&d), name, args);
+        assert_eq!(error_kind(&r), "daemon_unreachable", "{name}");
+        assert!(r.text.contains("no luck"));
+        assert!(r.to_json()["isError"] == true);
+    }
+}
+
+// ---- submit_steps / run_suite -------------------------------------------------------------
+
+fn plan_daemon() -> Arc<FakeDaemon> {
+    fake(|r| match r {
+        Request::SubmitPlan { plan, .. } => Ok(Response::PlanSubmitted {
+            plan_id: 3,
+            jobs: plan
+                .steps
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (s.name.clone(), JobId(10 + i as i64)))
+                .collect(),
+        }),
+        Request::SubmitSuite { .. } => Ok(Response::PlanSubmitted {
+            plan_id: 4,
+            jobs: vec![("build".into(), JobId(20)), ("test".into(), JobId(21))],
+        }),
+        _ => Err(DaemonError::Failed("unexpected".into())),
+    })
+}
+
+#[test]
+fn submit_steps_sends_one_plan_and_lists_the_job_ids() {
+    let d = plan_daemon();
+    let r = call(
+        &tools_with(&d),
+        "submit_steps",
+        json!({"steps": [
+            {"name": "build", "argv": ["cargo", "build"]},
+            {"name": "test", "argv": ["cargo", "test", "-p", "x", "--lib"], "after": ["build"], "kind": "test"}
+        ], "who": "me", "placement": "pin"}),
+    );
+    assert!(!r.is_error, "{}", r.text);
+    assert_eq!(r.structured["plan_id"], 3);
+    assert_eq!(r.structured["jobs"][1], json!({"step": "test", "id": 11}));
+    assert!(r.text.contains("test -> job 11"));
+    let reqs = d.requests();
+    assert_eq!(reqs.len(), 1);
+    let Request::SubmitPlan {
+        plan,
+        owner,
+        placement,
+        ..
+    } = &reqs[0]
+    else {
+        panic!("{reqs:?}")
+    };
+    assert_eq!((owner.as_str(), placement), ("me", &Placement::Pin));
+    assert_eq!(plan.steps[1].after, vec!["build".to_string()]);
+    assert_eq!(plan.steps[1].kind, Kind::Test);
+}
+
+// R-193
+#[test]
+fn r193_every_step_is_checked_before_any_daemon_request() {
+    let d = never_called();
+    let r = call(
+        &tools_with(&d),
+        "submit_steps",
+        json!({"steps": [
+            {"name": "ok", "argv": ["true"]},
+            {"name": "broad", "argv": ["cargo", "test", "-p", "x", "filter"]}
+        ]}),
+    );
+    assert_eq!(error_kind(&r), "refused");
+    assert!(r.text.contains("step \"broad\""), "{}", r.text);
+    for steps in [
+        json!([]),
+        json!([{"name": "a", "argv": ["true"], "after": ["a"]}]),
+        json!([{"name": "a", "argv": ["true"], "after": ["zz"]}]),
+        json!([{"name": "a", "argv": ["true"]}, {"name": "a", "argv": ["true"]}]),
+        json!([{"name": "a", "argv": []}]),
+        json!([{"name": "a", "argv": ["true"], "kind": "huge"}]),
+        json!([{"name": "a", "argv": ["adb", "-s", "ZD22257P6G"]}]),
+    ] {
+        let r = call(&tools_with(&d), "submit_steps", json!({"steps": steps}));
+        assert!(r.is_error, "{steps} accepted");
+    }
+    assert!(d.requests().is_empty());
+}
+
+#[test]
+fn run_suite_sends_the_suite_request() {
+    let d = plan_daemon();
+    let r = call(
+        &tools_with(&d),
+        "run_suite",
+        json!({"name": "ci", "quick": true, "peer": "nixos"}),
+    );
+    assert!(!r.is_error, "{}", r.text);
+    assert!(r.text.contains("suite ci") && r.text.contains("build -> job 20"));
+    let Request::SubmitSuite {
+        name,
+        quick,
+        placement,
+        owner,
+        ..
+    } = &d.requests()[0]
+    else {
+        panic!()
+    };
+    assert_eq!((name.as_str(), *quick, owner.as_str()), ("ci", true, "me"));
+    assert!(matches!(placement, Placement::Peer(m) if m.0 == "nixos"));
+    let d = never_called();
+    assert!(call(&tools_with(&d), "run_suite", json!({})).is_error);
+}
+
+// ---- list / get ---------------------------------------------------------------------------
+
+#[test]
+fn list_asks_for_active_plus_recent_and_shows_one_line_per_job() {
+    let d = fake(|r| match r {
+        Request::List {
+            active_only,
+            recent_finished,
+            owner,
+            ..
+        } => {
+            assert_eq!(
+                (*active_only, *recent_finished, owner.as_deref()),
+                (false, Some(5), Some("me"))
+            );
+            Ok(Response::Jobs {
+                jobs: vec![
+                    job(1, "me", Phase::Passed, "cargo test"),
+                    job(2, "other", Phase::Running, "cargo build"),
+                    job(3, "me", Phase::Failed { exit: Some(101) }, "cargo clippy"),
+                ],
+                truncated: false,
+            })
+        }
+        _ => Err(DaemonError::Failed("unexpected".into())),
+    });
+    let r = call(&tools_with(&d), "list", json!({"who": "me", "limit": 5}));
+    assert!(!r.is_error, "{}", r.text);
+    // R-185: the owner filter holds even if the daemon answers more
+    assert_eq!(r.structured["jobs"].as_array().map(Vec::len), Some(2));
+    assert!(r.text.contains("#3 failed (exit 101) me"), "{}", r.text);
+    assert_eq!(r.text.lines().count(), 3);
+}
+
+#[test]
+fn list_active_drops_finished_jobs_and_says_so_when_empty() {
+    let d = fake(|r| match r {
+        Request::List {
+            active_only: true,
+            recent_finished: None,
+            ..
+        } => Ok(Response::Jobs {
+            jobs: vec![job(1, "me", Phase::Passed, "x")],
+            truncated: false,
+        }),
+        _ => Err(DaemonError::Failed("unexpected".into())),
+    });
+    let r = call(&tools_with(&d), "list", json!({"active": true}));
+    assert_eq!(r.text, "no jobs");
+}
+
+#[test]
+fn a_cut_list_says_how_to_narrow_it() {
+    let d = fake(|_| {
+        Ok(Response::Jobs {
+            jobs: vec![job(1, "me", Phase::Running, "x")],
+            truncated: true,
+        })
+    });
+    let r = call(&tools_with(&d), "list", json!({}));
+    assert!(r.text.contains("truncated"), "{}", r.text);
+    assert_eq!(r.structured["truncated"], true);
+}
+
+#[test]
+fn get_describes_one_job_and_a_missing_job_is_not_found() {
+    let d = fake(|r| match r {
+        Request::Get { id } if id.0 == 5 => {
+            let mut j = job(5, "me", Phase::Running, "cargo test -p x");
+            j.wait_text = Some("waiting for a compile slot".into());
+            j.forwarded_to = Some(("nixos".into(), Some(77)));
+            Ok(Response::Job { job: Box::new(j) })
+        }
+        _ => Err(DaemonError::Refused(ApiError::new(
+            ErrorCode::NotFound,
+            "no job 6",
+        ))),
+    });
+    let t = tools_with(&d);
+    let r = call(&t, "get", json!({"id": 5}));
+    assert!(
+        r.text.contains("running on nixos as #77") && r.text.contains("compile slot"),
+        "{}",
+        r.text
+    );
+    assert_eq!(r.structured["phase"], "running");
+    assert_eq!(error_kind(&call(&t, "get", json!({"id": 6}))), "not_found");
+    assert_eq!(
+        error_kind(&call(&t, "get", json!({"id": 0}))),
+        "invalid_arguments"
+    );
+}
+
+// ---- logs ---------------------------------------------------------------------------------
+
+#[test]
+fn logs_default_to_the_last_hundred_lines() {
+    let d = fake(|r| match r {
+        Request::Logs {
+            view: LogView::Tail { lines },
+            ..
+        } => {
+            assert_eq!(*lines, 100);
+            Ok(Response::LogTail {
+                lines: vec!["a".into(), "b".into()],
+                running: true,
+            })
+        }
+        _ => Err(DaemonError::Failed("unexpected".into())),
+    });
+    let r = call(&tools_with(&d), "logs", json!({"id": 1}));
+    assert!(
+        r.text.starts_with("a\nb") && r.text.contains("still running"),
+        "{}",
+        r.text
+    );
+}
+
+#[test]
+fn a_huge_tail_is_bounded_with_a_note() {
+    let d = fake(|_| {
+        Ok(Response::LogTail {
+            lines: (0..5000)
+                .map(|i| format!("line {i} {}", "x".repeat(40)))
+                .collect(),
+            running: false,
+        })
+    });
+    let r = call(&tools_with(&d), "logs", json!({"id": 1, "tail": 5000}));
+    assert!(r.text.len() < 40 * 1024, "{}", r.text.len());
+    assert!(
+        r.text.starts_with("truncated:") && r.text.contains("offset 0"),
+        "{}",
+        &r.text[..120]
+    );
+    assert!(r.text.contains("line 4999"), "the tail end is kept");
+    assert_eq!(r.structured["truncated"], true);
+}
+
+#[test]
+fn logs_grep_shows_numbered_matches_and_context() {
+    let d = fake(|r| match r {
+        Request::Logs {
+            view:
+                LogView::Grep {
+                    pattern,
+                    context,
+                    regex,
+                    ..
+                },
+            ..
+        } => {
+            assert_eq!((pattern.as_str(), *context, *regex), ("FAILED", 1, false));
+            Ok(Response::LogGrep {
+                groups: vec![
+                    GrepGroup {
+                        lines: vec![
+                            GrepLine {
+                                n: 4,
+                                text: "before".into(),
+                                matched: false,
+                            },
+                            GrepLine {
+                                n: 5,
+                                text: "test x FAILED".into(),
+                                matched: true,
+                            },
+                        ],
+                    },
+                    GrepGroup {
+                        lines: vec![GrepLine {
+                            n: 90,
+                            text: "FAILED again".into(),
+                            matched: true,
+                        }],
+                    },
+                ],
+                matches: 2,
+                truncated: true,
+            })
+        }
+        _ => Err(DaemonError::Failed("unexpected".into())),
+    });
+    let r = call(
+        &tools_with(&d),
+        "logs",
+        json!({"id": 1, "grep": "FAILED", "fixed": true, "context": 1}),
+    );
+    assert!(
+        r.text
+            .contains("4-before\n5:test x FAILED\n--\n90:FAILED again"),
+        "{}",
+        r.text
+    );
+    assert!(r.text.contains("match limit"));
+    let d = fake(|_| {
+        Ok(Response::LogGrep {
+            groups: vec![],
+            matches: 0,
+            truncated: false,
+        })
+    });
+    assert_eq!(
+        call(&tools_with(&d), "logs", json!({"id": 1, "grep": "zz"})).text,
+        "no matching lines"
+    );
+}
+
+#[test]
+fn logs_from_an_offset_names_the_next_offset() {
+    let d = fake(|r| match r {
+        Request::Logs {
+            view: LogView::Follow { offset, max_bytes },
+            ..
+        } => {
+            assert_eq!((*offset, *max_bytes), (100, Some(10)));
+            Ok(Response::LogChunk {
+                data: "0123456789".into(),
+                next_offset: 110,
+                done: false,
+            })
+        }
+        _ => Err(DaemonError::Failed("unexpected".into())),
+    });
+    let r = call(
+        &tools_with(&d),
+        "logs",
+        json!({"id": 1, "offset": 100, "max_bytes": 10}),
+    );
+    assert!(
+        r.text.contains("truncated, use logs with offset 110"),
+        "{}",
+        r.text
+    );
+    assert_eq!(r.structured["next_offset"], 110);
+
+    let d = fake(|_| {
+        Ok(Response::LogChunk {
+            data: "tail\n".into(),
+            next_offset: 505,
+            done: true,
+        })
+    });
+    let r = call(&tools_with(&d), "logs", json!({"id": 1, "offset": 500}));
+    assert!(r.text.contains("end of log at offset 505"), "{}", r.text);
+    assert_eq!(r.structured["done"], true);
+
+    let d = fake(|_| {
+        Ok(Response::LogChunk {
+            data: "x".repeat(100_000),
+            next_offset: 100_000,
+            done: false,
+        })
+    });
+    let r = call(
+        &tools_with(&d),
+        "logs",
+        json!({"id": 1, "offset": 0, "max_bytes": 100_000}),
+    );
+    assert!(r.text.len() < 40 * 1024);
+    let next = r.structured["next_offset"].as_u64().unwrap();
+    assert!(
+        next < 40 * 1024 && r.text.contains(&format!("offset {next}")),
+        "{}",
+        &r.text[r.text.len() - 80..]
+    );
+}
+
+#[test]
+fn logs_rejects_conflicting_views_and_a_missing_log_is_explained() {
+    let d = never_called();
+    for args in [
+        json!({"id": 1, "tail": 5, "grep": "x"}),
+        json!({"id": 1, "offset": 0, "tail": 5}),
+        json!({"id": 1, "offset": 0, "grep": "x"}),
+        json!({"id": 1, "context": 2}),
+        json!({"id": 1, "max_bytes": 5}),
+        json!({"id": 1, "tail": 0}),
+        json!({"id": 1, "tail": 5001}),
+        json!({"id": 1, "grep": "x", "context": 101}),
+    ] {
+        assert!(
+            call(&tools_with(&d), "logs", args.clone()).is_error,
+            "{args}"
+        );
+    }
+    assert!(d.requests().is_empty());
+    let d = fake(|_| {
+        Err(DaemonError::Refused(ApiError::new(
+            ErrorCode::NotFound,
+            "no log",
+        )))
+    });
+    let r = call(&tools_with(&d), "logs", json!({"id": 3}));
+    assert_eq!(error_kind(&r), "not_found");
+    assert!(r.text.contains("has not started yet"), "{}", r.text);
+}
+
+// ---- wait ---------------------------------------------------------------------------------
+
+#[test]
+fn wait_returns_the_state_and_log_tail_once_the_job_is_over() {
+    let gets = Arc::new(AtomicUsize::new(0));
+    let g = Arc::clone(&gets);
+    let d = fake(move |r| match r {
+        Request::Get { .. } => {
+            let n = g.fetch_add(1, Ordering::SeqCst);
+            let phase = if n < 2 {
+                Phase::Running
+            } else {
+                Phase::Failed { exit: Some(101) }
+            };
+            Ok(Response::Job {
+                job: Box::new(job(8, "me", phase, "cargo test")),
+            })
+        }
+        Request::Logs {
+            view: LogView::Tail { lines },
+            ..
+        } => {
+            assert_eq!(*lines, 3);
+            Ok(Response::LogTail {
+                lines: vec!["a".into(), "test result: FAILED".into()],
+                running: false,
+            })
+        }
+        _ => Err(DaemonError::Failed("unexpected".into())),
+    });
+    let r = call(
+        &tools_with(&d),
+        "wait",
+        json!({"id": 8, "timeout_s": 30, "tail_lines": 3}),
+    );
+    assert!(!r.is_error, "{}", r.text);
+    assert!(
+        r.text.starts_with("job 8 failed (exit 101)") && r.text.contains("test result: FAILED"),
+        "{}",
+        r.text
+    );
+    assert_eq!(r.structured["finished"], true);
+    assert_eq!(r.structured["passed"], false);
+    assert_eq!(gets.load(Ordering::SeqCst), 3);
+}
+
+// R-104, R-105
+#[test]
+fn r104_a_wait_that_times_out_never_touches_the_job() {
+    let d = fake(|r| match r {
+        Request::Get { .. } => Ok(Response::Job {
+            job: Box::new(job(8, "me", Phase::Running, "cargo build")),
+        }),
+        _ => Err(DaemonError::Failed("unexpected".into())),
+    });
+    let r = call(&tools_with(&d), "wait", json!({"id": 8, "timeout_s": 0}));
+    assert!(!r.is_error);
+    assert_eq!(r.structured["finished"], false);
+    assert!(
+        r.text.contains("still running") && r.text.contains("untouched"),
+        "{}",
+        r.text
+    );
+    assert!(
+        d.requests()
+            .iter()
+            .all(|r| matches!(r, Request::Get { .. })),
+        "only reads: {:?}",
+        d.requests()
+    );
+}
+
+#[test]
+fn a_cancelled_wait_ends_with_no_result_and_sends_no_mutation() {
+    let d = fake(|r| match r {
+        Request::Get { .. } => Ok(Response::Job {
+            job: Box::new(job(8, "me", Phase::Queued, "cargo build")),
+        }),
+        _ => Err(DaemonError::Failed("unexpected".into())),
+    });
+    let t = tools_with(&d);
+    let tok = CancelToken::new();
+    let tok2 = Arc::clone(&tok);
+    let h = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        tok2.cancel();
+    });
+    let out = t.call("wait", json!({"id": 8, "timeout_s": 3600}), &tok);
+    h.join().unwrap();
+    assert_eq!(out, Some(Outcome::Cancelled));
+    assert!(
+        d.requests()
+            .iter()
+            .all(|r| matches!(r, Request::Get { .. }))
+    );
+}
+
+#[test]
+fn wait_on_a_missing_job_is_an_error_not_a_hang() {
+    let d = fake(|_| {
+        Err(DaemonError::Refused(ApiError::new(
+            ErrorCode::NotFound,
+            "no job",
+        )))
+    });
+    assert_eq!(
+        error_kind(&call(
+            &tools_with(&d),
+            "wait",
+            json!({"id": 4, "timeout_s": 60})
+        )),
+        "not_found"
+    );
+}
+
+// ---- cancel -------------------------------------------------------------------------------
+
+// R-108
+#[test]
+fn r108_cancel_requires_the_owner() {
+    let d = fake(|r| match r {
+        Request::Cancel { who, .. } if who == "me" => Ok(Response::Cancelled {
+            id: JobId(3),
+            result: "requested".into(),
+        }),
+        Request::Cancel { .. } => Err(DaemonError::Refused(ApiError::new(
+            ErrorCode::NotOwner,
+            "job 3 belongs to me",
+        ))),
+        _ => Err(DaemonError::Failed("unexpected".into())),
+    });
+    let t = tools_with(&d);
+    let r = call(&t, "cancel", json!({"id": 3, "who": "intruder"}));
+    assert_eq!(error_kind(&r), "not_owner");
+    let r = call(
+        &t,
+        "cancel",
+        json!({"id": 3, "who": "me", "reason": "stale"}),
+    );
+    assert!(
+        r.text.contains("cancel requested") && r.text.contains("reason: stale"),
+        "{}",
+        r.text
+    );
+    // who is required: there is no owner fallback for a destructive call
+    assert_eq!(
+        error_kind(&call(&t, "cancel", json!({"id": 3}))),
+        "invalid_arguments"
+    );
+    assert_eq!(d.requests().len(), 2);
+}
+
+// R-100
+#[test]
+fn r100_a_cancel_with_a_lost_reply_is_not_resent() {
+    let d = fake(|_| Err(DaemonError::ReplyLost("eof".into())));
+    let r = call(&tools_with(&d), "cancel", json!({"id": 3, "who": "me"}));
+    assert!(r.is_error && r.text.contains("not resent"), "{}", r.text);
+    assert_eq!(d.requests().len(), 1);
+}
+
+#[test]
+fn cancel_results_say_what_happened() {
+    for (res, want) in [
+        ("cancelled", "before it started"),
+        ("already_finished", "already finished"),
+    ] {
+        let d = fake(move |_| {
+            Ok(Response::Cancelled {
+                id: JobId(1),
+                result: res.into(),
+            })
+        });
+        let r = call(&tools_with(&d), "cancel", json!({"id": 1, "who": "me"}));
+        assert!(r.text.contains(want), "{}", r.text);
+    }
+}
+
+// ---- status / estimate --------------------------------------------------------------------
+
+fn snapshot() -> tasks_daemon::api::StatusSnapshot {
+    use tasks_daemon::api::*;
+    StatusSnapshot {
+        daemon: DaemonView {
+            pid: 9,
+            version: "0.1".into(),
+            machine: "laptop".into(),
+            state_dir: "/s".into(),
+            lock_dir: "/l".into(),
+            policy_file: "/p".into(),
+            policy_file_loaded: false,
+            policy_problems: vec![],
+            draining: true,
+            execution_enabled: true,
+            uptime_secs: 5,
+        },
+        slots: vec![SlotGroupView {
+            kind: "compile".into(),
+            total: 2,
+            free: 1,
+            busy: vec![SlotView {
+                index: 0,
+                job: Some(JobId(4)),
+                external: false,
+                holder: None,
+            }],
+        }],
+        waiting: vec![WaiterView {
+            id: JobId(6),
+            owner: "o".into(),
+            command: "cargo test".into(),
+            wait_text: "waiting for a compile slot".into(),
+            position: 1,
+            start_estimate_secs: None,
+            rough: true,
+        }],
+        waiting_more: 0,
+        running: vec![RunningView {
+            id: JobId(4),
+            owner: "me".into(),
+            command: "cargo build".into(),
+            slot: None,
+            elapsed_secs: 65.0,
+            done_targets: 1,
+            total_targets: 4,
+            current: None,
+            eta_secs: Some(30.0),
+            log_bytes: 10,
+        }],
+        pressure: PressureView {
+            memory: "ok".into(),
+            memory_some: Some(1.0),
+            memory_full: Some(0.0),
+            cpu: Some(40.0),
+            io: None,
+            available_memory: Some(8 << 30),
+            cache_free: Some(50 << 30),
+            state_free: None,
+            compile_blocker: Some("cpu pressure 40%".into()),
+            warning: None,
+        },
+        alerts: vec![AlertView {
+            id: "a".into(),
+            level: "warn".into(),
+            message: "disk low".into(),
+            since_ms: 0,
+        }],
+        settings: vec![SettingView {
+            key: "k".into(),
+            value: "v".into(),
+            source: Source::Default,
+        }],
+        peers: vec![PeerView {
+            name: "nixos".into(),
+            node_id: "n".into(),
+            state: "up".into(),
+            last_seen_ago_secs: Some(1),
+            detail: String::new(),
+        }],
+    }
+}
+
+#[test]
+fn status_summarises_the_machine_and_keeps_the_structure_small() {
+    let d = fake(|_| Ok(Response::Status(Box::new(snapshot()))));
+    let r = call(&tools_with(&d), "status", json!({}));
+    assert!(!r.is_error, "{}", r.text);
+    for want in [
+        "laptop",
+        "DRAINING",
+        "slots compile: 1/2 free (held by job 4)",
+        "running #4 me cargo build for 1m05s",
+        "waiting: 1 job(s)",
+        "would wait: cpu pressure 40%",
+        "alert [warn] disk low",
+        "peer nixos: up",
+    ] {
+        assert!(r.text.contains(want), "missing {want:?} in:\n{}", r.text);
+    }
+    assert!(r.structured.get("settings").is_none());
+    assert_eq!(r.structured["slots"][0]["free"], 1);
+    assert!(call(&tools_with(&d), "status", json!({"x": 1})).is_error);
+}
+
+#[test]
+fn estimate_reports_median_and_p90() {
+    let d = fake(|r| match r {
+        Request::Estimate { argv, .. } => {
+            assert_eq!(argv, &argv_of("cargo test"));
+            Ok(Response::Estimate(tasks_daemon::api::EstimateView {
+                recipe: "cargo test".into(),
+                median_secs: 90.0,
+                p90_secs: 200.0,
+                samples: 4,
+                text: "from 4 runs".into(),
+            }))
+        }
+        _ => Err(DaemonError::Failed("unexpected".into())),
+    });
+    let r = call(
+        &tools_with(&d),
+        "estimate",
+        json!({"argv": ["cargo", "test"]}),
+    );
+    assert_eq!(r.text, "from 4 runs (median 1m30s, p90 3m20s, 4 sample(s))");
+    assert!(call(&tools_with(&d), "estimate", json!({"argv": []})).is_error);
+}
+
+fn argv_of(s: &str) -> Vec<String> {
+    argv(s)
+}
+
+#[test]
+fn an_unknown_tool_is_not_a_result() {
+    let d = never_called();
+    assert!(
+        tools_with(&d)
+            .call("nope", json!({}), &CancelToken::new())
+            .is_none()
+    );
+}
