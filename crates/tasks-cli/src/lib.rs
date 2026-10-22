@@ -10,6 +10,8 @@ pub mod commands;
 pub mod device;
 pub mod error;
 pub mod fake;
+#[cfg(feature = "mcp")]
+pub mod mcp;
 pub mod render;
 pub mod runtime;
 #[cfg(test)]
@@ -103,6 +105,19 @@ pub fn not_built(name: &str) -> String {
     )
 }
 
+/// Runs `tasks2 mcp`: the MCP server on stdin and stdout.
+#[cfg(feature = "mcp")]
+fn run_mcp(cli: &Cli, deps: &Deps<'_>) -> i32 {
+    let (client, _) = (deps.client_for)(cli);
+    mcp::run_stdio(Arc::from(client), deps.cwd.clone(), deps.env)
+}
+
+/// Unreachable without the feature: `run_cli` only calls it when [`MCP_BUILT`].
+#[cfg(not(feature = "mcp"))]
+fn run_mcp(_cli: &Cli, _deps: &Deps<'_>) -> i32 {
+    error::EXIT_USAGE
+}
+
 /// Parses and runs one command line, writing to `out` and `err`, and returns the exit code.
 pub fn run_cli(args: &[String], out: &mut dyn Write, err: &mut dyn Write, deps: &Deps<'_>) -> i32 {
     let cli = match Cli::try_parse_from(args) {
@@ -128,6 +143,7 @@ pub fn run_cli(args: &[String], out: &mut dyn Write, err: &mut dyn Write, deps: 
                 }
             };
         }
+        Command::Mcp { .. } if MCP_BUILT => return run_mcp(&cli, deps),
         Command::Ui { .. } | Command::Mcp { .. } => {
             let (name, built) = if matches!(cli.command, Command::Ui { .. }) {
                 ("ui", UI_BUILT)

@@ -1358,6 +1358,10 @@ fn stats_groups_finished_jobs_by_recipe_and_leaves_out_cancelled_ones() {
 fn r199_ui_and_mcp_fail_with_built_without_and_exit_2() {
     let c = never_called();
     for name in ["ui", "mcp"] {
+        if name == "mcp" && crate::MCP_BUILT {
+            // with the feature the command serves stdio; `crate::mcp` has its own tests
+            continue;
+        }
         let r = Harness::default().run(&c, &[name]);
         assert_eq!(r.code, 2);
         if cfg!(not(any(feature = "ui", feature = "mcp"))) {

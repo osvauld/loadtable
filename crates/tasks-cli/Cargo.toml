@@ -18,9 +18,9 @@ name = "tasks2"
 path = "src/main.rs"
 
 [features]
-# The desktop window and the MCP server are not built yet; both stay off (R-199).
+# The desktop window is not built yet; it stays off (R-199). `mcp` builds `tasks2 mcp`.
 ui = []
-mcp = []
+mcp = ["dep:tasks-mcp"]
 
 [dependencies]
 tasks-core.workspace = true
@@ -28,6 +28,7 @@ tasks-daemon.workspace = true
 tasks-platform.workspace = true
 tasks-policy.workspace = true
 tasks-timing.workspace = true
+tasks-mcp = { workspace = true, optional = true }
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true

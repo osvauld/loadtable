@@ -117,7 +117,7 @@ fn busy_means_not_processed(req: &Request) -> bool {
 }
 
 /// Talks to the daemon. A fake implements it for tests.
-pub trait Client {
+pub trait Client: Send + Sync {
     /// Sends one request and returns the daemon's answer.
     fn call(&self, req: &Request) -> Result<Response, ClientError>;
 
