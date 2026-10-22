@@ -1,5 +1,6 @@
 //! macOS implementations of the platform traits (sysctl, vm_stat, libproc, launchd).
 
+mod bsdinfo;
 mod memory;
 mod pressure;
 mod procs;

@@ -119,8 +119,8 @@ pub(crate) fn try_wait(child: &Child) -> Result<Option<i32>, PlatformError> {
         Ok(None) => Ok(None),
         Ok(Some((_, status))) => {
             let code = match (status.exit_status(), status.terminating_signal()) {
-                (Some(c), _) => i32::try_from(c).unwrap_or(i32::MAX),
-                (None, Some(s)) => 128 + i32::try_from(s).unwrap_or(0),
+                (Some(c), _) => c,
+                (None, Some(s)) => 128 + s,
                 (None, None) => -1,
             };
             Ok(Some(code))

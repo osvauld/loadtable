@@ -18,5 +18,5 @@ thiserror.workspace = true
 rustix = { workspace = true, features = ["param", "fs", "process", "std"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-libproc = "0.14"
+libc = "0.2"
 sysinfo = { version = "0.37", default-features = false, features = ["system"] }

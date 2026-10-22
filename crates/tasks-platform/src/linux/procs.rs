@@ -135,6 +135,7 @@ pub(super) fn usage(group: GroupId) -> Result<Usage, PlatformError> {
 mod tests {
     use super::*;
 
+    #[allow(clippy::too_many_arguments)]
     fn line(
         pid: i32,
         comm: &str,
