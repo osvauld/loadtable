@@ -193,6 +193,43 @@ integrate the ownership handle into the worker. Existing parent-death/FD hooks r
 ENOTSUP on macOS and runtime entry points remain blocked. The prior conservative-memory
 policy blocker is unchanged.
 
+## Shared controller-loss guard (not worker integration)
+
+`crates/platform/src/guarded_group.rs` adds a shared Unix guard for a **separate guardian
+process**. The controller owns the sole peer of a close-on-exec Unix socket. The guardian
+waits for an explicit startup byte before spawning a dedicated `OwnedChildGroup`; EOF
+before startup means nothing is spawned, and EOF after spawn triggers group cleanup.
+Unexpected protocol/I/O errors propagate rather than reporting success; an existing group
+receives best-effort Drop cleanup. An inheritable guardian endpoint is rejected.
+
+The controller's peer endpoint must never be duplicated/passed to the workload; doing so
+would mask controller loss. Callers must provide explicit workload stdio, retain exclusive
+child-reaping ownership and drain any captured output concurrently. The internal byte
+protocol is a primitive's test/caller contract, not a deployed peer or ledger protocol.
+
+Real native fixtures launch distinct controller, guardian, workload and resistant descendant
+processes. Tests SIGKILL the controller before startup grant and during execution, then
+prove non-entry or inherited-lease release, unchanged slot inode and unrelated-group
+survival. Normal leader exit also preserves exit 7 while descendants are cleaned up.
+Buffered grant plus EOF, malformed grant and inheritable endpoint checks fail closed.
+Six behavior tests plus one re-exec fixture entry pass; fixtures self-expire after 15 s.
+
+**Remaining holes:** killing the guardian itself bypasses its cleanup. A controller may
+also disappear after the final pre-spawn check or while synchronous spawn/exec is stuck;
+this guard cannot atomically prevent subsequent command entry. It is not an admission
+backend, arbitrary-descendant containment, hard timeout or ledger recovery mechanism.
+Workload-side startup/liveness protection and failure-injection tests must close these
+windows before worker integration. No claim of complete crash-safe execution is made.
+
+The selected native checkpoint passed 169 tests (prior 162-case selection plus these 7),
+zero failed/ignored. Headless/default-feature compile checks, platform all-target Clippy,
+headless library/CLI/example/boundary Clippy and owned-file formatting/diff checks passed.
+Initial Clippy exposed fixture Child handles needing explicit reaping guards; fixed with
+RAII fixture ownership, not warning suppression. Linux native runtime and full worker E2E
+remain unrun. No fixture subprocesses remained after the check. Mac runtime guards,
+ENOTSUP pre-exec hooks, deployed state and the conservative memory-policy blocker are
+unchanged. No service was installed or restarted.
+
 ## Validation on ARM64 macOS
 
 ```sh

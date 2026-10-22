@@ -9,6 +9,7 @@ compile_error!("task-manager-platform currently supports only Linux and macOS");
 
 mod disk;
 pub mod fs;
+pub mod guarded_group;
 mod memory;
 pub mod owned_group;
 pub mod process;
