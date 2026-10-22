@@ -235,6 +235,18 @@ const FIELDS: &[Field] = &[
         "200",
     ),
     f(
+        "audit.retention_days",
+        "TASKS_AUDIT_RETENTION_DAYS",
+        Ty::OptUint(1, 3650),
+        "90",
+    ),
+    f(
+        "audit.checkpoint_every",
+        "TASKS_AUDIT_CHECKPOINT_EVERY",
+        Ty::Uint(0, 1_000_000),
+        "100",
+    ),
+    f(
         "cargo.max_jobs",
         "TASKS_MAX_CARGO_JOBS",
         Ty::Uint(1, 16),
@@ -730,6 +742,15 @@ impl MachinePolicy {
                 .and_then(|v| usize::try_from(v).ok()),
         }
     }
+    /// How long audit rows are kept (design D5); `None` keeps them for good.
+    pub fn audit_retention(&self) -> Option<Duration> {
+        self.ou("audit.retention_days")
+            .map(|d| Duration::from_secs(d.saturating_mul(86_400)))
+    }
+    /// Rows between signed audit checkpoints; 0 writes them only on demand.
+    pub fn audit_checkpoint_every(&self) -> u64 {
+        self.u("audit.checkpoint_every")
+    }
     /// What to do with a broad `cargo test` without the escape (R-191): `refuse` or `warn`.
     pub fn broad_test_mode(&self) -> BroadTestMode {
         match self.vals.get("submit.broad_test") {
@@ -977,6 +998,31 @@ mod tests {
         assert_eq!(t.compile.max_cpu, None);
         assert_eq!(t.compile.max_io, None);
         assert_eq!(t.compile.max_memory, Level::Normal);
+    }
+
+    // R-286
+    #[test]
+    fn r286_audit_retention_is_ninety_days_by_default_and_can_be_changed_or_turned_off() {
+        let d = MachinePolicy::defaults();
+        assert_eq!(d.audit_retention(), Some(Duration::from_secs(90 * 86_400)));
+        assert_eq!(d.audit_checkpoint_every(), 100);
+        let p = MachinePolicy::from_text(
+            Some("[audit]\nretention_days = 7\ncheckpoint_every = 5\n"),
+            &no_env,
+        );
+        assert!(p.problems.is_empty(), "{:?}", p.problems);
+        assert_eq!(p.audit_retention(), Some(Duration::from_secs(7 * 86_400)));
+        assert_eq!(p.audit_checkpoint_every(), 5);
+        let off = MachinePolicy::from_text(Some("[audit]\nretention_days = \"off\"\n"), &no_env);
+        assert!(off.problems.is_empty(), "{:?}", off.problems);
+        assert_eq!(off.audit_retention(), None);
+        let env = MachinePolicy::from_text(None, &env1("TASKS_AUDIT_RETENTION_DAYS", "30"));
+        assert_eq!(
+            env.audit_retention(),
+            Some(Duration::from_secs(30 * 86_400))
+        );
+        let bad = MachinePolicy::from_text(Some("[audit]\nretention_days = 0\n"), &no_env);
+        assert!(!bad.problems.is_empty());
     }
 
     #[test]

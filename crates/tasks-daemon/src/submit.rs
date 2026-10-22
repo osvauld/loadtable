@@ -67,6 +67,23 @@ impl Scheduler {
     /// Applies the submit rules to one job spec. `Ok` carries the warnings; `Err` the refusal
     /// text (one line per refusing rule).
     pub(crate) fn check_spec(&self, spec: &JobSpec, via: Via) -> Result<Vec<String>, String> {
+        self.spec_verdict(spec, via)
+            .map(|v| v.warnings)
+            .map_err(|refusals| {
+                refusals
+                    .iter()
+                    .map(|r| r.message.clone())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+    }
+
+    /// The rules' verdict on one spec: the verdict when it passes, the refusals when not.
+    pub(crate) fn spec_verdict(
+        &self,
+        spec: &JobSpec,
+        via: Via,
+    ) -> Result<submit_rules::Verdict, Vec<submit_rules::Refusal>> {
         let policy = self.policy();
         // a denied serial named as the device resource is refused like one in argv (R-210)
         let mut hay = spec.argv.clone();
@@ -88,14 +105,9 @@ impl Scheduler {
             },
         });
         if verdict.allowed() {
-            Ok(verdict.warnings)
+            Ok(verdict)
         } else {
-            Err(verdict
-                .refusals
-                .iter()
-                .map(|r| r.message.clone())
-                .collect::<Vec<_>>()
-                .join("\n"))
+            Err(verdict.refusals)
         }
     }
 }

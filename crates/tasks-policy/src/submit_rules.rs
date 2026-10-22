@@ -177,6 +177,17 @@ pub enum Rule {
     CargoJobs,
 }
 
+impl Rule {
+    /// The regression id that names the rule, as the audit log records it.
+    pub fn id(self) -> &'static str {
+        match self {
+            Rule::BroadTest => "R-191",
+            Rule::DeniedDevice => "R-210",
+            Rule::CargoJobs => "R-091",
+        }
+    }
+}
+
 /// One refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refusal {

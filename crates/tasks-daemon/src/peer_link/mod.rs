@@ -51,6 +51,35 @@ pub trait PeerSource: Send + Sync {
     fn peers(&self) -> Vec<PeerSpec>;
 }
 
+/// A change of a peer link worth keeping a record of. Probes that find the link as it was are
+/// not changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkChange {
+    /// The peer answered after not answering (or for the first time).
+    Up {
+        /// `direct`, `relay` or `unknown`.
+        path: String,
+    },
+    /// The peer stopped answering.
+    Down {
+        /// The probe's error.
+        reason: String,
+    },
+    /// The link moved between a direct path and the relay.
+    Path {
+        /// The path before.
+        from: String,
+        /// The path now.
+        to: String,
+    },
+}
+
+/// Told when a peer link changes state; the audit log plugs in here.
+pub trait LinkObserver: Send + Sync {
+    /// `peer`'s link changed.
+    fn changed(&self, peer: &PeerSpec, change: LinkChange);
+}
+
 /// How the adapter behaves. [`PeerLinkOptions::new`] gives the production values.
 #[derive(Clone)]
 pub struct PeerLinkOptions {
@@ -74,6 +103,8 @@ pub struct PeerLinkOptions {
     pub tick_every: Duration,
     /// Run the status prober on a thread. Tests turn it off and call [`PeerLink::probe_all`].
     pub background_status: bool,
+    /// Told when a link comes up, goes down or changes path.
+    pub observer: Option<Arc<dyn LinkObserver>>,
 }
 
 impl PeerLinkOptions {
@@ -91,6 +122,7 @@ impl PeerLinkOptions {
             probe_timeout: Duration::from_secs(5),
             tick_every: Duration::from_millis(50),
             background_status: true,
+            observer: None,
         }
     }
 }
@@ -308,10 +340,27 @@ fn probe_all<T: Transport>(inner: &Inner<T>) {
     for spec in specs {
         let result = probe(inner, &spec.node_id);
         let now = inner.now();
+        let mut change = None;
         if let Some(l) = lock(&inner.links).get_mut(&spec.name) {
+            let was_up = l.probed.then_some(l.ok);
+            let old_path = l.path.path.name();
             l.probed = true;
             match result {
                 Ok((status, path)) => {
+                    let new_path = path.path.name();
+                    change = if was_up != Some(true) {
+                        Some(LinkChange::Up {
+                            path: new_path.to_string(),
+                        })
+                    } else if old_path != new_path && old_path != "unknown" && new_path != "unknown"
+                    {
+                        Some(LinkChange::Path {
+                            from: old_path.to_string(),
+                            to: new_path.to_string(),
+                        })
+                    } else {
+                        None
+                    };
                     l.ok = true;
                     l.last_ok = Some(now);
                     l.error.clear();
@@ -319,10 +368,19 @@ fn probe_all<T: Transport>(inner: &Inner<T>) {
                     l.path = path;
                 }
                 Err(e) => {
+                    if was_up != Some(false) {
+                        change = Some(LinkChange::Down {
+                            reason: e.to_string(),
+                        });
+                    }
                     l.ok = false;
                     l.error = e.to_string();
                 }
             }
+        }
+        // told outside the lock: an observer may call back into the adapter
+        if let (Some(c), Some(o)) = (change, &inner.opts.observer) {
+            o.changed(&spec, c);
         }
     }
 }

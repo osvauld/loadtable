@@ -1,8 +1,9 @@
 //! Executing API requests against the scheduler and ledger.
 
 use crate::api::{
-    ApiError, DEFAULT_LIST_ROWS, ErrorCode, EstimateView, HelloInfo, JobGrep, LogSearchQuery,
-    LogView, MAX_LIST_ROWS, PROTOCOL_VERSION, Reply, Request, Response,
+    ApiError, AuditProblemView, AuditRowView, AuditVerifyView, DEFAULT_AUDIT_ROWS,
+    DEFAULT_LIST_ROWS, ErrorCode, EstimateView, HelloInfo, JobGrep, LogSearchQuery, LogView,
+    MAX_AUDIT_ROWS, MAX_LIST_ROWS, PROTOCOL_VERSION, Reply, Request, Response,
 };
 use crate::logs::{self, LogError, Matcher};
 use crate::scheduler::Scheduler;
@@ -15,7 +16,8 @@ use std::time::Duration;
 use tasks_core::plan::Plan;
 use tasks_core::{JobId, JobSpec, Owner, Placement};
 use tasks_ledger::{
-    CancelOutcome, JobRecord, LedgerError, ListFilter, PlanContext, RetryPolicy, retry_busy,
+    AuditEvent, AuditQuery, CancelOutcome, JobRecord, LedgerError, ListFilter, PlanContext,
+    RetryPolicy, action, retry_busy,
 };
 use tasks_policy::{Executables, ExpandOptions, RealFs, Timing};
 use tasks_timing::{History, RecipeKey};
@@ -184,6 +186,39 @@ impl Scheduler {
                 machines,
                 max_samples,
             } => self.history_view(&recipes, &machines, max_samples),
+            Request::Audit {
+                since_ms,
+                until_ms,
+                peer,
+                job,
+                action,
+                limit,
+            } => self.audit_rows(since_ms, until_ms, peer, job, action, limit),
+            Request::AuditVerify => {
+                let sink = self.audit_sink_or_err()?;
+                let rep = sink.log().verify().map_err(|e| ledger_error(&e))?;
+                Ok(Response::AuditVerify(AuditVerifyView {
+                    ok: rep.ok(),
+                    rows: rep.rows,
+                    first_seq: rep.first_seq,
+                    last_seq: rep.last_seq,
+                    checkpoints: rep.checkpoints,
+                    signed_through: rep.signed_through,
+                    pruned_before: rep.pruned_before,
+                    problem: rep.problem.map(|p| AuditProblemView {
+                        seq: p.seq,
+                        kind: p.kind.name().to_string(),
+                        message: p.message,
+                    }),
+                }))
+            }
+            Request::AuditCheckpoint => {
+                let sink = self.audit_sink_or_err()?;
+                let row = sink.log().checkpoint().map_err(|e| ledger_error(&e))?;
+                Ok(Response::AuditCheckpoint {
+                    seq: row.map(|r| r.seq),
+                })
+            }
             Request::Execution { enabled } => {
                 std::fs::write(
                     self.cfg.intent_path(),
@@ -223,6 +258,17 @@ impl Scheduler {
     /// requester; a resume forgets it.
     fn set_drain(&self, on: bool, who: Option<String>) {
         let now = self.clock.now_ms();
+        if on != self.draining.load(Ordering::SeqCst) {
+            let name = who.clone().unwrap_or_else(|| "unknown".to_string());
+            self.audit(
+                AuditEvent::new(if on {
+                    action::QUEUE_DRAIN
+                } else {
+                    action::QUEUE_RESUME
+                })
+                .owner(name),
+            );
+        }
         {
             let mut d = crate::scheduler::lock(&self.drained);
             if !on {
@@ -235,11 +281,110 @@ impl Scheduler {
         self.wake.notify();
     }
 
-    /// The shared submit rules for a spec (R-191, R-210, R-091); a refusal is `Refused`.
+    /// The shared submit rules for a spec (R-191, R-210, R-091); a refusal is `Refused` and is
+    /// written to the audit log with the rule that refused it.
     fn rules(&self, spec: &JobSpec, what: &str) -> Result<(), ApiError> {
-        self.check_spec(spec, Via::Local)
-            .map(|_warnings| ())
-            .map_err(|text| ApiError::new(ErrorCode::Refused, format!("{what}{text}")))
+        match self.spec_verdict(spec, Via::Local) {
+            Ok(_) => Ok(()),
+            Err(refusals) => {
+                self.audit_refusal(spec, &refusals, Via::Local, None);
+                let text = refusals
+                    .iter()
+                    .map(|r| r.message.clone())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                Err(ApiError::new(ErrorCode::Refused, format!("{what}{text}")))
+            }
+        }
+    }
+
+    fn audit_sink_or_err(&self) -> Result<Arc<crate::audited::AuditSink>, ApiError> {
+        self.audit_sink()
+            .ok_or_else(|| ApiError::new(ErrorCode::Refused, "this daemon keeps no audit log"))
+    }
+
+    fn audit_rows(
+        &self,
+        since_ms: Option<i64>,
+        until_ms: Option<i64>,
+        peer: Option<String>,
+        job: Option<i64>,
+        act: Option<String>,
+        limit: Option<usize>,
+    ) -> Out {
+        let limit = limit.unwrap_or(DEFAULT_AUDIT_ROWS);
+        if limit == 0 || limit > MAX_AUDIT_ROWS {
+            return Err(ApiError::new(
+                ErrorCode::BadRequest,
+                format!("limit must be between 1 and {MAX_AUDIT_ROWS}"),
+            ));
+        }
+        let sink = self.audit_sink_or_err()?;
+        let q = AuditQuery {
+            since_ms,
+            until_ms,
+            peer: peer.map(|p| sink.resolve_peer(&p)),
+            job,
+            action: act.filter(|a| !a.is_empty()),
+            limit: limit + 1,
+        };
+        let mut rows = retry_busy(&API_RETRY, &sleep, || sink.log().query(&q))
+            .map_err(|e| ledger_error(&e))?;
+        let truncated = rows.len() > limit;
+        rows.truncate(limit);
+        let mut names = sink.names();
+        // this machine's own rows show its name too
+        names.insert(sink.log().actor().to_string(), self.cfg.machine.clone());
+        let name_of = |did: &str| names.get(did).cloned();
+        let rows = rows
+            .into_iter()
+            .map(|r| {
+                let details = r.details_json();
+                AuditRowView {
+                    actor_name: name_of(&r.actor),
+                    peer_name: r.peer.as_deref().and_then(name_of),
+                    seq: r.seq,
+                    at_ms: r.at_ms,
+                    actor: r.actor,
+                    owner: r.owner,
+                    action: r.action,
+                    job: r.job,
+                    peer: r.peer,
+                    target: r.target,
+                    details,
+                    prev_hash: r.prev_hash,
+                    hash: r.hash,
+                }
+            })
+            .collect();
+        Ok(Response::Audit { rows, truncated })
+    }
+
+    /// Writes a job refused by the submit rules to the audit log: the rule ids, never the
+    /// command line.
+    pub(crate) fn audit_refusal(
+        &self,
+        spec: &JobSpec,
+        refusals: &[tasks_policy::submit_rules::Refusal],
+        via: Via,
+        actor: Option<String>,
+    ) {
+        let rules: Vec<&str> = refusals.iter().map(|r| r.rule.id()).collect();
+        let mut ev = AuditEvent::new(action::JOB_REFUSED)
+            .owner(spec.owner.as_str())
+            .target(spec.cwd.display().to_string())
+            .detail("rules", rules)
+            .detail(
+                "via",
+                match via {
+                    Via::Local => "local",
+                    Via::Peer => "peer",
+                },
+            );
+        if let Some(did) = actor {
+            ev = ev.by_actor(did.clone()).peer(did);
+        }
+        self.audit(ev);
     }
 
     fn submit(&self, spec: JobSpec) -> Out {

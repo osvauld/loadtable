@@ -2,6 +2,7 @@
 //! first start), the trust ledger and the [`TrustNode`] over them. Independent of the peer
 //! transport, so every daemon has an identity and `tasks2 identity show` works on any build.
 
+use crate::audited::AuditSink;
 use crate::config::DaemonConfig;
 use crate::error::DaemonError;
 use crate::forwarder::Forwarder;
@@ -10,13 +11,15 @@ use crate::peer_link::PeerSource;
 use crate::peers_config::PeerSpec;
 use crate::trust_control::{NodeTrust, TrustControl};
 use std::sync::Arc;
-use tasks_identity::{Identity, Keystore};
+use tasks_identity::Identity;
 use tasks_ledger::{Clock, SqliteStore, SystemClock};
-use tasks_peer::trust::{SelfAddr, Side, TrustEvent, TrustEvents, TrustNode, TrustPolicy};
+use tasks_peer::trust::{
+    AuditEvents, FanoutEvents, SelfAddr, Side, TrustEvent, TrustEvents, TrustNode, TrustPolicy,
+};
 use tasks_peer::{PeerId, Receiver};
 
 /// Logs the trust events an operator needs to see, one line each. Never a token, a key or a
-/// ticket. The audit table (design step 2) replaces this sink.
+/// ticket. The audit table keeps the full record; this is what an operator sees live.
 pub struct StderrEvents;
 
 impl TrustEvents for StderrEvents {
@@ -65,18 +68,31 @@ pub struct TrustRuntime {
     pub created: bool,
 }
 
-/// Opens (creating on first start) the keystore in the state dir and the trust ledger, and
-/// builds the [`TrustNode`]. Call after the one-daemon lock is held.
+/// What the daemon hands a peer runtime: the identity (opened once by the daemon, which also
+/// signs the audit log with it) and the audit sink.
+pub struct PeerContext {
+    /// The machine identity.
+    pub identity: Arc<Identity>,
+    /// True when this start created the keystore.
+    pub created: bool,
+    /// Where audit rows go.
+    pub audit: Arc<AuditSink>,
+}
+
+/// Opens the trust ledger and builds the [`TrustNode`] over the identity in `ctx`. Trust events
+/// go to the log line and to the audit table. Call after the one-daemon lock is held.
 pub fn open_trust(
     cfg: &DaemonConfig,
-    events: Arc<dyn TrustEvents>,
+    ctx: &PeerContext,
     clock: Arc<dyn Clock>,
 ) -> Result<TrustRuntime, DaemonError> {
-    let ks = Keystore::open_or_create(&cfg.state_dir)
-        .map_err(|e| DaemonError::Identity(e.to_string()))?;
-    let identity = Arc::new(ks.identity().clone());
+    let identity = ctx.identity.clone();
     // A second connection to the ledger (WAL): trust state is kept apart from the job store.
     let ledger = Arc::new(SqliteStore::open(&cfg.db_path())?);
+    let events: Arc<dyn TrustEvents> = Arc::new(FanoutEvents(vec![
+        Arc::new(StderrEvents),
+        Arc::new(AuditEvents::new(ctx.audit.log().clone(), clock.clone())),
+    ]));
     let node = TrustNode::new(
         identity.clone(),
         &cfg.machine,
@@ -89,7 +105,7 @@ pub fn open_trust(
     Ok(TrustRuntime {
         identity,
         node,
-        created: ks.created(),
+        created: ctx.created,
     })
 }
 
@@ -132,6 +148,7 @@ pub trait PeerRuntimeFactory: Send {
         self: Box<Self>,
         cfg: &DaemonConfig,
         policy: &MachinePolicy,
+        ctx: &PeerContext,
     ) -> Result<PeerRuntime, DaemonError>;
 }
 
@@ -144,8 +161,9 @@ impl PeerRuntimeFactory for LocalOnly {
         self: Box<Self>,
         cfg: &DaemonConfig,
         _policy: &MachinePolicy,
+        ctx: &PeerContext,
     ) -> Result<PeerRuntime, DaemonError> {
-        let rt = open_trust(cfg, Arc::new(StderrEvents), Arc::new(SystemClock))?;
+        let rt = open_trust(cfg, ctx, Arc::new(SystemClock))?;
         let trust = NodeTrust::new(rt.node.clone(), None, Arc::new(SelfAddr::default()));
         Ok(PeerRuntime {
             forwarder: None,

@@ -254,6 +254,26 @@ impl SubmitPolicy for DaemonRules {
             .check_spec(spec, crate::submit::Via::Peer)
             .map(|_warnings| ())
     }
+
+    /// A refusal is written to the audit log under the sending peer's DID.
+    fn check_from(&self, from: &PeerId, spec: &JobSpec) -> Result<(), String> {
+        use crate::submit::Via;
+        match self.sch.spec_verdict(spec, Via::Peer) {
+            Ok(_) => Ok(()),
+            Err(refusals) => {
+                let actor = self
+                    .sch
+                    .audit_sink()
+                    .and_then(|a| a.did_of_node(from.as_str()));
+                self.sch.audit_refusal(spec, &refusals, Via::Peer, actor);
+                Err(refusals
+                    .iter()
+                    .map(|r| r.message.clone())
+                    .collect::<Vec<_>>()
+                    .join("\n"))
+            }
+        }
+    }
 }
 
 /// The scheduler's slots, queue and pressure as the peer-visible status.

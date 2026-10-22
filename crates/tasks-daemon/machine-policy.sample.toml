@@ -48,6 +48,10 @@
 # max_sample_age_days = 365   # env TASKS_RETAIN_SAMPLE_DAYS
 # max_samples_per_key = 200   # env TASKS_RETAIN_SAMPLES_PER_KEY
 
+[audit]
+# retention_days = 90   # env TASKS_AUDIT_RETENTION_DAYS
+# checkpoint_every = 100   # env TASKS_AUDIT_CHECKPOINT_EVERY
+
 [cargo]
 # max_jobs = 2   # env TASKS_MAX_CARGO_JOBS
 # jobs_when_busy = 1   # env TASKS_CARGO_JOBS_WHEN_BUSY

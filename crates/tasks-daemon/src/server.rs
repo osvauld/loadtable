@@ -5,6 +5,7 @@
 //! connection thread only reads a request, asks the scheduler and writes a reply.
 
 use crate::api::{ApiError, ErrorCode, MAX_REQUEST_BYTES, Reply, parse_request, render_reply};
+use crate::audited::{AuditSink, AuditedLedger};
 use crate::config::{DaemonConfig, PidLock, raise_nofile};
 use crate::error::DaemonError;
 use crate::forwarder::{Forwarder, NoForwarder};
@@ -12,7 +13,7 @@ use crate::machine_policy::MachinePolicy;
 use crate::platform::{Ledger, Platform};
 use crate::scheduler::{Scheduler, SchedulerParts};
 use crate::startup::{StartupReport, reconcile};
-use crate::trust_runtime::{LocalOnly, PeerRuntimeFactory};
+use crate::trust_runtime::{LocalOnly, PeerContext, PeerRuntimeFactory};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -20,7 +21,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-use tasks_ledger::{RetryPolicy, SqliteStore, SystemClock, retry_busy};
+use tasks_identity::{Keystore, Signer};
+use tasks_ledger::{AuditLedger, AuditLog, RetryPolicy, SqliteStore, SystemClock, retry_busy};
 
 /// Most connections served at once.
 pub const MAX_CONNECTIONS: usize = 64;
@@ -98,11 +100,29 @@ impl Daemon {
         let store = retry_busy(&RetryPolicy::default(), &sleep, || {
             SqliteStore::open(&cfg.db_path())
         })?;
-        let ledger: Arc<dyn Ledger> = Arc::new(store);
+        // The machine identity signs the audit log, so it is opened here, once, and handed on.
+        let keystore = Keystore::open_or_create(&cfg.state_dir)
+            .map_err(|e| DaemonError::Identity(e.to_string()))?;
+        let identity = Arc::new(keystore.identity().clone());
+        let store = Arc::new(store);
+        let log = AuditLog::new(
+            store.clone() as Arc<dyn AuditLedger>,
+            Arc::new(SystemClock),
+            Signer::did(&*identity),
+        )
+        .with_signer(identity.clone());
+        log.set_checkpoint_every(policy.audit_checkpoint_every());
+        let audit = AuditSink::new(Arc::new(log));
+        let ledger: Arc<dyn Ledger> = Arc::new(AuditedLedger::new(store, audit.clone()));
         // Identity, trust and the transport start only now: the state is locked, so a stray
         // second daemon never binds an endpoint or touches the keystore.
+        let ctx = PeerContext {
+            identity,
+            created: keystore.created(),
+            audit: audit.clone(),
+        };
         let peer_rt = match opts.peer_runtime {
-            Some(f) => Some(f.start(&cfg, &policy)?),
+            Some(f) => Some(f.start(&cfg, &policy, &ctx)?),
             None => None,
         };
         let forwarder = peer_rt
@@ -128,6 +148,7 @@ impl Daemon {
             execution_enabled: enabled,
             runner_poll: Duration::from_millis(50),
         });
+        sch.set_audit(audit);
         let mut keepalive = None;
         if let Some(rt) = peer_rt {
             sch.set_trust(rt.trust);

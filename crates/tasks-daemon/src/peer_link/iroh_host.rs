@@ -12,7 +12,7 @@ use crate::error::DaemonError;
 use crate::machine_policy::MachinePolicy;
 use crate::peers_config::{PeerConfig, RelaySetting};
 use crate::trust_control::NodeTrust;
-use crate::trust_runtime::{NodePeers, PeerRuntime, PeerRuntimeFactory, StderrEvents, open_trust};
+use crate::trust_runtime::{NodePeers, PeerContext, PeerRuntime, PeerRuntimeFactory, open_trust};
 use iroh::SecretKey;
 use std::sync::Arc;
 use tasks_ledger::SystemClock;
@@ -79,8 +79,9 @@ impl PeerRuntimeFactory for IrohFactory {
         self: Box<Self>,
         cfg: &DaemonConfig,
         policy: &MachinePolicy,
+        ctx: &PeerContext,
     ) -> Result<PeerRuntime, DaemonError> {
-        let rt = open_trust(cfg, Arc::new(StderrEvents), Arc::new(SystemClock))?;
+        let rt = open_trust(cfg, ctx, Arc::new(SystemClock))?;
         if rt.created {
             eprintln!("tasks2d: created this machine's identity {}", rt.node.did());
         }
@@ -102,6 +103,10 @@ impl PeerRuntimeFactory for IrohFactory {
         );
         let mut opts = PeerLinkOptions::new(&cfg.machine, Vec::new());
         opts.source = Some(Arc::new(NodePeers(rt.node.clone())));
+        opts.observer = Some(Arc::new(crate::audited::AuditLinks::new(
+            ctx.audit.clone(),
+            Arc::new(SystemClock),
+        )));
         let link = PeerLink::new(TrustedTransport::new(raw, rt.node.clone()), opts);
         let node = rt.node.clone();
         let endpoint = host.endpoint.clone();

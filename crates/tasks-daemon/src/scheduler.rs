@@ -151,6 +151,8 @@ pub struct Scheduler {
     pub(crate) cores: u32,
     pub(crate) running: Mutex<BTreeMap<JobId, Arc<RunningJob>>>,
     pub(crate) alerts: Mutex<AlertBook>,
+    /// The audit log; set by the daemon (design §8).
+    pub(crate) audit: Mutex<Option<Arc<crate::audited::AuditSink>>>,
     /// Trust control (identity, pairing, peers); set by the daemon when the trust runtime is up.
     pub(crate) trust: Mutex<Option<Arc<dyn crate::trust_control::TrustControl>>>,
     pub(crate) state: Mutex<TickState>,
@@ -183,6 +185,7 @@ impl Scheduler {
                 .unwrap_or(1),
             running: Mutex::new(BTreeMap::new()),
             alerts: Mutex::new(AlertBook::new()),
+            audit: Mutex::new(None),
             trust: Mutex::new(None),
             state: Mutex::new(TickState::default()),
             wake: Wake::default(),
@@ -199,7 +202,29 @@ impl Scheduler {
     /// Plugs in trust control: `Identity`, `Pair*` and `Peers` requests, peer trust in the
     /// status and grant-expiry alerts.
     pub fn set_trust(&self, trust: Arc<dyn crate::trust_control::TrustControl>) {
+        if let Some(a) = self.audit_sink() {
+            a.set_trust(trust.clone());
+        }
         *lock(&self.trust) = Some(trust);
+    }
+
+    /// Plugs in the audit log: `Audit*` requests, drain and refusal rows, retention.
+    pub fn set_audit(&self, sink: Arc<crate::audited::AuditSink>) {
+        if let Some(t) = self.trust() {
+            sink.set_trust(t);
+        }
+        *lock(&self.audit) = Some(sink);
+    }
+
+    pub(crate) fn audit_sink(&self) -> Option<Arc<crate::audited::AuditSink>> {
+        lock(&self.audit).clone()
+    }
+
+    /// Records an audit event when the daemon keeps a log.
+    pub(crate) fn audit(&self, ev: tasks_ledger::AuditEvent) {
+        if let Some(a) = self.audit_sink() {
+            a.record(ev);
+        }
     }
 
     pub(crate) fn trust(&self) -> Option<Arc<dyn crate::trust_control::TrustControl>> {

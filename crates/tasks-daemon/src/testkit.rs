@@ -1,5 +1,6 @@
 //! Fakes and a rig for the scheduler tests.
 
+use crate::audited::{AuditSink, AuditedLedger};
 use crate::config::DaemonConfig;
 use crate::forwarder::{
     ForwardError, ForwardPoll, ForwardProgress, ForwardTicket, Forwarder, LinkReport, NoForwarder,
@@ -15,7 +16,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 use tasks_core::{JobId, JobSpec, Kind, MachineName, Owner, Placement, Requirements, SlotKind};
-use tasks_ledger::{JobRecord, ManualClock, MemoryStore, Store};
+use tasks_ledger::{AuditLog, JobRecord, ManualClock, MemoryAudit, MemoryStore, Store};
 use tasks_placement::MachineView;
 use tasks_platform::{
     Child, Disk, FlockSlots, GroupId, Level, Memory, MemorySnapshot, PlatformError, Pressure,
@@ -390,6 +391,16 @@ pub struct Rig {
     pub holders: Arc<FakeHolders>,
     pub cfg: DaemonConfig,
     pub platform: Platform,
+    /// The store behind the audited ledger the scheduler runs on.
+    pub ledger: Arc<dyn Ledger>,
+    /// The audit sink (a signing log over [`Rig::audit_store`] on the rig's clock).
+    pub audit: Arc<AuditSink>,
+    pub audit_store: Arc<MemoryAudit>,
+}
+
+/// The identity the rig signs its audit checkpoints with.
+pub fn rig_identity() -> Arc<tasks_identity::Identity> {
+    Arc::new(tasks_identity::Identity::from_entropy(&[9u8; 32]).unwrap())
 }
 
 impl Rig {
@@ -413,17 +424,19 @@ impl Rig {
     /// A second scheduler over the same ledger, slots and directories: the daemon after a
     /// restart. The first one is left to its own devices, as a crashed process would be.
     pub fn restart_with(&self, forwarder: Arc<dyn Forwarder>) -> Arc<Scheduler> {
-        Scheduler::new(SchedulerParts {
+        let sch = Scheduler::new(SchedulerParts {
             cfg: self.cfg.clone(),
             policy: MachinePolicy::from_text(None, &|_| None),
-            ledger: self.store.clone(),
+            ledger: Arc::new(AuditedLedger::new(self.store.clone(), self.audit.clone())),
             platform: self.platform.clone(),
             clock: self.clock.clone(),
             forwarder,
             parent_env: vec![("PATH".into(), "/usr/bin:/bin".into())],
             execution_enabled: true,
             runner_poll: Duration::from_millis(2),
-        })
+        });
+        sch.set_audit(self.audit.clone());
+        sch
     }
 
     fn build(policy: &str, forwarder: Arc<dyn Forwarder>, native: bool) -> Rig {
@@ -462,11 +475,16 @@ impl Rig {
             &|_| None,
         );
         assert!(policy.problems.is_empty(), "{:?}", policy.problems);
-        let ledger: Arc<dyn Ledger> = store.clone();
+        let audit_store = Arc::new(MemoryAudit::new());
+        let log = AuditLog::new(audit_store.clone(), clock.clone(), "did:key:zTestbox")
+            .with_signer(rig_identity());
+        log.set_checkpoint_every(0);
+        let audit = AuditSink::new(Arc::new(log));
+        let ledger: Arc<dyn Ledger> = Arc::new(AuditedLedger::new(store.clone(), audit.clone()));
         let sch = Scheduler::new(SchedulerParts {
             cfg: cfg.clone(),
             policy,
-            ledger,
+            ledger: ledger.clone(),
             platform: platform.clone(),
             clock: clock.clone(),
             forwarder,
@@ -477,6 +495,7 @@ impl Rig {
             execution_enabled: true,
             runner_poll: Duration::from_millis(2),
         });
+        sch.set_audit(audit.clone());
         Rig {
             dir,
             sch,
@@ -487,6 +506,9 @@ impl Rig {
             holders,
             cfg,
             platform,
+            ledger,
+            audit,
+            audit_store,
         }
     }
 
@@ -515,7 +537,7 @@ impl Rig {
     }
 
     pub fn submit(&self, spec: &JobSpec) -> JobId {
-        let id = self.store.submit(spec).unwrap();
+        let id = self.ledger.submit(spec).unwrap();
         // distinct queue times keep the queue order unambiguous
         self.clock.advance(10);
         id

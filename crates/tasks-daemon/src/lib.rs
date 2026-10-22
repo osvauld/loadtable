@@ -8,6 +8,9 @@
 
 pub mod alerts;
 pub mod api;
+#[cfg(test)]
+mod audit_tests;
+pub mod audited;
 pub mod cargo_jobs;
 pub mod config;
 pub mod entry;

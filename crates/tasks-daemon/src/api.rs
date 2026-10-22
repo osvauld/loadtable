@@ -31,6 +31,10 @@ pub const MAX_CONTEXT: usize = 100;
 pub const MAX_TAIL_LINES: usize = 5000;
 /// Most waiter rows in a status snapshot.
 pub const MAX_STATUS_WAITERS: usize = 100;
+/// Most rows one `audit` request returns.
+pub const MAX_AUDIT_ROWS: usize = 1000;
+/// Rows `audit` returns when the request sets no limit.
+pub const DEFAULT_AUDIT_ROWS: usize = 200;
 /// Most recipes one `history` request returns.
 pub const MAX_HISTORY_RECIPES: usize = 200;
 /// Samples per series a `history` request returns when it sets no limit.
@@ -192,6 +196,31 @@ pub enum Request {
         #[serde(default)]
         max_samples: Option<usize>,
     },
+    /// Read the audit log, newest first. Every filter narrows; none set returns the latest rows.
+    Audit {
+        /// At or after this time, ms since the epoch.
+        #[serde(default)]
+        since_ms: Option<i64>,
+        /// At or before this time, ms since the epoch.
+        #[serde(default)]
+        until_ms: Option<i64>,
+        /// Rows naming this peer, as its paired name or its DID.
+        #[serde(default)]
+        peer: Option<String>,
+        /// Rows about this job.
+        #[serde(default)]
+        job: Option<i64>,
+        /// This action, or a family (`job` matches every `job.*`).
+        #[serde(default)]
+        action: Option<String>,
+        /// Row limit (default [`DEFAULT_AUDIT_ROWS`], at most [`MAX_AUDIT_ROWS`]).
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    /// Walk the audit chain and report the first break, checking checkpoint signatures.
+    AuditVerify,
+    /// Sign a checkpoint of the audit chain now.
+    AuditCheckpoint,
     /// Persist the execution intent: enabled or stopped (R-017).
     Execution {
         /// True lets queued jobs start.
@@ -498,6 +527,89 @@ pub enum Response {
     Estimate(EstimateView),
     /// Timing history.
     History(HistoryView),
+    /// Audit rows, newest first.
+    Audit {
+        /// The rows.
+        rows: Vec<AuditRowView>,
+        /// True when the limit cut the list.
+        truncated: bool,
+    },
+    /// The result of walking the audit chain.
+    AuditVerify(AuditVerifyView),
+    /// A checkpoint was signed.
+    AuditCheckpoint {
+        /// Its row, or `None` when the log is empty.
+        seq: Option<i64>,
+    },
+}
+
+/// One audit row as the API shows it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AuditRowView {
+    /// Position in the chain.
+    pub seq: i64,
+    /// When, ms since the epoch.
+    pub at_ms: i64,
+    /// The machine that did it (DID).
+    pub actor: String,
+    /// Its paired name, when it is a paired peer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_name: Option<String>,
+    /// The agent or person; empty when none applies.
+    pub owner: String,
+    /// What happened, for example `job.cancelled`.
+    pub action: String,
+    /// The job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job: Option<i64>,
+    /// The other machine (DID).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<String>,
+    /// Its paired name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_name: Option<String>,
+    /// A checkout, path or node id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// The details object.
+    pub details: serde_json::Value,
+    /// Hash of the previous row.
+    pub prev_hash: String,
+    /// Hash of this row.
+    pub hash: String,
+}
+
+/// Where the audit chain broke.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AuditProblemView {
+    /// The row it was found at.
+    pub seq: i64,
+    /// `edited`, `broken_link`, `gap`, `reordered`, `missing_history`, `bad_record`,
+    /// `bad_signature` or `unexpected_signer`.
+    pub kind: String,
+    /// A sentence for people.
+    pub message: String,
+}
+
+/// The result of `audit_verify`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AuditVerifyView {
+    /// True when no break was found.
+    pub ok: bool,
+    /// Rows checked.
+    pub rows: u64,
+    /// Oldest and newest row seen.
+    pub first_seq: Option<i64>,
+    /// Newest row seen.
+    pub last_seq: Option<i64>,
+    /// Checkpoints whose signature verified.
+    pub checkpoints: u64,
+    /// The row of the newest verified checkpoint; rows after it are covered by the chain only.
+    pub signed_through: Option<i64>,
+    /// Rows before this one were removed by retention.
+    pub pruned_before: Option<i64>,
+    /// The first break.
+    pub problem: Option<AuditProblemView>,
 }
 
 /// Who the daemon is.

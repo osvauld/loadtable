@@ -286,6 +286,73 @@ pub fn parse_time(text: &str, now_ms: i64) -> Result<i64, LogError> {
         .ok_or_else(|| LogError::Bad(format!("time {t:?} is out of range")))
 }
 
+/// Days since 1970-01-01 of a civil date (proleptic Gregorian).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// The civil date of a day count since 1970-01-01.
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// `2026-10-22 14:03:11` (UTC), for tables.
+pub fn format_utc(ms: i64) -> String {
+    let secs = ms.div_euclid(1000);
+    let (y, m, d) = civil_from_days(secs.div_euclid(86_400));
+    let t = secs.rem_euclid(86_400);
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}",
+        t / 3600,
+        t % 3600 / 60,
+        t % 60
+    )
+}
+
+/// Parses `2026-10-22`, `2026-10-22T14:30` or `2026-10-22 14:30:05` (UTC, optional trailing
+/// `Z`) to ms since the epoch.
+pub fn parse_utc(text: &str) -> Option<i64> {
+    let t = text.trim().trim_end_matches('Z');
+    let (date, time) = match t.split_once(['T', ' ']) {
+        Some((d, tm)) => (d, Some(tm)),
+        None => (t, None),
+    };
+    let mut ymd = date.split('-');
+    let y: i64 = ymd.next()?.parse().ok()?;
+    let m: i64 = ymd.next()?.parse().ok()?;
+    let d: i64 = ymd.next()?.parse().ok()?;
+    if ymd.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let mut secs = 0i64;
+    if let Some(tm) = time {
+        let mut p = tm.split(':');
+        let h: i64 = p.next()?.parse().ok()?;
+        let mi: i64 = p.next()?.parse().ok()?;
+        let s: i64 = p.next().map_or(Some(0), |s| s.parse().ok())?;
+        if p.next().is_some() || h > 23 || mi > 59 || s > 59 {
+            return None;
+        }
+        secs = h * 3600 + mi * 60 + s;
+    }
+    Some((days_from_civil(y, m, d) * 86_400 + secs) * 1000)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,5 +477,27 @@ mod tests {
         let p = temp_log("tail", "a\nb\nc\npartial");
         assert_eq!(tail(&p, 2, true).unwrap(), ["c", "partial"]);
         assert_eq!(tail(&p, 2, false).unwrap(), ["b", "c"]);
+    }
+
+    #[test]
+    fn utc_dates_round_trip_through_text() {
+        assert_eq!(format_utc(0), "1970-01-01 00:00:00");
+        assert_eq!(format_utc(1_792_239_733_000), "2026-10-17 12:22:13");
+        assert_eq!(parse_utc("2026-10-17T12:22:13Z"), Some(1_792_239_733_000));
+        assert_eq!(parse_utc("2026-10-17 12:22"), Some(1_792_239_720_000));
+        assert_eq!(parse_utc("2024-02-29"), Some(1_709_164_800_000));
+        for bad in [
+            "2026-13-01",
+            "2026-10",
+            "2026-10-17T25:00",
+            "yesterday",
+            "2026-10-17T10",
+        ] {
+            assert_eq!(parse_utc(bad), None, "{bad}");
+        }
+        // a leap day and the day after survive the round trip
+        for ms in [951_782_400_000_i64, 1_709_251_199_000, 4_102_444_800_000] {
+            assert_eq!(parse_utc(&format_utc(ms)), Some(ms));
+        }
     }
 }

@@ -90,9 +90,23 @@ impl Scheduler {
         };
         if prune_due {
             let _ = self.guard("prune", self.ledger.prune(&policy.retention()));
+            self.maintain_audit(policy);
         }
         if audit_due {
             self.audit_holders(policy);
+        }
+    }
+
+    /// Audit retention (default 90 days, D5) and the checkpoint interval from the policy.
+    fn maintain_audit(&self, policy: &MachinePolicy) {
+        let Some(sink) = self.audit_sink() else {
+            return;
+        };
+        sink.log()
+            .set_checkpoint_every(policy.audit_checkpoint_every());
+        if let Some(retention) = policy.audit_retention() {
+            let pruned = sink.log().prune(retention);
+            let _ = self.guard("audit prune", pruned);
         }
     }
 
