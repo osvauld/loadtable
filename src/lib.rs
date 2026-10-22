@@ -17,6 +17,7 @@ pub mod catalog;
 pub mod device;
 pub mod device_denylist;
 pub mod execution;
+pub mod forward_live;
 pub mod gc;
 pub mod gc_auto;
 pub mod health;
