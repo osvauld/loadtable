@@ -36,18 +36,23 @@ fn kind_name(k: SlotKind) -> &'static str {
 
 impl SlotLocks for FlockSlots {
     fn try_acquire(&self, kind: SlotKind, index: u32) -> Result<Option<SlotGuard>, PlatformError> {
-        std::fs::create_dir_all(&self.dir)?;
+        std::fs::create_dir_all(&self.dir).map_err(|e| PlatformError::io(&self.dir, e))?;
         let path = self.dir.join(format!("{}-{index}.lock", kind_name(kind)));
         let file = OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
-            .open(path)?;
+            .open(&path)
+            .map_err(|e| PlatformError::io(&path, e))?;
         match flock(&file, FlockOperation::NonBlockingLockExclusive) {
             Ok(()) => Ok(Some(SlotGuard { _file: file })),
             Err(rustix::io::Errno::WOULDBLOCK) => Ok(None),
-            Err(e) => Err(e.into()),
+            Err(source) => Err(PlatformError::Syscall {
+                syscall: "flock",
+                path: Some(path),
+                source,
+            }),
         }
     }
 }

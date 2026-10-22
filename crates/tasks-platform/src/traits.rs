@@ -1,8 +1,8 @@
 //! The platform traits.
 
 use crate::{
-    Child, GroupId, MemorySnapshot, PlatformError, PressureSnapshot, ServiceStatus, ServiceUnit,
-    Signal, SlotGuard, SpawnSpec, Usage,
+    Child, GroupId, InstallPlan, MemorySnapshot, PlatformError, PressureSnapshot,
+    PressureThresholds, ServiceStatus, ServiceUnit, Signal, SlotGuard, SpawnSpec, Usage,
 };
 use std::path::Path;
 use tasks_core::SlotKind;
@@ -15,18 +15,24 @@ pub trait Memory {
 
 /// Reads system pressure.
 pub trait Pressure {
-    /// Current pressure (Linux PSI avg10; macOS memorystatus level).
-    fn snapshot(&self) -> Result<PressureSnapshot, PlatformError>;
+    /// Current pressure (Linux PSI avg10 mapped with `thresholds`; macOS
+    /// memorystatus level, which ignores `thresholds`). Fails closed on error.
+    fn snapshot(&self, thresholds: &PressureThresholds) -> Result<PressureSnapshot, PlatformError>;
 }
 
 /// Spawns and supervises process groups.
 pub trait Processes {
     /// Starts a command in a new session and process group, output to the log file.
     fn spawn_group(&self, cmd: &SpawnSpec) -> Result<Child, PlatformError>;
-    /// Sends a signal to a whole group.
+    /// Sends a signal to a whole group. Fails with `Gone` if the leader's start
+    /// time no longer matches, and refuses group ids <= 1 and our own group.
     fn signal_group(&self, group: GroupId, sig: Signal) -> Result<(), PlatformError>;
-    /// Resource usage of a group.
+    /// Resource usage of a group (live, non-zombie processes). `Gone` on PID reuse.
     fn usage(&self, group: GroupId) -> Result<Usage, PlatformError>;
+    /// Reaps the leader without blocking: `Some(code)` once it exited (128 + n
+    /// when killed by signal n), `None` while running. Keep the leader unreaped
+    /// until descendants are cleaned so its identity still guards the group.
+    fn try_wait(&self, child: &Child) -> Result<Option<i32>, PlatformError>;
 }
 
 /// Exclusive slot locks held via file locks.
@@ -37,10 +43,11 @@ pub trait SlotLocks {
 
 /// Installs and queries the background service.
 pub trait Service {
-    /// Installs the unit (systemd user unit or launchd agent).
-    fn install(&self, unit: &ServiceUnit) -> Result<(), PlatformError>;
-    /// Reports whether the service is installed and running.
-    fn status(&self) -> Result<ServiceStatus, PlatformError>;
+    /// Writes the unit file (systemd user unit or launchd agent) without
+    /// starting anything; never overwrites a different file (`Exists`).
+    fn install(&self, unit: &ServiceUnit) -> Result<InstallPlan, PlatformError>;
+    /// Reports whether the named service is installed and running.
+    fn status(&self, name: &str) -> Result<ServiceStatus, PlatformError>;
 }
 
 /// Reports free disk space.

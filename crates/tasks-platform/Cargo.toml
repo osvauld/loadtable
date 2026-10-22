@@ -15,4 +15,8 @@ fake = []
 [dependencies]
 tasks-core.workspace = true
 thiserror.workspace = true
-rustix.workspace = true
+rustix = { workspace = true, features = ["param", "fs", "process", "std"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libproc = "0.14"
+sysinfo = { version = "0.37", default-features = false, features = ["system"] }
