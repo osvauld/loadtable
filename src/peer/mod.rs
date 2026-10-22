@@ -13,6 +13,7 @@
 //! * [`reroute`]: re-scores waiting local jobs and moves one to a worker peer that would
 //!   clearly finish it sooner (`crate::reroute`).
 pub mod bridge;
+pub mod checkout_gate;
 pub mod forward;
 pub mod host;
 pub mod records;

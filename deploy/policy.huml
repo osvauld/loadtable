@@ -32,12 +32,13 @@ broad_test: "refuse"
 
 # Rerouting of waiting jobs to an idle worker peer (src/reroute.rs), read when the peer
 # runtime starts. TASKS_REROUTE, TASKS_REROUTE_INTERVAL_S, TASKS_REROUTE_MIN_RATIO and
-# TASKS_REROUTE_MIN_GAIN_S win over these keys. An invalid value disables rerouting.
+# TASKS_REROUTE_MIN_GAIN_S (and TASKS_REROUTE_PULL_BACK) win over these keys. An invalid value disables rerouting.
 # reroute::
 #   enabled: true
 #   interval_s: 20          # 1..3600
 #   min_ratio: 2.0          # move only when the peer finishes >= this many times sooner
 #   min_gain_s: 300         # ... and at least this many seconds sooner (0..86400)
+#   pull_back: true         # a forward waiting on a pressured peer comes back when this machine is free
 
 # `tasks gc`: what counts as idle (src/gc.rs). Run `tasks gc` for the list, `tasks gc --apply`
 # to remove. Offload copies (~/offload/checkouts, on a worker) go whole; checkout output caches

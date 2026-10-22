@@ -256,7 +256,7 @@ fn new_key(shared: &Shared, job: i64) -> String {
 /// `${XDG_STATE_HOME:-~/.local/state}/tasks-offload/locks/<id>.lock`: the SAME per-checkout
 /// client lock as `tasks-offload`, so an ssh offload and a peer forward of one checkout never
 /// rewrite the worker copy under each other.
-fn checkout_lock_path(cid: &str) -> Option<PathBuf> {
+pub(super) fn checkout_lock_path(cid: &str) -> Option<PathBuf> {
     let base = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
@@ -264,7 +264,7 @@ fn checkout_lock_path(cid: &str) -> Option<PathBuf> {
     Some(base.join("tasks-offload/locks").join(format!("{cid}.lock")))
 }
 
-fn try_flock(path: &Path) -> Result<Option<OwnedFd>, String> {
+pub(super) fn try_flock(path: &Path) -> Result<Option<OwnedFd>, String> {
     if let Some(dir) = path.parent() {
         super::records::private_dir(dir).map_err(|e| e.to_string())?;
     }
