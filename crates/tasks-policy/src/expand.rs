@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use tasks_core::plan::{Plan, Step};
 use tasks_core::{Kind, Requirements};
 use tasks_timing::estimate::Estimate;
-use tasks_timing::{TestExe, order_longest_first, split_cargo_test};
+use tasks_timing::{TestExe, label_of, order_longest_first, split_cargo_test};
 
 /// Scheduling hints that `tasks_core::Step` has no field for.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -44,10 +44,6 @@ pub struct ExpandOptions<'a> {
 
 /// Executables per split step name, supplied by the caller from `cargo test --no-run` output.
 pub type Executables = BTreeMap<String, Vec<TestExe>>;
-
-fn label_of(piece: &str) -> String {
-    piece.replacen('-', ":", 1)
-}
 
 fn estimates(
     sub: &Plan,

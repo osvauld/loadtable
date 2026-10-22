@@ -28,5 +28,5 @@ pub use gradle::GradleParser;
 pub use history::{Cache, History, MemHistory, Outcome, Sample, SampleKey};
 pub use progress::{Estimates, Progress, progress};
 pub use recipe::RecipeKey;
-pub use split::{order_longest_first, split_cargo_test};
+pub use split::{label_of, order_longest_first, split_cargo_test};
 pub use timeline::{Phase, PhaseKind, Timeline};

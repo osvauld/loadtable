@@ -160,7 +160,7 @@ pub fn split_cargo_test(
 }
 
 /// History label for a step name made by [`split_cargo_test`]: `test-lifecycle` is `test:lifecycle`.
-fn label_of(step: &str) -> String {
+pub fn label_of(step: &str) -> String {
     step.replacen('-', ":", 1)
 }
 
