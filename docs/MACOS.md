@@ -7,6 +7,25 @@ when built with UI); other commands reject before connecting to a daemon, creati
 submitting jobs. No macOS daemon, GUI, scheduler, recovery or local execution acceptance is
 claimed.
 
+## Latest dev synchronization
+
+Merged `origin/dev` through `8244b7b` into `dev-macos` (merge `80367c2`), retaining
+our admission candidate and direct-child ownership work. Incoming shared changes include
+Cargo jobs policy/busy lowering, stuck-job detection, whole-log grep, coarse ETA matching
+and test-target progress. No source conflicts or runtime-guard changes were required.
+
+Native Mac validation passed 117 selected tests: the previous 98-case selection plus
+7 policy tests, 3 admission cap/stuck-window/busy-lowering tests, 1 requested-jobs test,
+5 worker stuck-rule/log-retention tests and 3 CLI grep tests. Zero failed/ignored.
+Headless/default-feature checks, platform all-target Clippy and headless
+library/CLI/example/boundary Clippy passed with warnings denied where applicable.
+
+Coverage limitation: incoming ETA/test-target unit tests live in the Linux-only metrics
+test module; attempted native filters matched zero tests and are NOT counted above.
+The incoming stuck detector's live group-CPU sampler also uses `/proc`, so its actual
+sampling and native Linux runtime regressions remain unvalidated here. Pure stuck-rule
+tests do run. Mac execution remains disabled and the conservative-memory blocker persists.
+
 ## Shared primitives implemented
 
 `crates/platform` (`task-manager-platform`):
@@ -58,7 +77,7 @@ The existing ledger, wire protocol, approvals, slot filenames and identity JSON 
 names have not changed. The Linux default Cargo cap remains two; `-j 4` below is an
 operator-approved local macOS bootstrap, not a change to deployed Linux policy.
 
-## Integration with current dev
+## First integration with dev
 
 Merged `origin/dev` at `f110c1b` into `dev-macos`. Its canonical serialized
 `ProcessIdentity`, native memory/disk/child-usage APIs, capabilities, setup app, relay
