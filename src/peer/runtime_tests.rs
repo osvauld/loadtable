@@ -15,7 +15,7 @@ async fn the_link_binds_once_the_address_frees_up() {
             let config = PeerConfig::parse(
                 &format!("secret_key = \"unused\"\nbind = \"{bind}\"\n"),
                 Path::new("/unused/peer.toml"),
-                None,
+                Some(Path::new("/home/unused")),
             )
             .unwrap();
             bind_when_possible(&key, &config, Duration::from_millis(50), &report, &log).await
