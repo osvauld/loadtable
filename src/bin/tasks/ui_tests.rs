@@ -117,7 +117,7 @@ fn busy_fixture_dashboard_shows_both_machines_jobs_and_agents() {
         }
         if width >= 1180.0 {
             for expected in [
-                "212/310 crates",
+                "212 crates (usually ~310)",
                 " WARM ",
                 " COLD ",
                 "compile slot held by #91",

@@ -729,7 +729,14 @@ fn snapshot_json_has_exactly_the_contract_field_names() {
                 "live",
                 set(&["cpu_cores", "rss_bytes", "processes", "history"]),
             ),
-            ("progress", set(&["crates_compiled", "crates_expected"])),
+            (
+                "progress",
+                set(&[
+                    "crates_compiled",
+                    "crates_expected",
+                    "crates_expected_is_estimate",
+                ]),
+            ),
             (
                 "estimate",
                 set(&["total_s", "remaining_s", "samples", "basis"]),
@@ -782,6 +789,9 @@ fn laptop_snapshot_explains_queue_progress_and_eta() {
         Some(Progress {
             crates_compiled: 212,
             crates_expected: Some(310),
+            crates_expected_is_estimate: true,
+            units_done: None,
+            units_total: None,
             test_targets_built: None,
             test_targets_expected: None,
         })

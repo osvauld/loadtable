@@ -69,10 +69,13 @@ fn job_line(j: &JobView) -> String {
         if let (Some(built), Some(total)) = (p.test_targets_built, p.test_targets_expected) {
             write!(line, " | {built}/{total} test targets").unwrap();
         }
-        match p.crates_expected {
-            Some(e) => write!(line, " | {}/{e} crates", p.crates_compiled).unwrap(),
-            None => write!(line, " | {} crates", p.crates_compiled).unwrap(),
-        }
+        let units = p.units_done.zip(p.units_total);
+        let (_, text) = tinline_task_manager::metrics::units::describe(
+            p.crates_compiled,
+            p.crates_expected,
+            units,
+        );
+        write!(line, " | {text}").unwrap();
     }
     write!(line, " | {}", j.warmth.as_str()).unwrap();
     if let Some(c) = j.compiling.as_ref().filter(|c| !c.is_empty()) {

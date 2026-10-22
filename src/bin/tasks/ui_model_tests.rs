@@ -310,7 +310,7 @@ fn running_cards_carry_progress_eta_and_live_numbers() {
     assert_eq!(warm.cpu_text, "7.8 cores");
     assert_eq!(warm.rss_text, "3.9 GB");
     let (fraction, text) = warm.progress.clone().unwrap();
-    assert_eq!(text, "212/310 crates");
+    assert_eq!(text, "212 crates (usually ~310)");
     assert!((fraction.unwrap() - 212.0 / 310.0).abs() < 1e-6);
     // The worker snapshot is 1 s old when shown: elapsed is measured on the
     // worker's clock plus that age (724 s), the 236 s remainder shrinks by it.
@@ -328,7 +328,7 @@ fn running_cards_carry_progress_eta_and_live_numbers() {
     );
     assert_eq!(cold.elapsed_text, "8:10 elapsed");
     assert_eq!(cold.eta_text, "~13 min left (2 similar runs)");
-    assert_eq!(cold.progress.clone().unwrap().1, "90/520 crates");
+    assert_eq!(cold.progress.clone().unwrap().1, "90 crates (usually ~520)");
     assert!(matches!(cold.cancel, Target::Local { id: 305, .. }));
 
     // A remote job without a laptop pair: buttons disabled with the agreed tooltip.
@@ -361,9 +361,40 @@ fn unknown_live_values_never_become_zero() {
     assert_eq!(card.eta_text, "ETA unknown");
     assert_eq!(card.warmth, Warmth::Unknown);
     assert_eq!(card.command, "unknown command");
+    assert_eq!(card.progress, Some((None, "5 crates".into())));
+}
+
+#[test]
+fn crates_397_past_a_376_median_is_not_shown_as_a_fraction() {
+    let snap = Snapshot::parse(json!({
+        "taken_at": 100.0,
+        "machine": {"id": "m", "role": "host"},
+        "jobs": [{"id": 7, "phase": "running", "started_at": null, "live": null,
+                  "progress": {"crates_compiled": 397, "crates_expected": 376,
+                               "crates_expected_is_estimate": true}}]
+    }))
+    .unwrap();
+    let view = build(&[state(snap, true, 0.0)]);
     assert_eq!(
-        card.progress,
-        Some((None, "5 crates (total unknown)".into()))
+        view.running[0].progress,
+        Some((None, "397 crates (usually ~376)".into()))
+    );
+}
+
+#[test]
+fn cargo_units_give_the_exact_total_in_the_running_card() {
+    let snap = Snapshot::parse(json!({
+        "taken_at": 100.0,
+        "machine": {"id": "m", "role": "host"},
+        "jobs": [{"id": 7, "phase": "running", "started_at": null, "live": null,
+                  "progress": {"crates_compiled": 397, "crates_expected": 376,
+                               "units_done": 30, "units_total": 60}}]
+    }))
+    .unwrap();
+    let view = build(&[state(snap, true, 0.0)]);
+    assert_eq!(
+        view.running[0].progress,
+        Some((Some(0.5), "30/60 units".into()))
     );
 }
 

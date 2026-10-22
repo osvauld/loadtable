@@ -50,6 +50,8 @@ guessed. Unknown fields must be ignored by readers (forward compatible).
       "history": { "interval_s": 2.0, "cpu_cores": [ ], "rss_bytes": [ ] }
     },
     "progress": { "crates_compiled": 212, "crates_expected": 310 | null,   // cargo only; null otherwise
+                  "crates_expected_is_estimate": true,   // present with crates_expected: a median, NOT a total
+                  "units_done": 40, "units_total": 57,   // optional: cargo's own N/M progress line; exact
                   "test_targets_built": 3 },      // optional (feature/log-search); absent until one is seen
     "warmth": "cold" | "warm" | "unknown",
     "warmth_reason": "no build output for this checkout on this machine",
@@ -281,7 +283,16 @@ Jobs.
   `result.crates_compiled`): `crates_compiled` counts `Compiling ` lines in the
   job log as they arrive; `crates_expected` = median of earlier successful runs
   of the same `kind_key` on this machine: cold runs if this job is cold, else
-  warm runs; null without such history.
+  warm runs; null without such history. It is an estimate (half of all runs
+  exceed a median), so `crates_expected_is_estimate` is true whenever it is
+  present, and renderers show "397 crates (usually ~376)", never "397/376".
+  `units_done`/`units_total` (optional) are Cargo's own `Building [..] N/M`
+  progress (the worker sets `CARGO_TERM_PROGRESS_WHEN=always` and
+  `CARGO_TERM_PROGRESS_WIDTH=80` for Cargo jobs unless already set): `M` is the
+  exact unit total of this build. Units include build scripts and fresh units,
+  so they are not comparable with `crates_compiled`. The worker keeps these
+  redrawn lines out of `job.log` (only the last is appended at the end) and
+  records the latest pair in `jobs/ID/units.json`.
 - `warmth`: (1) before output placement the worker checks the profile's output
   directory (`target[/TRIPLE]/debug|release|PROFILE`, following tasks' cache
   link; `--target-dir`, `CARGO_TARGET_DIR=`, `--manifest-path` respected): no

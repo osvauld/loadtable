@@ -9,6 +9,7 @@ pub mod procfs;
 pub mod ring;
 pub mod testscope;
 pub mod types;
+pub mod units;
 pub mod warmth;
 
 #[cfg(target_os = "linux")]
@@ -22,3 +23,6 @@ pub use types::*;
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests;
+
+#[cfg(test)]
+mod units_tests;

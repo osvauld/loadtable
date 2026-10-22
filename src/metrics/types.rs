@@ -195,7 +195,18 @@ pub struct LiveHistory {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Progress {
     pub crates_compiled: u64,
+    /// MEDIAN crate count of earlier runs: an estimate, not a total (half of all runs exceed
+    /// it). Kept for compatibility; see `crates_expected_is_estimate`.
     pub crates_expected: Option<u64>,
+    /// True whenever `crates_expected` is present (it never is an exact total).
+    #[serde(default)]
+    pub crates_expected_is_estimate: bool,
+    /// Cargo's own `N/M` progress: units finished and the exact unit total of this build
+    /// (units include build scripts and fresh units, so this is not the `Compiling` count).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub units_done: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub units_total: Option<u64>,
     /// Test targets built so far (distinct test binaries in the log, or `rustc --test`
     /// crates seen live, whichever is larger). Absent until one is seen.
     #[serde(default, skip_serializing_if = "Option::is_none")]

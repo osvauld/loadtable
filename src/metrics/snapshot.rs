@@ -35,6 +35,8 @@ pub struct JobExtras {
     pub live: Option<Live>,
     /// `Compiling` lines seen so far in the job log (active jobs).
     pub crates_so_far: Option<u64>,
+    /// Cargo's latest `N/M` progress line (active jobs; see `metrics::units`).
+    pub units: Option<super::units::Units>,
     /// Test targets seen so far (log test binaries or live `rustc --test` crates).
     pub test_targets_so_far: Option<u64>,
     /// Live compile attribution (executing jobs only).
@@ -321,9 +323,13 @@ fn job_view(job: &Job, inputs: &Inputs, history: &History) -> JobView {
         }
     };
     // Live progress only; a finished job's count is in `result.crates_compiled`.
+    let units = extras.units.filter(|_| !build_done);
     let progress = (cargo && !terminal).then(|| Progress {
         crates_compiled: crates_now,
         crates_expected: history.crates_expected(&kind_key, warmth, job.id),
+        crates_expected_is_estimate: history.crates_expected(&kind_key, warmth, job.id).is_some(),
+        units_done: units.map(|u| u.done),
+        units_total: units.map(|u| u.total),
         test_targets_built: extras.test_targets_so_far.filter(|&n| n > 0),
         test_targets_expected: super::command::test_targets_expected(&argv),
     });

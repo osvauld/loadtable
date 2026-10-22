@@ -833,7 +833,8 @@
       },
       "progress": {
         "crates_compiled": 212,
-        "crates_expected": 310
+        "crates_expected": 310,
+        "crates_expected_is_estimate": true
       },
       "warmth": "cold",
       "warmth_reason": "no build output for this checkout on this machine (target/release has no fingerprints)",
@@ -878,7 +879,8 @@
       "live": null,
       "progress": {
         "crates_compiled": 0,
-        "crates_expected": 6
+        "crates_expected": 6,
+        "crates_expected_is_estimate": true
       },
       "warmth": "unknown",
       "warmth_reason": "build output exists (target/debug: 412 fingerprints); refined from Compiling lines",
@@ -1085,7 +1087,8 @@
       "live": null,
       "progress": {
         "crates_compiled": 0,
-        "crates_expected": null
+        "crates_expected": null,
+        "crates_expected_is_estimate": false
       },
       "warmth": "unknown",
       "warmth_reason": "start state not checked yet (job not picked up)",

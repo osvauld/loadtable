@@ -950,6 +950,7 @@ impl Sampler {
                 JobExtras {
                     live,
                     crates_so_far: sampled.map(|j| j.counter.count),
+                    units: super::units::read(&job_dir(&self.state_dir, job.id)),
                     test_targets_so_far: sampled
                         .map(|j| j.counter.test_targets().max(j.test_crates.len() as u64)),
                     compiling: sampled

@@ -1747,17 +1747,51 @@ fn leader_exited(child: &Child) -> bool {
 }
 fn drain<R: Read + Send + 'static>(mut reader: R, dir: PathBuf) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
+        // Cargo's `Building [..] N/M` redraws are kept out of the retained log (the last one
+        // is appended at the end); the latest N/M goes to units.json for the sampler.
+        let mut filter = crate::metrics::units::ProgressFilter::default();
         let mut buf = [0u8; 4096];
         loop {
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
-                Ok(n) => append_log(&dir, &buf[..n]),
+                Ok(n) => {
+                    let out = filter.feed(&buf[..n]);
+                    if !out.log.is_empty() {
+                        append_log(&dir, &out.log);
+                    }
+                    if let Some(units) = out.latest {
+                        crate::metrics::units::write(&dir, units);
+                    }
+                }
             }
+        }
+        let rest = filter.finish();
+        if !rest.is_empty() {
+            append_log(&dir, &rest);
         }
     })
 }
 
 const DEFAULT_CARGO_BUILD_JOBS: &str = "2";
+/// Makes a Cargo job print its `Building [..] N/M` line on the job log's pipe so the exact
+/// unit total can be shown. A value already on the command, else the daemon's own, is kept;
+/// a job that sets the variables itself (`env CARGO_TERM_PROGRESS_WHEN=never cargo ...`)
+/// wins because its `env` runs after this.
+fn apply_cargo_progress_env(cmd: &mut Command) {
+    let have: Vec<String> = cmd
+        .get_envs()
+        .map(|(k, _)| k.to_string_lossy().into_owned())
+        .collect();
+    let mut set = vec![];
+    crate::metrics::units::progress_env(
+        |name| have.iter().any(|k| k == name),
+        |name| std::env::var(name).ok(),
+        |name, value| set.push((name.to_string(), value)),
+    );
+    for (name, value) in set {
+        cmd.env(name, value);
+    }
+}
 /// `admission::cargo_jobs_when_busy`: while another compile-class job holds a slot on this
 /// machine, a Cargo command's `-j` (or the injected default) above `min(cap, when_busy)` is
 /// replaced by it. A lone job, and any other command, runs as submitted.
@@ -2011,6 +2045,9 @@ fn run_command(state: &Path, dir: &Path, job: &crate::Job, stage: &str) -> Resul
         let argv = lower_busy_jobs(dir, &recipe.resource, argv);
         let mut cmd = sanitized(Path::new(&argv[0]));
         cmd.args(&argv[1..]).current_dir(&job.spec.source);
+        if crate::placement::is_cargo(&argv) {
+            apply_cargo_progress_env(&mut cmd);
+        }
         // tasks-offload names its per-job sidecar after this (cluster-snapshot.md).
         cmd.env("TASKS_JOB_ID", job.id.to_string());
         // Host wiring from the daemon's own environment (the worker unit), never the client's:
@@ -2106,6 +2143,7 @@ fn run_command(state: &Path, dir: &Path, job: &crate::Job, stage: &str) -> Resul
             }
             let mut cmd = sanitized(Path::new("cargo"));
             compile_cache.apply(&mut cmd);
+            apply_cargo_progress_env(&mut cmd);
             prepare_compiler_cache_server(dir, &cmd);
             cmd.current_dir(dir.join("snapshot"))
                 .env("CARGO_TARGET_DIR", &target)
@@ -2771,6 +2809,27 @@ mod tests {
                 assert_eq!(value, std::env::var_os(key).as_deref(), "{key}");
             }
         }
+    }
+    #[test]
+    fn cargo_jobs_get_progress_env_unless_the_command_already_has_it() {
+        let mut cmd = sanitized(Path::new("cargo"));
+        apply_cargo_progress_env(&mut cmd);
+        let value = |cmd: &Command, name: &str| {
+            cmd.get_envs()
+                .find(|(k, _)| *k == name)
+                .and_then(|(_, v)| v.map(|v| v.to_owned()))
+        };
+        assert_eq!(
+            value(&cmd, "CARGO_TERM_PROGRESS_WHEN").as_deref(),
+            Some(std::ffi::OsStr::new("always"))
+        );
+        let mut chosen = sanitized(Path::new("cargo"));
+        chosen.env("CARGO_TERM_PROGRESS_WHEN", "never");
+        apply_cargo_progress_env(&mut chosen);
+        assert_eq!(
+            value(&chosen, "CARGO_TERM_PROGRESS_WHEN").as_deref(),
+            Some(std::ffi::OsStr::new("never"))
+        );
     }
     #[test]
     fn sanitized_commands_default_to_two_cargo_jobs_not_cpu_count() {

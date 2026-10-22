@@ -946,7 +946,8 @@
       },
       "progress": {
         "crates_compiled": 4,
-        "crates_expected": 4
+        "crates_expected": 4,
+        "crates_expected_is_estimate": true
       },
       "warmth": "warm",
       "warmth_reason": "compiled 4 crates, at most 20% of a full build (310)",
@@ -991,7 +992,8 @@
       "live": null,
       "progress": {
         "crates_compiled": 0,
-        "crates_expected": null
+        "crates_expected": null,
+        "crates_expected_is_estimate": false
       },
       "warmth": "cold",
       "warmth_reason": "no build output for this checkout on this machine (target/debug has no fingerprints)",
@@ -1037,7 +1039,8 @@
       "live": null,
       "progress": {
         "crates_compiled": 0,
-        "crates_expected": 4
+        "crates_expected": 4,
+        "crates_expected_is_estimate": true
       },
       "warmth": "unknown",
       "warmth_reason": "build output exists (target/release: 610 fingerprints); refined from Compiling lines",

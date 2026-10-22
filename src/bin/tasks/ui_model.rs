@@ -143,6 +143,8 @@ pub struct Live {
 pub struct Progress {
     pub crates_compiled: Option<u64>,
     pub crates_expected: Option<u64>,
+    pub units_done: Option<u64>,
+    pub units_total: Option<u64>,
     pub test_targets_built: Option<u64>,
     pub test_targets_expected: Option<u64>,
 }
@@ -1624,11 +1626,14 @@ fn running_card(
                         format!("{done}/{total} test targets"),
                     ))
                 }
-                (Some(done), Some(total)) if total > 0 => Some((
-                    Some((done as f32 / total as f32).clamp(0.0, 1.0)),
-                    format!("{done}/{total} crates"),
-                )),
-                (Some(done), _) => Some((None, format!("{done} crates (total unknown)"))),
+                (Some(done), expected) => {
+                    let (fraction, text) = tinline_task_manager::metrics::units::describe(
+                        done,
+                        expected,
+                        p.units_done.zip(p.units_total),
+                    );
+                    Some((fraction.map(|f| f.clamp(0.0, 1.0)), text))
+                }
                 _ => None,
             });
     let elapsed_text = match (ctx.now(m), job.started_at) {
