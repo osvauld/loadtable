@@ -19,6 +19,8 @@ anyhow = "1"
 tasks-core = { path = "crates/tasks-core" }
 tasks-platform = { path = "crates/tasks-platform" }
 tasks-ledger = { path = "crates/tasks-ledger" }
+tasks-timing = { path = "crates/tasks-timing" }
+toml = "0.9"
 
 [workspace.lints.clippy]
 unwrap_used = "deny"

@@ -1,0 +1,53 @@
+# .tasks/run-policy.toml -- how this repo is built and tested.
+#
+# Agents: run `tasks2 suite run NAME` instead of writing cargo lines by hand, and read
+# `tasks2 policy show`. After a few runs, `tasks2 policy suggest` proposes edits to this file
+# with timing evidence; review the diff and commit it. tasks never rewrites this file.
+# Unknown keys are errors.
+
+version = 1
+
+# --- core tests (shaped like p2p_chat's core crate) ---------------------------------------
+[suites.core-tests]
+notes = """
+Run before pushing core changes. One shared build (dev-tools feature) and one step per
+test target, longest first. lifecycle and group_call dominate wall time.
+"""
+tools = ["cargo"]
+
+[[suites.core-tests.steps]]
+name = "fmt"
+command = ["cargo", "fmt", "--all", "--check"]
+timeout_secs = 120
+skip_in_quick = true
+
+# `split = "cargo-test"` expands into core.build plus one step per test executable
+# (cargo test -p p2pcore --features dev-tools --test lifecycle, --test group_call, ...).
+[[suites.core-tests.steps]]
+name = "core"
+command = ["cargo", "test", "-p", "p2pcore", "--features", "dev-tools"]
+after = ["fmt"]
+split = "cargo-test"
+placement = "nixos"
+timeout_secs = 3600
+
+[suites.core-tests.targets."test:lifecycle"]
+long = true
+note = "median 116 s over 5 runs on nixos"
+
+[suites.core-tests.targets."test:group_call"]
+long = true
+note = "median 112 s over 5 runs on nixos"
+
+[suites.core-tests.targets."test:link"]
+isolate = true
+note = "binds fixed local ports; must not overlap other network tests"
+
+# --- quick check ---------------------------------------------------------------------------
+[suites.check]
+notes = "Fast type check of the whole workspace; use while iterating."
+
+[[suites.check.steps]]
+name = "check"
+command = ["cargo", "check", "--workspace", "--all-targets"]
+timeout_secs = 900
