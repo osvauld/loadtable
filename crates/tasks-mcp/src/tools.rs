@@ -2,7 +2,6 @@
 
 use crate::cancel::CancelToken;
 use crate::daemon::{Daemon, DaemonError};
-use crate::rules::check_command;
 use crate::text::{
     MAX_TEXT_BYTES, bound_head, bound_tail, dur, elapsed_secs, grep_text, job_detail, job_json,
     job_line, phase_tag, phase_text,
@@ -19,7 +18,6 @@ use tasks_daemon::api::{
     ErrorCode, JobView, LogView, MAX_CONTEXT, MAX_LOG_CHUNK, MAX_TAIL_LINES, Request, Response,
     StatusSnapshot,
 };
-use tasks_policy::submit_rules::{self, BroadTestMode};
 use tasks_timing::RecipeKey;
 
 /// Finished jobs `list` shows when no limit is given.
@@ -42,8 +40,6 @@ pub struct Config {
     pub cwd: PathBuf,
     /// Default job owner: `$TASKS_WHO`, then `$USER`.
     pub default_who: Option<String>,
-    /// What a broad `cargo test` without the escape does.
-    pub broad_mode: BroadTestMode,
     /// Pause between polls of a waited job.
     pub poll: Duration,
     /// Wait budget when the call names none.
@@ -61,11 +57,6 @@ impl Config {
         Config {
             cwd,
             default_who: non_empty("TASKS_WHO").or_else(|| non_empty("USER")),
-            // needs daemon: the broad_test policy value should come from the daemon's machine
-            // policy; until then the server's environment decides, as for `tasks2 run`.
-            broad_mode: non_empty("TASKS_BROAD_TEST")
-                .and_then(|v| BroadTestMode::parse(&v).ok())
-                .unwrap_or_default(),
             poll: Duration::from_millis(500),
             default_wait: Duration::from_secs(120),
             max_wait: Duration::from_secs(3600),
@@ -136,6 +127,7 @@ fn code_name(c: ErrorCode) -> &'static str {
         ErrorCode::NotFound => "not_found",
         ErrorCode::NotOwner => "not_owner",
         ErrorCode::Busy => "busy",
+        ErrorCode::ConnectionLimit => "connection_limit",
         ErrorCode::Refused => "refused",
         ErrorCode::LedgerUnavailable => "ledger_unavailable",
         ErrorCode::Internal => "internal",
@@ -156,6 +148,15 @@ impl ToolError {
             ToolError::Cancelled => return Outcome::Cancelled,
             ToolError::Args(m) => error_result("invalid_arguments", m),
             ToolError::Refused(m) => error_result("refused", m),
+            ToolError::Daemon(DaemonError::Refused(e)) if e.code == ErrorCode::ConnectionLimit => {
+                error_result(
+                    "connection_limit",
+                    format!(
+                        "the daemon has too many connections ({}). The request was not processed; it is safe to try again in a moment",
+                        e.message
+                    ),
+                )
+            }
             ToolError::Daemon(DaemonError::Refused(e)) => {
                 error_result(code_name(e.code), e.message)
             }
@@ -231,6 +232,7 @@ struct SuiteArgs {
     placement: Option<String>,
     peer: Option<String>,
     quick: Option<bool>,
+    broad_test: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -451,30 +453,14 @@ impl Tools {
         )?;
         let owner = self.owner(a.who.as_deref())?;
         let cwd = self.cwd(a.cwd.as_deref())?;
-        if a.timeout_s.is_some() {
-            // needs daemon: a `timeout_secs` field on JobSpec that the supervisor enforces.
-            return Err(ToolError::Refused(
-                "timeout_s is not supported by this daemon yet (a job has no timeout field); wrap the work in your own command, or cancel the job".into(),
-            ));
-        }
         if a.argv.is_empty() {
             return Err(ToolError::Args("argv must name a program".into()));
         }
-        let notes = check_command(
-            &a.argv,
-            &cwd,
-            a.broad_test.unwrap_or(false),
-            self.cfg.broad_mode,
-            placement == Placement::Anywhere,
-        )
-        .map_err(ToolError::Refused)?;
-        if let Some(d) = a.device.as_deref()
-            && submit_rules::denied_device(&[d.to_string()]).is_some()
-        {
-            return Err(ToolError::Refused(format!(
-                "refused: device {d} is on the denylist and is never used"
-            )));
+        if a.timeout_s == Some(0) {
+            return Err(ToolError::Args("timeout_s must be at least 1".into()));
         }
+        // The submit rules (R-191 broad test, R-210 denied devices, R-091 -j cap) are applied by
+        // the daemon; its refusal reaches the agent as a tool error.
         let kind = if a.device.is_some() {
             Kind::Device
         } else {
@@ -490,6 +476,8 @@ impl Tools {
             kind,
             requirements: tasks_core::Requirements::default(),
             placement,
+            timeout_secs: a.timeout_s,
+            broad_test_escape: a.broad_test.unwrap_or(false),
             after: a
                 .after
                 .unwrap_or_default()
@@ -500,7 +488,7 @@ impl Tools {
         spec.requirements.device = a.device.map(DeviceId);
         spec.validate()
             .map_err(|e| ToolError::Refused(format!("invalid job: {e}")))?;
-        let mut notes = notes;
+        let mut notes: Vec<String> = Vec::new();
         if let Ok(Response::Jobs { jobs, .. }) = self.daemon.call(&Request::List {
             owner: None,
             active_only: true,
@@ -630,24 +618,14 @@ impl Tools {
         let plan = Plan { steps };
         plan.validate()
             .map_err(|e| ToolError::Args(format!("invalid plan: {e}")))?;
-        let mut notes = Vec::new();
-        for s in &plan.steps {
-            let n = check_command(
-                &s.argv,
-                &cwd,
-                a.broad_test.unwrap_or(false),
-                self.cfg.broad_mode,
-                placement == Placement::Anywhere,
-            )
-            .map_err(|m| ToolError::Refused(format!("step {:?}: {m}", s.name)))?;
-            notes.extend(n.into_iter().map(|m| format!("step {:?}: {m}", s.name)));
-        }
+        let notes: Vec<String> = Vec::new();
         let resp = self.call_daemon(&Request::SubmitPlan {
             plan,
             owner: owner.as_str().to_string(),
             cwd,
             env: Vec::new(),
             placement,
+            broad_test: a.broad_test.unwrap_or(false),
         })?;
         plan_result(resp, "plan", "submit_steps", notes)
     }
@@ -656,8 +634,6 @@ impl Tools {
         let placement = placement(a.placement.as_deref(), a.peer.as_deref(), None)?;
         let owner = self.owner(a.who.as_deref())?;
         let cwd = self.cwd(a.cwd.as_deref())?;
-        // needs daemon: the suite is expanded inside the daemon, so the submit rules cannot be
-        // applied to its steps here; they must be applied there.
         let resp = self.call_daemon(&Request::SubmitSuite {
             name: a.name.clone(),
             owner: owner.as_str().to_string(),
@@ -665,6 +641,7 @@ impl Tools {
             env: Vec::new(),
             placement,
             quick: a.quick.unwrap_or(false),
+            broad_test: a.broad_test.unwrap_or(false),
         })?;
         plan_result(resp, &format!("suite {}", a.name), "run_suite", Vec::new())
     }
@@ -991,10 +968,10 @@ impl Tools {
     fn cancel(&self, a: CancelArgs) -> ToolOk {
         let id = job_id(a.id)?;
         let owner = self.owner(Some(&a.who))?;
-        // needs daemon: a `reason` field on Request::Cancel; for now it is only echoed here.
         let resp = match self.daemon.call(&Request::Cancel {
             id,
             who: owner.as_str().to_string(),
+            reason: a.reason.clone(),
         }) {
             Err(DaemonError::ReplyLost(d)) => {
                 return Err(ToolError::Daemon(DaemonError::Failed(format!(

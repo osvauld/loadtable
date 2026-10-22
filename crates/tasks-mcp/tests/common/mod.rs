@@ -60,6 +60,9 @@ pub fn job(id: i64, owner: &str, phase: Phase, cmd: &str) -> JobView {
         cancel_requested_by: None,
         plan: None,
         log_path: None,
+        cancel_reason: None,
+        timeout_secs: None,
+        remote_phase: None,
     }
 }
 

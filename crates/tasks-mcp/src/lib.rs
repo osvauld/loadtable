@@ -9,7 +9,6 @@ pub mod cancel;
 pub mod daemon;
 pub mod defs;
 pub mod rpc;
-pub mod rules;
 pub mod server;
 pub mod text;
 pub mod tools;

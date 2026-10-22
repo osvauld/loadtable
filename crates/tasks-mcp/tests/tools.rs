@@ -65,44 +65,36 @@ fn r193_submit_routes_through_the_submit_request_with_the_tasks_run_spec() {
     assert_eq!(s.kind, Kind::Test);
 }
 
-// R-193
+// R-193, R-191
 #[test]
-fn r193_submission_policy_is_the_tasks_run_policy() {
-    // the shared rules: a broad cargo test is refused, with the same wording as `tasks2 run`
-    let d = never_called();
-    let r = call(
-        &tools_with(&d),
-        "submit",
-        json!({"argv": ["cargo", "test", "-p", "x", "some_filter"]}),
-    );
+fn r193_the_daemons_refusal_of_a_broad_test_reaches_the_agent() {
+    let d = fake(|r| match r {
+        Request::Submit { spec } if !spec.broad_test_escape => {
+            Err(DaemonError::Refused(ApiError::new(
+                ErrorCode::Refused,
+                "refused: this cargo test builds every target; use --lib or --test NAME",
+            )))
+        }
+        Request::Submit { .. } => Ok(Response::Submitted { id: JobId(1) }),
+        _ => Ok(Response::Jobs {
+            jobs: vec![],
+            truncated: false,
+        }),
+    });
+    let args = json!({"argv": ["cargo", "test", "-p", "x", "some_filter"]});
+    let r = call(&tools_with(&d), "submit", args);
     assert_eq!(error_kind(&r), "refused");
     assert!(r.text.contains("--lib"), "{}", r.text);
-    assert!(d.requests().is_empty());
-}
-
-// R-191
-#[test]
-fn r191_broad_test_escape_and_warn_mode() {
-    let d = submitted(1);
-    let r = call(
-        &tools_with(&d),
-        "submit",
-        json!({"argv": ["cargo", "test", "-p", "x", "some_filter"], "broad_test": true}),
+    assert_eq!(
+        submits(&d).len(),
+        1,
+        "the daemon decided, not the MCP server"
     );
+    // R-191: the escape is carried on the job for the daemon to honour and record
+    let args = json!({"argv": ["cargo", "test", "-p", "x", "some_filter"], "broad_test": true});
+    let r = call(&tools_with(&d), "submit", args);
     assert!(!r.is_error, "{}", r.text);
-    assert!(r.text.contains("note:"), "{}", r.text);
-    assert_eq!(r.structured["notes"].as_array().map(Vec::len), Some(1));
-
-    let d = submitted(2);
-    let mut cfg = config();
-    cfg.broad_mode = tasks_policy::submit_rules::BroadTestMode::Warn;
-    let tools = tasks_mcp::Tools::new(d.clone() as Arc<dyn tasks_mcp::Daemon>, cfg);
-    let r = call(
-        &tools,
-        "submit",
-        json!({"argv": ["cargo", "test", "-p", "x", "f"]}),
-    );
-    assert!(!r.is_error, "{}", r.text);
+    assert!(submits(&d)[1].broad_test_escape);
 }
 
 // R-193
@@ -116,7 +108,7 @@ fn r193_arguments_are_checked_before_any_daemon_request() {
         json!({"argv": ["echo"], "placement": "elsewhere"}),
         json!({"argv": ["echo"], "device": "emu-1", "placement": "anywhere"}),
         json!({"argv": ["echo"], "device": "emu-1", "peer": "nixos"}),
-        json!({"argv": ["echo"], "timeout_s": 5}),
+        json!({"argv": ["echo"], "timeout_s": 0}),
         json!({"argv": ["echo"], "after": [0]}),
         json!({"argv": ["echo"], "surprise": 1}),
         json!({"cwd": "/w"}),
@@ -132,17 +124,55 @@ fn r193_arguments_are_checked_before_any_daemon_request() {
 
 // R-210
 #[test]
-fn r210_a_denied_device_is_refused_in_any_case_and_never_reaches_the_daemon() {
-    for args in [
+fn r210_a_denied_device_refusal_from_the_daemon_reaches_the_agent() {
+    let d = fake(|r| match r {
+        Request::Submit { .. } => Err(DaemonError::Refused(ApiError::new(
+            ErrorCode::Refused,
+            "refused: the command names the denied device",
+        ))),
+        _ => Ok(Response::Jobs {
+            jobs: vec![],
+            truncated: false,
+        }),
+    });
+    let r = call(
+        &tools_with(&d),
+        "submit",
         json!({"argv": ["adb", "-s", "zd22257p6g", "shell"]}),
-        json!({"argv": ["adb", "-s", "ZD22257P6G", "shell"]}),
-        json!({"argv": ["true"], "device": "zd22257P6g"}),
-    ] {
-        let d = never_called();
-        let r = call(&tools_with(&d), "submit", args);
-        assert_eq!(error_kind(&r), "refused", "{}", r.text);
-        assert!(d.requests().is_empty());
-    }
+    );
+    assert_eq!(error_kind(&r), "refused");
+    assert!(r.text.contains("denied device"), "{}", r.text);
+}
+
+// R-102
+#[test]
+fn a_full_daemon_is_a_retryable_error() {
+    let d = fake(|_| {
+        Err(DaemonError::Refused(ApiError::new(
+            ErrorCode::ConnectionLimit,
+            "full",
+        )))
+    });
+    let r = call(&tools_with(&d), "status", json!({}));
+    assert_eq!(error_kind(&r), "connection_limit");
+    assert!(
+        r.text.contains("not processed") && r.text.contains("try again"),
+        "{}",
+        r.text
+    );
+}
+
+#[test]
+fn timeout_s_goes_to_the_job_spec() {
+    let d = submitted(1);
+    let r = call(
+        &tools_with(&d),
+        "submit",
+        json!({"argv": ["true"], "timeout_s": 90}),
+    );
+    assert!(!r.is_error, "{}", r.text);
+    assert_eq!(submits(&d)[0].timeout_secs, Some(90));
+    assert!(!submits(&d)[0].broad_test_escape);
 }
 
 #[test]
@@ -176,18 +206,6 @@ fn placement_peer_and_anywhere_reach_the_spec() {
         let r = call(&tools_with(&d), "submit", args);
         assert_eq!(r.structured["placement"], want, "{}", r.text);
     }
-}
-
-#[test]
-fn anywhere_on_a_local_only_command_is_a_note_not_an_error() {
-    let d = submitted(1);
-    let r = call(
-        &tools_with(&d),
-        "submit",
-        json!({"argv": ["cargo", "build"], "placement": "anywhere"}),
-    );
-    assert!(!r.is_error, "{}", r.text);
-    assert!(r.text.contains("stays on this machine"), "{}", r.text);
 }
 
 #[test]
@@ -388,18 +406,8 @@ fn submit_steps_sends_one_plan_and_lists_the_job_ids() {
 
 // R-193
 #[test]
-fn r193_every_step_is_checked_before_any_daemon_request() {
+fn r193_plan_arguments_are_checked_before_any_daemon_request() {
     let d = never_called();
-    let r = call(
-        &tools_with(&d),
-        "submit_steps",
-        json!({"steps": [
-            {"name": "ok", "argv": ["true"]},
-            {"name": "broad", "argv": ["cargo", "test", "-p", "x", "filter"]}
-        ]}),
-    );
-    assert_eq!(error_kind(&r), "refused");
-    assert!(r.text.contains("step \"broad\""), "{}", r.text);
     for steps in [
         json!([]),
         json!([{"name": "a", "argv": ["true"], "after": ["a"]}]),
@@ -407,12 +415,39 @@ fn r193_every_step_is_checked_before_any_daemon_request() {
         json!([{"name": "a", "argv": ["true"]}, {"name": "a", "argv": ["true"]}]),
         json!([{"name": "a", "argv": []}]),
         json!([{"name": "a", "argv": ["true"], "kind": "huge"}]),
-        json!([{"name": "a", "argv": ["adb", "-s", "ZD22257P6G"]}]),
     ] {
         let r = call(&tools_with(&d), "submit_steps", json!({"steps": steps}));
         assert!(r.is_error, "{steps} accepted");
     }
     assert!(d.requests().is_empty());
+}
+
+// R-193
+#[test]
+fn r193_a_daemon_refusal_of_a_step_reaches_the_agent_and_the_flag_is_sent() {
+    let d = fake(|r| match r {
+        Request::SubmitPlan {
+            broad_test: false, ..
+        } => Err(DaemonError::Refused(ApiError::new(
+            ErrorCode::Refused,
+            "step \"broad\": refused: builds every target",
+        ))),
+        Request::SubmitPlan { .. } => Ok(Response::PlanSubmitted {
+            plan_id: 1,
+            jobs: vec![("broad".into(), JobId(2))],
+        }),
+        _ => Err(DaemonError::Failed("unexpected".into())),
+    });
+    let steps = json!([{"name": "broad", "argv": ["cargo", "test", "-p", "x", "filter"]}]);
+    let r = call(&tools_with(&d), "submit_steps", json!({"steps": steps}));
+    assert_eq!(error_kind(&r), "refused");
+    assert!(r.text.contains("step \"broad\""), "{}", r.text);
+    let r = call(
+        &tools_with(&d),
+        "submit_steps",
+        json!({"steps": steps, "broad_test": true}),
+    );
+    assert!(!r.is_error, "{}", r.text);
 }
 
 #[test]
@@ -932,6 +967,9 @@ fn snapshot() -> tasks_daemon::api::StatusSnapshot {
             policy_file_loaded: false,
             policy_problems: vec![],
             draining: true,
+            drained_by: Some("ops".into()),
+            drained_at_ms: Some(1),
+            now_ms: 2,
             execution_enabled: true,
             uptime_secs: 5,
         },
@@ -1059,4 +1097,23 @@ fn an_unknown_tool_is_not_a_result() {
             .call("nope", json!({}), &CancelToken::new())
             .is_none()
     );
+}
+
+#[test]
+fn the_cancel_reason_is_passed_to_the_daemon() {
+    let d = fake(|_| {
+        Ok(Response::Cancelled {
+            id: JobId(3),
+            result: "cancelled".into(),
+        })
+    });
+    call(
+        &tools_with(&d),
+        "cancel",
+        json!({"id": 3, "who": "me", "reason": "stale"}),
+    );
+    assert!(matches!(
+        &d.requests()[0],
+        Request::Cancel { reason: Some(r), .. } if r == "stale"
+    ));
 }

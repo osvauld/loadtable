@@ -113,6 +113,8 @@ pub fn job_json(j: &JobView, now_ms: i64) -> Value {
         "finished_at_ms": j.finished_at_ms,
         "elapsed_secs": elapsed_secs(j, now_ms),
         "cancel_requested_by": j.cancel_requested_by,
+        "cancel_reason": j.cancel_reason,
+        "timeout_secs": j.timeout_secs,
     })
 }
 
@@ -138,6 +140,9 @@ pub fn job_detail(j: &JobView, now_ms: i64) -> String {
     }
     if let Some(who) = &j.cancel_requested_by {
         s.push_str(&format!("cancel requested by {who}\n"));
+        if let Some(r) = &j.cancel_reason {
+            s.push_str(&format!("cancel reason: {r}\n"));
+        }
     }
     if !j.after.is_empty() {
         let ids: Vec<String> = j.after.iter().map(|i| i.0.to_string()).collect();

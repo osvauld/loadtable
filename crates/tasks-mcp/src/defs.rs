@@ -86,7 +86,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     "placement": placement,
                     "peer": peer,
                     "device": {"type": "string", "description": "adb serial of an attached test device; the job holds that device's slot and stays on this machine."},
-                    "timeout_s": {"type": "integer", "minimum": 1, "description": "Stop the job after this many seconds (not supported by this daemon yet; refused)."},
+                    "timeout_s": {"type": "integer", "minimum": 1, "description": "Stop the job after this many seconds (1 s to 7 days; the job ends timed out)."},
                     "broad_test": {"type": "boolean", "description": "Deliberately build every test target of a filtered `cargo test`. Prefer naming the target."},
                     "after": {"type": "array", "items": {"type": "integer", "minimum": 1}, "description": "Job ids that must pass before this job may start."}
                 }),
@@ -118,7 +118,8 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     "who": who_prop(),
                     "placement": placement,
                     "peer": peer,
-                    "quick": {"type": "boolean", "description": "Drop steps marked skip_in_quick."}
+                    "quick": {"type": "boolean", "description": "Drop steps marked skip_in_quick."},
+                    "broad_test": {"type": "boolean", "description": "Allow broad `cargo test` steps."}
                 }),
                 &["name"],
             ),
