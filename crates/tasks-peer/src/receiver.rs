@@ -106,6 +106,10 @@ pub trait StatusSource: Send + Sync {
 pub trait SubmitPolicy: Send + Sync {
     /// `Err(reason)` refuses the job.
     fn check(&self, spec: &JobSpec) -> Result<(), String>;
+    /// Like [`SubmitPolicy::check`], knowing which peer sent the job (for the audit log).
+    fn check_from(&self, _from: &PeerId, spec: &JobSpec) -> Result<(), String> {
+        self.check(spec)
+    }
 }
 
 /// A policy that accepts everything `JobSpec::validate` accepts.
@@ -162,7 +166,7 @@ impl Receiver {
             reason: e.to_string(),
         })?;
         self.policy
-            .check(&job.spec)
+            .check_from(from, &job.spec)
             .map_err(|reason| Refusal::PolicyDenied { reason })?;
         let tree = self.store.tree_root(from, &job.checkout);
         let cwd = if job.rel_cwd.is_empty() {

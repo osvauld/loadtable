@@ -1216,3 +1216,234 @@ fn r255_latest_addresses_are_remembered_for_the_next_dial() {
     assert_eq!(hints.relay, None);
     assert!(AddressBook::hints(&*laptop.node, &PeerId::new("unknown").unwrap()).is_none());
 }
+
+// ---- audit -----------------------------------------------------------------------------
+
+/// A worker whose trust events go to a recorder and to an audit log over `audit`.
+fn audited_worker(
+    net: &FakeNet,
+    clock: &Arc<ManualClock>,
+    audit: &Arc<tasks_ledger::MemoryAudit>,
+) -> (M, Arc<tasks_ledger::AuditLog>) {
+    let (ident, _) = generate().unwrap();
+    let ident = Arc::new(ident);
+    let log = Arc::new(
+        tasks_ledger::AuditLog::new(audit.clone(), clock.clone(), ident.did())
+            .with_signer(ident.clone()),
+    );
+    let events = Arc::new(RecordingEvents::new());
+    let sinks: Vec<Arc<dyn TrustEvents>> = vec![
+        events.clone(),
+        Arc::new(AuditEvents::new(log.clone(), clock.clone())),
+    ];
+    let ledger = Arc::new(MemoryTrust::new());
+    let node = TrustNode::new(
+        ident.clone(),
+        "nixos",
+        ledger.clone(),
+        Arc::new(FanoutEvents(sinks)),
+        clock.clone(),
+        TrustPolicy::default(),
+    )
+    .unwrap();
+    let probe = Arc::new(Probe::default());
+    let id = PeerId::new(&node.node_id()).unwrap();
+    net.serve(
+        &id,
+        Arc::new(TrustedHandler::new(node.clone(), probe.clone())),
+    );
+    (
+        M {
+            id,
+            ident,
+            node,
+            ledger,
+            events,
+            probe,
+        },
+        log,
+    )
+}
+
+fn audit_actions(audit: &tasks_ledger::MemoryAudit) -> Vec<String> {
+    use tasks_ledger::AuditLedger;
+    audit
+        .scan(0, 1000)
+        .unwrap()
+        .into_iter()
+        .map(|r| r.action)
+        .collect()
+}
+
+// R-278
+#[test]
+fn r278_pairing_grants_and_revocation_are_audited_and_probes_are_not() {
+    use tasks_ledger::AuditLedger;
+    let net = FakeNet::new();
+    let clock = Arc::new(ManualClock::new(T0_MS));
+    let audit = Arc::new(tasks_ledger::MemoryAudit::new());
+    let (worker, log) = audited_worker(&net, &clock, &audit);
+    let laptop = machine("kurukkan", &net, &clock);
+
+    let ticket = worker
+        .node
+        .invite(&[Role::Submit], false, None, &addr())
+        .unwrap();
+    let ticket_text = ticket.to_text().unwrap();
+    laptop
+        .node
+        .accept(
+            &ticket_text,
+            &tr(&net, &laptop),
+            &SelfAddr::default(),
+            TIMEOUT,
+        )
+        .unwrap();
+    // the link probes every few seconds: each probe opens and closes a connection
+    for _ in 0..50 {
+        let mut c = tr(&net, &laptop).connect(&worker.id, TIMEOUT).unwrap();
+        assert!(matches!(c.request(submit_body()), Ok(Body::Ok)));
+    }
+    let opened = worker
+        .events
+        .actions()
+        .iter()
+        .filter(|a| **a == "conn.opened")
+        .count();
+    assert!(opened >= 50, "the trust layer saw every probe ({opened})");
+    worker.node.revoke_peer("kurukkan").unwrap();
+    worker.node.reset_tickets().unwrap();
+
+    let actions = audit_actions(&audit);
+    assert!(
+        !actions
+            .iter()
+            .any(|a| a == "conn.opened" || a == "conn.closed"),
+        "{actions:?}"
+    );
+    assert_eq!(
+        actions,
+        [
+            "pair.ticket_minted",
+            "pair.ticket_redeemed",
+            "grant.issued",
+            "grant.revoked",
+            "pair.tickets_reset",
+        ]
+    );
+    let rows = audit.scan(0, 100).unwrap();
+    let redeemed = rows
+        .iter()
+        .find(|r| r.action == "pair.ticket_redeemed")
+        .unwrap();
+    let laptop_did = laptop.ident.did().to_string();
+    assert_eq!(
+        (redeemed.peer.as_deref(), redeemed.actor.as_str()),
+        (Some(laptop_did.as_str()), laptop_did.as_str())
+    );
+    let granted = rows.iter().find(|r| r.action == "grant.issued").unwrap();
+    assert_eq!(granted.peer.as_deref(), Some(laptop_did.as_str()));
+    assert_eq!(granted.details_json()["role"], "submit");
+    assert!(log.verify().unwrap().ok());
+}
+
+// R-276
+#[test]
+fn r276_no_ticket_token_or_grant_text_reaches_the_audit_log() {
+    use tasks_ledger::AuditLedger;
+    let net = FakeNet::new();
+    let clock = Arc::new(ManualClock::new(T0_MS));
+    let audit = Arc::new(tasks_ledger::MemoryAudit::new());
+    let (worker, _log) = audited_worker(&net, &clock, &audit);
+    let laptop = machine("kurukkan", &net, &clock);
+    let ticket = worker
+        .node
+        .invite(&[Role::Submit], true, None, &addr())
+        .unwrap();
+    let invite_token = ticket.invite_token.clone();
+    let ticket_text = ticket.to_text().unwrap();
+    let claims = Invite::parse(&invite_token).unwrap().claims;
+    laptop
+        .node
+        .accept(
+            &ticket_text,
+            &tr(&net, &laptop),
+            &SelfAddr::default(),
+            TIMEOUT,
+        )
+        .unwrap();
+    // a second try with the spent ticket is a refusal whose text must not echo the ticket
+    let again = laptop.node.accept(
+        &ticket_text,
+        &tr(&net, &laptop),
+        &SelfAddr::default(),
+        TIMEOUT,
+    );
+    assert!(again.is_err());
+
+    let mut secrets = vec![invite_token, ticket_text, claims.nonce.clone()];
+    secrets.extend(worker.ledger.grants().unwrap().into_iter().map(|g| g.token));
+    secrets.extend(laptop.ledger.grants().unwrap().into_iter().map(|g| g.token));
+    assert!(secrets.iter().all(|s| s.len() > 16));
+    let dump = format!("{:?}", audit.scan(0, 1000).unwrap());
+    assert!(dump.contains("pair.ticket_minted"));
+    for s in &secrets {
+        assert!(
+            !dump.contains(s.as_str()),
+            "a secret reached the audit log: {s}"
+        );
+    }
+    assert!(!dump.contains("g1.") && !dump.contains("i1.") && !dump.contains("tasks1."));
+    // the ticket is named by a short id both rows share
+    let rows = audit.scan(0, 1000).unwrap();
+    let minted = rows
+        .iter()
+        .find(|r| r.action == "pair.ticket_minted")
+        .unwrap();
+    let redeemed = rows
+        .iter()
+        .find(|r| r.action == "pair.ticket_redeemed")
+        .unwrap();
+    assert_eq!(minted.target, redeemed.target);
+    assert_eq!(minted.target.as_ref().unwrap().len(), 8);
+}
+
+// R-277
+#[test]
+fn r277_a_peer_retrying_a_refused_connection_is_throttled_and_the_next_row_counts_the_rest() {
+    let net = FakeNet::new();
+    let clock = Arc::new(ManualClock::new(T0_MS));
+    let audit = Arc::new(tasks_ledger::MemoryAudit::new());
+    let (worker, _log) = audited_worker(&net, &clock, &audit);
+    let (stranger, _) = generate().unwrap();
+    let sid = PeerId::new(&tasks_identity::hex::encode(&stranger.device_public_key())).unwrap();
+    for _ in 0..60 {
+        let mut c = raw_connect(&net, &sid, &worker);
+        let _ = c.request(submit_body());
+    }
+    let refused = |a: &Arc<tasks_ledger::MemoryAudit>| {
+        audit_actions(a)
+            .iter()
+            .filter(|x| *x == "conn.refused")
+            .count()
+    };
+    let seen = worker
+        .events
+        .actions()
+        .iter()
+        .filter(|a| **a == "conn.refused")
+        .count();
+    assert!(seen >= 60, "the trust layer saw every refusal ({seen})");
+    assert_eq!(refused(&audit), 2, "a burst of two, then silence");
+    // a minute later the same peer is recorded again, with what was dropped
+    clock.advance(61_000);
+    let mut c = raw_connect(&net, &sid, &worker);
+    let _ = c.request(submit_body());
+    assert_eq!(refused(&audit), 3);
+    use tasks_ledger::AuditLedger;
+    let last = audit.head().unwrap().unwrap();
+    assert_eq!(last.action, "conn.refused");
+    assert!(last.details_json()["suppressed"].as_u64().unwrap() >= 50);
+    assert_eq!(last.details_json()["side"], "served");
+    assert_eq!(last.details_json()["code"], "not_authorised");
+}

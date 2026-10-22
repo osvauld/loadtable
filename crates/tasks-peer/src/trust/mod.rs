@@ -5,8 +5,9 @@
 //! * [`node`]: [`TrustNode`], one machine's rules, sessions and revocation.
 //! * [`handler`] / [`client`]: the gate in front of a receiver and the grant-presenting
 //!   transport wrapper.
-//! * [`events`]: the single [`TrustEvents`] sink the audit log plugs into.
+//! * [`events`]: the single [`TrustEvents`] sink; [`audit`] is the one that writes the audit table.
 
+pub mod audit;
 pub mod client;
 pub mod error;
 pub mod events;
@@ -20,9 +21,10 @@ pub mod wire;
 #[cfg(test)]
 mod tests;
 
+pub use audit::AuditEvents;
 pub use client::TrustedTransport;
 pub use error::TrustError;
-pub use events::{NoEvents, RecordingEvents, Side, TrustEvent, TrustEvents};
+pub use events::{FanoutEvents, NoEvents, RecordingEvents, Side, TrustEvent, TrustEvents};
 pub use handler::TrustedHandler;
 pub use node::{
     AddrSource, AddressBook, ExpiringGrant, PairedPeer, PeerTrust, RevokeReport, RoleExpiry,

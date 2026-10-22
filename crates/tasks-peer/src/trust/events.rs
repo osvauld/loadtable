@@ -156,6 +156,17 @@ impl TrustEvents for NoEvents {
     fn record(&self, _event: TrustEvent) {}
 }
 
+/// Hands every event to each sink in turn (the log line and the audit table).
+pub struct FanoutEvents(pub Vec<std::sync::Arc<dyn TrustEvents>>);
+
+impl TrustEvents for FanoutEvents {
+    fn record(&self, event: TrustEvent) {
+        for sink in &self.0 {
+            sink.record(event.clone());
+        }
+    }
+}
+
 /// Keeps every event in order, for tests.
 #[derive(Debug, Default)]
 pub struct RecordingEvents {
