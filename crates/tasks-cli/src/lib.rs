@@ -14,6 +14,7 @@ pub mod fake;
 pub mod mcp;
 pub mod render;
 pub mod runtime;
+pub mod trust;
 #[cfg(test)]
 mod testutil;
 
@@ -142,6 +143,10 @@ pub fn run_cli(args: &[String], out: &mut dyn Write, err: &mut dyn Write, deps: 
                     error::EXIT_FAILURE
                 }
             };
+        }
+        Command::Identity { action } => {
+            let tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+            return trust::identity(action, cli.state_dir.as_deref(), deps.env, tty, out, err);
         }
         Command::Mcp { .. } if MCP_BUILT => return run_mcp(&cli, deps),
         Command::Ui { .. } | Command::Mcp { .. } => {

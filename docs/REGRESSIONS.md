@@ -311,6 +311,50 @@ Sources read: `git log dev-macos` (all bodies) and every `#[test]` name under `s
 
 Rows: 229. Rows that cite only a commit (R-019, R-028, R-046, R-086, R-089, R-104, R-106, R-157, R-158, R-164, R-211, R-229) had no dedicated old test and are the highest-value new tests.
 
+## 15. Trust and pairing
+
+New in v2 (design `DESIGN-peers-sync-audit.md` §2-§5). R-174 (LAN-only config, node-id allowlist) is superseded by R-257 and R-247..R-250: peers are paired, admission is by grant.
+
+| id | behaviour that must hold | source | platform |
+|---|---|---|---|
+| R-232 | Identity derivation (BIP39 -> HKDF `osv/identity/{signing,encryption,device}/v1` -> `did:key:z`) matches the golden vectors copied from p2p_chat; keys are distinct; signatures verify only for their key and message. | `tasks-identity/tests/golden_identity.rs`; `r232_*` in `tasks-identity/src/tests.rs` | any |
+| R-233 | The keystore is created once, mode 0600, reopens to the same identity; a file others can read, edited public parts, a newer version or junk are refused; secrets never appear in Debug or errors. | `r233_*` | any |
+| R-234 | The 24-word backup phrase recovers the same identity; random bytes differ. | `r234_*` | any |
+| R-235 | Grants persist both directions; revoking changes state and deletes nothing. | `tasks-ledger` `r235_grants_persist_and_revoking_deletes_nothing` | any |
+| R-236 | A spent invite nonce is spent exactly once, also after a reopen. | `r236_a_nonce_is_spent_exactly_once`, `r236_spent_nonces_survive_a_reopen` | any |
+| R-237 | Paired peers and small named values (ticket epoch) round trip. | `r237_peers_and_meta_round_trip` | any |
+| R-238 | Schema 4 upgrades to 5 keeping jobs. | `r238_a_v4_database_upgrades_to_v5_and_keeps_its_jobs` | any |
+| R-239 | Grant tokens carry `iss, aud, sub, role, scope, nonce, iat, exp, binds.device` inside the signed payload; any tamper, expiry, future `iat` or newer version is refused; trust wire shapes and ALPN `tasks/1` are stable. | `r239_a_grant_round_trips_and_every_tamper_is_caught`, `r239_the_device_binding_is_inside_the_signed_payload_and_time_is_checked`, `r239_trust_wire_shapes_are_stable` | any |
+| R-240 | The `tasks1.` ticket is one URL-safe word; a newer version is refused by name; visible fields that disagree with the signed invite are an error; junk and oversize are refused. | `r240_a_ticket_round_trips_as_one_word_and_names_the_machine`, `r240_a_newer_ticket_version_is_refused_by_name`, `r240_visible_fields_that_disagree_with_the_signed_invite_are_an_error` | any |
+| R-241 | Roles parse; `observe` covers status/hello/events only, `submit` adds jobs/sync/fetch, `admin` covers all. | `r241_roles_parse_and_each_covers_only_what_it_should` | any |
+| R-242 | Pairing dials, proves the DID's key over a challenge and mints one grant per role bound to the redeemer's device key; both sides record the peer. | `r242_pairing_dials_proves_and_mints_a_grant_bound_to_the_redeemers_device` | any |
+| R-243 | `--both-ways` gives each side the roles on the other in one exchange; one-way gives no reverse. | `r243_a_both_ways_ticket_grants_each_side_the_roles_on_the_other` | any |
+| R-244 | A ticket works once, also after the inviter restarts. | `r244_a_ticket_works_once_also_after_the_inviter_restarts` | any |
+| R-245 | Ticket lifetime is bounded (default 15 min, max 24 h) and checked by both sides; `pair reset` invalidates unredeemed tickets and survives a restart. | `r245_ticket_lifetimes_are_bounded_and_expire`, `r245_an_expired_ticket_is_refused_by_the_redeemer_and_by_the_inviter`, `r245_pair_reset_invalidates_every_unredeemed_ticket_and_new_ones_work` | any |
+| R-246 | A failed attempt does not burn the ticket; every redemption needs a fresh challenge; the machine that answers must be the one the ticket names. | `r246_*` | any |
+| R-247 | Nothing is read before a grant is presented (hello included); a refusal closes the connection; the dialer without a grant never connects. | `r247_*` | any |
+| R-248 | A stolen grant is useless from another device; unknown, foreign, garbage and expired grants are each refused with their reason. | `r248_*` | any |
+| R-249 | Each request is checked against the grants' roles. | `r249_each_request_is_checked_against_the_grants_role` | any |
+| R-250 | Revoking fails the next request, closes the live connection, deletes nothing, leaves other peers alone and survives a restart. | `r250_*` | any |
+| R-251 | A grant that expires during a connection fails the next request. | `r251_a_grant_that_expires_during_a_connection_fails_the_next_request` | any |
+| R-252 | A held grant inside 30 days of its end is renewed over the live connection (old marked renewed, never deleted); only the issuer renews, only a presented unexpired grant. | `r252_*` | any |
+| R-253 | Grants inside the 7-day window are listed until renewed. | `r253_grants_inside_the_alert_window_are_listed_until_they_are_renewed` | any |
+| R-254 | Every trust event goes through the one `TrustEvents` sink, with refusal reasons as stable codes. | `r254_*` | any |
+| R-255 | `peers` shows DID, name, roles each way and expiry; the latest addresses are remembered. | `r255_*` | any |
+| R-256 | A name belongs to one DID; re-pairing replaces older grants; names are safe labels. | `r256_*` | any |
+| R-257 | `[peers]` holds only transport choices (`relay`, `bind`), public relays by default; old per-peer tables are refused with a pointer to pairing. | `r257_*` (peers_config), `r174_the_peers_section_is_strict_and_a_bad_one_refuses_the_whole_file` | any |
+| R-258 | Status shows each peer's DID, roles each way, grant expiry, path and round-trip time; inbound-only peers are listed. | `r258_status_shows_each_peer_with_did_roles_expiry_path_and_round_trip` | any |
+| R-259 | A grant within 7 days of its end (or past it) alerts and clears when renewed; paired peers without a transport alert at once. | `r259_*` | any |
+| R-260 | The API mints, redeems, resets, lists and revokes; without the trust runtime it refuses by name. | `r260_*` | any |
+| R-261 | A job forwarded through the admission gate runs on the worker identified by its device key; a revoked peer's next job is not started; a no-longer-paired peer shows offline with the reason. | `r261_*` | any |
+| R-262 | Two real iroh endpoints (loopback, relays off) pair, send a request through the gate, report a direct path, and a revoke closes the live connection. Runs behind the `iroh` feature. | `tasks-peer/tests/iroh_loopback.rs` | any |
+| R-263 | The first daemon start creates the identity (0600); restarts keep it; a second daemon is refused before touching it. | `r263_the_first_start_creates_the_identity_and_every_start_keeps_it` | any |
+| R-264 | Durations parse as `90s`, `15m`, `2h`, bare seconds. | `r264_*` | any |
+| R-265 | `pair invite` prints only the ticket on stdout; bad input never reaches the daemon. | `r265_*` | any |
+| R-266 | `pair accept`/`reset` report what happened; daemon refusals reach the user with their reason. | `r266_*` | any |
+| R-267 | `peers` and `peers revoke` render the table, JSON and the empty case. | `r267_*` | any |
+| R-268 | `identity show` needs no daemon; the backup phrase goes only to a terminal, never JSON; a missing identity says when it appears. | `r268_*` | any |
+
 ## Not to carry over (compatibility shims)
 
 - **Legacy ledger migration** (`execution.rs` `legacy_ledger_migration_does_not_approve_backlog`): the new ledger starts with its own schema. If a migration exists at all, keep only its invariant: an imported backlog is never auto-approved.

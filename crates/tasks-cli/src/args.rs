@@ -294,6 +294,54 @@ pub enum ExecutionCommand {
     Stop,
 }
 
+/// `identity` subcommands.
+#[derive(Subcommand, Debug, Clone)]
+pub enum IdentityCommand {
+    /// Print this machine's DID, name and node id.
+    Show {
+        /// Also print the backup phrase (only to a terminal; it restores this identity).
+        #[arg(long)]
+        mnemonic: bool,
+        /// Print the public parts as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// `pair` subcommands.
+#[derive(Subcommand, Debug, Clone)]
+pub enum PairCommand {
+    /// Print a one-use pairing ticket for another machine to redeem.
+    Invite {
+        /// What the other machine may do here: submit, observe, admin (comma separated).
+        #[arg(long, value_name = "ROLES", default_value = "submit,observe")]
+        role: String,
+        /// The other machine grants the same roles back, in the same exchange.
+        #[arg(long)]
+        both_ways: bool,
+        /// How long the ticket stays valid: 90s, 15m, 2h (default 15m, at most 24h).
+        #[arg(long, value_name = "TIME")]
+        ttl: Option<String>,
+    },
+    /// Redeem a ticket printed by `pair invite` on another machine.
+    Accept {
+        /// The `tasks1.…` text.
+        ticket: String,
+    },
+    /// Invalidate every unredeemed ticket.
+    Reset,
+}
+
+/// `peers` subcommands.
+#[derive(Subcommand, Debug, Clone)]
+pub enum PeersCommand {
+    /// Revoke a peer's grants, close its live connections and stop forwarding to it.
+    Revoke {
+        /// The peer's name, as `tasks2 peers` shows it.
+        name: String,
+    },
+}
+
 /// All commands.
 #[derive(Subcommand, Debug)]
 pub enum Command {
@@ -379,6 +427,27 @@ pub enum Command {
         /// Arguments for the daemon.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+    /// This machine's identity.
+    Identity {
+        /// What to do.
+        #[command(subcommand)]
+        action: IdentityCommand,
+    },
+    /// Pair with another machine by ticket.
+    Pair {
+        /// What to do.
+        #[command(subcommand)]
+        action: PairCommand,
+    },
+    /// Paired machines: DID, roles each way, grant expiry and link path.
+    Peers {
+        /// What to do; without one, list the peers.
+        #[command(subcommand)]
+        action: Option<PeersCommand>,
+        /// The daemon's reply as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// The desktop window (not built in this binary).
     Ui {
