@@ -78,11 +78,20 @@ CREATE TABLE samples(
 CREATE INDEX samples_key ON samples(recipe, machine, target, at_ms);
 ";
 
+/// Peer forwarding that survives a restart: the duplicate-submit key of a forwarded job and the
+/// (peer, key) a received job came in under, unique so a repeat can never start a second job.
+const V3: &str = "
+ALTER TABLE jobs ADD COLUMN fwd_key TEXT;
+ALTER TABLE jobs ADD COLUMN origin_peer TEXT;
+ALTER TABLE jobs ADD COLUMN origin_key TEXT;
+CREATE UNIQUE INDEX jobs_origin ON jobs(origin_peer, origin_key) WHERE origin_peer IS NOT NULL;
+";
+
 /// The migrations in order; entry `i` upgrades version `i` to `i + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3];
 
 /// The schema version this build writes.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 fn version(conn: &Connection) -> Result<i64> {
     Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)

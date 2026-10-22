@@ -372,6 +372,11 @@ impl JobRunner for FakeRunner {
         })
         .unwrap_or_default()
     }
+    fn checkout_busy(&self, peer: &PeerId, tree: &std::path::Path) -> bool {
+        self.jobs()
+            .iter()
+            .any(|j| &j.peer == peer && !j.phase.is_terminal() && j.spec.cwd.starts_with(tree))
+    }
     fn cancel(&self, peer: &PeerId, id: RemoteJobId) -> Option<CancelState> {
         let peer = peer.clone();
         self.with(id, |j| {

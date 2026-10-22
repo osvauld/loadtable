@@ -9,16 +9,10 @@ use crate::scheduler::{RunningJob, Scheduler, lock};
 use crate::startup::{group_of, terminate_group};
 use crate::stuck::tail_is_terminal;
 use std::collections::BTreeSet;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tasks_admission::kind_name;
 use tasks_core::{JobId, SlotKind};
 use tasks_platform::Level;
-
-/// The lock file of a slot, as the platform's `FlockSlots` names it.
-pub fn slot_lock_path(dir: &std::path::Path, kind: SlotKind, index: u32) -> PathBuf {
-    dir.join(format!("{}-{index}.lock", kind_name(kind)))
-}
 
 const MIB: u64 = 1 << 20;
 
@@ -116,7 +110,7 @@ impl Scheduler {
                 if tracked.contains(&(*kind, index)) || self.slot_is_free(*kind, index) {
                     continue;
                 }
-                let path = slot_lock_path(&self.cfg.lock_dir, *kind, index);
+                let path = tasks_platform::slot_lock_path(&self.cfg.lock_dir, *kind, index);
                 let holders = self.platform.holders.holders(&path);
                 let line = self.classify(policy, *kind, index, &holders);
                 lock(&self.state)
@@ -279,7 +273,66 @@ impl Scheduler {
             }
         }
         wanted.extend(self.orphan_alerts(policy, now_ms));
+        wanted.extend(self.peer_alerts(policy, now_ms));
         lock(&self.alerts).reconcile(wanted, now_ms);
+    }
+
+    /// A stale or offline peer alerts only after the grace period (R-222). A peer that is
+    /// configured while this build has no peer transport alerts at once: nothing will ever be
+    /// forwarded or accepted.
+    fn peer_alerts(
+        &self,
+        policy: &MachinePolicy,
+        now_ms: i64,
+    ) -> Vec<(String, AlertLevel, String)> {
+        use crate::forwarder::LinkState;
+        let links = self.forwarder.links();
+        let mut out = Vec::new();
+        if links.is_empty() && !policy.peers().peers.is_empty() {
+            out.push((
+                "peers-unavailable".to_string(),
+                AlertLevel::Warn,
+                format!(
+                    "{} peer(s) are configured but this daemon has no peer transport",
+                    policy.peers().peers.len()
+                ),
+            ));
+        }
+        let grace =
+            i64::try_from(policy.peer_grace_secs().saturating_mul(1000)).unwrap_or(i64::MAX);
+        let mut st = lock(&self.state);
+        let mut bad_now = BTreeSet::new();
+        for l in links {
+            if !matches!(l.state, LinkState::Stale | LinkState::Offline) {
+                continue;
+            }
+            bad_now.insert(l.peer.clone());
+            let since = *st.peer_bad_since.entry(l.peer.clone()).or_insert(now_ms);
+            if now_ms - since >= grace {
+                let seen = l
+                    .last_seen_ago_secs
+                    .map_or("never answered".to_string(), |s| {
+                        format!("last answered {s} s ago")
+                    });
+                let detail = if l.detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", l.detail)
+                };
+                out.push((
+                    format!("peer-{}-{}", l.peer, l.state.name()),
+                    AlertLevel::Warn,
+                    format!(
+                        "peer {} is {} ({seen}){detail}; it has been so for {} s",
+                        l.peer,
+                        l.state.name(),
+                        (now_ms - since) / 1000
+                    ),
+                ));
+            }
+        }
+        st.peer_bad_since.retain(|k, _| bad_now.contains(k));
+        out
     }
 
     /// A slot held with no live job alerts only after the grace period (R-222).

@@ -1,0 +1,373 @@
+//! The receiving half: this daemon hosting a `tasks_peer::Receiver`.
+//!
+//! A job forwarded to this daemon is an ordinary queue job: it keeps the origin's owner, runs
+//! with placement `Here` (the receiver rewrites it), takes a slot of its kind like any other and
+//! shows up in `list` and `status`. What marks it is the ledger's `origin` (peer, key), unique
+//! per pair, so a repeated submission is the same job also across a restart (R-152). A peer can
+//! see and cancel only jobs it sent.
+
+use crate::scheduler::{Scheduler, lock};
+use std::io::{Read, Seek, SeekFrom};
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+use tasks_core::{JobId, JobSpec, Phase};
+use tasks_ledger::{CancelOutcome, JobRecord, LedgerError, NewJob, Origin, TimeoutReason};
+use tasks_peer::outputs::FetchPolicy;
+use tasks_peer::proto::{
+    CancelState, PeerStatus, PressureSummary, QueueSummary, SlotStatus, WireEnd, WireOutcome,
+    WireSample,
+};
+use tasks_peer::receiver::{
+    AllowAll, Allowlist, FinishedJob, JobRunner, JobView, Receiver, StatusSource,
+};
+use tasks_peer::store::{CheckoutStore, StoreLimits};
+use tasks_peer::{PeerId, RemoteJobId, SubmitKey};
+use tasks_timing::{Cache, Outcome as TimingOutcome, RecipeKey, Sample, SampleKey};
+
+/// The scheduler and ledger as the receiver's [`JobRunner`].
+pub struct DaemonRunner {
+    sch: Arc<Scheduler>,
+    /// Serialises find-then-insert so two concurrent submissions of one key cannot both pass
+    /// the check; the ledger's unique index is the backstop across processes.
+    submit_lock: Mutex<()>,
+}
+
+impl DaemonRunner {
+    /// A runner over `sch`.
+    pub fn new(sch: Arc<Scheduler>) -> DaemonRunner {
+        DaemonRunner {
+            sch,
+            submit_lock: Mutex::new(()),
+        }
+    }
+
+    /// The job, when it exists and came from `peer`.
+    fn owned(&self, peer: &PeerId, id: RemoteJobId) -> Option<JobRecord> {
+        let rec = self
+            .sch
+            .ledger
+            .get(JobId(i64::try_from(id.0).ok()?))
+            .ok()??;
+        (rec.origin.as_ref()?.peer == peer.as_str()).then_some(rec)
+    }
+
+    fn log_path(&self, rec: &JobRecord) -> std::path::PathBuf {
+        rec.log_path
+            .clone()
+            .unwrap_or_else(|| self.sch.cfg.log_path(rec.id))
+    }
+}
+
+fn remote_id(id: JobId) -> RemoteJobId {
+    RemoteJobId(u64::try_from(id.0).unwrap_or(0))
+}
+
+fn wire_end(rec: &JobRecord) -> WireEnd {
+    match rec.phase {
+        Phase::Cancelled => WireEnd::Cancelled,
+        Phase::TimedOut { .. } => match rec.timeout {
+            Some(TimeoutReason::Idle) => WireEnd::IdleTimeout,
+            _ => WireEnd::WallTimeout,
+        },
+        Phase::Passed | Phase::Failed { .. } => WireEnd::Exited,
+        // Interrupted and NotStarted: the result is unknown to the origin, never a pass
+        _ => WireEnd::Lost,
+    }
+}
+
+/// The end of a finished job as the receiver reports it. One whole-job timing sample is sent
+/// back so the origin's history learns what this machine costs.
+fn finished(rec: &JobRecord, machine: &str) -> FinishedJob {
+    let wall_ms = match (rec.started_at_ms, rec.finished_at_ms) {
+        (Some(s), Some(f)) => u64::try_from((f - s).max(0)).unwrap_or(0),
+        _ => 0,
+    };
+    let outcome = WireOutcome {
+        end: wire_end(rec),
+        exit_code: rec.exit_code,
+        signal: rec.signal,
+        wall_ms,
+        rss_bytes: None,
+        cpu_s: None,
+        description: rec
+            .summary
+            .clone()
+            .unwrap_or_else(|| format!("{:?}", rec.phase)),
+    };
+    let mut samples = Vec::new();
+    let keys = RecipeKey::from_argv(&rec.spec.argv, &rec.spec.env);
+    let ran =
+        rec.started_at_ms.is_some() && matches!(rec.phase, Phase::Passed | Phase::Failed { .. });
+    if let (Some(k), true) = (keys.first(), ran) {
+        let key = SampleKey {
+            recipe: k.to_string(),
+            target: None,
+            machine: machine.to_string(),
+        };
+        let sample = Sample {
+            secs: wall_ms as f64 / 1000.0,
+            cache: Cache::Unknown,
+            outcome: if rec.phase == Phase::Passed {
+                TimingOutcome::Passed
+            } else {
+                TimingOutcome::Failed
+            },
+            at_ms: u64::try_from(rec.finished_at_ms.unwrap_or(0)).unwrap_or(0),
+        };
+        samples.push(WireSample::from_sample(&key, &sample));
+    }
+    FinishedJob { outcome, samples }
+}
+
+impl JobRunner for DaemonRunner {
+    fn submit(
+        &self,
+        peer: &PeerId,
+        key: &SubmitKey,
+        spec: JobSpec,
+    ) -> Result<(RemoteJobId, bool), String> {
+        let _one_at_a_time = lock(&self.submit_lock);
+        let ledger = &self.sch.ledger;
+        let find = || ledger.find_origin(peer.as_str(), key.as_str());
+        if let Some(id) = find().map_err(|e| e.to_string())? {
+            return Ok((remote_id(id), true));
+        }
+        let mut job = NewJob::new(spec);
+        job.origin = Some(Origin {
+            peer: peer.as_str().to_string(),
+            key: key.as_str().to_string(),
+        });
+        match ledger.submit_job(&job) {
+            Ok(id) => {
+                self.sch.wake.notify();
+                Ok((remote_id(id), false))
+            }
+            Err(LedgerError::DuplicateOrigin { .. }) => match find().map_err(|e| e.to_string())? {
+                Some(id) => Ok((remote_id(id), true)),
+                None => Err("duplicate submit key but no such job".to_string()),
+            },
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    fn view(&self, peer: &PeerId, id: RemoteJobId) -> Option<JobView> {
+        let rec = self.owned(peer, id)?;
+        let log_len = std::fs::metadata(self.log_path(&rec))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        Some(JobView {
+            detail: rec.wait_text.clone().unwrap_or_default(),
+            finished: rec
+                .phase
+                .is_terminal()
+                .then(|| finished(&rec, &self.sch.cfg.machine)),
+            phase: rec.phase,
+            log_len,
+        })
+    }
+
+    fn read_log(&self, peer: &PeerId, id: RemoteJobId, offset: u64, max: usize) -> Vec<u8> {
+        let Some(rec) = self.owned(peer, id) else {
+            return Vec::new();
+        };
+        read_range(&self.log_path(&rec), offset, max)
+    }
+
+    fn cancel(&self, peer: &PeerId, id: RemoteJobId) -> Option<CancelState> {
+        let rec = self.owned(peer, id)?;
+        let by = format!("peer {peer}");
+        match self.sch.ledger.request_cancel(rec.id, &by).ok()? {
+            CancelOutcome::Cancelled => {
+                self.sch.wake.notify();
+                Some(CancelState::Requested)
+            }
+            CancelOutcome::Requested => {
+                self.sch.stop_running(rec.id);
+                Some(CancelState::Requested)
+            }
+            CancelOutcome::AlreadyFinished(_) => Some(CancelState::AlreadyFinished),
+        }
+    }
+
+    fn checkout_busy(&self, peer: &PeerId, tree: &Path) -> bool {
+        let filter = tasks_ledger::ListFilter {
+            active_only: true,
+            ..tasks_ledger::ListFilter::default()
+        };
+        self.sch.ledger.list(&filter).is_ok_and(|rows| {
+            rows.iter().any(|r| {
+                r.origin.as_ref().is_some_and(|o| o.peer == peer.as_str())
+                    && r.spec.cwd.starts_with(tree)
+            })
+        })
+    }
+}
+
+fn read_range(path: &Path, offset: u64, max: usize) -> Vec<u8> {
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    if f.seek(SeekFrom::Start(offset)).is_err() {
+        return Vec::new();
+    }
+    let mut buf = Vec::new();
+    let _ = f
+        .take(u64::try_from(max).unwrap_or(u64::MAX))
+        .read_to_end(&mut buf);
+    buf
+}
+
+/// The receiver this daemon hosts: allowlist from the policy's peers, jobs into the ledger,
+/// synced copies under `store_dir`. Hand it to the transport's serving side.
+pub fn build_receiver(sch: &Arc<Scheduler>, store_dir: std::path::PathBuf) -> Arc<Receiver> {
+    let policy = sch.policy();
+    Arc::new(Receiver::new(
+        &sch.cfg.machine,
+        Allowlist::new(policy.peers().allowlist()),
+        Arc::new(CheckoutStore::new(store_dir, StoreLimits::default())),
+        Arc::new(DaemonRunner::new(sch.clone())),
+        Arc::new(DaemonStatus::new(sch.clone())),
+        // open choice: the daemon has no device denylist or broad-test rule of its own yet
+        // (R-153 stays at the peer crate); the generic spec rules still apply in the receiver
+        Arc::new(AllowAll),
+        FetchPolicy::default(),
+    ))
+}
+
+/// The scheduler's slots, queue and pressure as the peer-visible status.
+pub struct DaemonStatus {
+    sch: Arc<Scheduler>,
+}
+
+impl DaemonStatus {
+    /// A status source over `sch`.
+    pub fn new(sch: Arc<Scheduler>) -> DaemonStatus {
+        DaemonStatus { sch }
+    }
+}
+
+impl StatusSource for DaemonStatus {
+    fn status(&self) -> PeerStatus {
+        let snap = self.sch.status();
+        let policy = self.sch.policy();
+        let machine = self.sch.local_machine(&policy, &Default::default());
+        PeerStatus {
+            machine,
+            slots: snap
+                .slots
+                .iter()
+                .filter_map(|g| {
+                    let kind = match g.kind.as_str() {
+                        "compile" => tasks_core::SlotKind::Compile,
+                        "run" => tasks_core::SlotKind::Run,
+                        "offload" => tasks_core::SlotKind::Offload,
+                        _ => return None,
+                    };
+                    Some(SlotStatus {
+                        kind,
+                        total: g.total,
+                        used: g.total.saturating_sub(g.free),
+                    })
+                })
+                .collect(),
+            queue: QueueSummary {
+                waiting: u32::try_from(snap.waiting.len() + snap.waiting_more).unwrap_or(u32::MAX),
+                running: u32::try_from(snap.running.len()).unwrap_or(u32::MAX),
+            },
+            pressure: PressureSummary {
+                cpu_pct: snap.pressure.cpu.map(pct),
+                memory_pct: snap.pressure.memory_some.map(pct),
+                io_pct: snap.pressure.io.map(pct),
+                summary: snap.pressure.compile_blocker.clone().unwrap_or_default(),
+            },
+        }
+    }
+}
+
+fn pct(v: f32) -> u8 {
+    v.clamp(0.0, 100.0) as u8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testkit::Rig;
+    use tasks_core::Kind;
+    use tasks_ledger::Store;
+
+    fn peer() -> PeerId {
+        PeerId::new("laptop-node").unwrap()
+    }
+
+    // R-152
+    #[test]
+    fn r152_a_repeated_key_is_the_same_job_and_a_peer_sees_only_its_own() {
+        let r = Rig::new();
+        let run = DaemonRunner::new(r.sch.clone());
+        let key = SubmitKey::new("laptop:1").unwrap();
+        let spec = r.spec("origin-owner", &["make", "x"], Kind::Compile);
+        let (id, dup) = run.submit(&peer(), &key, spec.clone()).unwrap();
+        assert!(!dup);
+        let (again, dup) = run.submit(&peer(), &key, spec.clone()).unwrap();
+        assert_eq!((again, dup), (id, true));
+        assert_eq!(r.store.list(&Default::default()).unwrap().len(), 1);
+        // the job is an ordinary queue job with the origin's owner
+        let rec = r.record(JobId(i64::try_from(id.0).unwrap()));
+        assert_eq!(rec.spec.owner.as_str(), "origin-owner");
+        assert_eq!(rec.origin.unwrap().peer, "laptop-node");
+        // another peer neither sees nor cancels it, and may reuse the key for its own job
+        let other = PeerId::new("mac-node").unwrap();
+        assert!(run.view(&other, id).is_none());
+        assert!(run.cancel(&other, id).is_none());
+        let (id2, dup) = run.submit(&other, &key, spec).unwrap();
+        assert!(!dup && id2 != id);
+    }
+
+    #[test]
+    fn a_remote_job_runs_through_the_queue_and_reports_its_end_and_log() {
+        let r = Rig::new();
+        r.procs.auto_exit(0);
+        r.procs.output(b"hello from the worker\n");
+        let run = DaemonRunner::new(r.sch.clone());
+        let key = SubmitKey::new("laptop:2").unwrap();
+        let (id, _) = run
+            .submit(&peer(), &key, r.spec("o", &["make", "x"], Kind::Run))
+            .unwrap();
+        let local = JobId(i64::try_from(id.0).unwrap());
+        assert_eq!(r.until_done(local), Phase::Passed);
+        let v = run.view(&peer(), id).unwrap();
+        let fin = v.finished.unwrap();
+        assert_eq!(fin.outcome.phase(), Phase::Passed);
+        assert_eq!(fin.samples.len(), 1);
+        // the log holds the daemon's own placement note, then the command's output
+        let log = String::from_utf8(run.read_log(&peer(), id, 0, 4096)).unwrap();
+        assert!(log.ends_with("hello from the worker\n"), "{log}");
+        let at = u64::try_from(log.find("hello").unwrap()).unwrap();
+        assert_eq!(run.read_log(&peer(), id, at + 6, 4), b"from");
+        assert_eq!(run.cancel(&peer(), id), Some(CancelState::AlreadyFinished));
+    }
+
+    #[test]
+    fn a_live_remote_job_makes_its_checkout_busy_until_it_ends() {
+        let r = Rig::new();
+        let run = DaemonRunner::new(r.sch.clone());
+        let key = SubmitKey::new("laptop:3").unwrap();
+        let tree = r.dir.path().to_path_buf();
+        let (id, _) = run
+            .submit(&peer(), &key, r.spec("o", &["make", "x"], Kind::Run))
+            .unwrap();
+        assert!(run.checkout_busy(&peer(), &tree));
+        assert!(!run.checkout_busy(&PeerId::new("mac-node").unwrap(), &tree));
+        assert!(!run.checkout_busy(&peer(), &tree.join("elsewhere")));
+        assert_eq!(run.cancel(&peer(), id), Some(CancelState::Requested));
+        assert!(!run.checkout_busy(&peer(), &tree));
+    }
+
+    #[test]
+    fn status_reports_slots_and_queue() {
+        let r = Rig::new();
+        let s = DaemonStatus::new(r.sch.clone()).status();
+        assert!(s.slots.iter().any(|x| x.total > 0));
+        assert_eq!(s.queue.waiting, 0);
+    }
+}

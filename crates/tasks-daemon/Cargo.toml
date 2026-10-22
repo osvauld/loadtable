@@ -22,11 +22,19 @@ tasks-admission.workspace = true
 tasks-runner.workspace = true
 tasks-placement.workspace = true
 tasks-policy.workspace = true
+tasks-peer.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 rustix.workspace = true
+iroh = { version = "1.3", optional = true }
+tokio = { version = "1", optional = true, features = ["rt-multi-thread", "time"] }
+
+[features]
+# The real iroh transport for peer forwarding. Off by default: the default build has no async
+# runtime. The adapter keeps any runtime on threads of its own.
+iroh = ["tasks-peer/iroh", "dep:iroh", "dep:tokio"]
 
 [dev-dependencies]
 tasks-platform = { workspace = true, features = ["fake"] }

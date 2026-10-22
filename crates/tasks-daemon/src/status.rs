@@ -1,8 +1,8 @@
 //! Building the API views: the status snapshot and job rows.
 
 use crate::api::{
-    DaemonView, JobView, MAX_STATUS_WAITERS, PressureView, RunningView, SlotGroupView, SlotView,
-    StatusSnapshot, WaiterView,
+    DaemonView, JobView, MAX_STATUS_WAITERS, PeerView, PressureView, RunningView, SlotGroupView,
+    SlotView, StatusSnapshot, WaiterView,
 };
 use crate::queue_estimate::start_offsets;
 use crate::scheduler::{RunningJob, Scheduler, lock, shorten};
@@ -215,6 +215,18 @@ impl Scheduler {
             pressure: self.pressure_view(&policy),
             alerts: lock(&self.alerts).views(),
             settings: policy.settings(),
+            peers: self
+                .forwarder
+                .links()
+                .into_iter()
+                .map(|l| PeerView {
+                    name: l.peer,
+                    node_id: l.node_id,
+                    state: l.state.name().to_string(),
+                    last_seen_ago_secs: l.last_seen_ago_secs,
+                    detail: l.detail,
+                })
+                .collect(),
         }
     }
 

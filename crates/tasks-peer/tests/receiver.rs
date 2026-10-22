@@ -196,3 +196,44 @@ fn unsynced_checkouts_and_unsafe_cwds_are_refused() {
     }
     let _ = JobId(0);
 }
+
+#[test]
+fn a_resync_of_a_checkout_with_a_live_remote_job_is_refused_busy_until_it_ends() {
+    let w = synced_world();
+    let checkout = CheckoutId::derive("laptop", &w.root);
+    let resync = |w: &World| {
+        conn(w).request(Body::SyncHaveRequest {
+            checkout: CheckoutId::derive("laptop", &w.root),
+            hashes: vec![],
+        })
+    };
+    assert!(matches!(
+        resync(&w),
+        Err(PeerError::Refused(Refusal::Busy { checkout: ref c })) if *c == checkout
+    ));
+    let page = conn(&w).request(Body::SyncManifestPage {
+        checkout: checkout.clone(),
+        session: 1,
+        index: 0,
+        last: true,
+        entries: vec![],
+    });
+    assert!(matches!(
+        page,
+        Err(PeerError::Refused(Refusal::Busy { .. }))
+    ));
+    // another checkout of the same peer is not affected
+    let other = conn(&w).request(Body::SyncHaveRequest {
+        checkout: CheckoutId::derive("laptop", std::path::Path::new("/elsewhere")),
+        hashes: vec![],
+    });
+    assert!(!matches!(
+        other,
+        Err(PeerError::Refused(Refusal::Busy { .. }))
+    ));
+    w.runner.finish(tasks_peer::RemoteJobId(1), 0, Vec::new());
+    assert!(!matches!(
+        resync(&w),
+        Err(PeerError::Refused(Refusal::Busy { .. }))
+    ));
+}

@@ -262,7 +262,14 @@ impl Scheduler {
             .chain(rec.hints.tools.iter().cloned())
             .collect();
         let local = self.local_machine(policy, &wanted);
-        let peers = self.forwarder.peers();
+        let avoid = lock(&self.state)
+            .no_forward
+            .get(&rec.id)
+            .cloned()
+            .unwrap_or_default();
+        let mut peers = self.forwarder.peers();
+        // a peer this job already failed to reach is not tried again (it runs here instead)
+        peers.retain(|p| !avoid.contains(&p.machine.name.0));
         let info = MachineInfo {
             name: local.name.0.clone(),
             cores: local.cores,
@@ -343,10 +350,24 @@ impl Scheduler {
             }
             Decision::Run(name) => match self.forwarder.forward(rec, name) {
                 Ok(ticket) => {
-                    let _ = self.guard(
+                    // the (peer, key) pair is persisted before anything is sent
+                    let saved = self.guard(
                         "set_forward",
-                        self.ledger.set_forward(rec.id, name, ticket.remote_job),
+                        self.ledger.set_forward(
+                            rec.id,
+                            name,
+                            ticket.remote_job,
+                            ticket.remote_key.as_deref(),
+                        ),
                     );
+                    if saved.is_none() {
+                        self.forwarder.forget(rec.id);
+                        return Placed::Waiting(format!(
+                            "cannot record the forward to {} in the ledger",
+                            name.0
+                        ));
+                    }
+                    self.wake.notify();
                     Placed::Forwarded
                 }
                 Err(e) => Placed::Waiting(format!("cannot forward to {}: {e}", name.0)),

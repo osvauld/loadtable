@@ -30,6 +30,7 @@ tasks-policy = { path = "crates/tasks-policy" }
 tasks-daemon = { path = "crates/tasks-daemon" }
 clap = { version = "4.5", features = ["derive"] }
 signal-hook = "0.4"
+tasks-peer = { path = "crates/tasks-peer" }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"

@@ -37,6 +37,14 @@ pub enum LedgerError {
     /// A value does not fit the column it is stored in.
     #[error("value out of range: {0}")]
     OutOfRange(&'static str),
+    /// A job from this peer under this key already exists.
+    #[error("a job received from {peer} under key {key:?} already exists")]
+    DuplicateOrigin {
+        /// The submitting peer.
+        peer: String,
+        /// Its idempotency key.
+        key: String,
+    },
     /// The database was written by a newer version of the program.
     #[error("database schema version {found} is newer than supported version {supported}")]
     SchemaTooNew {

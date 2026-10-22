@@ -506,6 +506,9 @@ fn r230_dropping_a_waiting_or_holding_forward_never_wedges_the_checkout() {
     w.tick(&mut a, secs(1), &mut log);
     drop(b); // a waiter that vanished must not block c
     drop(a); // and neither must a holder that vanished
+    // the dropped holder's job was submitted; the peer would refuse a re-sync as busy until
+    // it ends (see busy_peer_...), so let it end
+    w.runner.finish(R1, 0, vec![]);
     w.tick(&mut c, secs(2), &mut log);
     assert!(
         matches!(c.state(), ForwardState::RemoteQueued { .. }),
@@ -661,4 +664,33 @@ fn r150_a_peer_that_accepts_connections_but_stays_silent_is_still_declared_lost(
     let r = f.result().expect("lost, not stuck");
     assert_eq!(r.phase, Phase::Interrupted);
     assert!(r.reason.contains("unreachable"), "{}", r.reason);
+}
+
+#[test]
+fn a_busy_peer_is_waited_for_without_burning_sync_attempts_then_is_interrupted_never_unsubmitted() {
+    let w = World::new();
+    let mut a = w.forward(1, fast_policy());
+    let mut log = Vec::new();
+    w.tick(&mut a, secs(1), &mut log);
+    assert!(a.remote().is_some());
+    // a second forward of the same checkout, as after a lost daemon: the lock is free
+    // locally but the peer still runs the first job
+    drop(a);
+    let mut c = w.forward(3, fast_policy());
+    let mut t = 2;
+    for _ in 0..6 {
+        w.tick(&mut c, secs(t), &mut log);
+        t += 2;
+    }
+    assert!(
+        matches!(c.state(), ForwardState::Syncing { attempt: 1 }),
+        "busy must not use up attempts: {:?}",
+        c.state()
+    );
+    assert_eq!(w.runner.submitted().len(), 1);
+    w.tick(&mut c, secs(t + 1000), &mut log);
+    let r = c.result().expect("gave up");
+    // the live job may be this one's earlier submission: never "nothing submitted", never local
+    assert!(!r.nothing_submitted && r.reason.contains("busy"), "{r:?}");
+    assert_eq!(r.phase, Phase::Interrupted);
 }

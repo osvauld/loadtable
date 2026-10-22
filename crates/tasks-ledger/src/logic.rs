@@ -30,6 +30,7 @@ pub(crate) fn new_record(id: JobId, job: &NewJob, now: i64) -> JobRecord {
         lease: None,
         log_path: None,
         forward: None,
+        origin: job.origin.clone(),
         remote_phase: None,
         cancel: None,
     }
@@ -168,6 +169,7 @@ pub(crate) fn plan_jobs(
             },
             hints: step.hints.clone(),
             step: Some((plan_id, step.name.clone())),
+            origin: None,
         };
         let id = insert(&job)?;
         ids.insert(step.name.as_str(), id);

@@ -17,7 +17,9 @@ pub use clock::{Clock, ManualClock, SystemClock};
 pub use error::LedgerError;
 pub use memory::MemoryStore;
 pub use migrate::SCHEMA_VERSION;
-pub use record::{CancelRequest, Forward, JobRecord, LeaseRecord, ListFilter, TimeoutReason};
+pub use record::{
+    CancelRequest, Forward, JobRecord, LeaseRecord, ListFilter, Origin, TimeoutReason,
+};
 pub use request::{
     CancelOutcome, ChangeToken, Finish, NewJob, PlanContext, PlanSubmitted, PruneReport,
     RetentionPolicy, StartInfo,
@@ -95,8 +97,20 @@ pub trait Store {
             .map(|r| r.cancel_requested())
             .ok_or(LedgerError::NotFound(id))
     }
-    /// Records where the job was forwarded.
-    fn set_forward(&self, id: JobId, peer: &MachineName, remote_job: Option<i64>) -> Result<()>;
+    /// Records where the job was forwarded. `remote_key` is the peer's duplicate-submit key;
+    /// `None` keeps a key recorded earlier, so a later call that learns the remote id cannot
+    /// lose it.
+    fn set_forward(
+        &self,
+        id: JobId,
+        peer: &MachineName,
+        remote_job: Option<i64>,
+        remote_key: Option<&str>,
+    ) -> Result<()>;
+    /// Forgets that the job was forwarded (the peer never received it, so it may run here).
+    fn clear_forward(&self, id: JobId) -> Result<()>;
+    /// The job received from `peer` under `key`, if any.
+    fn find_origin(&self, peer: &str, key: &str) -> Result<Option<JobId>>;
     /// Records the last known peer phase without touching the local phase (R-015).
     fn set_remote_phase(&self, id: JobId, phase: &Phase) -> Result<()>;
     /// Records the job's log path.

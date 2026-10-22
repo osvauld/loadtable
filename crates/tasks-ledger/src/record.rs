@@ -37,6 +37,19 @@ pub struct Forward {
     pub peer: MachineName,
     /// The job id on that peer, once known; `None` means never submitted remotely.
     pub remote_job: Option<i64>,
+    /// The peer's duplicate-submit key for this job. Persisted so a restarted daemon resends
+    /// the same key (the peer deduplicates) and never invents a second submission.
+    pub remote_key: Option<String>,
+}
+
+/// Where a job received from a peer came from. `(peer, key)` is unique: a repeated submission
+/// of the same pair is the same job (R-152), also across a restart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Origin {
+    /// The submitting peer's transport identity.
+    pub peer: String,
+    /// The peer's idempotency key.
+    pub key: String,
 }
 
 /// A job as stored in the ledger.
@@ -78,6 +91,8 @@ pub struct JobRecord {
     pub log_path: Option<PathBuf>,
     /// Forwarding info.
     pub forward: Option<Forward>,
+    /// Set when a peer forwarded this job to us.
+    pub origin: Option<Origin>,
     /// Last known phase on the peer; never changes the local `phase` (R-015).
     pub remote_phase: Option<Phase>,
     /// The cancel request, if one was made.
@@ -204,6 +219,7 @@ pub(crate) mod tests {
             lease: None,
             log_path: None,
             forward: None,
+            origin: None,
             remote_phase: None,
             cancel: None,
         }

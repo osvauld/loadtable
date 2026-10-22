@@ -3080,18 +3080,21 @@ dependencies = [
 name = "tasks-daemon"
 version = "0.1.0"
 dependencies = [
+ "iroh",
  "rustix",
  "serde",
  "serde_json",
  "tasks-admission",
  "tasks-core",
  "tasks-ledger",
+ "tasks-peer",
  "tasks-placement",
  "tasks-platform",
  "tasks-policy",
  "tasks-runner",
  "tasks-timing",
  "thiserror 2.0.21",
+ "tokio",
  "toml",
 ]
 
