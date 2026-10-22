@@ -1267,13 +1267,13 @@ impl TrustNode {
             .values()
             .find(|p| p.node_id == node_id)
             .cloned();
-        if let Some(mut p) = found {
-            if p.relay != relay || p.addrs != addrs {
-                p.relay = relay;
-                p.addrs = addrs;
-                self.ledger.peer_put(&p)?;
-                self.st().peers.insert(p.name.clone(), p);
-            }
+        if let Some(mut p) = found
+            && (p.relay != relay || p.addrs != addrs)
+        {
+            p.relay = relay;
+            p.addrs = addrs;
+            self.ledger.peer_put(&p)?;
+            self.st().peers.insert(p.name.clone(), p);
         }
         Ok(())
     }

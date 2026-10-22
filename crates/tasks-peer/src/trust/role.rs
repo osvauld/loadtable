@@ -55,12 +55,10 @@ impl Role {
 
     /// True when this role covers what `need` asks.
     pub fn covers(self, need: Need) -> bool {
-        match (self, need) {
-            (Role::Admin, _) => true,
-            (_, Need::Any) => true,
-            (Role::Submit, Need::Submit) => true,
-            _ => false,
-        }
+        matches!(
+            (self, need),
+            (Role::Admin, _) | (_, Need::Any) | (Role::Submit, Need::Submit)
+        )
     }
 }
 
