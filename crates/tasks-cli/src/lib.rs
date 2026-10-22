@@ -5,6 +5,7 @@
 //! [`render`]ing. `main.rs` only forwards the process environment to [`real_main`].
 
 pub mod args;
+pub mod audit;
 pub mod client;
 pub mod commands;
 pub mod device;

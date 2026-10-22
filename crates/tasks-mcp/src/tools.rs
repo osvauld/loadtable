@@ -22,6 +22,8 @@ use tasks_timing::RecipeKey;
 
 /// Finished jobs `list` shows when no limit is given.
 const DEFAULT_LIST_RECENT: usize = 20;
+/// Rows `audit` shows when no limit is given.
+const DEFAULT_AUDIT_ROWS: usize = 50;
 /// Default tail length of `logs`.
 const DEFAULT_TAIL: usize = 100;
 /// Default byte window of `logs` with an offset.
@@ -288,6 +290,16 @@ struct EstimateArgs {
     argv: Vec<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuditArgs {
+    since: Option<String>,
+    peer: Option<String>,
+    job: Option<i64>,
+    action: Option<String>,
+    limit: Option<usize>,
+}
+
 fn job_id(id: i64) -> Result<JobId, ToolError> {
     if id < 1 {
         return Err(ToolError::Args(format!(
@@ -386,6 +398,7 @@ impl Tools {
             "cancel" => parse(args).and_then(|a| self.cancel(a)),
             "status" => parse::<EmptyArgs>(args).and_then(|_| self.status()),
             "estimate" => parse(args).and_then(|a| self.estimate(a)),
+            "audit" => parse(args).and_then(|a| self.audit(a)),
             _ => return None,
         };
         Some(match r {
@@ -1017,6 +1030,77 @@ impl Tools {
         Ok(ToolResult {
             text,
             structured,
+            is_error: false,
+        })
+    }
+
+    fn audit(&self, a: AuditArgs) -> ToolOk {
+        let limit = a.limit.unwrap_or(DEFAULT_AUDIT_ROWS).clamp(1, 200);
+        let since_ms = match a.since.as_deref() {
+            Some(t) => Some(
+                tasks_daemon::logs::parse_time(t, self.now())
+                    .map_err(|e| ToolError::Args(format!("since: {e}")))?,
+            ),
+            None => None,
+        };
+        let resp = self.call_daemon(&Request::Audit {
+            since_ms,
+            until_ms: None,
+            peer: a.peer,
+            job: a.job,
+            action: a.action,
+            limit: Some(limit),
+        })?;
+        let Response::Audit { rows, truncated } = resp else {
+            return Err(unexpected("audit", &resp));
+        };
+        let body: String = rows
+            .iter()
+            .map(|r| {
+                let who = r.actor_name.as_deref().unwrap_or(r.actor.as_str());
+                let job = r.job.map_or_else(String::new, |j| format!(" job {j}"));
+                let peer = r
+                    .peer_name
+                    .as_deref()
+                    .or(r.peer.as_deref())
+                    .map_or_else(String::new, |p| format!(" peer {p}"));
+                let owner = if r.owner.is_empty() {
+                    String::new()
+                } else {
+                    format!(" owner {}", r.owner)
+                };
+                let details = if r.details.as_object().is_some_and(|o| !o.is_empty()) {
+                    format!(" {}", r.details)
+                } else {
+                    String::new()
+                };
+                format!(
+                    "#{} t={} {} by {who}{owner}{job}{peer}{details}\n",
+                    r.seq,
+                    r.at_ms / 1000,
+                    r.action
+                )
+            })
+            .collect();
+        let (body, cut) = bound_head(&body, MAX_TEXT_BYTES);
+        let mut text = if rows.is_empty() {
+            "no audit rows match".to_string()
+        } else {
+            format!(
+                "{} audit row(s), newest first\n{}",
+                rows.len(),
+                body.trim_end()
+            )
+        };
+        if cut || truncated {
+            text.push_str("\ntruncated: narrow with since, peer, job or action");
+        }
+        Ok(ToolResult {
+            text,
+            structured: json!({
+                "rows": serde_json::to_value(&rows).unwrap_or(Value::Null),
+                "truncated": cut || truncated,
+            }),
             is_error: false,
         })
     }

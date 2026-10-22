@@ -3,7 +3,7 @@
 use serde_json::{Value, json};
 
 /// The tool names, in the order `tools/list` returns them.
-pub const TOOL_NAMES: [&str; 10] = [
+pub const TOOL_NAMES: [&str; 11] = [
     "submit",
     "submit_steps",
     "run_suite",
@@ -14,6 +14,7 @@ pub const TOOL_NAMES: [&str; 10] = [
     "cancel",
     "status",
     "estimate",
+    "audit",
 ];
 
 fn object(properties: Value, required: &[&str]) -> Value {
@@ -193,6 +194,20 @@ pub fn tool_defs() -> Vec<ToolDef> {
             input_schema: object(
                 json!({"argv": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "The command."}}),
                 &["argv"],
+            ),
+        },
+        ToolDef {
+            name: "audit",
+            description: "Read the machine's audit log, newest first: who did what and when (pairing and grants, refused connections, peer link changes, job submit/forward/receive/start/end/cancel/timeout, drain and resume, submit-rule refusals). Read-only. Each row has an actor machine, an owner, an action, a job or peer and details; no secret is ever stored in it.",
+            input_schema: object(
+                json!({
+                    "since": {"type": "string", "description": "Only rows since: a duration back from now such as 30m, 2h or 3d, or unix seconds."},
+                    "peer": {"type": "string", "description": "Only rows naming this paired machine (its name or DID) as the peer or the actor."},
+                    "job": {"type": "integer", "minimum": 1, "description": "Only rows about this job."},
+                    "action": {"type": "string", "description": "Only this action (job.cancelled) or a family (job, pair, grant, conn, queue)."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "Most rows (default 50)."}
+                }),
+                &[],
             ),
         },
     ]

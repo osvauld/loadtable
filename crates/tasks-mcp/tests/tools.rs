@@ -1125,3 +1125,94 @@ fn the_cancel_reason_is_passed_to_the_daemon() {
         Request::Cancel { reason: Some(r), .. } if r == "stale"
     ));
 }
+
+// ---- audit -------------------------------------------------------------------------------
+
+fn audit_row(seq: i64, action: &str, job: Option<i64>) -> tasks_daemon::api::AuditRowView {
+    tasks_daemon::api::AuditRowView {
+        seq,
+        at_ms: 1_700_000_000_000 + seq,
+        actor: "did:key:zMe".into(),
+        actor_name: Some("kurukkan".into()),
+        owner: "agent-1".into(),
+        action: action.into(),
+        job,
+        peer: None,
+        peer_name: None,
+        target: None,
+        details: json!({"by": "agent-1", "reason": "wrong branch"}),
+        prev_hash: "00".into(),
+        hash: "11".into(),
+    }
+}
+
+// R-284
+#[test]
+fn r284_audit_is_read_only_and_asks_the_daemon_for_the_filters_given() {
+    let d = fake(|r| match r {
+        Request::Audit { .. } => Ok(Response::Audit {
+            rows: vec![
+                audit_row(3, "job.cancelled", Some(9)),
+                audit_row(2, "job.started", Some(9)),
+            ],
+            truncated: false,
+        }),
+        _ => Err(DaemonError::Failed(format!("unexpected {r:?}"))),
+    });
+    let r = call(
+        &tools_with(&d),
+        "audit",
+        json!({"job": 9, "action": "job", "peer": "nixos", "since": "2h", "limit": 5}),
+    );
+    assert!(!r.is_error, "{}", r.text);
+    assert!(r.text.contains("2 audit row(s)"), "{}", r.text);
+    assert!(r.text.contains("job.cancelled by kurukkan"), "{}", r.text);
+    assert!(r.text.contains("wrong branch"), "{}", r.text);
+    assert_eq!(r.structured["rows"].as_array().unwrap().len(), 2);
+    assert_eq!(r.structured["rows"][0]["action"], "job.cancelled");
+    let reqs = d.requests();
+    assert_eq!(reqs.len(), 1);
+    match &reqs[0] {
+        Request::Audit {
+            since_ms,
+            peer,
+            job,
+            action,
+            limit,
+            ..
+        } => {
+            assert!(since_ms.is_some());
+            assert_eq!(peer.as_deref(), Some("nixos"));
+            assert_eq!(
+                (*job, action.as_deref(), *limit),
+                (Some(9), Some("job"), Some(5))
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+// R-284
+#[test]
+fn r284_audit_rejects_unknown_arguments_and_bad_times() {
+    let d = never_called();
+    let r = call(&tools_with(&d), "audit", json!({"verify": true}));
+    assert!(r.is_error);
+    let r = call(&tools_with(&d), "audit", json!({"since": "yesterday-ish"}));
+    assert!(r.is_error, "{}", r.text);
+    assert!(d.requests().is_empty());
+}
+
+// R-284
+#[test]
+fn r284_an_empty_audit_log_says_so() {
+    let d = fake(|_| {
+        Ok(Response::Audit {
+            rows: vec![],
+            truncated: false,
+        })
+    });
+    let r = call(&tools_with(&d), "audit", json!({}));
+    assert!(!r.is_error);
+    assert_eq!(r.text, "no audit rows match");
+}

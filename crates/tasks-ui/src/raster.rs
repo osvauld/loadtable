@@ -268,6 +268,11 @@ mod tests {
         }
         texts
             .push_str("Cancel... Log Close Drain Resume Follow Search Clear Refresh Show raw JSON");
+        // the Audit tab: filters, column titles and the rows' own symbols
+        texts.push_str("Action Peer Job Apply all name or DID id #101 did:key:z6Mk…EGta");
+        for t in crate::audit::COLUMNS.iter().chain(&crate::audit::FAMILIES) {
+            texts.push_str(t);
+        }
         let font = egui::FontId::proportional(14.0);
         let mono = egui::FontId::monospace(14.0);
         let missing: Vec<char> = ctx.fonts_mut(|f| {
@@ -321,6 +326,31 @@ mod tests {
                 true,
             ),
             (
+                "audit-dark",
+                {
+                    let mut a = App::fixed(&fixtures::idle(), dead_link());
+                    a.show_tab(Tab::Audit);
+                    a.set_audit(audit_rows());
+                    a
+                },
+                [1280, 600],
+                true,
+            ),
+            (
+                "audit-light-empty",
+                {
+                    let mut a = App::fixed(&fixtures::idle(), dead_link());
+                    a.show_tab(Tab::Audit);
+                    a.set_audit(crate::audit::AuditData {
+                        rows: vec![],
+                        truncated: false,
+                    });
+                    a
+                },
+                [900, 400],
+                false,
+            ),
+            (
                 "stats-dark",
                 {
                     let mut a = App::fixed(&fixtures::idle(), dead_link());
@@ -342,6 +372,56 @@ mod tests {
                     Ok(())
                 );
             }
+        }
+    }
+
+    fn audit_rows() -> crate::audit::AuditData {
+        use tasks_daemon::api::AuditRowView;
+        let row =
+            |seq: i64, action: &str, job: Option<i64>, details: serde_json::Value| AuditRowView {
+                seq,
+                at_ms: fixtures::NOW_MS - (20 - seq) * 60_000,
+                actor: "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK".into(),
+                actor_name: Some("laptop".into()),
+                owner: "claude@laptop".into(),
+                action: action.into(),
+                job,
+                peer: Some("did:key:z6MksPeerPeerPeerPeerPeerPeerPeerPeerPeerPeerPeer".into()),
+                peer_name: Some("nixos".into()),
+                target: None,
+                details,
+                prev_hash: "0".into(),
+                hash: "1".into(),
+            };
+        crate::audit::AuditData {
+            rows: vec![
+                row(
+                    5,
+                    "job.cancelled",
+                    Some(101),
+                    serde_json::json!({"by": "claude@laptop", "reason": "wrong branch", "result": "requested"}),
+                ),
+                row(
+                    4,
+                    "job.started",
+                    Some(101),
+                    serde_json::json!({"machine": "nixos"}),
+                ),
+                row(3, "conn.up", None, serde_json::json!({"path": "direct"})),
+                row(
+                    2,
+                    "grant.issued",
+                    None,
+                    serde_json::json!({"role": "submit", "direction": "issued"}),
+                ),
+                row(
+                    1,
+                    "pair.ticket_minted",
+                    None,
+                    serde_json::json!({"roles": ["submit"]}),
+                ),
+            ],
+            truncated: false,
         }
     }
 

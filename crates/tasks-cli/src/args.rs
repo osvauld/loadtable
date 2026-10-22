@@ -342,6 +342,50 @@ pub enum PeersCommand {
     },
 }
 
+/// `audit` subcommands.
+#[derive(Subcommand, Debug, Clone)]
+pub enum AuditCommand {
+    /// Walk the audit chain, check the checkpoint signatures and report the first break.
+    Verify {
+        /// The daemon's reply as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Sign a checkpoint of the audit chain now.
+    Checkpoint,
+}
+
+/// Arguments of `audit`: with no subcommand, show rows (newest first).
+#[derive(Args, Debug, Clone)]
+#[command(args_conflicts_with_subcommands = true)]
+pub struct AuditArgs {
+    /// `verify` or `checkpoint`; without one, list the rows.
+    #[command(subcommand)]
+    pub sub: Option<AuditCommand>,
+    /// Only rows since: a duration such as 2h or 3d, unix seconds, or a UTC date such as
+    /// 2026-10-22 or 2026-10-22T14:30.
+    #[arg(long, value_name = "DUR|TIME")]
+    pub since: Option<String>,
+    /// Only rows until: the same forms as --since.
+    #[arg(long, value_name = "DUR|TIME")]
+    pub until: Option<String>,
+    /// Only rows naming this paired machine (its name or DID) as the peer or the actor.
+    #[arg(long, value_name = "NAME")]
+    pub peer: Option<String>,
+    /// Only rows about this job.
+    #[arg(long, value_name = "ID")]
+    pub job: Option<i64>,
+    /// Only this action, or a family: `job` shows every job.* row.
+    #[arg(long = "action", value_name = "ACTION")]
+    pub action_filter: Option<String>,
+    /// Most rows (default 100).
+    #[arg(long, value_name = "N")]
+    pub limit: Option<usize>,
+    /// The daemon's reply as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
 /// All commands.
 #[derive(Subcommand, Debug)]
 pub enum Command {
@@ -449,6 +493,8 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// The audit log: who did what, when; `audit verify` checks it was not altered.
+    Audit(AuditArgs),
     /// The desktop window (not built in this binary).
     Ui {
         /// Ignored.

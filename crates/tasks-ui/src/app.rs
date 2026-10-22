@@ -2,6 +2,7 @@
 //! from the view model, and every daemon call runs on a feed thread (R-200).
 
 use crate::actions::{self, Avail};
+use crate::audit::{self, AuditData, AuditFilter};
 use crate::columns::{self, ACTION_BAR_WIDTH, Col, ColSpec, GAP, MIN_WINDOW_WIDTH};
 use crate::feed::{self, ActionOutcome, Dashboard, DashboardResult, Feed, Wake};
 use crate::format;
@@ -90,6 +91,11 @@ pub struct App {
     history: Option<Result<HistoryView, String>>,
     history_loading: bool,
     stats_asked: bool,
+    audit_box: Arc<Mailbox<Result<AuditData, String>>>,
+    audit: Option<Result<AuditData, String>>,
+    audit_filter: AuditFilter,
+    audit_loading: bool,
+    audit_asked: bool,
 }
 
 impl App {
@@ -131,6 +137,11 @@ impl App {
             history: None,
             history_loading: false,
             stats_asked: false,
+            audit_box: Arc::new(Mailbox::new()),
+            audit: None,
+            audit_filter: AuditFilter::default(),
+            audit_loading: false,
+            audit_asked: false,
         }
     }
 
@@ -157,6 +168,12 @@ impl App {
     pub fn set_history(&mut self, h: HistoryView) {
         self.history = Some(Ok(h));
         self.stats_asked = true;
+    }
+
+    /// Gives the Audit tab its rows (for screenshots).
+    pub fn set_audit(&mut self, data: AuditData) {
+        self.audit = Some(Ok(data));
+        self.audit_asked = true;
     }
 
     /// Opens the cancel dialog for a job (for screenshots).
@@ -211,6 +228,10 @@ impl App {
         if let Some(h) = self.history_box.take() {
             self.history = Some(h);
             self.history_loading = false;
+        }
+        if let Some(d) = self.audit_box.take() {
+            self.audit = Some(d);
+            self.audit_loading = false;
         }
         if let Some(l) = &mut self.log {
             if let Some(s) = l.updates.take() {
@@ -309,7 +330,8 @@ impl App {
         egui::CentralPanel::default().show(ctx, |ui| match self.tab {
             Tab::Dashboard => self.dashboard(ui),
             Tab::Stats => self.stats_tab(ui),
-            Tab::Audit | Tab::PressureEvents => {
+            Tab::Audit => self.audit_tab(ui),
+            Tab::PressureEvents => {
                 ui.weak("Planned. See docs/DESIGN-peers-sync-audit.md.");
             }
         });
@@ -687,6 +709,99 @@ impl App {
             });
         if !open {
             self.log = None;
+        }
+    }
+
+    fn audit_tab(&mut self, ui: &mut egui::Ui) {
+        if !self.audit_asked {
+            self.audit_asked = true;
+            self.audit_loading = true;
+            let link = Arc::clone(&self.link);
+            let filter = self.audit_filter.clone();
+            feed::spawn_once(
+                Arc::clone(&self.audit_box),
+                Arc::clone(&self.wake),
+                move || audit::fetch(link.as_ref(), &filter),
+            );
+        }
+        let before = self.audit_filter.clone();
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Action");
+            egui::ComboBox::from_id_salt("audit-action")
+                .selected_text(if self.audit_filter.action.is_empty() {
+                    "all"
+                } else {
+                    self.audit_filter.action.as_str()
+                })
+                .show_ui(ui, |ui| {
+                    for f in audit::FAMILIES {
+                        ui.selectable_value(
+                            &mut self.audit_filter.action,
+                            f.to_string(),
+                            if f.is_empty() { "all" } else { f },
+                        );
+                    }
+                });
+            ui.label("Peer");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.audit_filter.peer)
+                    .desired_width(110.0)
+                    .hint_text("name or DID"),
+            );
+            ui.label("Job");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.audit_filter.job)
+                    .desired_width(60.0)
+                    .hint_text("id"),
+            );
+            let apply = ui.button("Apply").clicked();
+            if ui
+                .add_enabled(!self.audit_loading, egui::Button::new("Refresh"))
+                .clicked()
+                || apply
+                || (self.audit_filter.action != before.action)
+            {
+                self.audit_asked = false;
+            }
+            if self.audit_loading {
+                ui.weak("loading...");
+            }
+        });
+        match &self.audit {
+            None => {
+                ui.weak("No audit rows loaded yet.");
+            }
+            Some(Err(e)) => {
+                ui.colored_label(Color32::from_rgb(220, 90, 80), e);
+            }
+            Some(Ok(d)) => {
+                ui.weak(audit::summary(d));
+                egui::ScrollArea::both()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        egui::Grid::new("audit-table")
+                            .striped(true)
+                            .num_columns(audit::COLUMNS.len())
+                            .show(ui, |ui| {
+                                for t in audit::COLUMNS {
+                                    ui.label(RichText::new(t).strong());
+                                }
+                                ui.end_row();
+                                for r in &d.rows {
+                                    let c = audit::cells(r);
+                                    for (i, text) in c.iter().enumerate() {
+                                        let l = if i == 0 || i == 4 {
+                                            RichText::new(text).monospace()
+                                        } else {
+                                            RichText::new(text)
+                                        };
+                                        ui.add(egui::Label::new(l).truncate()).on_hover_text(text);
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            }
         }
     }
 

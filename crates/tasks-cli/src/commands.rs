@@ -110,6 +110,7 @@ fn dispatch(ctx: &mut Ctx<'_>, cmd: &Command) -> Result<i32, CliError> {
         },
         Command::Split(a) => split(ctx, a),
         Command::Stats(a) => stats(ctx, a),
+        Command::Audit(a) => crate::audit::audit(ctx, a),
         Command::Pair { action } => crate::trust::pair(ctx, action),
         Command::Peers { action, json } => crate::trust::peers(ctx, action.as_ref(), *json),
         Command::Identity { .. } => Err(CliError::Failed(

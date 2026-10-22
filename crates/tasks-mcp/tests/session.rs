@@ -73,7 +73,8 @@ fn r195_tools_list_matches_the_schemas() {
             "wait",
             "cancel",
             "status",
-            "estimate"
+            "estimate",
+            "audit"
         ]
     );
     assert_eq!(names, TOOL_NAMES);

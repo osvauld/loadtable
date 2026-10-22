@@ -290,3 +290,45 @@ fn help_documents_the_exit_codes() {
     assert_eq!(e.exit_code(), 0);
     assert_eq!(parse(&[]).unwrap_err().exit_code(), 2);
 }
+
+// R-283
+#[test]
+fn r283_audit_takes_filters_or_one_subcommand_but_not_both() {
+    let a = match parse(&[
+        "audit", "--since", "2h", "--peer", "nixos", "--job", "4", "--action", "grant", "--limit",
+        "9", "--json",
+    ])
+    .unwrap()
+    .command
+    {
+        Command::Audit(a) => a,
+        other => panic!("{other:?}"),
+    };
+    assert!(a.sub.is_none() && a.json);
+    assert_eq!(
+        (
+            a.since.as_deref(),
+            a.peer.as_deref(),
+            a.job,
+            a.action_filter.as_deref(),
+            a.limit
+        ),
+        (Some("2h"), Some("nixos"), Some(4), Some("grant"), Some(9))
+    );
+    assert!(matches!(
+        parse(&["audit", "verify", "--json"]).unwrap().command,
+        Command::Audit(AuditArgs {
+            sub: Some(AuditCommand::Verify { json: true }),
+            ..
+        })
+    ));
+    assert!(matches!(
+        parse(&["audit", "checkpoint"]).unwrap().command,
+        Command::Audit(AuditArgs {
+            sub: Some(AuditCommand::Checkpoint),
+            ..
+        })
+    ));
+    assert!(parse(&["audit", "verify", "--job", "3"]).is_err());
+    assert!(parse(&["audit", "--job", "x"]).is_err());
+}
