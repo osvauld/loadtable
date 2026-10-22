@@ -16,6 +16,7 @@ pub mod render;
 pub mod runtime;
 #[cfg(test)]
 mod testutil;
+pub mod trust;
 #[cfg(feature = "ui")]
 mod ui;
 
@@ -157,6 +158,10 @@ pub fn run_cli(args: &[String], out: &mut dyn Write, err: &mut dyn Write, deps: 
                     error::EXIT_FAILURE
                 }
             };
+        }
+        Command::Identity { action } => {
+            let tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+            return trust::identity(action, cli.state_dir.as_deref(), deps.env, tty, out, err);
         }
         Command::Mcp { .. } if MCP_BUILT => return run_mcp(&cli, deps),
         Command::Ui { .. } if UI_BUILT => return run_ui(&cli, deps),

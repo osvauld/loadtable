@@ -1037,6 +1037,12 @@ fn snapshot() -> tasks_daemon::api::StatusSnapshot {
             last_seen_ago_secs: Some(1),
             detail: String::new(),
             machine: None,
+            did: String::new(),
+            roles_out: vec![],
+            roles_in: vec![],
+            grant_expires_at: None,
+            path: "unknown".into(),
+            rtt_ms: None,
         }],
     }
 }

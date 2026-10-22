@@ -69,6 +69,12 @@ pub fn kind_of(r: &Response) -> &'static str {
     match r {
         Response::Ack => "ack",
         Response::Hello(_) => "hello",
+        Response::Identity(_) => "identity",
+        Response::Invite(_) => "invite",
+        Response::Paired(_) => "paired",
+        Response::PairReset { .. } => "pair_reset",
+        Response::Peers { .. } => "peers",
+        Response::Revoked(_) => "revoked",
         Response::Submitted { .. } => "submitted",
         Response::PlanSubmitted { .. } => "plan_submitted",
         Response::Jobs { .. } => "jobs",

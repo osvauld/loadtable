@@ -288,16 +288,17 @@ impl Scheduler {
         use crate::forwarder::LinkState;
         let links = self.forwarder.links();
         let mut out = Vec::new();
-        if links.is_empty() && !policy.peers().peers.is_empty() {
+        let paired_out = self.trust().map_or(0, |t| {
+            t.peers().iter().filter(|p| !p.roles_out.is_empty()).count()
+        });
+        if links.is_empty() && paired_out > 0 {
             out.push((
                 "peers-unavailable".to_string(),
                 AlertLevel::Warn,
-                format!(
-                    "{} peer(s) are configured but this daemon has no peer transport",
-                    policy.peers().peers.len()
-                ),
+                format!("{paired_out} peer(s) are paired but this daemon has no peer transport"),
             ));
         }
+        out.extend(self.grant_alerts());
         let grace =
             i64::try_from(policy.peer_grace_secs().saturating_mul(1000)).unwrap_or(i64::MAX);
         let mut st = lock(&self.state);
@@ -333,6 +334,48 @@ impl Scheduler {
         }
         st.peer_bad_since.retain(|k, _| bad_now.contains(k));
         out
+    }
+
+    /// A grant within its alert window (7 days by default) or past its end alerts: a held grant
+    /// that close to expiry has failed to renew, so the peer needs a new pairing soon; an issued
+    /// one means the peer has not renewed it.
+    fn grant_alerts(&self) -> Vec<(String, AlertLevel, String)> {
+        let Some(t) = self.trust() else {
+            return Vec::new();
+        };
+        t.expiring()
+            .into_iter()
+            .map(|e| {
+                let (level, when) = if e.left_secs <= 0 {
+                    (AlertLevel::Critical, "has expired".to_string())
+                } else {
+                    (
+                        AlertLevel::Warn,
+                        format!(
+                            "expires in {} d {} h",
+                            e.left_secs / 86_400,
+                            e.left_secs % 86_400 / 3600
+                        ),
+                    )
+                };
+                let what = if e.direction == "held" {
+                    format!(
+                        "the {} grant from {} {when} and could not be renewed; pair again with `tasks2 pair`",
+                        e.role, e.peer
+                    )
+                } else {
+                    format!(
+                        "the {} grant given to {} {when} and it has not renewed it",
+                        e.role, e.peer
+                    )
+                };
+                (
+                    format!("grant-{}-{}-{}", e.peer, e.direction, e.role),
+                    level,
+                    what,
+                )
+            })
+            .collect()
     }
 
     /// A slot held with no live job alerts only after the grace period (R-222).

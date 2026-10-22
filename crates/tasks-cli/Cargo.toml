@@ -25,6 +25,7 @@ mcp = ["dep:tasks-mcp"]
 [dependencies]
 tasks-core.workspace = true
 tasks-daemon.workspace = true
+tasks-identity.workspace = true
 tasks-platform.workspace = true
 tasks-policy.workspace = true
 tasks-timing.workspace = true
@@ -39,3 +40,4 @@ signal-hook.workspace = true
 
 [dev-dependencies]
 rustix.workspace = true
+tempfile.workspace = true

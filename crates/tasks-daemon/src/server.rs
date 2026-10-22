@@ -12,6 +12,7 @@ use crate::machine_policy::MachinePolicy;
 use crate::platform::{Ledger, Platform};
 use crate::scheduler::{Scheduler, SchedulerParts};
 use crate::startup::{StartupReport, reconcile};
+use crate::trust_runtime::{LocalOnly, PeerRuntimeFactory};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -38,6 +39,9 @@ pub struct DaemonOptions {
     pub forwarder: Arc<dyn Forwarder>,
     /// The operating system; `None` means the real one.
     pub platform: Option<Platform>,
+    /// Starts identity, trust and the peer transport once the state is locked. Defaults to
+    /// identity and pairing bookkeeping without a transport ([`LocalOnly`]).
+    pub peer_runtime: Option<Box<dyn PeerRuntimeFactory>>,
 }
 
 impl DaemonOptions {
@@ -48,6 +52,7 @@ impl DaemonOptions {
             env: std::env::vars().collect(),
             forwarder: Arc::new(NoForwarder),
             platform: None,
+            peer_runtime: Some(Box::new(LocalOnly)),
         }
     }
 }
@@ -57,6 +62,7 @@ pub struct Daemon {
     sch: Arc<Scheduler>,
     listener: UnixListener,
     _pid: PidLock,
+    _peer_keepalive: Option<Box<dyn std::any::Any + Send>>,
     /// What startup reconciliation did.
     pub startup: StartupReport,
 }
@@ -93,6 +99,16 @@ impl Daemon {
             SqliteStore::open(&cfg.db_path())
         })?;
         let ledger: Arc<dyn Ledger> = Arc::new(store);
+        // Identity, trust and the transport start only now: the state is locked, so a stray
+        // second daemon never binds an endpoint or touches the keystore.
+        let peer_rt = match opts.peer_runtime {
+            Some(f) => Some(f.start(&cfg, &policy)?),
+            None => None,
+        };
+        let forwarder = peer_rt
+            .as_ref()
+            .and_then(|r| r.forwarder.clone())
+            .unwrap_or(opts.forwarder);
         let platform = opts
             .platform
             .unwrap_or_else(|| Platform::native(&cfg.lock_dir));
@@ -107,15 +123,27 @@ impl Daemon {
             ledger,
             platform,
             clock: Arc::new(SystemClock),
-            forwarder: opts.forwarder,
+            forwarder,
             parent_env: env,
             execution_enabled: enabled,
             runner_poll: Duration::from_millis(50),
         });
+        let mut keepalive = None;
+        if let Some(rt) = peer_rt {
+            sch.set_trust(rt.trust);
+            if let Some(serve) = rt.serving {
+                serve(crate::peer_link::serve::build_receiver(
+                    &sch,
+                    sch.config().state_dir.join("peer-store"),
+                ));
+            }
+            keepalive = Some(rt.keepalive);
+        }
         Ok(Daemon {
             sch,
             listener,
             _pid: pid,
+            _peer_keepalive: keepalive,
             startup,
         })
     }

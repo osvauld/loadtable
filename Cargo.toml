@@ -33,6 +33,7 @@ signal-hook = "0.4"
 tasks-peer = { path = "crates/tasks-peer" }
 tasks-mcp = { path = "crates/tasks-mcp" }
 tasks-ui = { path = "crates/tasks-ui" }
+tasks-identity = { path = "crates/tasks-identity" }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"

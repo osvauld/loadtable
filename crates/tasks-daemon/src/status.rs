@@ -250,20 +250,61 @@ impl Scheduler {
             pressure: self.pressure_view(&policy),
             alerts: lock(&self.alerts).views(),
             settings: policy.settings(),
-            peers: self
-                .forwarder
-                .links()
-                .into_iter()
-                .map(|l| PeerView {
-                    name: l.peer,
-                    node_id: l.node_id,
-                    state: l.state.name().to_string(),
-                    last_seen_ago_secs: l.last_seen_ago_secs,
-                    detail: l.detail,
-                    machine: l.status.map(|s| peer_machine_view(&s)),
-                })
-                .collect(),
+            peers: self.peer_views(),
         }
+    }
+
+    /// Every peer: the forwarder's links joined with what trust knows (DID, roles each way, grant
+    /// expiry), plus paired peers that have no link yet (they only connect to this machine).
+    fn peer_views(&self) -> Vec<PeerView> {
+        let trust = self.trust();
+        let quality = self.forwarder.link_quality();
+        if let Some(t) = &trust {
+            t.set_link_quality(quality.clone());
+        }
+        let known = trust.as_ref().map(|t| t.peers()).unwrap_or_default();
+        let roles = |v: &[crate::trust_control::RoleView]| -> Vec<String> {
+            v.iter().map(|r| r.role.clone()).collect()
+        };
+        let mut out: Vec<PeerView> = Vec::new();
+        for l in self.forwarder.links() {
+            let t = known.iter().find(|p| p.name == l.peer);
+            let q = quality.iter().find(|q| q.peer == l.peer);
+            out.push(PeerView {
+                state: l.state.name().to_string(),
+                last_seen_ago_secs: l.last_seen_ago_secs,
+                detail: l.detail,
+                did: t.map(|p| p.did.clone()).unwrap_or_default(),
+                roles_out: t.map(|p| roles(&p.roles_out)).unwrap_or_default(),
+                roles_in: t.map(|p| roles(&p.roles_in)).unwrap_or_default(),
+                grant_expires_at: t.and_then(|p| p.expires_at),
+                path: q.map_or_else(|| "unknown".to_string(), |q| q.path.clone()),
+                rtt_ms: q.and_then(|q| q.rtt_ms),
+                machine: l.status.map(|s| peer_machine_view(&s)),
+                name: l.peer,
+                node_id: l.node_id,
+            });
+        }
+        for p in known {
+            if out.iter().any(|v| v.name == p.name) {
+                continue;
+            }
+            out.push(PeerView {
+                state: if p.revoked { "revoked" } else { "inbound" }.to_string(),
+                last_seen_ago_secs: None,
+                detail: String::new(),
+                did: p.did,
+                roles_out: roles(&p.roles_out),
+                roles_in: roles(&p.roles_in),
+                grant_expires_at: p.expires_at,
+                path: p.path,
+                rtt_ms: p.rtt_ms,
+                machine: None,
+                name: p.name,
+                node_id: p.node_id,
+            });
+        }
+        out
     }
 
     fn pressure_view(&self, policy: &crate::machine_policy::MachinePolicy) -> PressureView {

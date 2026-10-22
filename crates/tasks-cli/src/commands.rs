@@ -110,6 +110,11 @@ fn dispatch(ctx: &mut Ctx<'_>, cmd: &Command) -> Result<i32, CliError> {
         },
         Command::Split(a) => split(ctx, a),
         Command::Stats(a) => stats(ctx, a),
+        Command::Pair { action } => crate::trust::pair(ctx, action),
+        Command::Peers { action, json } => crate::trust::peers(ctx, action.as_ref(), *json),
+        Command::Identity { .. } => Err(CliError::Failed(
+            "internal: identity is read from the state directory, not from the daemon".into(),
+        )),
         Command::Daemon { .. } | Command::Ui { .. } | Command::Mcp { .. } => Err(CliError::Failed(
             "internal: this command is handled before the client is built".into(),
         )),

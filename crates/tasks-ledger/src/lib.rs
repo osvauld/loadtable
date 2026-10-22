@@ -12,6 +12,7 @@ mod retry;
 mod sqlite;
 #[cfg(test)]
 mod suite;
+mod trust;
 
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use error::LedgerError;
@@ -26,6 +27,7 @@ pub use request::{
 };
 pub use retry::{RetryPolicy, retry_busy};
 pub use sqlite::{OpenOptions, SqliteStore};
+pub use trust::{GrantDirection, GrantRecord, MemoryTrust, PeerRecord, TrustLedger};
 
 use std::path::Path;
 use std::time::Duration;

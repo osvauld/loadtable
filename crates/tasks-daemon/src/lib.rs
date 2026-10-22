@@ -39,6 +39,10 @@ mod supervise;
 mod testkit;
 #[cfg(test)]
 mod tests;
+pub mod trust_control;
+pub mod trust_runtime;
+#[cfg(test)]
+mod trust_tests;
 #[cfg(test)]
 mod wiring_tests;
 

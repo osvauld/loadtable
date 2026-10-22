@@ -92,11 +92,46 @@ const V4: &str = "
 ALTER TABLE jobs ADD COLUMN cancel_reason TEXT;
 ";
 
+/// Trust: paired peers, grants (issued and held, never deleted: revoking changes `state`), spent
+/// invite nonces and small named values such as the ticket epoch.
+const V5: &str = "
+CREATE TABLE trust_peers(
+    name TEXT PRIMARY KEY,
+    did TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    relay TEXT,
+    addrs TEXT NOT NULL DEFAULT '[]',
+    paired_ms INTEGER NOT NULL
+);
+CREATE TABLE trust_grants(
+    id TEXT PRIMARY KEY,
+    direction TEXT NOT NULL,
+    peer_did TEXT NOT NULL,
+    peer_node TEXT NOT NULL,
+    role TEXT NOT NULL,
+    nonce TEXT NOT NULL,
+    iat INTEGER NOT NULL,
+    exp INTEGER NOT NULL,
+    token TEXT NOT NULL,
+    state TEXT NOT NULL,
+    state_at_ms INTEGER NOT NULL
+);
+CREATE INDEX trust_grants_peer ON trust_grants(peer_did, direction);
+CREATE TABLE trust_spent_nonces(
+    nonce TEXT PRIMARY KEY,
+    spent_at_ms INTEGER NOT NULL
+);
+CREATE TABLE trust_meta(
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+";
+
 /// The migrations in order; entry `i` upgrades version `i` to `i + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5];
 
 /// The schema version this build writes.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 fn version(conn: &Connection) -> Result<i64> {
     Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
@@ -158,6 +193,37 @@ mod tests {
             .query_row("SELECT cancel_reason FROM jobs", [], |r| r.get(0))
             .unwrap();
         assert_eq!(reason, None);
+    }
+
+    // R-238
+    #[test]
+    fn r238_a_v4_database_upgrades_to_v5_and_keeps_its_jobs() {
+        let mut c = Connection::open_in_memory().unwrap();
+        migrate(&mut c, &MIGRATIONS[..4]).unwrap();
+        assert_eq!(uv(&c), 4);
+        c.execute(
+            "INSERT INTO jobs(spec, phase, phase_tag, submitted_at_ms, owner, cwd, argv, hints)
+             VALUES ('{}', '\"Queued\"', 'queued', 1, 'o', '/', '[]', '{}')",
+            [],
+        )
+        .unwrap();
+        migrate(&mut c, MIGRATIONS).unwrap();
+        assert_eq!(uv(&c), 5);
+        let jobs: i64 = c
+            .query_row("SELECT count(*) FROM jobs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(jobs, 1);
+        for table in [
+            "trust_peers",
+            "trust_grants",
+            "trust_spent_nonces",
+            "trust_meta",
+        ] {
+            let n: i64 = c
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 0, "{table}");
+        }
     }
 
     #[test]

@@ -756,6 +756,12 @@ mod tests {
             state: "from-the-future".into(),
             last_seen_ago_secs: None,
             detail: String::new(),
+            did: String::new(),
+            roles_out: vec![],
+            roles_in: vec![],
+            grant_expires_at: None,
+            path: "unknown".into(),
+            rtt_ms: None,
             machine: None,
         };
         let c = peer_card(&p, &[]);

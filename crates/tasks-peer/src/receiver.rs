@@ -19,16 +19,30 @@ use tasks_core::{JobSpec, Phase, Placement};
 
 /// Peers allowed to talk to this daemon, by transport-proven identity.
 #[derive(Debug, Clone, Default)]
-pub struct Allowlist(BTreeSet<PeerId>);
+pub struct Allowlist {
+    peers: BTreeSet<PeerId>,
+    open: bool,
+}
 
 impl Allowlist {
     /// An allowlist of exactly these peers; empty admits nobody.
     pub fn new(peers: impl IntoIterator<Item = PeerId>) -> Allowlist {
-        Allowlist(peers.into_iter().collect())
+        Allowlist {
+            peers: peers.into_iter().collect(),
+            open: false,
+        }
+    }
+    /// Admits every peer. For a receiver behind [`crate::trust::TrustedHandler`], which has
+    /// already admitted the caller on a grant: the node-id allowlist is gone, grants decide.
+    pub fn open() -> Allowlist {
+        Allowlist {
+            peers: BTreeSet::new(),
+            open: true,
+        }
     }
     /// True when `peer` is listed.
     pub fn admits(&self, peer: &PeerId) -> bool {
-        self.0.contains(peer)
+        self.open || self.peers.contains(peer)
     }
 }
 

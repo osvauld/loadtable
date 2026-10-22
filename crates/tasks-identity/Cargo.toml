@@ -1,0 +1,27 @@
+[package]
+name = "tasks-identity"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Pure RustCrypto: nothing here needs a C toolchain, so aarch64-apple-darwin builds as is.
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bip39 = "3"
+bs58 = "0.5"
+ed25519-dalek = "3"
+x25519-dalek = { version = "3", features = ["static_secrets"] }
+hkdf = "0.13"
+sha2 = "0.11"
+getrandom = "0.4"
+zeroize = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tempfile.workspace = true

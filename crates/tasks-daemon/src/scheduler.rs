@@ -151,6 +151,8 @@ pub struct Scheduler {
     pub(crate) cores: u32,
     pub(crate) running: Mutex<BTreeMap<JobId, Arc<RunningJob>>>,
     pub(crate) alerts: Mutex<AlertBook>,
+    /// Trust control (identity, pairing, peers); set by the daemon when the trust runtime is up.
+    pub(crate) trust: Mutex<Option<Arc<dyn crate::trust_control::TrustControl>>>,
     pub(crate) state: Mutex<TickState>,
     pub(crate) wake: Wake,
     pub(crate) draining: AtomicBool,
@@ -181,6 +183,7 @@ impl Scheduler {
                 .unwrap_or(1),
             running: Mutex::new(BTreeMap::new()),
             alerts: Mutex::new(AlertBook::new()),
+            trust: Mutex::new(None),
             state: Mutex::new(TickState::default()),
             wake: Wake::default(),
             draining: AtomicBool::new(false),
@@ -191,6 +194,16 @@ impl Scheduler {
             parent_env: parts.parent_env,
             runner_poll: parts.runner_poll,
         })
+    }
+
+    /// Plugs in trust control: `Identity`, `Pair*` and `Peers` requests, peer trust in the
+    /// status and grant-expiry alerts.
+    pub fn set_trust(&self, trust: Arc<dyn crate::trust_control::TrustControl>) {
+        *lock(&self.trust) = Some(trust);
+    }
+
+    pub(crate) fn trust(&self) -> Option<Arc<dyn crate::trust_control::TrustControl>> {
+        lock(&self.trust).clone()
     }
 
     /// The current machine policy.

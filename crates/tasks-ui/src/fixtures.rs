@@ -101,6 +101,12 @@ fn peer(state: &str, ago: Option<u64>) -> PeerView {
         } else {
             String::new()
         },
+        did: String::new(),
+        roles_out: vec![],
+        roles_in: vec![],
+        grant_expires_at: None,
+        path: "unknown".into(),
+        rtt_ms: None,
         machine: Some(PeerMachineView {
             cores: 16,
             memory_bytes: 64 << 30,

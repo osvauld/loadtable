@@ -130,8 +130,23 @@ pub struct LinkReport {
     pub status: Option<tasks_peer::proto::PeerStatus>,
 }
 
+/// How a link to one peer carries traffic, as last measured.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkQuality {
+    /// The peer's name.
+    pub peer: String,
+    /// `direct`, `relay` or `unknown`.
+    pub path: String,
+    /// Round-trip time of the selected path, in milliseconds.
+    pub rtt_ms: Option<u64>,
+}
+
 /// The daemon's view of its peers.
 pub trait Forwarder: Send + Sync {
+    /// Path and round-trip time per peer, from the last probe. Additive to [`Forwarder::links`].
+    fn link_quality(&self) -> Vec<LinkQuality> {
+        Vec::new()
+    }
     /// The other machines as placement sees them (`is_local` false), with link state, free
     /// slots and checkout sync facts. Estimates may be left empty; the daemon fills them.
     fn peers(&self) -> Vec<MachineView>;
