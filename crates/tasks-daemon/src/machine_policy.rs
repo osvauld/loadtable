@@ -828,9 +828,37 @@ impl MachinePolicy {
     }
 }
 
+/// A job's wall-clock limit: its own (or its step's) limit, capped by the machine's.
+/// A job may ask for less time than the machine allows, never more.
+pub fn effective_wall_timeout(
+    job: Option<Duration>,
+    machine: Option<Duration>,
+) -> Option<Duration> {
+    match (job, machine) {
+        (Some(j), Some(m)) => Some(j.min(m)),
+        (j, m) => j.or(m),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn r095_the_machine_wall_timeout_is_a_ceiling_for_a_jobs_own_limit() {
+        let s = Duration::from_secs;
+        assert_eq!(
+            effective_wall_timeout(Some(s(60)), Some(s(3600))),
+            Some(s(60))
+        );
+        assert_eq!(
+            effective_wall_timeout(Some(s(7200)), Some(s(3600))),
+            Some(s(3600))
+        );
+        assert_eq!(effective_wall_timeout(Some(s(60)), None), Some(s(60)));
+        assert_eq!(effective_wall_timeout(None, Some(s(3600))), Some(s(3600)));
+        assert_eq!(effective_wall_timeout(None, None), None);
+    }
 
     fn no_env(_: &str) -> Option<String> {
         None

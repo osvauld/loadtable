@@ -606,13 +606,14 @@ impl Scheduler {
                 .known_median
                 .or(facts.est.as_ref().map(|e| e.median_secs)),
         });
-        // the spec's own limit, then a plan step's hint (older rows), then the machine default
-        let wall = rec
-            .spec
-            .timeout_secs
-            .or(rec.hints.timeout_secs)
-            .map(Duration::from_secs)
-            .or_else(|| policy.wall_timeout());
+        // the spec's own limit, else a plan step's hint (older rows), capped by the machine's
+        let wall = crate::machine_policy::effective_wall_timeout(
+            rec.spec
+                .timeout_secs
+                .or(rec.hints.timeout_secs)
+                .map(Duration::from_secs),
+            policy.wall_timeout(),
+        );
         let run_policy = RunPolicy {
             cancel_grace: policy.cancel_grace(),
             wall_timeout: wall,
