@@ -83,6 +83,33 @@ impl Plan {
         Ok(plan)
     }
 
+    /// Step indices with every step after the steps it waits for; one dependency wave at a time, plan order within a wave. Only
+    /// meaningful for a validated plan.
+    pub fn order(&self) -> Vec<usize> {
+        let mut done = vec![false; self.steps.len()];
+        let mut order = Vec::with_capacity(self.steps.len());
+        loop {
+            let wave: Vec<usize> = (0..self.steps.len())
+                .filter(|&i| {
+                    !done[i]
+                        && self.steps[i].after.iter().all(|name| {
+                            self.steps
+                                .iter()
+                                .position(|s| &s.name == name)
+                                .is_some_and(|j| done[j])
+                        })
+                })
+                .collect();
+            if wave.is_empty() {
+                return order;
+            }
+            for &i in &wave {
+                done[i] = true;
+            }
+            order.extend(wave);
+        }
+    }
+
     /// Every rule a plan must meet before anything is submitted.
     pub fn validate(&self) -> Result<(), String> {
         if self.steps.is_empty() {

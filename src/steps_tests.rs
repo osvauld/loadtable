@@ -214,3 +214,14 @@ fn summary_lines_up_names_and_shows_dependencies() {
     assert!(lines[1].contains("build") && lines[1].contains("1m01s") && lines[1].contains("12"));
     assert!(lines[2].contains("lifecycle") && lines[2].trim_end().ends_with("build"));
 }
+
+#[test]
+fn order_puts_every_step_after_what_it_waits_for() {
+    let p = plan(vec![
+        step("report", &["peer", "lifecycle"]),
+        step("peer", &["build"]),
+        step("build", &[]),
+        step("lifecycle", &["build"]),
+    ]);
+    assert_eq!(p.order(), [2, 1, 3, 0]);
+}

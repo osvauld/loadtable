@@ -23,6 +23,7 @@ pub mod health;
 #[cfg(target_os = "linux")]
 pub mod lease_audit;
 pub mod ledger;
+pub mod job_deps;
 pub mod listing;
 pub mod local_command;
 pub mod log_search;
@@ -197,6 +198,11 @@ impl Store {
             );
             CREATE TABLE IF NOT EXISTS executions (
                 job_id INTEGER PRIMARY KEY REFERENCES jobs(id), data TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS job_deps (
+                job_id INTEGER NOT NULL REFERENCES jobs(id),
+                after_id INTEGER NOT NULL REFERENCES jobs(id),
+                PRIMARY KEY(job_id, after_id)
             );",
         )?;
         Ok(Self(conn))
@@ -360,6 +366,8 @@ pub enum Action {
     Job(i64),
     Submit(JobSpec),
     Cancel(i64),
+    /// Makes a queued job wait for older jobs to pass (call after `Submit`, before approving).
+    After(i64, Vec<i64>),
     /// Moves an approved job ahead of the normal queue: (job id, who asked, reason). Daemons
     /// older than it answer "unknown variant".
     Prioritize(i64, String, String),
@@ -410,6 +418,7 @@ pub fn handle(store: &mut Store, request: Request) -> Response {
     let full = matches!(request.action, Action::List);
     let named = match &request.action {
         Action::Cancel(id)
+        | Action::After(id, _)
         | Action::Approve(id)
         | Action::ApproveAndroidTrial(id)
         | Action::ApproveCommand(id)
@@ -465,6 +474,7 @@ pub fn handle(store: &mut Store, request: Request) -> Response {
                 submitted_id = Some(j.id);
             }),
             Action::Cancel(id) => store.cancel(id),
+            Action::After(id, after) => store.set_after(id, &after),
             Action::Prioritize(id, by, reason) => store.prioritize(id, &by, &reason),
             Action::Approve(id) => store.approve(id),
             Action::ApproveAndroidTrial(id) => store.approve_android_trial(id),
@@ -734,6 +744,10 @@ pub fn request_with_reconnect_timeouts(
         }
         Action::Cancel(id) => Err(format!(
             "cancel of job {id} was sent but no reply arrived ({lost}); it may have been applied. Check `tasks list` before retrying"
+        )
+        .into()),
+        Action::After(id, _) => Err(format!(
+            "dependencies of job {id} were sent but no reply arrived ({lost}); they may have been applied. The job is not approved yet: cancel it and submit again rather than resending"
         )
         .into()),
         Action::Prioritize(id, _, _) => Err(format!(

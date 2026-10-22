@@ -387,10 +387,13 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
-    /// Approved jobs no worker has claimed yet.
+    /// Approved jobs no worker has claimed yet and that are not waiting for another job.
     pub fn approved_waiting(&self) -> Result<usize> {
         let n: i64 = self.0.query_row(
-            "SELECT COUNT(*) FROM jobs WHERE phase='approved'",
+            &format!(
+                "SELECT COUNT(*) FROM jobs j WHERE j.phase='approved' AND {}",
+                crate::job_deps::UNBLOCKED
+            ),
             [],
             |r| r.get(0),
         )?;
@@ -409,6 +412,8 @@ impl Store {
         general: bool,
         offload: bool,
     ) -> Result<Option<Job>> {
+        // A job waiting for one that did not pass can never run.
+        self.cancel_blocked()?;
         // Only one worker holds worker.lock, but the transaction also protects against CLI cancellation.
         let tx = self
             .0
@@ -416,9 +421,12 @@ impl Store {
         let id = {
             // Urgent jobs first (`tasks prioritize`), each group in submission order.
             let mut statement = tx.prepare(
-                "SELECT j.id, j.spec, COALESCE(json_extract(e.data, '$.priority.level') = 'urgent', 0) AS urgent \
-                 FROM jobs j LEFT JOIN executions e ON e.job_id=j.id \
-                 WHERE j.phase='approved' ORDER BY urgent DESC, j.id",
+                &format!(
+                    "SELECT j.id, j.spec, COALESCE(json_extract(e.data, '$.priority.level') = 'urgent', 0) AS urgent \
+                     FROM jobs j LEFT JOIN executions e ON e.job_id=j.id \
+                     WHERE j.phase='approved' AND {} ORDER BY urgent DESC, j.id",
+                    crate::job_deps::UNBLOCKED
+                ),
             )?;
             let mut rows = statement.query([])?;
             let mut found = None;
