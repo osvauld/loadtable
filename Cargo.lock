@@ -292,6 +292,15 @@ name = "tasks-runner"
 version = "0.1.0"
 
 [[package]]
+name = "tasks-timing"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tasks-core",
+ "thiserror",
+]
+
+[[package]]
 name = "tasks-ui"
 version = "0.1.0"
 
