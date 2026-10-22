@@ -1,0 +1,98 @@
+   Compiling rav1d v1.1.0 (https://github.com/memorysafety/rav1d?tag=v1.1.0#782dab21)
+   Compiling group-core v0.1.38 (/ws)
+   Compiling account-model v0.1.38 (/ws)
+   Compiling serde_spanned v1.1.2
+   Compiling cargo-platform v0.3.3
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling semver v1.0.28
+   Compiling toml_writer v1.1.3+spec-1.1.0
+   Compiling plain v0.2.3
+   Compiling strsim v0.11.1
+   Compiling clap_lex v1.1.1
+   Compiling siphasher v1.0.4
+   Compiling unicode-segmentation v1.13.3
+   Compiling anstyle v1.0.14
+   Compiling uniffi_meta v0.32.2
+   Compiling clap_builder v4.6.7
+   Compiling search-core v0.1.38 (/ws)
+   Compiling toml v1.1.6+spec-1.1.0
+   Compiling goblin v0.8.2
+   Compiling cargo_metadata v0.23.1
+   Compiling fs-err v3.3.2
+   Compiling uniffi_udl v0.32.2
+   Compiling askama v0.16.1
+   Compiling camino v1.2.6
+   Compiling clap_derive v4.6.7
+   Compiling regex-syntax v0.8.11
+   Compiling static_assertions v1.1.0
+   Compiling glob v0.3.4
+   Compiling uniffi_bindgen v0.32.2
+   Compiling clap v4.6.7
+   Compiling uniffi_core v0.32.2
+   Compiling regex-automata v0.4.18
+   Compiling uniffi_macros v0.32.2
+   Compiling gcall-core v0.1.38 (/ws)
+   Compiling receipts-core v0.1.38 (/ws)
+   Compiling lazy_static v1.5.1
+   Compiling sharded-slab v0.1.7
+   Compiling uniffi v0.32.2
+   Compiling matchers v0.2.0
+   Compiling tracing-log v0.2.0
+   Compiling p2pcore v0.1.38 (/ws)
+   Compiling nu-ansi-term v0.50.3
+   Compiling present v0.1.38 (/ws)
+   Compiling tracing-subscriber v0.3.23
+   Compiling gcall-net v0.1.38 (/ws)
+   Compiling video v0.1.38 (/ws)
+   Compiling video-call-core v0.1.38 (/ws)
+   Compiling call-video v0.1.38 (/ws)
+   Compiling node-runtime v0.1.38 (/ws)
+   Compiling search-ix v0.1.38 (/ws)
+   Compiling group-runtime v0.1.38 (/ws)
+   Compiling chat-runtime v0.1.38 (/ws)
+    Finished `release` profile [optimized] target(s) in 51m 03s
+     Running tests/accounts.rs (target/release/deps/accounts-84059f85074e6d6e)
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.89s
+     Running tests/blocking_acceptance.rs (target/release/deps/blocking_acceptance-c5e2cf2a5d75471d)
+test result: ok. 17 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 23.53s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 21.23s
+     Running tests/calls.rs (target/release/deps/calls-ed54271c6976e1fc)
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.84s
+     Running tests/contact_requests.rs (target/release/deps/contact_requests-8c5d3a4dda1fd0f5)
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.22s
+     Running tests/device_list_characterization.rs (target/release/deps/device_list_characterization-9bba387f4c9bea22)
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.53s
+     Running tests/device_list_push.rs (target/release/deps/device_list_push-1c6a9772d08459b7)
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 27.19s
+     Running tests/devices.rs (target/release/deps/devices-66d8e89de057a8fa)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.65s
+     Running tests/endpoint_close.rs (target/release/deps/endpoint_close-8818eb7382507571)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.29s
+     Running tests/gcall.rs (target/release/deps/gcall-701e5ec5a3d4c0fd)
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.04s
+     Running tests/grant_characterization.rs (target/release/deps/grant_characterization-8dd2141e07432ad1)
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.61s
+     Running tests/group_call.rs (target/release/deps/group_call-294ed8e94074991a)
+test result: ok. 6 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 112.36s
+     Running tests/idle_close.rs (target/release/deps/idle_close-68d43312b295de54)
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 47.78s
+     Running tests/lifecycle.rs (target/release/deps/lifecycle-c16c44a7a04bc8cc)
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 115.55s
+     Running tests/link.rs (target/release/deps/link-cccf23ef41fae4f0)
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 57.02s
+     Running tests/link_expiry.rs (target/release/deps/link_expiry-b6254bc47b572832)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.17s
+     Running tests/private_rotation.rs (target/release/deps/private_rotation-a34996aabe6cbfbc)
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 37.10s
+     Running tests/readd.rs (target/release/deps/readd-e33780cf142b86bb)
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.91s
+     Running tests/restore.rs (target/release/deps/restore-441882df999603a0)
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.34s
+     Running tests/restore_characterization.rs (target/release/deps/restore_characterization-95981c944545f849)
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 22.25s
+     Running tests/restore_ticket.rs (target/release/deps/restore_ticket-634e05ec524d5289)
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.06s
+     Running tests/tickets.rs (target/release/deps/tickets-7b3ee59ae24e73be)
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.64s
+     Running tests/video_calls.rs (target/release/deps/video_calls-753936dafba22668)
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.17s
