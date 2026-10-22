@@ -9,10 +9,31 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[lib]
+name = "tasks_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "tasks2"
 path = "src/main.rs"
 
+[features]
+# The desktop window and the MCP server are not built yet; both stay off (R-199).
+ui = []
+mcp = []
+
 [dependencies]
 tasks-core.workspace = true
+tasks-daemon.workspace = true
+tasks-platform.workspace = true
+tasks-policy.workspace = true
+tasks-timing.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+signal-hook.workspace = true
+
+[dev-dependencies]
+rustix.workspace = true

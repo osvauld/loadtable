@@ -27,6 +27,9 @@ tasks-runner = { path = "crates/tasks-runner" }
 tasks-admission = { path = "crates/tasks-admission" }
 tasks-placement = { path = "crates/tasks-placement" }
 tasks-policy = { path = "crates/tasks-policy" }
+tasks-daemon = { path = "crates/tasks-daemon" }
+clap = { version = "4.5", features = ["derive"] }
+signal-hook = "0.4"
 
 [workspace.lints.clippy]
 unwrap_used = "deny"

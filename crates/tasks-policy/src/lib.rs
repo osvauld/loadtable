@@ -13,6 +13,7 @@ pub mod expand;
 pub mod load;
 pub mod model;
 pub mod show;
+pub mod submit_rules;
 pub mod suggest;
 pub mod timing;
 pub mod validate;
