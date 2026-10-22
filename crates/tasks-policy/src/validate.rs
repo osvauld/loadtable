@@ -128,6 +128,7 @@ pub fn validate(policy: &Policy, file: &Path) -> Result<(), PolicyError> {
     for (name, suite) in &policy.suites {
         check_suite(name, suite, &mut out);
     }
+    check_sync(&policy.sync, &mut out);
     if out.is_empty() {
         Ok(())
     } else {
@@ -135,6 +136,39 @@ pub fn validate(policy: &Policy, file: &Path) -> Result<(), PolicyError> {
             file: file.to_path_buf(),
             list: out,
         }))
+    }
+}
+
+fn check_sync(sync: &crate::model::SyncSection, out: &mut Vec<Violation>) {
+    let mut bad = |why: String| {
+        out.push(Violation {
+            suite: String::new(),
+            step: None,
+            problem: Problem::BadSyncExtra(why),
+        })
+    };
+    if sync.extra.len() > crate::model::MAX_SYNC_EXTRA {
+        bad(format!(
+            "more than {} entries",
+            crate::model::MAX_SYNC_EXTRA
+        ));
+    }
+    for raw in &sync.extra {
+        let p = raw.trim_end_matches('/');
+        if p.is_empty() {
+            bad(format!("{raw:?} is empty"));
+        } else if p.starts_with('/') || p.contains('\0') || p.contains('\\') {
+            bad(format!(
+                "{raw:?} must be a relative path without backslashes"
+            ));
+        } else if p
+            .split('/')
+            .any(|c| c.is_empty() || c == "." || c == ".." || c == ".git")
+        {
+            bad(format!(
+                "{raw:?} has an empty, `.`, `..` or `.git` component"
+            ));
+        }
     }
 }
 
@@ -162,6 +196,33 @@ mod tests {
         }
     }
     const HEAD: &str = "version = 1\n[suites.s]\n";
+
+    #[test]
+    fn r314_sync_extras_parse_and_bad_ones_are_named() {
+        let ok = p("version = 1\n[sync]\nextra = [\"local.properties\", \"config/*.json\", \"fixtures/\"]\n").unwrap();
+        assert_eq!(ok.sync.extra.len(), 3);
+        assert!(p("version = 1\n").unwrap().sync.is_empty());
+        for bad in ["/etc/passwd", "../x", "a/../b", ".git/config", "", "a//b"] {
+            let t = format!("version = 1\n[sync]\nextra = [{bad:?}]\n");
+            let v = problems(&t);
+            assert!(
+                matches!(v.as_slice(), [Problem::BadSyncExtra(_)]),
+                "{bad:?}: {v:?}"
+            );
+        }
+        let many: Vec<String> = (0..65).map(|i| format!("\"f{i}\"")).collect();
+        let v = problems(&format!(
+            "version = 1\n[sync]\nextra = [{}]\n",
+            many.join(",")
+        ));
+        assert!(v.iter().any(
+            |p| matches!(p, Problem::BadSyncExtra(w) if w.contains("65") || w.contains("more than"))
+        ));
+        assert!(matches!(
+            p("version = 1\n[sync]\nbogus = 1\n"),
+            Err(PolicyError::Parse { .. })
+        ));
+    }
 
     #[test]
     fn minimal_parses() {

@@ -15,7 +15,32 @@ pub struct Policy {
     /// Named suites.
     #[serde(default)]
     pub suites: BTreeMap<String, Suite>,
+    /// What travels with a checkout when a job is forwarded to another machine.
+    #[serde(default, skip_serializing_if = "SyncSection::is_empty")]
+    pub sync: SyncSection,
 }
+
+/// `[sync]`: files beyond the git working tree that a forwarded job needs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncSection {
+    /// Gitignored files that must travel (e.g. `local.properties`), as relative paths. `*` and
+    /// `?` match inside one path component; a trailing `/` takes a whole directory. Anything
+    /// not listed here and ignored by git never leaves the machine, and a file that looks like
+    /// a secret is refused by name.
+    #[serde(default)]
+    pub extra: Vec<String>,
+}
+
+impl SyncSection {
+    /// True when nothing is listed.
+    pub fn is_empty(&self) -> bool {
+        self.extra.is_empty()
+    }
+}
+
+/// Most `[sync] extra` patterns.
+pub const MAX_SYNC_EXTRA: usize = 64;
 
 /// A named group of steps, e.g. `core-tests`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
