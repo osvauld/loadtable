@@ -1,6 +1,6 @@
 # Design: peer identity, git sync over iroh, audit and attribution, scheduling
 
-Status: proposal for review (2026-10-22). Nothing here is built yet. The daemon, peer
+Status: decided 2026-10-22 (§12 records the answers). Nothing here is built yet. The daemon, peer
 forwarding state machine, CLI and MCP crates already exist; this replaces their transport,
 sync and trust layers and adds audit, attribution and priority.
 
@@ -38,9 +38,10 @@ Reuse the osvauld identity contract (osvauld2 `identity/`, p2p_chat `crates/iden
 - `did:key:z…` is the machine's stable name in the ledger, audit log and status; the
   human name ("kurukkan", "nixos") is a label.
 
-Decision needed (D1): depend on the identity crate from osvauld2/p2p_chat (git or path
-dependency) or vendor its ~200 lines with its golden vectors. Recommendation: path/git
-dependency on one shared crate, so there is one forever-contract.
+Decided (D1): carry our own copy for now, in a `tasks-identity` crate: the same
+derivation contexts and DID encoding as osvauld2/p2p_chat, with their golden vectors copied
+into tests so the copies cannot drift unnoticed. Moving to a shared crate later changes no
+key or DID.
 
 ## 3. Grants and roles
 
@@ -143,9 +144,12 @@ The job records `tree`, the HEAD commit it was based on and the dirty-file count
   freed.
 
 This replaces the peer crate's `manifest`, `sync` and `store` modules; `CheckoutLocks`,
-`Forward`, `outputs` and the receiver stay. Shelling out to `git` (installed on Linux and
-macOS) is the default implementation behind a `Snapshot`/`PackTransfer` trait; a library
-can replace it later without changing the protocol.
+`Forward`, `outputs` and the receiver stay. Decided (D3): implement with `gix`
+(gitoxide, pure Rust, so no C toolchain and the macOS cross-check keeps working) behind
+`Snapshot`/`PackTransfer` traits: status with the index stat cache, object and tree
+writing, pack generation, pack receipt and tree checkout. A step where gix proves to have
+a real gap may fall back to the `git` command behind the same trait, named in the code.
+`git2` (libgit2) is not used: it needs a C build and cannot make thin packs.
 
 ## 7. Logs
 
@@ -222,31 +226,28 @@ Queue order: `(class, effective wait, submit time)`.
   A short job that overruns is not killed; its history updates, so the next run of that
   recipe is not short. No flag lets an agent claim "short".
 
-## 11. To discuss: workloads and test parallelism
+## 11. Workloads and test parallelism (decided)
 
-These need decisions before a build wave:
+1. Split `cargo test` by target across machines: build the feature (a plan runs `--lib`
+   and each `--test X` as separate jobs, placed independently, results merged into one
+   report), enabled per suite in the repo run policy (opt-in). Per-target timings decide
+   whether a split pays off; the policy can suggest enabling it.
+2. Placement: the agent states intent (`--pin`, `--peer`, `--anywhere`), the repo run
+   policy gives per-step hints, machine policy only caps (slots, RAM, I/O, disk).
+3. Cache warmth is a placement input: the expected finish time includes warmth from
+   history for each machine, so a warm machine wins unless a cold idle one would still
+   finish sooner.
+4. No per-agent quotas for now; round-robin by owner within a class only.
 
-1. Split `cargo test` by target? Timing already learns per-target durations (§ per-target
-   samples, in progress). A plan could run `--lib` and each `--test X` as separate jobs,
-   on both machines, and merge results. Cost: each machine compiles the test deps.
-2. Who decides placement: the repo run policy (checked in), machine policy (slots, RAM,
-   I/O), or the agent at submit? Proposal: the agent states intent (`--pin`,
-   `--peer`, `--anywhere`), the repo policy gives hints per step, machine policy only caps.
-3. Cache affinity: prefer the machine whose `target/` is warm for this checkout even if
-   the other one is idler? Proposal: yes, measured as expected finish time with warmth from
-   history, which placement already models.
-4. Per-agent quotas beyond round-robin fairness?
+## 12. Decisions
 
-## 12. Decisions needed
-
-- D1: shared identity crate vs vendored copy (recommend shared).
-- D2: iroh default relays now, self-hosted relay later (recommend yes).
-- D3: git subprocess vs library for snapshot/pack (recommend subprocess first).
-- D4: daemon as systemd user service with `Delegate=yes` on both Linux machines
-  (needed for per-job cgroups; a unit edit, your step on the worker).
-- D5: audit retention 90 days and hash chain (recommend yes).
-- D6: default grant expiry 1 year, ticket expiry 15 minutes.
-- §11 questions.
+- D1: own copy of the identity code for now (`tasks-identity`, golden vectors shared).
+- D2: iroh's public default relays; self-hosted relay later.
+- D3: `gix` library, with a named `git`-command fallback only where gix has a real gap.
+- D4: yes, daemon as a systemd user service with `Delegate=yes` on both Linux machines
+  (the worker's unit edit in `nix/taskworker-host.nix` is the user's step).
+- D5: yes, audit retention 90 days with the hash chain.
+- D6: yes, grants 1 year (renewed while connected), tickets 15 minutes and single use.
 
 ## 13. Build order
 
@@ -257,6 +258,8 @@ These need decisions before a build wave:
    manifest/sync/store.
 4. Attribution: per-job cgroups, macOS sampler, gate-trip snapshots, transfer slot.
 5. Priority classes, aging, owner round-robin; short lane from history.
+6. Placement by expected finish time including cache warmth; opt-in `cargo test` split
+   across machines with merged results.
 
 Each step lands with regression tests named after the R-ids it covers; new behaviours get
 new R-ids in `docs/REGRESSIONS.md`.
