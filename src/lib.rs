@@ -4,6 +4,9 @@
 //! acceptance: native operations must select their backend or reject unsupported hosts.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!("task-manager currently targets Linux and macOS only");
+/// Native Linux/macOS identity and headroom primitives. This alone does not
+/// enable the macOS worker; see docs/design/macos-platform.md for safety gaps.
+pub use task_manager_platform as platform;
 pub mod admission;
 pub mod android;
 pub mod android_build;
@@ -31,6 +34,7 @@ pub mod reroute;
 pub mod retention;
 pub mod runtime_support;
 pub mod snapshot;
+pub use task_manager_setup as setup;
 pub mod tmp_usage;
 pub mod worker;
 pub mod workspace_snapshot;

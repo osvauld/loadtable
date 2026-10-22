@@ -12,7 +12,6 @@ use crate::peer_link::{
     STREAM_ONLINE, STREAM_STATUS_ERROR, write_peer_link,
 };
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -25,7 +24,7 @@ use task_manager_peer::jobs::JobsTiming;
 use task_manager_peer::server::{self, Logger, Services};
 use task_manager_peer::source::{Limits, SourceService};
 use task_manager_peer::status::{self, Sample, StatusHub};
-use task_manager_peer::{LanReport, PeerConfig, lan_endpoint, select};
+use task_manager_peer::{LanReport, PeerConfig, Transport, configured_endpoint, select};
 
 /// State shared by every task of the runtime.
 pub struct Shared {
@@ -133,14 +132,15 @@ const BIND_RETRY: Duration = Duration::from_secs(5);
 /// the daemon. The report says what it is waiting for in the meantime.
 async fn bind_when_possible(
     key: &SecretKey,
-    bind: SocketAddr,
+    config: &PeerConfig,
     retry: Duration,
     report: &Arc<Mutex<PeersReport>>,
     log: &Logger,
 ) -> Endpoint {
+    let bind = config.bind;
     let mut attempt = 0u64;
     loop {
-        match lan_endpoint(key.clone(), bind, server::alpns()).await {
+        match configured_endpoint(key.clone(), config, server::alpns()).await {
             Ok(ep) => {
                 if attempt > 0 {
                     log(format!("peer: bound {bind} after {attempt} retries"));
@@ -175,9 +175,9 @@ async fn run(
 ) -> Result<(), String> {
     let config = PeerConfig::load(config_path)?;
     let key = config.secret_key()?;
-    let ep = bind_when_possible(&key, config.bind, BIND_RETRY, &report, &log).await;
+    let ep = bind_when_possible(&key, &config, BIND_RETRY, &report, &log).await;
     let lan = LanReport::of(&ep)?;
-    if !lan.is_relay_and_lookup_free() {
+    if config.transport == Transport::Lan && !lan.is_relay_and_lookup_free() {
         return Err(format!("endpoint is not LAN-only: {lan:?}"));
     }
     let paths = Paths::new(state);
@@ -269,6 +269,8 @@ async fn run(
         r.error = None;
         r.endpoint_id = Some(ep.id().to_string());
         r.bind = Some(config.bind.to_string());
+        r.transport = Some(format!("{:?}", config.transport).to_lowercase());
+        r.relay_url = config.relay_url.as_ref().map(ToString::to_string);
         r.peers = config
             .peers
             .iter()
@@ -284,9 +286,15 @@ async fn run(
     keep_snapshots(&shared, &report);
     super::reroute::start(&shared, &report);
     log(format!(
-        "peer: endpoint {} listening on {} (LAN-only, no relay/discovery); {} allowlisted peers: {}",
+        "peer: endpoint {} listening on {} ({:?}; relay={}; no discovery/portmapping); {} allowlisted peers: {}",
         ep.id(),
         config.bind,
+        config.transport,
+        config
+            .relay_url
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "disabled".into()),
         config.peers.len(),
         config
             .peers
@@ -313,7 +321,7 @@ fn keep_snapshots(shared: &Arc<Shared>, report: &Arc<Mutex<PeersReport>>) {
         .config
         .peers
         .iter()
-        .filter(|p| p.role.runs_my_jobs() && p.addr.is_some())
+        .filter(|p| p.role.runs_my_jobs() && shared.config.can_dial(p))
         .cloned()
         .collect();
     report.lock().unwrap_or_else(|p| p.into_inner()).snapshots = peers
@@ -386,8 +394,9 @@ async fn keep_snapshot(
     report: Arc<Mutex<PeersReport>>,
     peer: task_manager_peer::PeerEntry,
 ) {
-    let Some(addr) = peer.addr else { return };
-    let to = task_manager_peer::peer_addr(peer.endpoint, addr);
+    let Ok(to) = shared.config.endpoint_addr(&peer) else {
+        return;
+    };
     let mut backoff = 1.0f64;
     loop {
         let name = peer.name.clone();
@@ -678,15 +687,13 @@ pub async fn watch_peer(shared: &Shared, name: &str, sink: &mut Sink) {
             .await;
         return;
     };
-    let Some(addr) = peer.addr else {
-        let _ = sink
-            .event(&BridgeEvent::Error {
-                message: format!("peer {name} has no addr"),
-            })
-            .await;
-        return;
+    let to = match shared.config.endpoint_addr(&peer) {
+        Ok(to) => to,
+        Err(message) => {
+            let _ = sink.event(&BridgeEvent::Error { message }).await;
+            return;
+        }
     };
-    let to = task_manager_peer::peer_addr(peer.endpoint, addr);
     let short = peer.endpoint.to_string();
     let mut machine = peer.name.clone();
     let mut backoff = 1.0f64;

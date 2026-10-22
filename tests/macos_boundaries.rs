@@ -90,6 +90,29 @@ fn catalog_stays_available_without_daemon_or_state() {
 }
 
 #[test]
+fn setup_stays_available_without_probing_or_starting_a_daemon() {
+    let fixture = Fixture::new();
+    let state = fixture.0.join("never-created-state");
+    for args in [["setup", "--help"], ["setup", "--json"]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_tasks"))
+            .args(args)
+            .env("TASK_MANAGER_STATE_DIR", &state)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if args[1] == "--json" {
+            let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert!(!plan.is_null());
+        }
+        assert!(!state.exists());
+    }
+}
+
+#[test]
 fn native_pressure_and_unported_preexec_contracts_fail_closed() {
     let error = tinline_task_manager::admission::Pressure::read().unwrap_err();
     assert!(error.to_string().contains("admission fails closed"));

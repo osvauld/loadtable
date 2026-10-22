@@ -201,7 +201,7 @@ fn busy_machine_cards_match_the_agreed_layout() {
     assert_eq!(worker.swap_text, "swap 0.1 GB");
     assert_eq!(
         (worker.pressure_text.as_str(), worker.pressure_level),
-        ("memory high", Level::Bad)
+        ("memory stalls", Level::Bad)
     );
     assert!(
         worker
@@ -258,11 +258,11 @@ fn pressure_words_name_the_blocker() {
     );
     assert_eq!(
         pressure_words(&with("I/O PSI some avg10 above 20%")).0,
-        "I/O high"
+        "I/O stalls"
     );
     assert_eq!(
         pressure_words(&with("CPU PSI some avg10 above 40%")),
-        ("CPU high".into(), Level::Warn)
+        ("CPU contended".into(), Level::Warn)
     );
     assert_eq!(
         pressure_words(&with("cache disk below reserve")).0,

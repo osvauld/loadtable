@@ -57,7 +57,10 @@ const USAGE: &str = "usage: tasks [ui [--fixtures DIR]]  # DIR: cluster snapshot
          # asked; --pin keeps any job on this machine
        tasks place [--run | --device SERIAL] [--peer NAME] [--json] -- COMMAND [ARGS...]
          # dry run: print where --anywhere (or --peer) would run it and why; submits nothing
-       tasks peer init --bind IP:PORT [--config PATH] | id | add NAME ENDPOINT_ID ADDR [--role worker|host|both|observer] [--approve auto|manual] [--config PATH] | list [--json] | status-watch NAME
+       tasks peer init (--bind IP:PORT | --relay HTTPS_URL) [--config PATH] | id
+       tasks peer add NAME ENDPOINT_ID ADDR_OR_DASH [--role worker|host|both|observer] [--approve auto|manual] [--config PATH]
+         # '-' uses the locally configured relay; relay mode defaults to manual inbound approval
+       tasks peer list [--json] | status-watch NAME
        tasks approve-command JOB_ID  # trusted LIVE cwd/argv, not a source snapshot
        # local.command cost=cpu_simulation is a legacy label, NOT the resource class
        tasks approve-android-trial JOB_ID   # EXPERIMENTAL build-only; trusts local source/host config
@@ -80,6 +83,8 @@ const USAGE: &str = "usage: tasks [ui [--fixtures DIR]]  # DIR: cluster snapshot
        tasks alerts [--json] [--all] [--severity info|warn|critical] [--node NAME]
          # health alerts of this machine and its peers, disks, missing capabilities
        tasks alerts clear NODE [CAPABILITY]  # drop a node's missing-capability mark(s)
+       tasks setup [--ui | --json] [--probe [--simulator-runtime]] [--requirements FILE] [--plan FILE]
+         # read-only Apple Silicon onboarding; no daemon/install; probes only on explicit opt-in
        tasks doctor [--json]  # node-setup checks with fix lines; exit 1 when this machine is unhealthy
        tasks record SUITE CONFIG STAGE SECONDS
        tasks daemon
@@ -138,9 +143,11 @@ fn is_broken_pipe(error: &(dyn std::error::Error + 'static)) -> bool {
 
 fn run() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    // Only pure catalog/fixture inspection is accepted on macOS at this boundary
-    // checkpoint. Refuse before ensure_daemon, submission, or any state mutation.
+    // Offline catalog/fixture inspection and the independent setup tool do not need
+    // local runtime. Setup probes remain explicit opt-in; no installer/worker is enabled.
+    // Refuse other commands before ensure_daemon, submission, or state mutation.
     let offline_inspection = args.as_slice() == ["catalog"]
+        || args.first().is_some_and(|arg| arg == "setup")
         || (args.len() == 3 && args[0] == "ui" && args[1] == "--fixtures");
     if !offline_inspection {
         tinline_task_manager::runtime_support::require_local_runtime()?;
@@ -169,6 +176,7 @@ fn run() -> Result<()> {
             std::process::exit(tinline_task_manager::peer::bridge::run(&args[1..]));
         }
         Some("peer") => return peer_command(&args[1..]),
+        Some("setup") => return tinline_task_manager::setup::cli::run(&args[1..]),
         Some("gc") => return gc::run(&args[1..]),
         Some("mcp") => return mcp_command(&args[1..]),
         Some("place") => return place_command(&args[1..]),
@@ -774,12 +782,13 @@ fn peer_command(args: &[String]) -> Result<()> {
     };
     match args.first().map(String::as_str) {
         Some("init") => {
-            let (mut bind, mut path) = (None, None);
+            let (mut bind, mut path, mut relay) = (None, None, None);
             let mut it = args[1..].iter();
             while let Some(flag) = it.next() {
                 let value = it.next().ok_or(format!("{flag} needs a value"))?.clone();
                 match flag.as_str() {
                     "--bind" => bind = Some(value),
+                    "--relay" => relay = Some(value),
                     "--config" => path = Some(std::path::PathBuf::from(value)),
                     other => return Err(format!("unknown option {other}").into()),
                 }
@@ -790,13 +799,29 @@ fn peer_command(args: &[String]) -> Result<()> {
             };
             if path.exists() {
                 let c = PeerConfig::load(&path)?;
+                if let Some(url) = &relay {
+                    let requested: tinline_task_manager::peer::net::iroh::RelayUrl = url.parse()?;
+                    if c.relay_url.as_ref() != Some(&requested) {
+                        return Err("existing peer config uses a different transport/relay; init never overwrites it".into());
+                    }
+                }
                 println!("{}", c.secret_key()?.public());
                 eprintln!("tasks: {} already exists; endpoint id printed above", path.display());
                 return Ok(());
             }
-            let bind = bind.ok_or("tasks peer init needs --bind IP:PORT (this machine's LAN address and a UDP port, e.g. 192.168.1.10:7842)")?;
+            let bind = bind.or_else(|| relay.as_ref().map(|_| "0.0.0.0:0".into()))
+                .ok_or("tasks peer init needs --bind IP:PORT (LAN), or --relay HTTPS_URL (explicit internet relay)")?;
             bind.parse::<std::net::SocketAddr>()
                 .map_err(|e| format!("--bind {bind}: {e}"))?;
+            let transport = match &relay {
+                Some(url) => format!("transport = \"relay\"\nrelay_url = {}\n", toml::Value::String(url.clone())),
+                None => String::new(),
+            };
+            let text = format!(
+                "# Explicit local peer policy. Restart only an idle daemon to apply changes.\nsecret_key = \"peer.key\"\nbind = \"{bind}\"\n{transport}\n# Add authenticated endpoint IDs with `tasks peer add`.\n# Relay peers default to manual job approval; LAN keeps its existing default.\n"
+            );
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            PeerConfig::parse(&text, &path, home.as_deref())?;
             let dir = path.parent().ok_or("config path has no directory")?;
             fs::create_dir_all(dir)?;
             let key_path = dir.join("peer.key");
@@ -805,21 +830,6 @@ fn peer_command(args: &[String]) -> Result<()> {
             } else {
                 config::create_secret_key(&key_path)?
             };
-            let text = format!(
-                r#"# tasks peer link (iroh, LAN only). Restart an idle daemon to apply changes.
-secret_key = "peer.key"
-bind = "{bind}"
-# checkouts = "~/offload/checkouts"
-# reattach_timeout_s = 3600
-
-# [[peer]]
-# name = "worker"
-# endpoint_id = "<its `tasks peer id`>"
-# addr = "192.168.1.7:7842"
-# role = "worker"   # worker | host | both | observer
-# approve = "auto"  # for a host peer: auto | manual
-"#
-            );
             use std::io::Write;
             use std::os::unix::fs::OpenOptionsExt;
             fs::OpenOptions::new()
@@ -868,6 +878,9 @@ bind = "{bind}"
             );
             if let Some(id) = &report.endpoint_id {
                 println!("endpoint {id} on {}", report.bind.as_deref().unwrap_or("?"));
+                if let Some(transport) = &report.transport {
+                    println!("transport {transport}; relay {} (no discovery)", report.relay_url.as_deref().unwrap_or("disabled"));
+                }
             }
             for p in &report.peers {
                 println!(
@@ -912,7 +925,7 @@ bind = "{bind}"
             }
             Ok(())
         }
-        _ => Err("usage: tasks peer init --bind IP:PORT [--config PATH] | id | add NAME ENDPOINT_ID ADDR [--role worker|host|both|observer] [--approve auto|manual] [--config PATH] | list [--json] | status-watch NAME".into()),
+        _ => Err("usage: tasks peer init (--bind IP:PORT | --relay HTTPS_URL) [--config PATH] | id | add NAME ENDPOINT_ID ADDR_OR_DASH [--role worker|host|both|observer] [--approve auto|manual] [--config PATH] | list [--json] | status-watch NAME".into()),
     }
 }
 
@@ -951,7 +964,14 @@ fn peer_add(
         .trim()
         .parse()
         .map_err(|e| format!("endpoint id {id:?}: {e}"))?;
-    let addr: std::net::SocketAddr = addr.parse().map_err(|e| format!("addr {addr:?}: {e}"))?;
+    let addr = if addr == "-" {
+        None
+    } else {
+        Some(
+            addr.parse::<std::net::SocketAddr>()
+                .map_err(|e| format!("addr {addr:?}: {e}"))?,
+        )
+    };
     if !matches!(role.as_str(), "worker" | "host" | "both" | "observer") {
         return Err(format!("--role {role:?}: worker | host | both | observer").into());
     }
@@ -970,9 +990,11 @@ fn peer_add(
             path.display()
         )
     })?;
-    let mut entry = format!(
-        "\n[[peer]]\nname = \"{name}\"\nendpoint_id = \"{key}\"\naddr = \"{addr}\"\nrole = \"{role}\"\n"
-    );
+    let mut entry =
+        format!("\n[[peer]]\nname = \"{name}\"\nendpoint_id = \"{key}\"\nrole = \"{role}\"\n");
+    if let Some(addr) = addr {
+        entry.push_str(&format!("addr = \"{addr}\"\n"));
+    }
     if let Some(a) = approve {
         entry.push_str(&format!("approve = \"{a}\"\n"));
     }
@@ -982,7 +1004,10 @@ fn peer_add(
     }
     text.push_str(&entry);
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    PeerConfig::parse(&text, &path, home.as_deref())?;
+    let parsed = PeerConfig::parse(&text, &path, home.as_deref())?;
+    if addr.is_none() && parsed.relay_url.is_none() {
+        return Err("ADDR '-' requires an explicitly configured relay".into());
+    }
     let dir = path.parent().ok_or("config path has no directory")?;
     let tmp = dir.join(format!(
         ".{}.add-{}",
@@ -1010,7 +1035,9 @@ fn peer_add(
         return Err(e.into());
     }
     println!(
-        "added peer {name} ({role}) {key} at {addr} to {}",
+        "added peer {name} ({role}) {key} at {} to {}",
+        addr.map(|a| a.to_string())
+            .unwrap_or_else(|| "configured relay".into()),
         path.display()
     );
     eprintln!("tasks: restart the daemon when it is idle (tasks list --active) to apply it");

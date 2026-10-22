@@ -304,7 +304,10 @@ pub fn search_logs(daemon: &Daemon, args: &Args) -> Result<Outcome> {
             Ok(r) if r.enabled => r
                 .peers
                 .iter()
-                .filter(|p| p.addr.is_some() && matches!(p.role.as_str(), "worker" | "both"))
+                .filter(|p| {
+                    (p.addr.is_some() || r.relay_url.is_some())
+                        && matches!(p.role.as_str(), "worker" | "both")
+                })
                 .map(|p| p.name.clone())
                 .collect(),
             _ => vec![],

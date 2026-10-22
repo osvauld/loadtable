@@ -170,10 +170,7 @@ async fn search_peer_logs(
         .config
         .peer(name)
         .ok_or_else(|| format!("unknown peer {name:?}"))?;
-    let addr = peer
-        .addr
-        .ok_or_else(|| format!("peer {name} has no addr (only peers I can dial are searched)"))?;
-    let to = task_manager_peer::peer_addr(peer.endpoint, addr);
+    let to = shared.config.endpoint_addr(peer)?;
     jobs::search_logs(&shared.ep, to, query, SEARCH_TIMEOUT)
         .await
         .map_err(|e| match e {
@@ -350,13 +347,8 @@ fn peer_target(
             peer.name, peer.role
         ));
     }
-    let addr = peer
-        .addr
-        .ok_or_else(|| format!("peer {} has no addr to dial", peer.name))?;
-    Ok((
-        peer.clone(),
-        task_manager_peer::peer_addr(peer.endpoint, addr),
-    ))
+    let addr = shared.config.endpoint_addr(&peer)?;
+    Ok((peer, addr))
 }
 
 async fn local_cancel_requested(shared: &Shared, job_id: i64) -> bool {
@@ -1094,12 +1086,11 @@ pub enum Probe {
 /// terminal (the peer then sends `Done` at once). Never submits, cancels or re-runs.
 pub async fn probe_remote(shared: &Shared, link: &OutboundLink) -> Result<Probe, String> {
     let remote_id = link.remote_job_id.ok_or("no remote job id")?;
-    let (peer, addr) = shared
+    let peer = shared
         .config
         .peer(&link.peer)
-        .and_then(|p| p.addr.map(|a| (p.clone(), a)))
         .ok_or_else(|| format!("peer {} no longer configured", link.peer))?;
-    let addr = task_manager_peer::peer_addr(peer.endpoint, addr);
+    let addr = shared.config.endpoint_addr(peer)?;
     let seen = Arc::new(std::sync::Mutex::new(None::<String>));
     let probe_seen = Arc::clone(&seen);
     let attached = jobs::attach(
@@ -1151,12 +1142,11 @@ pub async fn propagate_cancel(shared: &Shared, job_id: i64) -> Result<(), String
     if link.done() {
         return Ok(());
     }
-    let (peer, addr) = shared
+    let peer = shared
         .config
         .peer(&link.peer)
-        .and_then(|p| p.addr.map(|a| (p.clone(), a)))
         .ok_or_else(|| format!("peer {} no longer configured", link.peer))?;
-    let addr = task_manager_peer::peer_addr(peer.endpoint, addr);
+    let addr = shared.config.endpoint_addr(peer)?;
     let reply = jobs::call(
         &shared.ep,
         addr,

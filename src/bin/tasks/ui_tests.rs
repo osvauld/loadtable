@@ -95,7 +95,7 @@ fn busy_fixture_dashboard_shows_both_machines_jobs_and_agents() {
             "nixos worker",
             "CPU 97%",
             "RAM 6.1/7.6 GB",
-            "memory high",
+            "memory stalls",
             "build #91 view-step-up",
             "agents here:",
             "RUNNING",

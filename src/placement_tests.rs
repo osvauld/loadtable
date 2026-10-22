@@ -760,3 +760,22 @@ fn a_tie_goes_to_the_machine_with_more_compile_slots_free() {
     assert_eq!(d.target, Target::Local, "{}", d.line());
     assert!(d.reason.contains("more compile slots free"), "{}", d.reason);
 }
+
+#[test]
+fn the_recorded_decision_becomes_one_job_log_line_with_each_machine_s_wait() {
+    let mut host = laptop("metrics-idle");
+    host.jobs.clear();
+    let mut worker = open_worker();
+    worker.jobs.clear();
+    let d = anywhere("cargo build -p never-seen", &host, &[peer(worker)]);
+    let dir = std::env::temp_dir().join(format!("placement-line-{}", std::process::id()));
+    assert!(recorded_line(&dir, 7).is_none());
+    record(&dir, 7, &d).unwrap();
+    let line = recorded_line(&dir, 7).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(line.starts_with("tasks: placement anywhere -> "), "{line}");
+    assert!(line.contains(&d.reason), "{line}");
+    assert!(line.contains("CARGO_BUILD_JOBS="), "{line}");
+    assert_eq!(line.matches("wait ").count(), 2, "{line}");
+    assert!(line.ends_with('\n'));
+}

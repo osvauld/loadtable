@@ -1,88 +1,85 @@
-//! Shared Linux/macOS host primitives. Monitoring is not admission policy.
+//! Native measurement primitives for Linux and macOS.
 //!
-//! `sysinfo` supplies observational readings; its seconds-resolution process start time
-//! must NOT be used as cancellation identity. Native identity preserves Linux start ticks
-//! and uses macOS's microsecond start timestamp. Neither makes signalling race-free by
-//! itself: supervisors must still retain the unreaped group leader through cleanup.
+//! This is preparation, not a complete macOS worker backend. In particular it
+//! does not emulate Linux PSI, inspect flock ownership, or implement parent-death
+//! supervision. Resource floors alone are NOT permission to launch a job.
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+compile_error!("task-manager-platform currently supports only Linux and macOS");
+
+mod disk;
 pub mod fs;
+mod memory;
 pub mod process;
+mod process_control;
+mod telemetry;
 pub mod thread;
+mod usage;
 
-use std::time::Instant;
-use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
+pub use disk::{DiskSpace, disk_space};
+pub use memory::{Memory, MemorySource, memory};
+pub use process::{ProcessIdentity, alive, identity};
+pub use telemetry::{MachineReading, MachineSampler};
+pub use usage::{ChildUsage, children_usage};
 
-#[derive(Clone, Debug)]
-pub struct MachineReading {
-    pub hostname: Option<String>,
-    pub logical_cpus: usize,
-    pub physical_cores: Option<usize>,
-    /// Null until a sufficiently separated second CPU sample exists. 1.0 = one busy core.
-    pub cpu_busy_cores: Option<f64>,
-    pub memory_total_bytes: u64,
-    /// sysinfo's OS-specific available-memory estimate; not Linux MemAvailable equivalence.
-    pub memory_available_bytes: u64,
-    pub swap_total_bytes: u64,
-    pub swap_used_bytes: u64,
+/// The native APIs present on this OS. This describes implementation support,
+/// not the health of any particular sample or authorization to execute jobs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct Capabilities {
+    pub process_start_identity: bool,
+    pub memory: bool,
+    pub disk: bool,
+    pub linux_psi: bool,
+    pub noninvasive_flock_observation: bool,
+    pub kernel_parent_death_signal: bool,
 }
 
-/// One retained collector per feed, refreshed by the caller rather than by a hidden thread.
-/// Does not enumerate processes, read command lines/environments, or spawn subprocesses.
-pub struct MachineSampler {
-    system: System,
-    cpu_sample_at: Option<Instant>,
-    cpu_busy: Option<f64>,
-    hostname: Option<String>,
-    physical_cores: Option<usize>,
-}
-
-impl Default for MachineSampler {
-    fn default() -> Self {
-        Self::new()
+pub const fn capabilities() -> Capabilities {
+    Capabilities {
+        process_start_identity: true,
+        memory: true,
+        disk: true,
+        linux_psi: cfg!(target_os = "linux"),
+        noninvasive_flock_observation: cfg!(target_os = "linux"),
+        kernel_parent_death_signal: cfg!(target_os = "linux"),
     }
 }
 
-impl MachineSampler {
-    pub fn new() -> Self {
-        Self {
-            system: System::new_with_specifics(
-                RefreshKind::nothing().with_cpu(CpuRefreshKind::nothing()),
-            ),
-            cpu_sample_at: None,
-            cpu_busy: None,
-            hostname: System::host_name(),
-            physical_cores: System::physical_core_count(),
-        }
+/// A snapshot of the memory/disk floors, independent of PSI policy. An error
+/// reading a required measurement must be propagated, never replaced with zero
+/// pressure or an unlimited resource. Linux admission must ALSO check PSI.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ResourceSample {
+    pub memory: Memory,
+    pub cache_disk: DiskSpace,
+    pub state_disk: DiskSpace,
+}
+
+impl ResourceSample {
+    pub fn read(cache: &std::path::Path, state: &std::path::Path) -> std::io::Result<Self> {
+        Ok(Self {
+            memory: memory()?,
+            cache_disk: disk_space(cache)?,
+            state_disk: disk_space(state)?,
+        })
     }
 
-    pub fn sample(&mut self) -> MachineReading {
-        self.system
-            .refresh_memory_specifics(MemoryRefreshKind::everything());
-        let now = Instant::now();
-        if self
-            .cpu_sample_at
-            .is_none_or(|last| now.duration_since(last) >= sysinfo::MINIMUM_CPU_UPDATE_INTERVAL)
-        {
-            self.system.refresh_cpu_usage();
-            if self.cpu_sample_at.is_some() {
-                self.cpu_busy = Some(
-                    self.system
-                        .cpus()
-                        .iter()
-                        .map(|cpu| f64::from(cpu.cpu_usage()) / 100.0)
-                        .sum(),
-                );
-            }
-            self.cpu_sample_at = Some(now);
-        }
-        MachineReading {
-            hostname: self.hostname.clone(),
-            logical_cpus: self.system.cpus().len(),
-            physical_cores: self.physical_cores,
-            cpu_busy_cores: self.cpu_busy,
-            memory_total_bytes: self.system.total_memory(),
-            memory_available_bytes: self.system.available_memory(),
-            swap_total_bytes: self.system.total_swap(),
-            swap_used_bytes: self.system.used_swap(),
+    /// Only checks floors. `None` means these three floors pass, NOT that all
+    /// admission requirements (pressure, leases, ownership, approvals) pass.
+    pub fn floor_blocker(
+        &self,
+        min_memory: u64,
+        min_cache: u64,
+        min_state: u64,
+    ) -> Option<&'static str> {
+        if self.memory.available_bytes < min_memory {
+            Some("available memory below reserve")
+        } else if self.cache_disk.available_bytes < min_cache {
+            Some("cache disk below reserve")
+        } else if self.state_disk.available_bytes < min_state {
+            Some("state disk below reserve")
+        } else {
+            None
         }
     }
 }
@@ -92,18 +89,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn real_machine_readings_are_bounded_and_cpu_requires_two_samples() {
-        let mut sampler = MachineSampler::new();
-        let first = sampler.sample();
-        assert!(first.logical_cpus > 0);
-        assert!(first.memory_total_bytes > 0);
-        assert!(first.memory_available_bytes <= first.memory_total_bytes);
-        assert!(first.swap_used_bytes <= first.swap_total_bytes);
-        assert_eq!(first.cpu_busy_cores, None);
-        std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
-        let second = sampler.sample();
-        let busy = second.cpu_busy_cores.unwrap();
-        assert!(busy.is_finite());
-        assert!((0.0..=second.logical_cpus as f64).contains(&busy));
+    fn floors_are_inclusive_and_independent() {
+        let sample = ResourceSample {
+            memory: Memory {
+                total_bytes: 200,
+                available_bytes: 100,
+                source: MemorySource::LinuxMemAvailable,
+            },
+            cache_disk: DiskSpace {
+                available_bytes: 50,
+            },
+            state_disk: DiskSpace {
+                available_bytes: 25,
+            },
+        };
+        assert_eq!(sample.floor_blocker(100, 50, 25), None);
+        assert_eq!(
+            sample.floor_blocker(101, 50, 25),
+            Some("available memory below reserve")
+        );
+        assert_eq!(
+            sample.floor_blocker(100, 51, 25),
+            Some("cache disk below reserve")
+        );
+        assert_eq!(
+            sample.floor_blocker(100, 50, 26),
+            Some("state disk below reserve")
+        );
+    }
+
+    #[test]
+    fn macos_capabilities_do_not_claim_linux_guarantees() {
+        let caps = capabilities();
+        assert!(caps.process_start_identity && caps.memory && caps.disk);
+        assert_eq!(caps.linux_psi, cfg!(target_os = "linux"));
+        assert_eq!(
+            caps.noninvasive_flock_observation,
+            cfg!(target_os = "linux")
+        );
+        assert_eq!(caps.kernel_parent_death_signal, cfg!(target_os = "linux"));
     }
 }

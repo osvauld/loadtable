@@ -14,11 +14,9 @@ pub fn now() -> i64 {
         .as_secs() as i64
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ProcessIdentity {
-    pub pid: u32,
-    pub start_ticks: u64,
-}
+// Preserve the existing public path and persisted JSON schema. start_ticks is
+// an opaque native generation token; only Linux interprets it as clock ticks.
+pub use task_manager_platform::ProcessIdentity;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct StageTiming {

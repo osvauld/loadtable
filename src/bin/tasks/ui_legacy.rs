@@ -551,7 +551,7 @@ mod tests {
             error: None,
             configured: true,
         }]);
-        assert_eq!(view.machines[0].pressure_text, "memory high");
+        assert_eq!(view.machines[0].pressure_text, "memory stalls");
         let card = view.running.iter().find(|r| r.key.id == 2).unwrap();
         assert_eq!(card.cpu_text, "CPU unknown");
         assert!(matches!(card.cancel, Target::Local { id: 2, .. }));

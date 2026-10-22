@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
-use iroh::{PublicKey, SecretKey};
+use iroh::{EndpointAddr, PublicKey, RelayUrl, SecretKey};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,9 +101,23 @@ struct RawPeer {
     approve: Option<Approve>,
 }
 
+/// LAN remains the default. Relay mode is explicit local consent to contact the
+/// configured HTTPS relay; discovery and port mapping remain disabled.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Transport {
+    #[default]
+    Lan,
+    Relay,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
+    #[serde(default)]
+    transport: Transport,
+    #[serde(default)]
+    relay_url: Option<String>,
     secret_key: String,
     bind: String,
     #[serde(default)]
@@ -126,6 +140,10 @@ struct RawConfig {
 
 #[derive(Debug, Clone)]
 pub struct PeerConfig {
+    pub transport: Transport,
+    /// A single operator-selected relay, shared by the paired endpoints. Never
+    /// inferred from an untrusted inbound request or a discovery service.
+    pub relay_url: Option<RelayUrl>,
     pub path: PathBuf,
     pub secret_key_path: PathBuf,
     pub bind: SocketAddr,
@@ -196,11 +214,37 @@ impl PeerConfig {
             .bind
             .parse()
             .map_err(|e| format!("{what}: bind {:?}: {e}", raw.bind))?;
-        if bind.ip().is_unspecified() {
+        if raw.transport == Transport::Lan && bind.ip().is_unspecified() {
             return Err(format!(
                 "{what}: bind {bind} is unspecified; name the LAN interface address"
             ));
         }
+        let relay_url = match (raw.transport, raw.relay_url) {
+            (Transport::Lan, None) => None,
+            (Transport::Lan, Some(_)) => {
+                return Err(format!("{what}: relay_url requires transport = \"relay\""));
+            }
+            (Transport::Relay, None) => {
+                return Err(format!(
+                    "{what}: transport relay requires an explicit relay_url"
+                ));
+            }
+            (Transport::Relay, Some(url)) => {
+                let relay: RelayUrl = url.parse().map_err(|e| format!("{what}: relay_url: {e}"))?;
+                if relay.scheme() != "https"
+                    || relay.host_str().is_none()
+                    || !relay.username().is_empty()
+                    || relay.password().is_some()
+                    || relay.query().is_some()
+                    || relay.fragment().is_some()
+                {
+                    return Err(format!(
+                        "{what}: relay_url must be HTTPS without credentials, query or fragment"
+                    ));
+                }
+                Some(relay)
+            }
+        };
         let mut names = HashMap::new();
         let mut ids = HashMap::new();
         let mut peers = Vec::new();
@@ -231,7 +275,11 @@ impl PeerConfig {
                 endpoint,
                 addr,
                 role: p.role,
-                approve: p.approve.unwrap_or(Approve::Auto),
+                approve: p.approve.unwrap_or(if raw.transport == Transport::Relay {
+                    Approve::Manual
+                } else {
+                    Approve::Auto
+                }),
             });
         }
         let checkouts = expand(
@@ -259,6 +307,8 @@ impl PeerConfig {
             ));
         }
         Ok(Self {
+            transport: raw.transport,
+            relay_url,
             path: path.to_owned(),
             secret_key_path: expand(&raw.secret_key, base, home)?,
             bind,
@@ -281,6 +331,29 @@ impl PeerConfig {
 
     pub fn peer(&self, name: &str) -> Option<&PeerEntry> {
         self.peers.iter().find(|p| p.name == name)
+    }
+
+    pub fn can_dial(&self, peer: &PeerEntry) -> bool {
+        peer.addr.is_some() || self.relay_url.is_some()
+    }
+
+    /// Explicit addressing only: never publishes or resolves endpoint identities.
+    /// In relay mode both operators must select the same relay URL.
+    pub fn endpoint_addr(&self, peer: &PeerEntry) -> Result<EndpointAddr, String> {
+        if !self.can_dial(peer) {
+            return Err(format!(
+                "peer {} has no addr or configured relay to dial",
+                peer.name
+            ));
+        }
+        let mut addr = EndpointAddr::new(peer.endpoint);
+        if let Some(ip) = peer.addr {
+            addr = addr.with_ip_addr(ip);
+        }
+        if let Some(relay) = &self.relay_url {
+            addr = addr.with_relay_url(relay.clone());
+        }
+        Ok(addr)
     }
 
     pub fn allowlist(&self) -> Allowlist {
@@ -429,6 +502,77 @@ approve = "manual"
         assert!(PeerConfig::parse(&base(&bad, "127.0.0.1:1"), p, None).is_err());
         let unknown = "surprise = 1\n";
         assert!(PeerConfig::parse(&base(unknown, "127.0.0.1:1"), p, None).is_err());
+    }
+
+    #[test]
+    fn relay_is_explicit_and_defaults_to_manual_approval() {
+        let text = format!(
+            "secret_key = \"k\"\nbind = \"0.0.0.0:0\"\ntransport = \"relay\"\nrelay_url = \"https://relay.example.invalid/\"\n[[peer]]\nname = \"mac\"\nendpoint_id = \"{}\"\nrole = \"both\"\n",
+            key()
+        );
+        let c = PeerConfig::parse(&text, Path::new("/c/peer.toml"), Some(Path::new("/h"))).unwrap();
+        assert_eq!(c.transport, Transport::Relay);
+        let peer = c.peer("mac").unwrap();
+        assert_eq!(peer.approve, Approve::Manual);
+        assert!(peer.addr.is_none());
+        assert!(c.can_dial(peer));
+        let address = c.endpoint_addr(peer).unwrap();
+        assert_eq!(address.id, peer.endpoint);
+        assert_eq!(address.relay_urls().next(), c.relay_url.as_ref());
+        assert_eq!(address.ip_addrs().count(), 0);
+        assert!(
+            c.allowlist()
+                .admit(&SecretKey::generate().public(), Capability::Jobs)
+                .is_err()
+        );
+        let auto = PeerConfig::parse(
+            &(text + "approve = \"auto\"\n"),
+            Path::new("/c/peer.toml"),
+            Some(Path::new("/h")),
+        )
+        .unwrap();
+        assert_eq!(auto.peer("mac").unwrap().approve, Approve::Auto);
+    }
+
+    #[test]
+    fn lan_defaults_stay_private_and_relay_urls_are_restricted() {
+        let parse = |extra: &str| {
+            PeerConfig::parse(
+                &format!("secret_key = \"k\"\nbind = \"127.0.0.1:0\"\n{extra}"),
+                Path::new("/c/peer.toml"),
+                Some(Path::new("/h")),
+            )
+        };
+        let lan = parse("").unwrap();
+        assert_eq!(lan.transport, Transport::Lan);
+        assert!(lan.relay_url.is_none());
+        assert!(parse("relay_url = \"https://relay.example.invalid/\"\n").is_err());
+        assert!(parse("transport = \"relay\"\n").is_err());
+        assert!(parse("transport = \"public\"\n").is_err());
+        for url in [
+            "http://localhost/",
+            "https://user:pass@relay.example.invalid/",
+            "https://relay.example.invalid/?token=secret",
+            "https://relay.example.invalid/#fragment",
+            "file:///tmp/relay",
+        ] {
+            assert!(
+                parse(&format!("transport = \"relay\"\nrelay_url = \"{url}\"\n")).is_err(),
+                "{url}"
+            );
+        }
+        let peer_text = format!(
+            "[[peer]]\nname = \"mac\"\nendpoint_id = \"{}\"\nrole = \"worker\"\n",
+            key()
+        );
+        let c = parse(&peer_text).unwrap();
+        assert!(!c.can_dial(c.peer("mac").unwrap()));
+        assert!(c.endpoint_addr(c.peer("mac").unwrap()).is_err());
+        assert_eq!(
+            c.peer("mac").unwrap().approve,
+            Approve::Auto,
+            "legacy LAN semantics unchanged"
+        );
     }
 
     #[test]

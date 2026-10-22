@@ -1063,6 +1063,31 @@ pub fn recorded(state: &Path, job: i64) -> Option<serde_json::Value> {
     serde_json::from_slice(&std::fs::read(record_path(state, job)).ok()?).ok()
 }
 
+/// One log line for the job's recorded decision: where it ran, why, and the Cargo jobs it was
+/// given, so an agent reading only the job log can tell why `--anywhere` stayed here.
+pub fn recorded_line(state: &Path, job: i64) -> Option<String> {
+    let r = recorded(state, job)?;
+    let text = |key: &str| r[key].as_str().map(str::to_owned);
+    let mut out = format!(
+        "tasks: placement {} -> {}: {}",
+        text("requested")?,
+        text("machine")?,
+        text("reason")?
+    );
+    if let Some(jobs) = r["cargo_jobs"].as_u64() {
+        out.push_str(&format!("; CARGO_BUILD_JOBS={jobs}"));
+    }
+    for s in r["scores"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "\ntasks:   {}: wait {:.0}s [{}]",
+            s["machine"].as_str().unwrap_or("?"),
+            s["wait_s"].as_f64().unwrap_or(0.0),
+            s["wait_basis"].as_str().unwrap_or("")
+        ));
+    }
+    Some(out + "\n")
+}
+
 #[cfg(test)]
 #[path = "placement_tests.rs"]
 mod tests;

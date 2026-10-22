@@ -1,183 +1,236 @@
-//! Native process identity plus shared Unix process-group signalling.
-use nix::sys::signal::{Signal, killpg};
-use nix::unistd::{Pid, getpgid};
 use std::io;
 
-#[cfg(target_os = "linux")]
-#[path = "process_linux.rs"]
-mod native;
-#[cfg(target_os = "macos")]
-#[path = "process_macos.rs"]
-mod native;
+pub use super::process_control::{
+    arm_parent_death_signal, mark_inherited_fds_cloexec, signal_owned_group,
+};
+/// Compatibility name for the initial macOS boundary implementation.
+pub type Identity = ProcessIdentity;
 
-// Exercise the Linux token parser with synthetic records on macOS too.
-#[cfg(all(test, not(target_os = "linux")))]
-#[path = "process_linux.rs"]
-mod linux_parser_tests;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Identity {
+/// Persisted identity. The historical `start_ticks` field is kept byte-for-byte
+/// compatible with existing job JSON. Treat it as an opaque host-local token:
+/// Linux uses boot-relative clock ticks; macOS uses start-time microseconds
+/// since the Unix epoch from PROC_PIDTBSDINFO. Never compare across machines or
+/// derive elapsed time from this field without knowing its native source.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ProcessIdentity {
     pub pid: u32,
-    /// Linux: /proc start ticks (unchanged). macOS: start time in microseconds since epoch.
-    /// Host-local token only, never compare identities from different machines/OSes.
     pub start_ticks: u64,
 }
 
-pub struct Observation {
-    pub identity: Identity,
-    pub zombie: bool,
+struct Process {
+    identity: ProcessIdentity,
+    zombie: bool,
 }
 
-pub fn observe(pid: u32) -> io::Result<Observation> {
-    if pid <= 1 || pid > i32::MAX as u32 {
+pub fn identity(pid: u32) -> io::Result<ProcessIdentity> {
+    Ok(read(pid)?.identity)
+}
+
+/// One kernel snapshot checks both start time and zombie state. Never falls
+/// back to kill(pid, 0), which cannot distinguish a reused PID.
+pub fn alive(process: &ProcessIdentity) -> bool {
+    read(process.pid).is_ok_and(|p| p.identity == *process && !p.zombie)
+}
+
+fn read(pid: u32) -> io::Result<Process> {
+    if pid == 0 || pid > i32::MAX as u32 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "invalid managed process PID",
+            "invalid process id",
         ));
     }
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    return native::observe(pid);
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "native process identity unavailable",
-    ))
+    native_read(pid)
 }
 
-pub fn identity(pid: u32) -> io::Result<Identity> {
-    observe(pid).map(|p| p.identity)
+fn invalid(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-pub fn alive(expected: &Identity) -> bool {
-    observe(expected.pid).is_ok_and(|p| p.identity == *expected && !p.zombie)
+#[cfg(target_os = "linux")]
+fn native_read(pid: u32) -> io::Result<Process> {
+    parse_linux(pid, &std::fs::read_to_string(format!("/proc/{pid}/stat"))?)
 }
 
-/// The caller must own this stage child and keep its leader unreaped through escalation.
-/// A matching PID/start token is necessary but is not a kernel-atomic signal capability.
-/// Zombie leaders are allowed here so descendants can still be killed before reaping.
-pub fn signal_owned_group(expected: &Identity, signal: i32) -> io::Result<()> {
-    if !identity(expected.pid).is_ok_and(|p| p == *expected) {
-        return Ok(());
+#[cfg(any(target_os = "linux", test))]
+fn parse_linux(pid: u32, stat: &str) -> io::Result<Process> {
+    // comm may contain spaces, parentheses and newlines. The final ')' ends it.
+    let (head, tail) = stat
+        .rsplit_once(')')
+        .ok_or_else(|| invalid("invalid proc stat"))?;
+    let actual_pid = head
+        .split_once('(')
+        .and_then(|(s, _)| s.trim().parse::<u32>().ok());
+    if actual_pid != Some(pid) {
+        return Err(invalid("proc stat pid mismatch"));
     }
-    let pid = Pid::from_raw(expected.pid as i32);
-    if getpgid(Some(pid)).map_err(io::Error::from)? != pid {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "refusing to signal a group not owned by stage child",
-        ));
-    }
-    let signal = Signal::try_from(signal).map_err(io::Error::from)?;
-    match killpg(pid, signal) {
-        Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
-        Err(e) => Err(e.into()),
-    }
+    let mut fields = tail.split_whitespace();
+    let state = fields
+        .next()
+        .ok_or_else(|| invalid("missing process state"))?;
+    let start_ticks = fields
+        .nth(18)
+        .ok_or_else(|| invalid("missing process start time"))?
+        .parse()
+        .map_err(|_| invalid("invalid process start time"))?;
+    Ok(Process {
+        identity: ProcessIdentity { pid, start_ticks },
+        zombie: state == "Z",
+    })
 }
 
-/// Arm the Linux admission child's parent-death contract in `Command::pre_exec`.
-/// macOS requires a different supervision design; never silently omit this protection.
-pub fn arm_parent_death_signal() -> io::Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        // SAFETY: prctl changes only the calling process; suitable for the pre-exec hook.
-        if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
+#[cfg(any(target_os = "macos", test))]
+fn macos_start_token(seconds: u64, micros: u64) -> io::Result<u64> {
+    if micros >= 1_000_000 {
+        return Err(invalid("invalid process start microseconds"));
     }
-    #[cfg(not(target_os = "linux"))]
-    Err(io::Error::from_raw_os_error(libc::ENOTSUP))
+    seconds
+        .checked_mul(1_000_000)
+        .and_then(|s| s.checked_add(micros))
+        .ok_or_else(|| invalid("process start time overflow"))
 }
 
-/// Mark descriptors above stderr close-on-exec in a pre-exec child. Preserve Linux's
-/// close_range/fcntl fallback. Other hosts reject rather than leak inherited slot leases.
-/// This function uses only async-signal-safe syscalls, with no allocation or FD enumeration.
-pub fn mark_inherited_fds_cloexec() -> io::Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        const CLOSE_RANGE_CLOEXEC: libc::c_uint = 1 << 2;
-        // SAFETY: this is called only in the pre-exec child; descriptors are not closed.
-        unsafe {
-            if libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, CLOSE_RANGE_CLOEXEC) == 0 {
-                return Ok(());
-            }
-            let mut limit = libc::rlimit {
-                rlim_cur: 0,
-                rlim_max: 0,
-            };
-            let max = if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0 {
-                limit.rlim_cur.min(1 << 16) as i32
-            } else {
-                1024
-            };
-            for fd in 3..max {
-                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
-            }
-        }
-        Ok(())
+#[cfg(target_os = "macos")]
+fn native_read(pid: u32) -> io::Result<Process> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>();
+    // SAFETY: this buffer has precisely the size required by PROC_PIDTBSDINFO;
+    // no field is read unless libproc reports the entire structure was filled.
+    let count = unsafe {
+        libc::proc_pidinfo(
+            pid as i32,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size as i32,
+        )
+    };
+    if count <= 0 {
+        return Err(io::Error::last_os_error());
     }
-    #[cfg(not(target_os = "linux"))]
-    Err(io::Error::from_raw_os_error(libc::ENOTSUP))
+    if count as usize != size {
+        return Err(invalid("short PROC_PIDTBSDINFO result"));
+    }
+    let info = unsafe { info.assume_init() };
+    if info.pbi_pid != pid {
+        return Err(invalid("PROC_PIDTBSDINFO pid mismatch"));
+    }
+    Ok(Process {
+        identity: ProcessIdentity {
+            pid,
+            start_ticks: macos_start_token(info.pbi_start_tvsec, info.pbi_start_tvusec)?,
+        },
+        zombie: info.pbi_status == libc::SZOMB,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::process::CommandExt;
-    use std::process::{Command, Stdio};
 
     #[test]
-    fn native_identity_is_stable_and_rejects_reused_token() {
+    fn current_identity_is_live_and_wrong_generation_is_not() {
         let current = identity(std::process::id()).unwrap();
-        assert_eq!(identity(current.pid).unwrap(), current);
         assert!(alive(&current));
-        let wrong = Identity {
-            start_ticks: current.start_ticks.wrapping_add(1),
-            ..current
-        };
-        assert!(!alive(&wrong));
-        // A mismatched token must not signal our own process group.
-        signal_owned_group(&wrong, libc::SIGTERM).unwrap();
-        for invalid in [0, 1, u32::MAX] {
-            assert!(identity(invalid).is_err());
+        let mut reused = current.clone();
+        reused.start_ticks = reused.start_ticks.wrapping_add(1);
+        assert!(!alive(&reused));
+        assert_eq!(identity(current.pid).unwrap(), current);
+    }
+
+    #[test]
+    fn invalid_pids_are_not_process_group_queries() {
+        for pid in [0, i32::MAX as u32 + 1, u32::MAX] {
+            assert_eq!(
+                identity(pid).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+            assert!(!alive(&ProcessIdentity {
+                pid,
+                start_ticks: 0
+            }));
         }
     }
 
     #[test]
-    fn refuses_child_that_does_not_lead_its_group() {
-        let mut child = Command::new("/bin/sleep")
-            .arg("30")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let result = identity(child.id()).and_then(|id| signal_owned_group(&id, libc::SIGTERM));
-        let _ = child.kill();
-        child.wait().unwrap();
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+    fn historical_identity_json_is_unchanged() {
+        let json = r#"{"pid":123,"start_ticks":987654321}"#;
+        let value: ProcessIdentity = serde_json::from_str(json).unwrap();
+        assert_eq!(serde_json::to_string(&value).unwrap(), json);
     }
 
     #[test]
-    fn signals_only_its_separate_child_group() {
-        let mut child = Command::new("/bin/sleep")
-            .arg("30")
-            .stdin(Stdio::null())
+    fn proc_parser_handles_comm_and_zombies() {
+        let stat = |state| {
+            format!(
+                "42 (tricky ) comm (\n) {state} {} 987 0 0",
+                vec!["0"; 18].join(" ")
+            )
+        };
+        let live = parse_linux(42, &stat("S")).unwrap();
+        assert_eq!(live.identity.start_ticks, 987);
+        assert!(!live.zombie);
+        assert!(parse_linux(42, &stat("Z")).unwrap().zombie);
+        assert!(parse_linux(43, &stat("S")).is_err());
+        assert!(parse_linux(42, "42 (truncated) S 1").is_err());
+    }
+
+    #[test]
+    fn macos_token_preserves_subsecond_generation() {
+        assert_eq!(macos_start_token(123, 456).unwrap(), 123_000_456);
+        assert_ne!(
+            macos_start_token(123, 456).unwrap(),
+            macos_start_token(123, 457).unwrap()
+        );
+        assert!(macos_start_token(123, 1_000_000).is_err());
+        assert!(macos_start_token(u64::MAX, 0).is_err());
+    }
+
+    #[test]
+    fn unreaped_zombie_is_not_alive() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "read line"])
+            .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .process_group(0)
             .spawn()
             .unwrap();
-        // Always reap our own child, including on a failed assertion.
-        let result = (|| -> io::Result<()> {
-            let child_identity = identity(child.id())?;
-            signal_owned_group(&child_identity, libc::SIGTERM)
+        let pid = child.id();
+        let observed = (|| -> io::Result<_> {
+            // Capture the generation BEFORE allowing exit. Darwin may not expose
+            // PROC_PIDTBSDINFO for a zombie, even while WNOWAIT retains its PID.
+            let original = identity(pid)?;
+            child.stdin.take().unwrap().write_all(b"exit\n")?;
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            let result = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid as libc::id_t,
+                    &mut info,
+                    libc::WEXITED | libc::WNOWAIT,
+                )
+            };
+            if result != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let live = alive(&original);
+            Ok((original, identity(pid), live))
         })();
-        if result.is_err() {
+        if observed.is_err() {
             let _ = child.kill();
         }
-        let status = child.wait().unwrap();
-        result.unwrap();
-        use std::os::unix::process::ExitStatusExt;
-        assert_eq!(status.signal(), Some(libc::SIGTERM));
+        let status = child.wait().unwrap(); // Always reap our child, including on read failure.
+        let (original, zombie, live) = observed.unwrap();
+        assert!(status.success());
+        assert!(!live);
+        match zombie {
+            Ok(zombie) => assert_eq!(zombie, original),
+            #[cfg(target_os = "macos")]
+            Err(error) => assert_eq!(error.raw_os_error(), Some(libc::ESRCH)),
+            #[cfg(not(target_os = "macos"))]
+            Err(error) => panic!("unreaped identity unavailable: {error}"),
+        }
+        assert!(!alive(&original));
     }
 }
