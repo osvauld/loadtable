@@ -41,6 +41,8 @@ pub struct PlanContext {
     pub env: Vec<(String, String)>,
     /// Placement for every step.
     pub placement: Placement,
+    /// The submitter passed the broad-test escape; every step's spec carries it (R-191).
+    pub broad_test_escape: bool,
 }
 
 /// The result of submitting a plan.

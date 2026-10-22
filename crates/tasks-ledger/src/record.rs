@@ -28,6 +28,8 @@ pub struct CancelRequest {
     pub by: String,
     /// When, ms since epoch.
     pub at_ms: i64,
+    /// Why, when the requester said.
+    pub reason: Option<String>,
 }
 
 /// Where a job was forwarded to.
@@ -202,6 +204,8 @@ pub(crate) mod tests {
                 requirements: Requirements::default(),
                 placement: Placement::Anywhere,
                 after: vec![],
+                timeout_secs: None,
+                broad_test_escape: false,
             },
             hints: StepHints::default(),
             plan_id: None,

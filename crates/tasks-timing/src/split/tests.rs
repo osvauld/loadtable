@@ -27,6 +27,32 @@ fn names(p: &Plan) -> Vec<&str> {
 }
 
 #[test]
+fn r114_every_test_piece_names_the_unsplit_recipe_and_its_label() {
+    let exes = [
+        exe("p2pcore", "lifecycle", ExeKind::Test),
+        exe("p2pcore", "group_call", ExeKind::Test),
+    ];
+    let argv = a("cargo test -p p2pcore --features dev-tools");
+    let plan = split_cargo_test(&argv, &exes).unwrap();
+    let unsplit = RecipeKey::from_argv(&argv, &[])[0].to_string();
+    assert!(
+        plan.steps[0].hints.split.is_none(),
+        "the build is not a piece"
+    );
+    for (step, label) in plan.steps[1..]
+        .iter()
+        .zip(["test:lifecycle", "test:group_call"])
+    {
+        let origin = step.hints.split.as_ref().unwrap();
+        assert_eq!(
+            (origin.recipe.as_str(), origin.target.as_str()),
+            (unsplit.as_str(), label)
+        );
+        assert_eq!(origin.target, label_of(&step.name));
+    }
+}
+
+#[test]
 fn builds_one_build_step_and_one_step_per_target() {
     let exes = [
         exe("p2pcore", "p2pcore", ExeKind::Lib),

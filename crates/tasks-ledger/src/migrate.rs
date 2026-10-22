@@ -87,11 +87,16 @@ ALTER TABLE jobs ADD COLUMN origin_key TEXT;
 CREATE UNIQUE INDEX jobs_origin ON jobs(origin_peer, origin_key) WHERE origin_peer IS NOT NULL;
 ";
 
+/// Why a job was cancelled, when the requester said.
+const V4: &str = "
+ALTER TABLE jobs ADD COLUMN cancel_reason TEXT;
+";
+
 /// The migrations in order; entry `i` upgrades version `i` to `i + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4];
 
 /// The schema version this build writes.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 fn version(conn: &Connection) -> Result<i64> {
     Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
@@ -135,6 +140,24 @@ mod tests {
         assert_eq!(i64::try_from(MIGRATIONS.len()).unwrap(), SCHEMA_VERSION);
         migrate(&mut c, MIGRATIONS).unwrap();
         assert_eq!(uv(&c), SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn a_v3_database_upgrades_to_v4_and_keeps_its_rows() {
+        let mut c = Connection::open_in_memory().unwrap();
+        migrate(&mut c, &MIGRATIONS[..3]).unwrap();
+        c.execute(
+            "INSERT INTO jobs(spec, phase, phase_tag, submitted_at_ms, owner, cwd, argv, hints)
+             VALUES ('{}', '\"Queued\"', 'queued', 1, 'o', '/', '[]', '{}')",
+            [],
+        )
+        .unwrap();
+        migrate(&mut c, MIGRATIONS).unwrap();
+        assert_eq!(uv(&c), SCHEMA_VERSION);
+        let reason: Option<String> = c
+            .query_row("SELECT cancel_reason FROM jobs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(reason, None);
     }
 
     #[test]

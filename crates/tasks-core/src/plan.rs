@@ -97,6 +97,21 @@ pub struct StepHints {
     /// Tools the step needs on the machine.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
+    /// Set when the step is one piece of a command split by test target: the history key its
+    /// run time belongs under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split: Option<SplitOrigin>,
+}
+
+/// Where a split step's timing is recorded: under the recipe of the command before it was
+/// split, with the step's target label, so estimates learn per test target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SplitOrigin {
+    /// The recipe (`RecipeKey` display string) of the unsplit command.
+    pub recipe: String,
+    /// The target label, e.g. `test:lifecycle`.
+    pub target: String,
 }
 
 impl StepHints {

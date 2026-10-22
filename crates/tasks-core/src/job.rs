@@ -7,6 +7,9 @@ use std::path::PathBuf;
 /// Device serials that must never appear in a job's argv.
 pub const DENIED_DEVICES: &[&str] = &["ZD22257P6G"];
 
+/// Longest wall-clock limit a job may ask for: seven days.
+pub const MAX_TIMEOUT_SECS: u64 = 604_800;
+
 /// What a job does, for scheduling and ETA purposes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Kind {
@@ -63,6 +66,14 @@ pub struct JobSpec {
     pub placement: Placement,
     /// Jobs that must pass first.
     pub after: Vec<JobId>,
+    /// Wall-clock limit in seconds, enforced by the supervisor: a job over it ends `TimedOut`.
+    /// A plan step's `hints.timeout_secs` fills it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    /// The submitter passed the broad-test escape (`--broad-test`, R-191). Carried on the spec
+    /// so every receiver of the job (a peer, a replayed plan) gives the same answer.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub broad_test_escape: bool,
 }
 
 fn valid_env_name(n: &str) -> bool {
@@ -91,6 +102,11 @@ impl JobSpec {
         if self.after.len() > 64 {
             return Err(CoreError::TooManyDeps(self.after.len()));
         }
+        if let Some(t) = self.timeout_secs
+            && !(1..=MAX_TIMEOUT_SECS).contains(&t)
+        {
+            return Err(CoreError::BadTimeout(t));
+        }
         for d in DENIED_DEVICES {
             if self.argv.iter().any(|a| a.contains(d)) {
                 return Err(CoreError::DeniedDevice((*d).to_string()));
@@ -115,6 +131,8 @@ pub(crate) mod tests {
             requirements: Requirements::default(),
             placement: Placement::Here,
             after: vec![],
+            timeout_secs: None,
+            broad_test_escape: false,
         }
     }
 
@@ -166,10 +184,42 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn timeout_must_be_between_one_second_and_a_week() {
+        for (t, ok) in [
+            (0, false),
+            (1, true),
+            (MAX_TIMEOUT_SECS, true),
+            (MAX_TIMEOUT_SECS + 1, false),
+        ] {
+            let mut s = spec();
+            s.timeout_secs = Some(t);
+            assert_eq!(s.validate().is_ok(), ok, "{t}");
+        }
+        let mut s = spec();
+        s.timeout_secs = Some(0);
+        assert_eq!(s.validate(), Err(CoreError::BadTimeout(0)));
+    }
+
+    #[test]
     fn denied_device() {
         let mut s = spec();
         s.argv = vec!["adb".into(), "-s".into(), "ZD22257P6G".into()];
         assert!(matches!(s.validate(), Err(CoreError::DeniedDevice(_))));
+    }
+
+    #[test]
+    fn new_spec_fields_default_when_absent_and_stay_off_the_wire_when_unset() {
+        let s = spec();
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains("timeout_secs") && !json.contains("broad_test_escape"));
+        // a spec written by an older build parses with the defaults
+        let back: JobSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!((back.timeout_secs, back.broad_test_escape), (None, false));
+        let mut t = s;
+        t.timeout_secs = Some(30);
+        t.broad_test_escape = true;
+        let back: JobSpec = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+        assert_eq!(back, t);
     }
 
     #[test]

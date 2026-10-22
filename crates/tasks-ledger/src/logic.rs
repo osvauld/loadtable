@@ -116,7 +116,12 @@ pub(crate) fn apply_finish(r: &mut JobRecord, f: &Finish, now: i64) -> Result<()
 
 /// Records a cancel request. A job that has not started is cancelled at once and never takes
 /// admission; a running job only gets the flag. The first requester is kept.
-pub(crate) fn apply_cancel(r: &mut JobRecord, by: &str, now: i64) -> CancelOutcome {
+pub(crate) fn apply_cancel(
+    r: &mut JobRecord,
+    by: &str,
+    reason: Option<&str>,
+    now: i64,
+) -> CancelOutcome {
     if r.phase.is_terminal() {
         return CancelOutcome::AlreadyFinished(r.phase.clone());
     }
@@ -124,6 +129,7 @@ pub(crate) fn apply_cancel(r: &mut JobRecord, by: &str, now: i64) -> CancelOutco
         r.cancel = Some(CancelRequest {
             by: by.to_string(),
             at_ms: now,
+            reason: reason.map(str::to_string),
         });
     }
     if r.phase == Phase::Running {
@@ -132,7 +138,10 @@ pub(crate) fn apply_cancel(r: &mut JobRecord, by: &str, now: i64) -> CancelOutco
     r.phase = Phase::Cancelled;
     r.wait_text = None;
     r.exit_code = None;
-    r.summary = Some(format!("cancelled before start by {by}"));
+    r.summary = Some(match reason {
+        Some(why) => format!("cancelled before start by {by}: {why}"),
+        None => format!("cancelled before start by {by}"),
+    });
     r.finished_at_ms = Some(now);
     CancelOutcome::Cancelled
 }
@@ -166,6 +175,9 @@ pub(crate) fn plan_jobs(
                 requirements: step.requirements.clone(),
                 placement: ctx.placement.clone(),
                 after,
+                // the step's own hint fills the spec's limit (R-095's sibling)
+                timeout_secs: step.hints.timeout_secs,
+                broad_test_escape: ctx.broad_test_escape,
             },
             hints: step.hints.clone(),
             step: Some((plan_id, step.name.clone())),
@@ -243,7 +255,7 @@ mod tests {
         assert!(matches!(again, Err(LedgerError::IllegalTransition { .. })));
 
         let mut r = rec(2, Phase::Running);
-        assert_eq!(apply_cancel(&mut r, "u", 3), CancelOutcome::Requested);
+        assert_eq!(apply_cancel(&mut r, "u", None, 3), CancelOutcome::Requested);
         let mut f = Finish::from_phase(Phase::Failed { exit: Some(3) });
         f.timeout = Some(TimeoutReason::Wall);
         apply_finish(&mut r, &f, 4).unwrap();
@@ -268,14 +280,19 @@ mod tests {
     #[test]
     fn cancel_keeps_first_requester_and_is_noop_when_finished() {
         let mut r = rec(1, Phase::Running);
-        apply_cancel(&mut r, "first", 1);
-        apply_cancel(&mut r, "second", 2);
+        apply_cancel(&mut r, "first", Some("a"), 1);
+        apply_cancel(&mut r, "second", Some("b"), 2);
         assert_eq!(r.cancel.as_ref().map(|c| c.by.as_str()), Some("first"));
+        // the reason belongs to the request that was kept
+        assert_eq!(
+            r.cancel.as_ref().and_then(|c| c.reason.as_deref()),
+            Some("a")
+        );
         let mut q = rec(2, Phase::Waiting(WaitReason::Disk));
-        assert_eq!(apply_cancel(&mut q, "u", 9), CancelOutcome::Cancelled);
+        assert_eq!(apply_cancel(&mut q, "u", None, 9), CancelOutcome::Cancelled);
         assert_eq!(q.finished_at_ms, Some(9));
         assert_eq!(
-            apply_cancel(&mut q, "v", 10),
+            apply_cancel(&mut q, "v", None, 10),
             CancelOutcome::AlreadyFinished(Phase::Cancelled)
         );
         assert_eq!(q.cancel.as_ref().map(|c| c.by.as_str()), Some("u"));

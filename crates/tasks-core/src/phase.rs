@@ -23,6 +23,9 @@ pub enum WaitReason {
     Slot(SlotKind),
     /// System pressure (description).
     Pressure(String),
+    /// Placement has not chosen a machine yet: waiting for a peer, a checkout sync or a
+    /// forward (description). Before this variant these waits were stored as `Pressure`.
+    Placement(String),
     /// Waiting on another job.
     Dependency(JobId),
     /// Low disk space.
@@ -141,6 +144,18 @@ mod tests {
                 assert_eq!(from.can_move_to(&to), expected, "{from:?} -> {to:?}");
             }
         }
+    }
+
+    #[test]
+    fn placement_wait_round_trips_and_is_distinct_from_pressure() {
+        let p = Phase::Waiting(WaitReason::Placement("waiting for nixos".into()));
+        let back: Phase = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back, p);
+        assert_ne!(
+            p,
+            Phase::Waiting(WaitReason::Pressure("waiting for nixos".into()))
+        );
+        assert!(!p.is_terminal() && p.can_move_to(&Phase::Running));
     }
 
     #[test]
