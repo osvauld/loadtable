@@ -2957,7 +2957,7 @@ dependencies = [
  "tasks-policy",
  "tasks-runner",
  "tasks-timing",
- "thiserror",
+ "thiserror 2.0.21",
  "toml",
 ]
 
