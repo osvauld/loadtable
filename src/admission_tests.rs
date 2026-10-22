@@ -778,8 +778,66 @@ fn compile_slot_names_keep_the_first_lock_name_and_the_policy_bounds_the_count()
         compile_slot_names(3),
         ["p2p-build.lock", "p2p-build-1.lock", "p2p-build-2.lock"]
     );
-    let slots = |n| AdmissionPolicy { compile_slots: n }.slots();
+    let slots = |n| {
+        AdmissionPolicy {
+            compile_slots: n,
+            ..Default::default()
+        }
+        .slots()
+    };
     assert_eq!(slots(None), Ok(DEFAULT_COMPILE_SLOTS));
     assert_eq!(slots(Some(3)), Ok(3));
     assert!(slots(Some(0)).is_err() && slots(Some(9)).is_err());
+}
+
+#[test]
+fn cargo_jobs_policy_keys_are_bounded_and_the_environment_wins() {
+    let jobs = |max, busy| AdmissionPolicy {
+        max_cargo_jobs: max,
+        cargo_jobs_when_busy: busy,
+        ..Default::default()
+    };
+    assert_eq!(jobs(Some(16), Some(1)).errors(), Vec::<String>::new());
+    assert_eq!(
+        jobs(Some(17), None).errors(),
+        ["admission::max_cargo_jobs: 17 is outside 1..=16"]
+    );
+    assert_eq!(
+        jobs(None, Some(0)).errors(),
+        ["admission::cargo_jobs_when_busy: 0 is outside 1..=16"]
+    );
+    // default < file < environment; an invalid value is reported and skipped.
+    let resolve = |pairs: &[(&str, &str)], p| resolve_max_cargo_jobs(&lookup(pairs), &p);
+    assert_eq!(resolve(&[], jobs(None, None)), (2, "default", None));
+    assert_eq!(resolve(&[], jobs(Some(6), None)), (6, "file", None));
+    assert_eq!(
+        resolve(&[(MAX_CARGO_JOBS_ENV, "8")], jobs(Some(6), None)),
+        (8, "env", None)
+    );
+    let (n, source, error) = resolve(&[(MAX_CARGO_JOBS_ENV, "x")], jobs(Some(6), None));
+    assert_eq!((n, source), (6, "file"));
+    assert!(error.unwrap().contains(MAX_CARGO_JOBS_ENV));
+    assert_eq!(resolve(&[], jobs(Some(99), None)).0, 2);
+}
+
+#[test]
+fn a_busy_machine_lowers_cargo_jobs_but_a_lone_job_keeps_the_cap() {
+    // (requested, cap, when_busy, busy) -> lowered jobs
+    let lowered =
+        |requested, cap, busy_jobs, busy| lowered_cargo_jobs(requested, 2, cap, busy_jobs, busy);
+    assert_eq!(lowered(Some(6), 6, Some(2), true), Some(2));
+    assert_eq!(lowered(Some(6), 6, Some(2), false), None, "a lone job");
+    assert_eq!(lowered(Some(6), 6, None, true), None, "no key, no lowering");
+    assert_eq!(
+        lowered(Some(6), 3, Some(5), true),
+        Some(3),
+        "never above the cap"
+    );
+    assert_eq!(lowered(Some(1), 6, Some(2), true), None, "never raised");
+    assert_eq!(
+        lowered(None, 6, Some(1), true),
+        Some(1),
+        "the injected default of 2"
+    );
+    assert_eq!(lowered(None, 6, Some(2), true), None);
 }

@@ -72,7 +72,7 @@ impl Recipe {
     /// Validates against this process's own `TASKS_MAX_CARGO_JOBS` (daemon
     /// approval and worker execution). Invalid configuration fails closed.
     pub fn validate(&self) -> Result<()> {
-        self.check(|| Ok(crate::admission::thresholds()?.max_cargo_jobs))
+        self.check(|| Ok(crate::admission::Thresholds::from_env()?.max_cargo_jobs))
     }
     /// Validates with an explicit Cargo jobs cap (1..=64).
     pub fn validate_with_max(&self, max_cargo_jobs: u64) -> Result<()> {
