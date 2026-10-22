@@ -1,0 +1,262 @@
+# Design: peer identity, git sync over iroh, audit and attribution, scheduling
+
+Status: proposal for review (2026-10-22). Nothing here is built yet. The daemon, peer
+forwarding state machine, CLI and MCP crates already exist; this replaces their transport,
+sync and trust layers and adds audit, attribution and priority.
+
+## 1. Goals
+
+- Machines talk only over iroh: direct on the LAN, through a relay otherwise. No SSH,
+  no `tasks-offload`, no worker reached by IP.
+- Trust is an identity, not an endpoint. A machine is a DID with a signing key; its iroh
+  node key is bound to that DID. Pairing is a ticket you copy from one machine to the other,
+  like p2p_chat contacts and osvauld2 invites.
+- Sync sends only what changed, reads only what changed, and ties every forwarded job to an
+  exact git tree id.
+- Every stall (I/O, memory, CPU) and every peer action can be explained afterwards from the
+  ledger: who, what, how many bytes, which job.
+- Priority classes and a short lane, decided from measured history rather than flags.
+
+Non-goals for now: more than one human owner, untrusted third-party workers, hermetic
+builds, Git LFS and submodules (refused with a named reason).
+
+## 2. Identity
+
+Reuse the osvauld identity contract (osvauld2 `identity/`, p2p_chat `crates/identity`):
+
+| key | curve | used for |
+|---|---|---|
+| signing | Ed25519 | signatures on tokens, tickets and audit rows; the DID |
+| device | Ed25519 | the iroh endpoint key (node id) |
+| encryption | X25519 | not needed yet; derived anyway so the contract matches |
+
+- One identity per machine, generated on first `tasks2 daemon serve` from 32 random bytes
+  through the same BIP39 + HKDF derivation (`osv/identity/*/v1`), so the existing crates'
+  golden tests apply and the mnemonic can be backed up (`tasks2 identity show --mnemonic`).
+- Stored in the daemon's state dir, mode 0600, never in argv or logs. macOS: same file;
+  Keychain later if wanted.
+- `did:key:z…` is the machine's stable name in the ledger, audit log and status; the
+  human name ("kurukkan", "nixos") is a label.
+
+Decision needed (D1): depend on the identity crate from osvauld2/p2p_chat (git or path
+dependency) or vendor its ~200 lines with its golden vectors. Recommendation: path/git
+dependency on one shared crate, so there is one forever-contract.
+
+## 3. Grants and roles
+
+Follow osvauld2 `courier` tokens: a node-signed claim `{iss, aud, sub, role, scope, nonce,
+iat, exp, binds}` where `binds` pins the holder's device key (iroh node id).
+
+Roles a machine can grant another:
+
+| role | allows the holder to |
+|---|---|
+| `submit` | send jobs to me, sync checkouts to me, fetch outputs of its own jobs |
+| `observe` | read my status, queue and logs of its own jobs |
+| `admin` | pair, revoke and change my peer policy (only the owner's other machines) |
+
+"I may send jobs to the worker" is the worker granting the laptop `submit`. Two-way use
+needs a grant each way, made by one pairing (§4) that asks for both.
+
+- Every live grant is a ledger row; revoking deletes nothing, it marks the row revoked and
+  writes an audit row. A revoked or expired grant fails the next request, and live
+  connections holding it are closed.
+- Grants expire (default 1 year) and are re-issued silently over a live connection before
+  expiry; an offline machine past expiry needs a new pairing.
+
+## 4. Pairing ticket
+
+```
+tasks2 pair invite --role submit,observe [--both-ways] [--ttl 15m]   # on the worker
+  -> tasks1.eyJ2ZXJzaW9uIjox…   (one URL-safe word; QR optional)
+tasks2 pair accept tasks1.eyJ…                                         # on the laptop
+```
+
+Ticket body (JSON, versioned prefix `tasks1.` so a newer ticket is refused by name):
+`version, node_did, device_public_key, node_id, name, relay, direct_addrs, invite_token`.
+The invite token is signed by the inviter and carries role, scope, a single-use nonce and
+an expiry (default 15 minutes).
+
+Redeem:
+1. The laptop dials `node_id` (direct addrs first, then the relay) and checks the endpoint
+   key equals the ticket's `device_public_key`.
+2. It sends the invite token, its own DID, device key and a signature over a fresh
+   challenge from the worker (proof it holds the DID's key).
+3. The worker checks the token signature, expiry and that the nonce is unspent, persists
+   the nonce as spent, mints the grant bound to the laptop's device key, and records the
+   peer. With `--both-ways` the laptop mints the reverse grant in the same exchange.
+4. Both sides write audit rows. The ticket is now useless.
+
+Like p2p_chat's ticket rotation, `tasks2 pair reset` invalidates every unredeemed ticket.
+
+## 5. Connection
+
+- One iroh endpoint per daemon, key = device key, ALPN `tasks/1`. Relay: iroh's default
+  relays to start; a self-hosted relay URL in machine policy later (D2).
+- Discovery: the ticket's direct addresses and relay; afterwards each side remembers the
+  other's latest addresses, plus iroh DNS/pkarr discovery so a moved machine is found.
+- Admission happens before any request is read: iroh authenticates the node id, then the
+  first frame presents the grant; the receiver checks signature, expiry, revocation and
+  that `binds.device` equals the connection's node id. Each request is checked against the
+  grant's role.
+- The status snapshot shows per peer: DID, name, path (direct / relay), round-trip time,
+  grant expiry. Relay-only links are fine for logs and status; placement charges sync cost
+  by measured throughput, so a slow relay path naturally keeps big syncs local.
+- Removes: SSH, `tasks-offload`, `status_watch_ssh.py`, the worker's `authorized_keys`
+  entry (user step), and the old `lan-peer` blob store.
+
+## 6. Sync: git over iroh
+
+### Snapshot on the origin
+1. Copy the checkout's index to a private temp index (`GIT_INDEX_FILE`), run
+   `git add -A` into it. Git's stat cache means only changed files are read and hashed.
+2. `git write-tree` gives the tree id of the exact working tree, uncommitted changes
+   included. Gitignored files are not in it.
+3. New objects go to a tasks-owned object dir (`GIT_OBJECT_DIRECTORY`) that lists the
+   repo's own objects as an alternate, so the user's repo, index, refs and stash are never
+   written.
+
+The job records `tree`, the HEAD commit it was based on and the dirty-file count.
+
+### Transfer
+- The worker keeps one bare mirror per (peer DID, repo) and one working copy per
+  (peer DID, checkout path), as today's store does.
+- Negotiation: the worker reports the trees/commits it already has for that checkout; the
+  origin runs `git pack-objects --thin --revs` excluding those, streams the pack over one
+  iroh stream with a byte limit; the worker runs `git index-pack --fix-thin`.
+- Apply: `git read-tree` + `git checkout-index` into the working copy inside the existing
+  per-checkout lock; files that left the tree are removed only if they were tracked before,
+  so build outputs stay (same rule as now). A sync while a remote job of that checkout is
+  live is refused `Busy` (already built).
+- Extra inputs: gitignored files that must travel (e.g. `local.properties`-style config)
+  come from an explicit allowlist in the repo run policy, sent as hashed blobs. A secret
+  denylist (names plus a content check for key/token patterns) refuses rather than skips
+  silently.
+- Refused with a named reason: LFS pointers, submodules, files over a size cap.
+
+### Outputs and cleanup
+- Outputs (APKs, binaries) come back over the existing hashed, bounded fetch, written to
+  a temp file and renamed into place.
+- Retention: the worker drops a working copy idle for N days (default 7) and runs
+  `git gc --prune=<age>` on its mirrors weekly; the origin prunes its object dir of trees
+  older than the newest job per checkout. Every deletion writes an audit row with bytes
+  freed.
+
+This replaces the peer crate's `manifest`, `sync` and `store` modules; `CheckoutLocks`,
+`Forward`, `outputs` and the receiver stay. Shelling out to `git` (installed on Linux and
+macOS) is the default implementation behind a `Snapshot`/`PackTransfer` trait; a library
+can replace it later without changing the protocol.
+
+## 7. Logs
+
+- A job's stdout/stderr go through a pipe into its log file; no fsync per write (already
+  so in v2). Hard size cap per job with the watchdog (already built), and log files are
+  deleted with the job row by retention.
+- Forwarded jobs: the worker's log is mirrored by byte offset; a reconnect resumes at the
+  offset. The origin writes the mirrored bytes the same way, no fsync.
+- Ledger: SQLite WAL with `synchronous=NORMAL` (already so); audit rows share it.
+
+## 8. Audit log
+
+An append-only `audit` table in the ledger. Each row: time, actor DID (machine) and owner
+(agent/person), action, target (job id, peer DID, checkout, path), details JSON, and
+`prev_hash` = hash of the previous row, so silent edits break the chain and
+`tasks2 audit verify` finds them. Rows are signed by the machine's key in batches.
+
+Recorded actions:
+- pairing: ticket minted, redeemed, refused (and why), grant issued, renewed, revoked;
+- connections: open, close, refused (bad grant, revoked, wrong node id), path changes;
+- jobs: submitted, forwarded (peer DID, tree id), received from a peer, started, ended,
+  cancelled (by whom, reason), priority raised (by whom, reason), refused by policy;
+- data: sync bytes sent/received and tree id; outputs fetched (path, hash, bytes);
+  retention deletions (path, bytes);
+- pressure: every gate trip with the attribution snapshot (§9).
+
+`tasks2 audit [--since] [--peer] [--job] [--action] [--json]` reads it; the UI shows it.
+Retention: 90 days by default, chain kept intact by recording a checkpoint row.
+
+## 9. Attribution of stalls
+
+### Linux: one cgroup per job
+- The daemon runs as a systemd user service with `Delegate=yes` and creates
+  `tasks.slice/job-<id>` per job (and `tasks.slice/transfer` for sync/fetch work).
+- From each job's cgroup the daemon reads: `io.stat` (bytes, ops per device),
+  `io.pressure`, `memory.peak`, `memory.pressure`, `cpu.stat`, `cpu.pressure`. These are
+  stored with the job and shown in `get`/`list`/UI.
+- Process-group leases and cancellation keep working; killing a cgroup (`cgroup.kill`)
+  becomes the last-resort kill that cannot miss an escaped child.
+- Without delegation (no systemd, containers) the daemon falls back to today's process
+  groups and says so in status.
+
+### macOS
+No cgroups or PSI. Per-process disk bytes from `proc_pid_rusage` (`ri_diskio_*`), memory
+pressure level from the kernel (`kern.memorystatus_vm_pressure_level`), summed over each
+job's process tree by the sampler. Attribution is per process tree, not exact.
+
+### When a gate trips
+Record the machine-wide pressure, the per-job figures above, and the top 10 processes
+outside any job by I/O and RSS over the last sample window (Firefox, the UI, a sync).
+That answers "what caused this stall" even when no job ran. The UI shows the last trips.
+
+### Transfers count
+Sync and fetch run in the `transfer` cgroup and take a transfer slot. Unlike today's
+offload slot, the transfer slot respects the I/O gate, because a sync is local disk work.
+
+## 10. Scheduling: priority and the short lane
+
+Queue order: `(class, effective wait, submit time)`.
+
+| class | for | how a job gets it |
+|---|---|---|
+| `blocking` | an agent or person is waiting on the result now | `--priority blocking --reason TEXT`; audited |
+| `normal` | default | — |
+| `background` | warm-ups, long suites, sweeps | `--priority background` or the repo run policy |
+
+- Aging: a waiting job's effective class rises one step after a configurable wait
+  (default 20 min), so background work never starves.
+- Fairness: within a class, round-robin by owner, so one agent's 30 queued jobs don't
+  block another agent's one.
+- Short lane (exists in admission today): admission is decided by the timing history:
+  predicted duration under the limit (default 60 s) and predicted peak memory under a
+  cap. Short jobs skip the CPU gate but keep the memory floor and disk reserve (built).
+  A short job that overruns is not killed; its history updates, so the next run of that
+  recipe is not short. No flag lets an agent claim "short".
+
+## 11. To discuss: workloads and test parallelism
+
+These need decisions before a build wave:
+
+1. Split `cargo test` by target? Timing already learns per-target durations (§ per-target
+   samples, in progress). A plan could run `--lib` and each `--test X` as separate jobs,
+   on both machines, and merge results. Cost: each machine compiles the test deps.
+2. Who decides placement: the repo run policy (checked in), machine policy (slots, RAM,
+   I/O), or the agent at submit? Proposal: the agent states intent (`--pin`,
+   `--peer`, `--anywhere`), the repo policy gives hints per step, machine policy only caps.
+3. Cache affinity: prefer the machine whose `target/` is warm for this checkout even if
+   the other one is idler? Proposal: yes, measured as expected finish time with warmth from
+   history, which placement already models.
+4. Per-agent quotas beyond round-robin fairness?
+
+## 12. Decisions needed
+
+- D1: shared identity crate vs vendored copy (recommend shared).
+- D2: iroh default relays now, self-hosted relay later (recommend yes).
+- D3: git subprocess vs library for snapshot/pack (recommend subprocess first).
+- D4: daemon as systemd user service with `Delegate=yes` on both Linux machines
+  (needed for per-job cgroups; a unit edit, your step on the worker).
+- D5: audit retention 90 days and hash chain (recommend yes).
+- D6: default grant expiry 1 year, ticket expiry 15 minutes.
+- §11 questions.
+
+## 13. Build order
+
+1. Identity + grants + pairing + iroh connection with admission (peer crate `trust`
+   module, daemon wiring, `tasks2 pair`/`peers`/`identity` commands). Remove SSH paths.
+2. Audit table and `tasks2 audit` (ledger schema bump), wired to pairing and forwarding.
+3. Git sync (`Snapshot`, `PackTransfer`, worker mirrors, retention), replacing
+   manifest/sync/store.
+4. Attribution: per-job cgroups, macOS sampler, gate-trip snapshots, transfer slot.
+5. Priority classes, aging, owner round-robin; short lane from history.
+
+Each step lands with regression tests named after the R-ids it covers; new behaviours get
+new R-ids in `docs/REGRESSIONS.md`.
