@@ -681,27 +681,37 @@ impl Snapshot for GixSnapshot {
             Some(write_trees(&tasks, &extra_blobs)?)
         };
 
-        // the new stat cache; written only after every check above passed
-        let mut state = gix::index::State::new(kind);
-        for (path, e) in &new_entries {
-            state.dangerously_push_entry(
-                e.stat,
-                e.id,
-                Flags::empty(),
-                e.mode,
-                path.as_bytes().as_bstr(),
-            );
+        // The new stat cache; written only after every check above passed, and only when it
+        // differs from the old one (an unchanged re-sync writes nothing).
+        let unchanged = p_cache.known.len() == new_entries.len()
+            && new_entries.iter().all(|(path, e)| {
+                p_cache
+                    .known
+                    .get(&BString::from(path.as_str()))
+                    .is_some_and(|k| k.id == e.id && k.mode == e.mode && k.stat == e.stat)
+            });
+        if !unchanged {
+            let mut state = gix::index::State::new(kind);
+            for (path, e) in &new_entries {
+                state.dangerously_push_entry(
+                    e.stat,
+                    e.id,
+                    Flags::empty(),
+                    e.mode,
+                    path.as_bytes().as_bstr(),
+                );
+            }
+            state.sort_entries();
+            let mut p_file = gix::index::File::from_state(state, &p_path);
+            std::fs::create_dir_all(&dir)?;
+            p_file
+                .write(gix::index::write::Options {
+                    extensions: gix::index::write::Extensions::None,
+                    skip_hash: true,
+                })
+                .map_err(store)?;
+            io.index_bytes_written = index_len(&p_path);
         }
-        state.sort_entries();
-        let mut p_file = gix::index::File::from_state(state, &p_path);
-        std::fs::create_dir_all(&dir)?;
-        p_file
-            .write(gix::index::write::Options {
-                extensions: gix::index::write::Extensions::None,
-                skip_hash: true,
-            })
-            .map_err(store)?;
-        io.index_bytes_written = index_len(&p_path);
 
         let head_tree = user
             .head_commit()

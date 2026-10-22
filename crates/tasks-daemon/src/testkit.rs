@@ -580,6 +580,9 @@ impl Rig {
             self.sch.tick();
             self.store.get(id).unwrap().unwrap().phase.is_terminal()
         });
+        // The terminal write is visible before the rows that follow it (the audit row, the
+        // per-target samples) are written; a busy machine made tests that read them race.
+        std::thread::sleep(Duration::from_millis(10));
         self.phase(id)
     }
 

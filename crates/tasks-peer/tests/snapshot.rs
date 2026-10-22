@@ -494,7 +494,7 @@ fn r310_prune_keeps_what_the_newest_snapshots_need_and_frees_the_rest() {
         .snap
         .prune(
             &old.repo,
-            &[new_commit.clone()],
+            std::slice::from_ref(&new_commit),
             std::time::Duration::from_secs(3600),
         )
         .unwrap();
@@ -502,7 +502,11 @@ fn r310_prune_keeps_what_the_newest_snapshots_need_and_frees_the_rest() {
     // everything counts as old now: only what the newest commit's tree reaches stays
     let stats = f
         .snap
-        .prune(&old.repo, &[new_commit.clone()], std::time::Duration::ZERO)
+        .prune(
+            &old.repo,
+            std::slice::from_ref(&new_commit),
+            std::time::Duration::ZERO,
+        )
         .unwrap();
     assert!(stats.objects >= 3 && stats.bytes > 0, "{stats:?}");
     assert!(exists(&new_blob) && exists(new.tree.as_str()) && exists(new_commit.as_str()));
