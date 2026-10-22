@@ -64,6 +64,15 @@ fn sleep(d: Duration) {
 type Out = Result<Response, ApiError>;
 
 impl Scheduler {
+    fn trust_control(&self) -> Result<Arc<dyn crate::trust_control::TrustControl>, ApiError> {
+        self.trust().ok_or_else(|| {
+            ApiError::new(
+                ErrorCode::Refused,
+                "this daemon has no identity yet (it was started without the trust runtime)",
+            )
+        })
+    }
+
     /// Answers one request. Never panics and never blocks on a running job.
     pub fn handle(self: &Arc<Self>, req: Request) -> Reply {
         match self.dispatch(req) {
@@ -82,6 +91,49 @@ impl Scheduler {
                 lock_dir: self.cfg.lock_dir.clone(),
                 machine: self.cfg.machine.clone(),
             })),
+            Request::Identity => {
+                let t = self.trust_control()?;
+                Ok(Response::Identity(t.identity()))
+            }
+            Request::PairInvite {
+                roles,
+                both_ways,
+                ttl_secs,
+            } => {
+                let t = self.trust_control()?;
+                let v = t
+                    .invite(&roles, both_ways, ttl_secs)
+                    .map_err(|e| ApiError::new(ErrorCode::Refused, e))?;
+                Ok(Response::Invite(v))
+            }
+            Request::PairAccept { ticket } => {
+                let t = self.trust_control()?;
+                let v = t
+                    .accept(&ticket)
+                    .map_err(|e| ApiError::new(ErrorCode::Refused, e))?;
+                self.wake().notify();
+                Ok(Response::Paired(v))
+            }
+            Request::PairReset => {
+                let t = self.trust_control()?;
+                let epoch = t
+                    .reset()
+                    .map_err(|e| ApiError::new(ErrorCode::Refused, e))?;
+                Ok(Response::PairReset { epoch })
+            }
+            Request::Peers => {
+                let t = self.trust_control()?;
+                t.set_link_quality(self.forwarder.link_quality());
+                Ok(Response::Peers { peers: t.peers() })
+            }
+            Request::PeerRevoke { name } => {
+                let t = self.trust_control()?;
+                let v = t
+                    .revoke(&name)
+                    .map_err(|e| ApiError::new(ErrorCode::Refused, e))?;
+                self.wake().notify();
+                Ok(Response::Revoked(v))
+            }
             Request::Submit { spec } => self.submit(spec),
             Request::SubmitPlan {
                 plan,

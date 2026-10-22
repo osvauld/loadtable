@@ -217,13 +217,13 @@ fn read_range(path: &Path, offset: u64, max: usize) -> Vec<u8> {
     buf
 }
 
-/// The receiver this daemon hosts: allowlist from the policy's peers, jobs into the ledger,
-/// synced copies under `store_dir`. Hand it to the transport's serving side.
+/// The receiver this daemon hosts: jobs into the ledger, synced copies under `store_dir`. Who may
+/// call it is decided in front of it by the trust gate (`tasks_peer::trust::TrustedHandler`), on
+/// grants; the receiver itself admits every caller it is handed.
 pub fn build_receiver(sch: &Arc<Scheduler>, store_dir: std::path::PathBuf) -> Arc<Receiver> {
-    let policy = sch.policy();
     Arc::new(Receiver::new(
         &sch.cfg.machine,
-        Allowlist::new(policy.peers().allowlist()),
+        Allowlist::open(),
         Arc::new(CheckoutStore::new(store_dir, StoreLimits::default())),
         Arc::new(DaemonRunner::new(sch.clone())),
         Arc::new(DaemonStatus::new(sch.clone())),

@@ -549,9 +549,13 @@ fn r222_stale_and_offline_peers_alert_after_the_grace_period_and_clear() {
     assert!(r.sch.status().alerts.is_empty());
 }
 
+// R-259
 #[test]
-fn peers_in_the_policy_without_a_peer_transport_alert_at_once() {
-    let r = Rig::with_policy("[peers.nixos]\nnode_id = \"nixos-node\"\n");
+fn r259_paired_peers_without_a_peer_transport_alert_at_once() {
+    let r = Rig::new();
+    let stub = Arc::new(crate::testkit::StubTrust::default());
+    stub.set_peers(vec![crate::testkit::peer_view("nixos", "did:key:zN", &["submit"], &[])]);
+    r.sch.set_trust(stub);
     r.tick();
     let st = r.sch.status();
     assert!(
@@ -565,7 +569,7 @@ fn peers_in_the_policy_without_a_peer_transport_alert_at_once() {
 #[test]
 fn a_job_forwarded_to_a_worker_daemon_runs_there_as_an_ordinary_queue_job() {
     let w = PeerWorld::new();
-    let worker = Rig::with_policy("[peers.laptop]\nnode_id = \"laptop-node\"\n");
+    let worker = Rig::new();
     worker.procs.auto_exit(0);
     worker.procs.output(b"built on the worker\n");
     let receiver =

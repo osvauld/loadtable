@@ -1004,22 +1004,22 @@ mod tests {
         assert!(bad.problems.iter().any(|m| m.contains("jobs_when_busy")));
     }
 
-    // R-174: peers come from the policy, strictly parsed; a bad peers section refuses the file.
+    // R-174 (superseded by R-257): the `[peers]` section is strict transport settings; a bad
+    // section refuses the whole file and old per-peer tables are pointed at pairing.
     #[test]
-    fn r174_peers_come_from_the_policy_and_a_bad_section_refuses_the_whole_file() {
-        let good = "[slots]\nrun = 6\n[peers]\nbind = \"192.168.1.5:7843\"\n[peers.nixos]\nnode_id = \"abc\"\n";
+    fn r174_the_peers_section_is_strict_and_a_bad_one_refuses_the_whole_file() {
+        let good = "[slots]\nrun = 6\n[peers]\nrelay = \"off\"\n";
         let p = MachinePolicy::from_text(Some(good), &no_env);
         assert!(p.problems.is_empty(), "{:?}", p.problems);
-        assert_eq!(p.peers().peers.len(), 1);
-        assert_eq!(p.peers().peers[0].name, "nixos");
+        assert_eq!(p.peers().relay, crate::peers_config::RelaySetting::Off);
         assert_eq!(p.slot_count(SlotKind::Run), 6);
-        // missing node_id: refused as a whole, valid keys beside it are not applied
+        // an old per-peer table: refused as a whole, valid keys beside it are not applied
         let bad = "[slots]\nrun = 6\n[peers.nixos]\naddr = \"192.168.1.7:7843\"\n";
         let p = MachinePolicy::from_text(Some(bad), &no_env);
-        assert!(p.peers().peers.is_empty());
+        assert_eq!(p.peers().relay, crate::peers_config::RelaySetting::Default);
         assert_eq!(p.slot_count(SlotKind::Run), 4);
         let all = p.problems.join("\n");
-        assert!(all.contains("peers.nixos.node_id: required"), "{all}");
+        assert!(all.contains("peers.nixos: peers are no longer configured here"), "{all}");
         assert!(all.contains("refused as a whole"), "{all}");
         // the grace is an ordinary setting with an environment override
         let p = MachinePolicy::from_text(None, &env1("TASKS_ALERT_PEER_GRACE_SECS", "5"));

@@ -46,6 +46,33 @@ pub const MAX_HISTORY_TOTAL_SAMPLES: usize = 20_000;
 pub enum Request {
     /// Who is this daemon: version, pid, directories.
     Hello,
+    /// This machine's identity: DID, node id, name.
+    Identity,
+    /// Mint a pairing ticket.
+    PairInvite {
+        /// Roles the redeemer receives (`submit`, `observe`, `admin`).
+        roles: Vec<String>,
+        /// Whether the redeemer grants the same roles back.
+        #[serde(default)]
+        both_ways: bool,
+        /// Ticket lifetime in seconds (default 15 minutes).
+        #[serde(default)]
+        ttl_secs: Option<u64>,
+    },
+    /// Redeem a ticket made by another machine.
+    PairAccept {
+        /// The `tasks1.…` text.
+        ticket: String,
+    },
+    /// Invalidate every unredeemed ticket.
+    PairReset,
+    /// Paired peers with DID, roles each way, expiry and link path.
+    Peers,
+    /// Revoke a paired peer's grants and close its live connections.
+    PeerRevoke {
+        /// The peer's name.
+        name: String,
+    },
     /// Submit one job.
     Submit {
         /// The job.
@@ -381,6 +408,24 @@ pub enum Response {
     Ack,
     /// Answer to `hello`.
     Hello(HelloInfo),
+    /// Answer to `identity`.
+    Identity(crate::trust_control::IdentityView),
+    /// A minted ticket.
+    Invite(crate::trust_control::InviteView),
+    /// A completed pairing.
+    Paired(crate::trust_control::PairedView),
+    /// Tickets reset.
+    PairReset {
+        /// The new ticket epoch.
+        epoch: u64,
+    },
+    /// Paired peers.
+    Peers {
+        /// The peers, by name.
+        peers: Vec<crate::trust_control::PeerTrustView>,
+    },
+    /// A peer was revoked.
+    Revoked(crate::trust_control::RevokeView),
     /// A job was submitted.
     Submitted {
         /// Its id.
@@ -737,6 +782,24 @@ pub struct PeerView {
     pub last_seen_ago_secs: Option<u64>,
     /// The last probe's error, or empty.
     pub detail: String,
+    /// The peer's DID (empty when not paired through a ticket).
+    #[serde(default)]
+    pub did: String,
+    /// Roles this machine holds there.
+    #[serde(default)]
+    pub roles_out: Vec<String>,
+    /// Roles the peer holds here.
+    #[serde(default)]
+    pub roles_in: Vec<String>,
+    /// The earliest grant expiry either way, unix seconds.
+    #[serde(default)]
+    pub grant_expires_at: Option<u64>,
+    /// `direct`, `relay` or `unknown`.
+    #[serde(default)]
+    pub path: String,
+    /// Round-trip time of the link, milliseconds.
+    #[serde(default)]
+    pub rtt_ms: Option<u64>,
 }
 
 /// The status snapshot.

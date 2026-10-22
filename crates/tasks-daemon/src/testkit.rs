@@ -282,6 +282,7 @@ pub struct FakeForwarder {
     pub remote_cancelled: Mutex<Vec<(String, i64)>>,
     pub cancel_remote_fails: Mutex<bool>,
     pub links: Mutex<Vec<LinkReport>>,
+    pub quality: Mutex<Vec<crate::forwarder::LinkQuality>>,
 }
 
 impl FakeForwarder {
@@ -299,6 +300,7 @@ impl FakeForwarder {
             remote_cancelled: Mutex::new(Vec::new()),
             cancel_remote_fails: Mutex::new(false),
             links: Mutex::new(Vec::new()),
+            quality: Mutex::new(Vec::new()),
         }
     }
     pub fn script(&self, id: JobId, p: ForwardPoll) {
@@ -312,6 +314,9 @@ impl Forwarder for FakeForwarder {
     }
     fn links(&self) -> Vec<LinkReport> {
         lock(&self.links).clone()
+    }
+    fn link_quality(&self) -> Vec<crate::forwarder::LinkQuality> {
+        lock(&self.quality).clone()
     }
     fn forward(&self, job: &JobRecord, peer: &MachineName) -> Result<ForwardTicket, ForwardError> {
         if *lock(&self.fail) {
@@ -657,8 +662,7 @@ impl PeerWorld {
             vec![crate::peers_config::PeerSpec {
                 name: "nixos".into(),
                 node_id: self.nixos.clone(),
-                addr: None,
-                allow: true,
+                did: String::new(),
             }],
         );
         o.policy.reattach_interval = Duration::from_millis(5);
@@ -687,4 +691,83 @@ impl PeerWorld {
             .filter(|(_, k)| k == kind)
             .count()
     }
+}
+
+/// A scripted [`TrustControl`](crate::trust_control::TrustControl).
+#[derive(Default)]
+pub struct StubTrust {
+    pub peers: Mutex<Vec<crate::trust_control::PeerTrustView>>,
+    pub expiring: Mutex<Vec<crate::trust_control::ExpiringView>>,
+}
+
+impl StubTrust {
+    pub fn set_peers(&self, p: Vec<crate::trust_control::PeerTrustView>) {
+        *lock(&self.peers) = p;
+    }
+    pub fn set_expiring(&self, e: Vec<crate::trust_control::ExpiringView>) {
+        *lock(&self.expiring) = e;
+    }
+}
+
+/// A peer view with the given roles each way, expiring at a fixed time.
+pub fn peer_view(
+    name: &str,
+    did: &str,
+    out: &[&str],
+    inn: &[&str],
+) -> crate::trust_control::PeerTrustView {
+    use crate::trust_control::{PeerTrustView, RoleView};
+    let roles = |v: &[&str]| {
+        v.iter()
+            .map(|r| RoleView {
+                role: (*r).to_string(),
+                expires_at: 2_000_000_000,
+            })
+            .collect()
+    };
+    PeerTrustView {
+        name: name.into(),
+        did: did.into(),
+        node_id: format!("{name}-node"),
+        roles_out: roles(out),
+        roles_in: roles(inn),
+        expires_at: Some(2_000_000_000),
+        revoked: false,
+        path: "unknown".into(),
+        rtt_ms: None,
+    }
+}
+
+impl crate::trust_control::TrustControl for StubTrust {
+    fn identity(&self) -> crate::trust_control::IdentityView {
+        crate::trust_control::IdentityView {
+            did: "did:key:zSelf".into(),
+            node_id: "self-node".into(),
+            name: "self".into(),
+        }
+    }
+    fn invite(
+        &self,
+        _roles: &[String],
+        _both_ways: bool,
+        _ttl: Option<u64>,
+    ) -> Result<crate::trust_control::InviteView, String> {
+        Err("stub".into())
+    }
+    fn accept(&self, _ticket: &str) -> Result<crate::trust_control::PairedView, String> {
+        Err("stub".into())
+    }
+    fn reset(&self) -> Result<u64, String> {
+        Ok(1)
+    }
+    fn peers(&self) -> Vec<crate::trust_control::PeerTrustView> {
+        lock(&self.peers).clone()
+    }
+    fn revoke(&self, _name: &str) -> Result<crate::trust_control::RevokeView, String> {
+        Err("stub".into())
+    }
+    fn expiring(&self) -> Vec<crate::trust_control::ExpiringView> {
+        lock(&self.expiring).clone()
+    }
+    fn set_link_quality(&self, _q: Vec<crate::forwarder::LinkQuality>) {}
 }

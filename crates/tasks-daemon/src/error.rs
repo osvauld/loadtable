@@ -40,6 +40,9 @@ pub enum DaemonError {
     /// Admission failed to measure the machine.
     #[error("admission: {0}")]
     Admission(#[from] tasks_admission::AdmissionError),
+    /// The machine identity or trust state could not be opened.
+    #[error("identity: {0}")]
+    Identity(String),
     /// The peer link could not start.
     #[error("peers: {0}")]
     Peer(String),

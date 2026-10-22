@@ -213,31 +213,16 @@ pub fn run(args: &[String]) -> Result<(), DaemonError> {
             let config = DaemonConfig::resolve(&args, &env)?;
             #[allow(unused_mut)]
             let mut opts = DaemonOptions::new(config);
-            let lookup = |k: &str| {
-                opts.env
-                    .iter()
-                    .find(|(n, _)| n == k)
-                    .map(|(_, v)| v.clone())
-            };
-            let policy = MachinePolicy::load(&opts.config.policy_path(), &lookup);
             #[cfg(feature = "iroh")]
-            let host = crate::peer_link::iroh_host::attach(&mut opts, &policy)?;
+            {
+                opts.peer_runtime = Some(Box::new(crate::peer_link::iroh_host::IrohFactory));
+            }
             #[cfg(not(feature = "iroh"))]
-            if !policy.peers().peers.is_empty() {
-                eprintln!(
-                    "tasks2d: {} peer(s) are configured but this build has no peer transport \
-                     (build with --features iroh); every job runs here",
-                    policy.peers().peers.len()
-                );
-            }
+            eprintln!(
+                "tasks2d: this build has no peer transport (build with --features iroh); \
+                 identity and pairing tickets work, but every job runs here"
+            );
             let daemon = Daemon::start(opts)?;
-            #[cfg(feature = "iroh")]
-            if let Some(h) = &host {
-                h.serve(
-                    daemon.receiver(),
-                    tasks_peer::Allowlist::new(policy.peers().allowlist()),
-                );
-            }
             for note in &daemon.startup.notes {
                 eprintln!("tasks2d: startup: {note}");
             }

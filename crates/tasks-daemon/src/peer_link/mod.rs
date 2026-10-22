@@ -22,8 +22,8 @@ pub mod serve;
 pub mod iroh_host;
 
 use crate::forwarder::{
-    ForwardEnd, ForwardError, ForwardPoll, ForwardProgress, ForwardTicket, Forwarder, LinkReport,
-    LinkState,
+    ForwardEnd, ForwardError, ForwardPoll, ForwardProgress, ForwardTicket, Forwarder, LinkQuality,
+    LinkReport, LinkState,
 };
 use crate::peers_config::PeerSpec;
 use crate::scheduler::lock;
@@ -36,20 +36,30 @@ use tasks_core::{Arch, JobId, Machine, MachineName, Os, SlotKind};
 use tasks_ledger::JobRecord;
 use tasks_peer::manifest::FileLister;
 use tasks_peer::proto::{Body, PeerStatus};
-use tasks_peer::transport::{PeerError, Transport};
+use tasks_peer::transport::{LinkInfo as PathInfo, PeerError, Transport};
 use tasks_peer::{
     CheckoutId, CheckoutLocks, Forward, ForwardJob, ForwardPolicy, LockOwner, PeerId, Refusal,
     RemoteJobId,
 };
 use tasks_placement::{Checkout, Link, MachineView, Pressure};
 
+/// Where the adapter learns its peers: the paired machines. Asked on every probe round and when
+/// a name is not known yet, so a machine paired (or revoked) while the daemon runs is picked up
+/// without a restart.
+pub trait PeerSource: Send + Sync {
+    /// The machines this daemon may forward to.
+    fn peers(&self) -> Vec<PeerSpec>;
+}
+
 /// How the adapter behaves. [`PeerLinkOptions::new`] gives the production values.
 #[derive(Clone)]
 pub struct PeerLinkOptions {
     /// This machine's name; part of every checkout id and duplicate-submit key.
     pub local_name: String,
-    /// The peers, from the machine policy.
+    /// Peers known at start (tests); [`PeerLinkOptions::source`] adds the paired ones.
     pub peers: Vec<PeerSpec>,
+    /// The paired machines, kept current while the daemon runs.
+    pub source: Option<Arc<dyn PeerSource>>,
     /// Forward timeouts and retry knobs.
     pub policy: ForwardPolicy,
     /// Lists a checkout's files for the sync (`git ls-files` in production).
@@ -73,6 +83,7 @@ impl PeerLinkOptions {
         PeerLinkOptions {
             local_name: local_name.to_string(),
             peers,
+            source: None,
             policy: ForwardPolicy::default(),
             lister: Arc::new(tasks_peer::manifest::GitLister),
             status_every: Duration::from_secs(5),
@@ -109,6 +120,9 @@ pub(crate) struct Job {
 
 struct LinkInfo {
     spec: PeerSpec,
+    /// False once the machine is no longer paired: it is not probed and shows as offline.
+    active: bool,
+    path: PathInfo,
     /// Since the adapter's epoch.
     last_ok: Option<Duration>,
     probed: bool,
@@ -152,6 +166,8 @@ impl<T: Transport + 'static> PeerLink<T> {
                     p.name.clone(),
                     LinkInfo {
                         spec: p.clone(),
+                        active: true,
+                        path: PathInfo::UNKNOWN,
                         last_ok: None,
                         probed: false,
                         ok: false,
@@ -221,12 +237,16 @@ impl<T: Transport + 'static> PeerLink<T> {
     }
 
     fn spec_of(&self, name: &str) -> Option<PeerSpec> {
-        self.inner
-            .opts
-            .peers
-            .iter()
-            .find(|p| p.name == name)
-            .cloned()
+        let find = || {
+            lock(&self.inner.links)
+                .get(name)
+                .filter(|l| l.active)
+                .map(|l| l.spec.clone())
+        };
+        find().or_else(|| {
+            sync_peers(&self.inner);
+            find()
+        })
     }
 }
 
@@ -236,9 +256,53 @@ impl<T: Transport + 'static> Drop for PeerLink<T> {
     }
 }
 
+/// Brings the link table in line with the paired machines: new ones appear, ones that are no
+/// longer paired go inactive (kept, so placement sees them offline with the reason).
+fn sync_peers<T: Transport>(inner: &Inner<T>) {
+    let Some(src) = &inner.opts.source else {
+        return;
+    };
+    let wanted = src.peers();
+    let mut links = lock(&inner.links);
+    for spec in &wanted {
+        match links.get_mut(&spec.name) {
+            Some(l) => {
+                l.active = true;
+                l.spec = spec.clone();
+            }
+            None => {
+                links.insert(
+                    spec.name.clone(),
+                    LinkInfo {
+                        spec: spec.clone(),
+                        active: true,
+                        path: PathInfo::UNKNOWN,
+                        last_ok: None,
+                        probed: false,
+                        ok: false,
+                        error: String::new(),
+                        status: None,
+                    },
+                );
+            }
+        }
+    }
+    for l in links.values_mut() {
+        if l.active && !wanted.iter().any(|w| w.name == l.spec.name) && inner.opts.source.is_some()
+        {
+            l.active = false;
+            l.ok = false;
+            l.probed = true;
+            l.error = "no longer paired (grant revoked or expired)".to_string();
+        }
+    }
+}
+
 fn probe_all<T: Transport>(inner: &Inner<T>) {
+    sync_peers(inner);
     let specs: Vec<PeerSpec> = lock(&inner.links)
         .values()
+        .filter(|l| l.active)
         .map(|l| l.spec.clone())
         .collect();
     for spec in specs {
@@ -247,11 +311,12 @@ fn probe_all<T: Transport>(inner: &Inner<T>) {
         if let Some(l) = lock(&inner.links).get_mut(&spec.name) {
             l.probed = true;
             match result {
-                Ok(status) => {
+                Ok((status, path)) => {
                     l.ok = true;
                     l.last_ok = Some(now);
                     l.error.clear();
                     l.status = Some(status);
+                    l.path = path;
                 }
                 Err(e) => {
                     l.ok = false;
@@ -262,10 +327,13 @@ fn probe_all<T: Transport>(inner: &Inner<T>) {
     }
 }
 
-fn probe<T: Transport>(inner: &Inner<T>, node: &PeerId) -> Result<PeerStatus, PeerError> {
+fn probe<T: Transport>(
+    inner: &Inner<T>,
+    node: &PeerId,
+) -> Result<(PeerStatus, PathInfo), PeerError> {
     let mut conn = inner.transport.connect(node, inner.opts.probe_timeout)?;
     match conn.request(Body::StatusRequest)? {
-        Body::Status(s) => Ok(s),
+        Body::Status(s) => Ok((s, conn.link_info())),
         other => Err(PeerError::Protocol(format!(
             "answered a status request with {}",
             tasks_peer::fake::kind(&other)
@@ -304,6 +372,7 @@ fn placeholder(name: &str) -> Machine {
 
 impl<T: Transport + 'static> Forwarder for PeerLink<T> {
     fn peers(&self) -> Vec<MachineView> {
+        sync_peers(&self.inner);
         let now = self.inner.now();
         let links = lock(&self.inner.links);
         links
@@ -370,7 +439,24 @@ impl<T: Transport + 'static> Forwarder for PeerLink<T> {
             .collect()
     }
 
+    fn link_quality(&self) -> Vec<LinkQuality> {
+        sync_peers(&self.inner);
+        lock(&self.inner.links)
+            .values()
+            .filter(|l| l.active)
+            .map(|l| LinkQuality {
+                peer: l.spec.name.clone(),
+                path: l.path.path.name().to_string(),
+                rtt_ms: l
+                    .path
+                    .rtt
+                    .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+            })
+            .collect()
+    }
+
     fn links(&self) -> Vec<LinkReport> {
+        sync_peers(&self.inner);
         let now = self.inner.now();
         lock(&self.inner.links)
             .values()
