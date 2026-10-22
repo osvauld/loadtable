@@ -16,6 +16,8 @@ pub mod render;
 pub mod runtime;
 #[cfg(test)]
 mod testutil;
+#[cfg(feature = "ui")]
+mod ui;
 
 use args::{Cli, Command};
 use clap::Parser;
@@ -118,6 +120,19 @@ fn run_mcp(_cli: &Cli, _deps: &Deps<'_>) -> i32 {
     error::EXIT_USAGE
 }
 
+/// Runs `tasks2 ui`: the desktop window over the daemon this shell resolves.
+#[cfg(feature = "ui")]
+fn run_ui(cli: &Cli, deps: &Deps<'_>) -> i32 {
+    let (client, _) = (deps.client_for)(cli);
+    ui::run(Arc::from(client), deps.env)
+}
+
+/// Unreachable without the feature: `run_cli` only calls it when [`UI_BUILT`].
+#[cfg(not(feature = "ui"))]
+fn run_ui(_cli: &Cli, _deps: &Deps<'_>) -> i32 {
+    error::EXIT_USAGE
+}
+
 /// Parses and runs one command line, writing to `out` and `err`, and returns the exit code.
 pub fn run_cli(args: &[String], out: &mut dyn Write, err: &mut dyn Write, deps: &Deps<'_>) -> i32 {
     let cli = match Cli::try_parse_from(args) {
@@ -144,17 +159,16 @@ pub fn run_cli(args: &[String], out: &mut dyn Write, err: &mut dyn Write, deps: 
             };
         }
         Command::Mcp { .. } if MCP_BUILT => return run_mcp(&cli, deps),
+        Command::Ui { .. } if UI_BUILT => return run_ui(&cli, deps),
         Command::Ui { .. } | Command::Mcp { .. } => {
             let (name, built) = if matches!(cli.command, Command::Ui { .. }) {
                 ("ui", UI_BUILT)
             } else {
                 ("mcp", MCP_BUILT)
             };
+            // `built` is false here: a built front end returned above
             let _ = if built {
-                writeln!(
-                    err,
-                    "tasks2: the {name} front end is enabled but not implemented yet"
-                )
+                writeln!(err, "tasks2: the {name} front end failed to start")
             } else {
                 writeln!(err, "{}", not_built(name))
             };

@@ -126,6 +126,8 @@ pub struct LinkReport {
     pub last_seen_ago_secs: Option<u64>,
     /// The last probe's error, or empty.
     pub detail: String,
+    /// What the peer last reported about itself.
+    pub status: Option<tasks_peer::proto::PeerStatus>,
 }
 
 /// The daemon's view of its peers.

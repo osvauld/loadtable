@@ -380,6 +380,7 @@ impl<T: Transport + 'static> Forwarder for PeerLink<T> {
                 state: link_state(&self.inner, l),
                 last_seen_ago_secs: l.last_ok.map(|t| now.saturating_sub(t).as_secs()),
                 detail: l.error.clone(),
+                status: l.status.clone(),
             })
             .collect()
     }

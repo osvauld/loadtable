@@ -9,6 +9,13 @@ publish.workspace = true
 [lints]
 workspace = true
 
-
 [features]
-ui = []
+# The egui window. Off by default: the default workspace build never pulls egui in (R-199).
+ui = ["dep:eframe", "dep:png"]
+
+[dependencies]
+tasks-core.workspace = true
+tasks-daemon.workspace = true
+serde_json.workspace = true
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"], optional = true }
+png = { version = "0.17", optional = true }
