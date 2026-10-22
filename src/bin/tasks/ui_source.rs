@@ -212,11 +212,17 @@ fn status_snapshot(socket: &Path) -> Result<Snapshot, String> {
     crate::ensure_daemon(socket).map_err(|e| e.to_string())?;
     let reply =
         tinline_task_manager::request_status(socket, STATUS_TIMEOUT).map_err(|e| e.to_string())?;
-    let status = reply.status.ok_or_else(|| {
+    let mut status = reply.status.ok_or_else(|| {
         reply
             .error
             .unwrap_or_else(|| "daemon returned no status".into())
     })?;
+    // A forwarded job's proxy has no CPU/RAM of its own: show the worker's numbers.
+    tinline_task_manager::forward_live::overlay_from_daemon(
+        socket,
+        Duration::from_secs(3),
+        &mut status.jobs,
+    );
     Snapshot::parse(serde_json::to_value(&status).map_err(|e| e.to_string())?)
 }
 
