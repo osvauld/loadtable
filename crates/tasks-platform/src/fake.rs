@@ -1,16 +1,24 @@
 //! In-memory fakes of the platform traits for tests.
 
 use crate::{
-    Child, Disk, GroupId, Level, Memory, MemorySnapshot, PlatformError, Pressure, PressureSnapshot,
+    Child, Disk, FlockSlots, GroupId, Level, Memory, MemorySnapshot, PlatformError, Pressure, PressureSnapshot,
     Processes, Service, ServiceStatus, ServiceUnit, Signal, SlotGuard, SlotLocks, SpawnSpec, Usage,
 };
-use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 use tasks_core::SlotKind;
 
 fn poisoned<T>(_: T) -> PlatformError {
     PlatformError::Parse("fake lock poisoned".into())
+}
+
+static FAKE_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+/// A private lock directory per fake, so tests in one process never share slots.
+fn unique_dir() -> std::path::PathBuf {
+    let n = FAKE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("tasks-fake-slots-{}-{n}", std::process::id()))
 }
 
 /// A fake with settable readings that implements every platform trait.
@@ -24,7 +32,7 @@ pub struct Fake {
     pub disk_free: u64,
     /// Signals received, in order.
     pub signals: Mutex<Vec<(GroupId, Signal)>>,
-    held: Mutex<BTreeSet<(SlotKind, u32)>>,
+    slots: FlockSlots,
     status: Mutex<ServiceStatus>,
 }
 
@@ -42,7 +50,7 @@ impl Default for Fake {
             },
             disk_free: 100 << 30,
             signals: Mutex::new(Vec::new()),
-            held: Mutex::new(BTreeSet::new()),
+            slots: FlockSlots::new(unique_dir()),
             status: Mutex::new(ServiceStatus::NotInstalled),
         }
     }
@@ -93,14 +101,9 @@ impl Service for Fake {
     }
 }
 impl SlotLocks for Fake {
-    /// Fake slots are tracked in memory and never released; guards are real temp-file locks.
+    /// Fake slots are real flocks in a private directory; dropping the guard releases the slot.
     fn try_acquire(&self, kind: SlotKind, index: u32) -> Result<Option<SlotGuard>, PlatformError> {
-        let mut held = self.held.lock().map_err(poisoned)?;
-        if !held.insert((kind, index)) {
-            return Ok(None);
-        }
-        let dir = std::env::temp_dir().join(format!("tasks-fake-slots-{}", std::process::id()));
-        crate::FlockSlots::new(dir).try_acquire(kind, index)
+        self.slots.try_acquire(kind, index)
     }
 }
 
@@ -114,8 +117,12 @@ mod tests {
         assert_eq!(Memory::snapshot(&f).unwrap().total_bytes, 16 << 30);
         f.signal_group(GroupId(3), Signal::Term).unwrap();
         assert_eq!(f.signals.lock().unwrap().len(), 1);
-        assert!(f.try_acquire(SlotKind::Run, 0).unwrap().is_some());
+        let guard = f.try_acquire(SlotKind::Run, 0).unwrap();
+        assert!(guard.is_some());
         assert!(f.try_acquire(SlotKind::Run, 0).unwrap().is_none());
+        drop(guard);
+        assert!(f.try_acquire(SlotKind::Run, 0).unwrap().is_some());
+        assert!(Fake::default().try_acquire(SlotKind::Run, 0).unwrap().is_some());
         assert_eq!(Service::status(&f).unwrap(), ServiceStatus::NotInstalled);
     }
 }
