@@ -35,6 +35,7 @@ pub mod policy;
 #[cfg(target_os = "linux")]
 pub mod remote_reconcile;
 pub mod reroute;
+pub mod steps;
 #[cfg(target_os = "linux")]
 pub mod retention;
 pub mod snapshot;

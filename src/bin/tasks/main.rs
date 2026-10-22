@@ -17,6 +17,7 @@ mod mcp;
 mod mcp_compute;
 mod options;
 mod status;
+mod steps;
 #[cfg(feature = "ui")]
 mod ui;
 #[cfg(feature = "ui")]
@@ -42,6 +43,7 @@ const USAGE: &str = "usage: tasks [ui [--fixtures DIR]]  # DIR: cluster snapshot
          # with any option: compact table by default (--active adds live lock holders); --json = filtered JSON
        tasks submit SPEC.json | approve JOB_ID | cancel JOB_ID
        tasks prioritize JOB_ID --reason TEXT [--who OWNER]  # urgent: skips the queue, never preempts; audited
+       tasks steps [--who OWNER] [--anywhere | --peer NAME | --pin] [--keep-going] PLAN.json|-  # named steps with `after`; each is a tasks run job
        tasks logs JOB_ID [--json]  # plain log text by default; --json preserves v2 response
        tasks logs JOB_ID --grep PATTERN [--context N] [--fixed] [--ignore-case]
          # matching lines of the whole retained log as LINE:TEXT (context as LINE-TEXT); exit 1 if none
@@ -176,6 +178,7 @@ fn run() -> Result<()> {
         Some("logs") if args.iter().any(|a| a == "--grep") => return grep::run(&args[1..]),
         Some("mcp") => return mcp_command(&args[1..]),
         Some("place") => return place_command(&args[1..]),
+        Some("steps") => return steps::run(&args[1..]),
         Some("catalog") if args.len() == 1 => {
             println!(
                 "{}",
