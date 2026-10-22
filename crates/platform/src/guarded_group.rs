@@ -36,13 +36,13 @@ pub struct Outcome {
     pub status: Option<ExitStatus>,
 }
 
-enum ControlRead {
+pub(crate) enum ControlRead {
     Closed,
     Pending,
     Byte(u8),
 }
 
-fn byte(control: &mut UnixStream) -> io::Result<ControlRead> {
+pub(crate) fn byte(control: &mut UnixStream) -> io::Result<ControlRead> {
     let mut buf = [0];
     loop {
         match control.read(&mut buf) {
@@ -66,6 +66,20 @@ fn lost(control: &mut UnixStream) -> io::Result<bool> {
     }
 }
 
+pub(crate) fn prepare_control(control: &UnixStream) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(control.as_raw_fd(), libc::F_GETFD) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if flags & libc::FD_CLOEXEC == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "guard control endpoint must be close-on-exec",
+        ));
+    }
+    control.set_nonblocking(true)
+}
+
 /// Run in the separate guardian, not a thread in the controller. No signal
 /// handlers or process-global reaper are installed. OwnedChildGroup's exclusive
 /// reaping/default-SIGCHLD contract applies. Call with explicit stdio and leases.
@@ -77,18 +91,7 @@ pub fn supervise(
     mut control: UnixStream,
     grace: Duration,
 ) -> io::Result<Outcome> {
-    // Refuse a descriptor that could leak through this guardian's workload exec.
-    let flags = unsafe { libc::fcntl(control.as_raw_fd(), libc::F_GETFD) };
-    if flags < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if flags & libc::FD_CLOEXEC == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "guardian control endpoint must be close-on-exec",
-        ));
-    }
-    control.set_nonblocking(true)?;
+    prepare_control(&control)?;
     loop {
         match byte(&mut control)? {
             ControlRead::Byte(START) => break,

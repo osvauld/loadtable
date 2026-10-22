@@ -7,6 +7,56 @@ when built with UI); other commands reject before connecting to a daemon, creati
 submitting jobs. No macOS daemon, GUI, scheduler, recovery or local execution acceptance is
 claimed.
 
+## Workload-side guardian-loss checkpoint (experimental)
+
+`crates/platform/src/workload_guard.rs` now supplies the other side of supervision:
+run it in a dedicated, freshly exec'd group leader, not in the daemon or a library
+thread. Its watcher is armed before READY; a single START grant permits the command
+in the same group. Guardian EOF/protocol failure kills the wrapper's **own live group**,
+not a remembered numeric PGID. The peer endpoint must belong exclusively to the guardian;
+control descriptors remain close-on-exec. The wrapper forces null command stdin and
+its own process group, overriding accidental inherit/new-group builder settings.
+The small bounded report is host-local, not a new deployed peer/ledger protocol.
+
+The wrapper remains alive and armed **after reporting the command's exit or spawn/wait
+error**. The guardian must record that report, clean its privately owned wrapper group,
+then reap; a report is not job completion. This avoids abandoning resistant descendants
+if the guardian dies between command exit and its final sweep. A caught no-op SIGTERM
+handler keeps the watcher alive during guardian TERM grace; unlike SIG_IGN, exec resets
+that handler to default for the actual command. Signal dispositions are process-global:
+this API is restricted to a fresh, single-purpose wrapper and refuses non-leaders and
+non-default startup SIGTERM. It never returns after arming.
+
+Real native tests SIGKILL the guardian before grant, during a deliberately blocked
+async-signal-safe command pre-exec hook, during execution, after command exit, and during
+TERM grace. They check non-entry where appropriate, inherited-lease release, stable lock
+inodes and unrelated-group survival. Normal cleanup preserves command exit 7 separately
+from wrapper termination; spawn errors and malformed/truncated reports are not success.
+Eleven behavior tests plus one re-exec fixture entry pass, including three repeated runs.
+
+Native tests exposed two relevant details: self-directed group SIGKILL can return on
+Darwin before delivery, so the wrapper waits for it instead of racing it with `_exit`;
+and signalling an already-empty retained-zombie group can return EPERM. That existing
+`OwnedChildGroup` error is NOT suppressed or treated as cleanup permission. Known-no-command
+startup-refusal fixtures use a private direct-child wait instead of requesting a group
+sweep. General empty-group cleanup/error classification remains an integration blocker
+requiring native observation, not an EPERM allowance. Control writes explicitly use
+MSG_NOSIGNAL so a report-write failure cannot SIGPIPE only the wrapper and strand children.
+
+Latest selected validation: **181 passed, zero failed/ignored** (the previous 169 selection
+plus these 12). Headless/default-feature checks, platform all-target Clippy, headless
+library/CLI/example/boundary Clippy and owned-file formatting/diff checks passed. No fixture
+processes remained. Linux validation is deferred at the user's request; no Linux native
+execution or full worker E2E is implied. Logs remain outside Git.
+
+**Still not execution acceptance:** the two guards are not composed into the worker;
+admission, descriptor allowlists, native holder observation, interrupted/uncertain ledger
+outcomes and restart/no-replay acceptance remain. This does not contain escaped sessions,
+credential changes, simultaneous guardian+wrapper death, every kernel fork/kill interleaving
+or hard-stuck wrapper exec/kernel tasks. Grant revocation is not atomic with exec. Lease
+retention may correctly block capacity rather than guarantee bounded cleanup. No service,
+key/config, reserve threshold or runtime guard was changed; Mac execution stays disabled.
+
 ## Latest dev synchronization: checkout gate and pull-back
 
 Merged `origin/dev` through `0e3da48` into `dev-macos` without conflicts (merge

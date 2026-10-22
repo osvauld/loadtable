@@ -17,6 +17,7 @@ mod process_control;
 mod telemetry;
 pub mod thread;
 mod usage;
+pub mod workload_guard;
 
 pub use disk::{DiskSpace, disk_space};
 pub use memory::{Memory, MemorySource, memory};
