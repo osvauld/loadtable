@@ -52,8 +52,10 @@ port and native tests pass should the friend pair/approve a tiny synthetic remot
 job. Then test Xcode simulator build + ZIP/hash return; signed device IPA export
 is a separate, explicitly authorized milestone.
 
-Read `docs/MACOS-FIRST-RUN.md` for commands, limits and outstanding work. The final
-integration verification was blocked by another session's shared maintenance
-drain; consult this task's coordinator feedback and recorded job log for the
-latest result. Never clear that drain or replace the installed runtime to test
-this branch.
+Read `docs/MACOS-FIRST-RUN.md` for commands, limits and outstanding work. Final
+integration verification **3911 passed** after the shared maintenance drain ended:
+Apple Silicon SDK-free setup Rust check, Linux setup/UI tests, workspace Clippy
+with warnings denied, and selected relay/platform/artifact/peer/protocol tests
+(66 tests passed, none ignored). This is not native macOS execution or a full
+workspace test run. See coordinator feedback for exact scope. No drain was
+cleared or installed runtime replaced by this task.
