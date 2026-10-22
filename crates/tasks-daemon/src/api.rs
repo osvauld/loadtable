@@ -664,6 +664,21 @@ pub struct AlertView {
     pub since_ms: i64,
 }
 
+/// A configured peer and the state of the link to it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerView {
+    /// The name placement and `--peer` use.
+    pub name: String,
+    /// The peer's transport identity.
+    pub node_id: String,
+    /// `unknown`, `up`, `stale` or `offline`.
+    pub state: String,
+    /// Seconds since it last answered, if ever.
+    pub last_seen_ago_secs: Option<u64>,
+    /// The last probe's error, or empty.
+    pub detail: String,
+}
+
 /// The status snapshot.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StatusSnapshot {
@@ -683,6 +698,9 @@ pub struct StatusSnapshot {
     pub alerts: Vec<AlertView>,
     /// Every policy value with its source.
     pub settings: Vec<SettingView>,
+    /// Link state per configured peer (empty without peers).
+    #[serde(default)]
+    pub peers: Vec<PeerView>,
 }
 
 /// A duration estimate.

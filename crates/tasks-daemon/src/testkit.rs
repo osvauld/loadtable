@@ -1,18 +1,20 @@
 //! Fakes and a rig for the scheduler tests.
 
 use crate::config::DaemonConfig;
-use crate::forwarder::{ForwardError, ForwardTicket, Forwarder, NoForwarder};
+use crate::forwarder::{
+    ForwardError, ForwardPoll, ForwardProgress, ForwardTicket, Forwarder, LinkReport, NoForwarder,
+};
 use crate::holders::{Holder, HolderSource};
 use crate::machine_policy::MachinePolicy;
 use crate::platform::{Ledger, Platform};
 use crate::scheduler::{Scheduler, SchedulerParts, lock};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
-use tasks_core::{JobId, JobSpec, Kind, MachineName, Owner, Placement, Requirements};
+use tasks_core::{JobId, JobSpec, Kind, MachineName, Owner, Placement, Requirements, SlotKind};
 use tasks_ledger::{JobRecord, ManualClock, MemoryStore, Store};
 use tasks_placement::MachineView;
 use tasks_platform::{
@@ -264,11 +266,22 @@ impl HolderSource for FakeHolders {
     }
 }
 
-/// A forwarder with scripted peers.
+/// A forwarder with scripted peers and scripted progress.
 pub struct FakeForwarder {
     pub peers: Mutex<Vec<MachineView>>,
     pub forwarded: Mutex<Vec<(JobId, String)>>,
     pub fail: Mutex<bool>,
+    pub registered: Mutex<BTreeSet<JobId>>,
+    /// Jobs `ready_to_start` says no to.
+    pub not_ready: Mutex<BTreeSet<JobId>>,
+    pub started: Mutex<Vec<JobId>>,
+    pub resumed: Mutex<Vec<JobId>>,
+    /// What `poll` answers per job; a job with no script is `Active` and not accepted.
+    pub script: Mutex<BTreeMap<JobId, ForwardPoll>>,
+    pub cancelled: Mutex<Vec<(JobId, String)>>,
+    pub remote_cancelled: Mutex<Vec<(String, i64)>>,
+    pub cancel_remote_fails: Mutex<bool>,
+    pub links: Mutex<Vec<LinkReport>>,
 }
 
 impl FakeForwarder {
@@ -277,7 +290,19 @@ impl FakeForwarder {
             peers: Mutex::new(peers),
             forwarded: Mutex::new(Vec::new()),
             fail: Mutex::new(false),
+            registered: Mutex::new(BTreeSet::new()),
+            not_ready: Mutex::new(BTreeSet::new()),
+            started: Mutex::new(Vec::new()),
+            resumed: Mutex::new(Vec::new()),
+            script: Mutex::new(BTreeMap::new()),
+            cancelled: Mutex::new(Vec::new()),
+            remote_cancelled: Mutex::new(Vec::new()),
+            cancel_remote_fails: Mutex::new(false),
+            links: Mutex::new(Vec::new()),
         }
+    }
+    pub fn script(&self, id: JobId, p: ForwardPoll) {
+        lock(&self.script).insert(id, p);
     }
 }
 
@@ -285,18 +310,67 @@ impl Forwarder for FakeForwarder {
     fn peers(&self) -> Vec<MachineView> {
         lock(&self.peers).clone()
     }
+    fn links(&self) -> Vec<LinkReport> {
+        lock(&self.links).clone()
+    }
     fn forward(&self, job: &JobRecord, peer: &MachineName) -> Result<ForwardTicket, ForwardError> {
         if *lock(&self.fail) {
             return Err(ForwardError::Unavailable("link down".into()));
         }
         lock(&self.forwarded).push((job.id, peer.0.clone()));
+        lock(&self.registered).insert(job.id);
         Ok(ForwardTicket {
-            remote_job: Some(77),
-            remote_key: None,
+            remote_job: job.forward.as_ref().and_then(|f| f.remote_job),
+            remote_key: Some(
+                job.forward
+                    .as_ref()
+                    .and_then(|f| f.remote_key.clone())
+                    .unwrap_or_else(|| format!("testbox:{}", job.id.0)),
+            ),
         })
     }
-    fn cancel_remote(&self, _: &MachineName, _: i64) -> Result<(), ForwardError> {
+    fn registered(&self, job: JobId) -> bool {
+        lock(&self.registered).contains(&job)
+    }
+    fn ready_to_start(&self, job: JobId) -> bool {
+        !lock(&self.not_ready).contains(&job)
+    }
+    fn wait_reason(&self, job: JobId) -> Option<String> {
+        lock(&self.not_ready)
+            .contains(&job)
+            .then(|| "waiting for checkout: job #0 is using the remote copy".to_string())
+    }
+    fn start(&self, job: JobId, _log: &std::path::Path) -> Result<(), ForwardError> {
+        lock(&self.started).push(job);
         Ok(())
+    }
+    fn resume(&self, job: &JobRecord, _log: &std::path::Path) -> Result<(), ForwardError> {
+        lock(&self.resumed).push(job.id);
+        Ok(())
+    }
+    fn poll(&self, job: JobId) -> ForwardPoll {
+        lock(&self.script)
+            .get(&job)
+            .cloned()
+            .unwrap_or(ForwardPoll::Active(ForwardProgress {
+                mirror: "syncing checkout".into(),
+                remote_job: None,
+                accepted: false,
+                remote_phase: None,
+            }))
+    }
+    fn cancel(&self, job: JobId, reason: &str) {
+        lock(&self.cancelled).push((job, reason.to_string()));
+    }
+    fn cancel_remote(&self, peer: &MachineName, remote: i64) -> Result<(), ForwardError> {
+        if *lock(&self.cancel_remote_fails) {
+            return Err(ForwardError::Unavailable("unreachable".into()));
+        }
+        lock(&self.remote_cancelled).push((peer.0.clone(), remote));
+        Ok(())
+    }
+    fn forget(&self, job: JobId) {
+        lock(&self.registered).remove(&job);
     }
 }
 
@@ -310,6 +384,7 @@ pub struct Rig {
     pub clock: Arc<ManualClock>,
     pub holders: Arc<FakeHolders>,
     pub cfg: DaemonConfig,
+    pub platform: Platform,
 }
 
 impl Rig {
@@ -325,6 +400,25 @@ impl Rig {
     }
     pub fn with_forwarder(f: Arc<dyn Forwarder>) -> Rig {
         Rig::build("", f, false)
+    }
+    pub fn with_policy_forwarder(policy: &str, f: Arc<dyn Forwarder>) -> Rig {
+        Rig::build(policy, f, false)
+    }
+
+    /// A second scheduler over the same ledger, slots and directories: the daemon after a
+    /// restart. The first one is left to its own devices, as a crashed process would be.
+    pub fn restart_with(&self, forwarder: Arc<dyn Forwarder>) -> Arc<Scheduler> {
+        Scheduler::new(SchedulerParts {
+            cfg: self.cfg.clone(),
+            policy: MachinePolicy::from_text(None, &|_| None),
+            ledger: self.store.clone(),
+            platform: self.platform.clone(),
+            clock: self.clock.clone(),
+            forwarder,
+            parent_env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+            execution_enabled: true,
+            runner_poll: Duration::from_millis(2),
+        })
     }
 
     fn build(policy: &str, forwarder: Arc<dyn Forwarder>, native: bool) -> Rig {
@@ -368,7 +462,7 @@ impl Rig {
             cfg: cfg.clone(),
             policy,
             ledger,
-            platform,
+            platform: platform.clone(),
             clock: clock.clone(),
             forwarder,
             parent_env: vec![(
@@ -387,6 +481,7 @@ impl Rig {
             clock,
             holders,
             cfg,
+            platform,
         }
     }
 
@@ -461,5 +556,133 @@ impl Rig {
 
     pub fn log_text(&self, id: JobId) -> String {
         std::fs::read_to_string(self.cfg.log_path(id)).unwrap_or_default()
+    }
+}
+
+/// A worker daemon's side of the fake network: a receiver over a scripted runner, and a store
+/// for synced copies. The origin side is a [`PeerLink`](crate::peer_link::PeerLink) over
+/// [`PeerWorld::net`].
+pub struct PeerWorld {
+    pub dir: TempDir,
+    pub net: tasks_peer::fake::FakeNet,
+    pub runner: Arc<tasks_peer::fake::FakeRunner>,
+    pub origin: tasks_peer::PeerId,
+    pub nixos: tasks_peer::PeerId,
+    /// A checkout with a few files, and a second one.
+    pub root_a: PathBuf,
+    pub root_b: PathBuf,
+}
+
+impl PeerWorld {
+    pub fn new() -> PeerWorld {
+        let dir = TempDir::new("peerworld");
+        let mk = |name: &str| {
+            let root = dir.path().join("origin").join(name);
+            std::fs::create_dir_all(root.join("src")).unwrap();
+            std::fs::write(root.join("Cargo.toml"), "[package]\n").unwrap();
+            std::fs::write(
+                root.join("src/main.rs"),
+                format!("fn main() {{}} // {name}\n"),
+            )
+            .unwrap();
+            root
+        };
+        let (root_a, root_b) = (mk("a"), mk("b"));
+        let net = tasks_peer::fake::FakeNet::new();
+        let runner = Arc::new(tasks_peer::fake::FakeRunner::new());
+        let origin = tasks_peer::PeerId::new("laptop-node").unwrap();
+        let nixos = tasks_peer::PeerId::new("nixos-node").unwrap();
+        let w = PeerWorld {
+            dir,
+            net,
+            runner,
+            origin,
+            nixos,
+            root_a,
+            root_b,
+        };
+        w.restart_worker();
+        w
+    }
+
+    /// Replaces the daemon behind `nixos` with a fresh receiver over the same runner and
+    /// store, as after a restart of the worker.
+    pub fn restart_worker(&self) {
+        use tasks_peer::receiver::{AllowAll, Allowlist, Receiver};
+        use tasks_peer::store::{CheckoutStore, StoreLimits};
+        let status = tasks_peer::proto::PeerStatus {
+            machine: tasks_core::Machine {
+                name: MachineName("nixos".into()),
+                os: tasks_core::Os::Linux,
+                arch: tasks_core::Arch::X86_64,
+                cores: 16,
+                memory_bytes: 32 << 30,
+                tools: Default::default(),
+                devices: Default::default(),
+            },
+            slots: [SlotKind::Compile, SlotKind::Run, SlotKind::Offload]
+                .into_iter()
+                .map(|kind| tasks_peer::proto::SlotStatus {
+                    kind,
+                    total: 4,
+                    used: 0,
+                })
+                .collect(),
+            queue: Default::default(),
+            pressure: Default::default(),
+        };
+        let r = Receiver::new(
+            "nixos",
+            Allowlist::new([self.origin.clone()]),
+            Arc::new(CheckoutStore::new(
+                self.dir.path().join("peer-store"),
+                StoreLimits::default(),
+            )),
+            self.runner.clone(),
+            Arc::new(tasks_peer::fake::FakeStatus(status)),
+            Arc::new(AllowAll),
+            tasks_peer::outputs::FetchPolicy::default(),
+        );
+        self.net
+            .serve(&self.nixos, Arc::new(r) as Arc<dyn tasks_peer::Handler>);
+    }
+
+    /// Options for a link whose timeouts are short enough for a test.
+    pub fn options(&self) -> crate::peer_link::PeerLinkOptions {
+        use crate::peer_link::PeerLinkOptions;
+        let mut o = PeerLinkOptions::new(
+            "laptop",
+            vec![crate::peers_config::PeerSpec {
+                name: "nixos".into(),
+                node_id: self.nixos.clone(),
+                addr: None,
+                allow: true,
+            }],
+        );
+        o.policy.reattach_interval = Duration::from_millis(5);
+        o.policy.lost_grace = Duration::from_secs(30);
+        o.policy.cancel_grace = Duration::from_secs(10);
+        o.policy.stream_idle = Duration::from_secs(20);
+        o.tick_every = Duration::from_millis(2);
+        o.stale_after = Duration::from_secs(20);
+        o.background_status = false;
+        o.lister = Arc::new(tasks_peer::manifest::StaticLister(vec![
+            "Cargo.toml".into(),
+            "src/main.rs".into(),
+        ]));
+        o
+    }
+
+    pub fn link(&self) -> crate::peer_link::PeerLink<tasks_peer::fake::FakeTransport> {
+        crate::peer_link::PeerLink::new(self.net.transport(&self.origin), self.options())
+    }
+
+    /// How many requests of `kind` reached the worker.
+    pub fn requests(&self, kind: &str) -> usize {
+        self.net
+            .requests()
+            .iter()
+            .filter(|(_, k)| k == kind)
+            .count()
     }
 }

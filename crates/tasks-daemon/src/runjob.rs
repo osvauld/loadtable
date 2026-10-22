@@ -231,10 +231,14 @@ impl RunEvents for Events {
                     .unwrap_or_else(|| "the start was not recorded".into()),
             };
         }
-        let summary = match &reason {
+        let mut summary = match &reason {
             Some(r) => format!("{} ({r})", o.describe()),
             None => o.describe(),
         };
+        // a job that fell back from a peer says so (nothing had been submitted there)
+        if let Some(note) = lock(&self.sch.state).fallbacks.remove(&self.rj.id) {
+            summary = format!("{summary} [{note}]");
+        }
         let fin = Finish {
             phase: phase.clone(),
             exit_code: o.exit_code,

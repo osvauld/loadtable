@@ -17,6 +17,9 @@ pub struct StartupReport {
     pub terminated: Vec<JobId>,
     /// Every job marked interrupted.
     pub interrupted: Vec<JobId>,
+    /// Jobs running on a peer, left as they are: the scheduler follows them by their remote id
+    /// on its first tick (R-173) instead of marking them interrupted.
+    pub forwarded: Vec<JobId>,
     /// Problems, in words.
     pub notes: Vec<String>,
 }
@@ -74,6 +77,10 @@ pub fn reconcile(
     let retry = RetryPolicy::default();
     let running = retry_busy(&retry, sleep, || store.find_running())?;
     for rec in running {
+        if rec.forward.is_some() {
+            report.forwarded.push(rec.id);
+            continue;
+        }
         let summary = match rec.lease.as_ref() {
             Some(l) => match terminate_group(procs, group_of(l), grace, sleep) {
                 Ok(true) => {

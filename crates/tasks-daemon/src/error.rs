@@ -40,6 +40,9 @@ pub enum DaemonError {
     /// Admission failed to measure the machine.
     #[error("admission: {0}")]
     Admission(#[from] tasks_admission::AdmissionError),
+    /// The peer link could not start.
+    #[error("peers: {0}")]
+    Peer(String),
     /// A command-line argument is wrong.
     #[error("usage: {0}")]
     Usage(String),

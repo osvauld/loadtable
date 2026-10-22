@@ -27,6 +27,7 @@ tasks-runner = { path = "crates/tasks-runner" }
 tasks-admission = { path = "crates/tasks-admission" }
 tasks-placement = { path = "crates/tasks-placement" }
 tasks-policy = { path = "crates/tasks-policy" }
+tasks-peer = { path = "crates/tasks-peer" }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"

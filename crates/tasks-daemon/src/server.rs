@@ -120,6 +120,15 @@ impl Daemon {
         })
     }
 
+    /// The receiver for forwarded jobs sent by this daemon's allowlisted peers; hand it to a
+    /// transport's serving side. Copies of peers' checkouts live under `<state>/peer-store`.
+    pub fn receiver(&self) -> Arc<tasks_peer::Receiver> {
+        crate::peer_link::serve::build_receiver(
+            &self.sch,
+            self.sch.config().state_dir.join("peer-store"),
+        )
+    }
+
     /// The scheduler, for tests and embedding.
     pub fn scheduler(&self) -> &Arc<Scheduler> {
         &self.sch

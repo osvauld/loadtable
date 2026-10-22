@@ -89,6 +89,15 @@ pub(crate) struct TickState {
     pub last_prune_ms: i64,
     pub last_error: Option<(i64, String)>,
     pub readings_error: Option<String>,
+    /// Peers a job must not be forwarded to again: a forward to them failed with nothing
+    /// submitted and the job fell back to local placement. Forgotten on restart.
+    pub no_forward: BTreeMap<JobId, BTreeSet<String>>,
+    /// Why a job runs here though placement chose a peer; appended to its summary at the end.
+    pub fallbacks: BTreeMap<JobId, String>,
+    /// Since when each peer has been stale or offline, ms.
+    pub peer_bad_since: BTreeMap<String, i64>,
+    /// Set once the forwarded jobs left running by a previous daemon were picked up.
+    pub reconciled: bool,
 }
 
 /// What one tick did.
@@ -243,6 +252,10 @@ impl Scheduler {
         let policy = self.policy();
         let now = self.clock.now_ms();
         let mut rep = TickReport::default();
+        let first = !std::mem::replace(&mut lock(&self.state).reconciled, true);
+        if first {
+            self.reconcile_forwards();
+        }
         if let Some(ids) = self.guard("cancel_blocked", self.ledger.cancel_blocked()) {
             rep.cancelled_blocked = ids;
         }
@@ -304,6 +317,10 @@ impl Scheduler {
             st.facts.retain(|id, _| keep.contains(id));
             st.placed.retain(|id, _| keep.contains(id));
             st.last_wait.retain(|id, _| keep.contains(id));
+            st.no_forward.retain(|id, _| keep.contains(id));
+            drop(st);
+            // a forward cancelled or finished while it waited must not hold up its checkout
+            self.forwarder.forget_unlisted(&keep);
         }
         let admitter = self.admitter(policy);
         let readings = admitter.readings();
@@ -323,7 +340,14 @@ impl Scheduler {
             let Some(Some(rec)) = self.guard("get", self.ledger.get(id)) else {
                 continue;
             };
-            if rec.phase.is_terminal() || rec.cancel_requested() || rec.forward.is_some() {
+            if rec.phase.is_terminal() || rec.cancel_requested() {
+                continue;
+            }
+            if rec.forward.is_some() {
+                // a job already placed on a peer: an offload-client job (R-162, R-230)
+                if let Some(w) = self.forward_waiter(&rec, blocked_hold.as_ref()) {
+                    candidates.insert(id, (rec, w));
+                }
                 continue;
             }
             match self.place(&rec, policy, &ctx) {
@@ -415,7 +439,12 @@ impl Scheduler {
             match d.verdict {
                 Verdict::Admit { slot, lane } => match admitter.try_admit(&w, slot, lane) {
                     Ok(Attempt::Admitted(guard)) => {
-                        if self.launch(policy, rec, Some(slot), Some(guard)) {
+                        let ok = if rec.forward.is_some() {
+                            self.launch_forwarded(rec, Some(slot), Some(guard))
+                        } else {
+                            self.launch(policy, rec, Some(slot), Some(guard))
+                        };
+                        if ok {
                             rep.started.push(d.job);
                         }
                     }
@@ -463,7 +492,7 @@ impl Scheduler {
     }
 
     /// Records why a job waits, writing the ledger only when the reason changed.
-    fn set_wait(&self, id: JobId, coarse: LedgerWait, text: &str) {
+    pub(crate) fn set_wait(&self, id: JobId, coarse: LedgerWait, text: &str) {
         {
             let st = lock(&self.state);
             if st

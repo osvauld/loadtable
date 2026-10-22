@@ -175,7 +175,33 @@ pub fn run(args: &[String]) -> Result<(), DaemonError> {
         Command::Serve(args) => {
             let env = |k: &str| std::env::var(k).ok();
             let config = DaemonConfig::resolve(&args, &env)?;
-            let daemon = Daemon::start(DaemonOptions::new(config))?;
+            #[allow(unused_mut)]
+            let mut opts = DaemonOptions::new(config);
+            let lookup = |k: &str| {
+                opts.env
+                    .iter()
+                    .find(|(n, _)| n == k)
+                    .map(|(_, v)| v.clone())
+            };
+            let policy = MachinePolicy::load(&opts.config.policy_path(), &lookup);
+            #[cfg(feature = "iroh")]
+            let host = crate::peer_link::iroh_host::attach(&mut opts, &policy)?;
+            #[cfg(not(feature = "iroh"))]
+            if !policy.peers().peers.is_empty() {
+                eprintln!(
+                    "tasks2d: {} peer(s) are configured but this build has no peer transport \
+                     (build with --features iroh); every job runs here",
+                    policy.peers().peers.len()
+                );
+            }
+            let daemon = Daemon::start(opts)?;
+            #[cfg(feature = "iroh")]
+            if let Some(h) = &host {
+                h.serve(
+                    daemon.receiver(),
+                    tasks_peer::Allowlist::new(policy.peers().allowlist()),
+                );
+            }
             for note in &daemon.startup.notes {
                 eprintln!("tasks2d: startup: {note}");
             }

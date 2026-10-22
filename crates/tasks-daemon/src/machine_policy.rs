@@ -9,6 +9,7 @@
 //! `slots.compile = 2` is `[slots] compile = 2`.
 
 use crate::api::{SettingView, Source};
+use crate::peers_config::{self, PeerConfig};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
@@ -261,6 +262,12 @@ const FIELDS: &[Field] = &[
         "60",
     ),
     f(
+        "alerts.peer_grace_secs",
+        "TASKS_ALERT_PEER_GRACE_SECS",
+        Ty::Uint(0, 86_400),
+        "120",
+    ),
+    f(
         "alerts.audit_secs",
         "TASKS_AUDIT_SECS",
         Ty::Uint(5, 86_400),
@@ -425,6 +432,7 @@ pub struct MachinePolicy {
     pub problems: Vec<String>,
     /// True when a file was found and used.
     pub file_loaded: bool,
+    peers: PeerConfig,
 }
 
 impl MachinePolicy {
@@ -443,6 +451,7 @@ impl MachinePolicy {
             sources,
             problems: Vec::new(),
             file_loaded: false,
+            peers: PeerConfig::default(),
         }
     }
 
@@ -486,11 +495,18 @@ impl MachinePolicy {
     }
 
     fn apply_file(&self, text: &str) -> Result<MachinePolicy, Vec<String>> {
-        let table: toml::Table = toml::from_str(text).map_err(|e| vec![format!("syntax: {e}")])?;
-        let mut flat = Vec::new();
-        flatten("", &table, &mut flat);
+        let mut table: toml::Table =
+            toml::from_str(text).map_err(|e| vec![format!("syntax: {e}")])?;
         let mut next = self.clone();
         let mut problems = Vec::new();
+        // `[peers]` holds tables of its own, so it is parsed apart from the flat keys
+        if let Some(peers) = table.remove("peers") {
+            let (cfg, p) = PeerConfig::parse(&peers);
+            next.peers = cfg;
+            problems.extend(p);
+        }
+        let mut flat = Vec::new();
+        flatten("", &table, &mut flat);
         for (key, value) in flat {
             let Some(fl) = field(&key) else {
                 problems.push(format!("{key}: unknown field"));
@@ -716,6 +732,14 @@ impl MachinePolicy {
     pub fn memory_alert_secs(&self) -> u64 {
         self.u("alerts.memory_secs")
     }
+    /// Grace before a stale or offline peer alerts (R-222).
+    pub fn peer_grace_secs(&self) -> u64 {
+        self.u("alerts.peer_grace_secs")
+    }
+    /// The configured peers and this daemon's listen address.
+    pub fn peers(&self) -> &PeerConfig {
+        &self.peers
+    }
     /// Seconds between holder audits (R-049).
     pub fn audit_secs(&self) -> u64 {
         self.u("alerts.audit_secs")
@@ -774,6 +798,7 @@ impl MachinePolicy {
             };
             out.push_str(&format!("# {name} = {rendered}   # env {}\n", fl.env));
         }
+        out.push_str(peers_config::SAMPLE);
         out
     }
 }
@@ -924,5 +949,28 @@ mod tests {
         let bad =
             MachinePolicy::from_text(Some("[cargo]\nmax_jobs = 2\njobs_when_busy = 4\n"), &no_env);
         assert!(bad.problems.iter().any(|m| m.contains("jobs_when_busy")));
+    }
+
+    // R-174: peers come from the policy, strictly parsed; a bad peers section refuses the file.
+    #[test]
+    fn r174_peers_come_from_the_policy_and_a_bad_section_refuses_the_whole_file() {
+        let good = "[slots]\nrun = 6\n[peers]\nbind = \"192.168.1.5:7843\"\n[peers.nixos]\nnode_id = \"abc\"\n";
+        let p = MachinePolicy::from_text(Some(good), &no_env);
+        assert!(p.problems.is_empty(), "{:?}", p.problems);
+        assert_eq!(p.peers().peers.len(), 1);
+        assert_eq!(p.peers().peers[0].name, "nixos");
+        assert_eq!(p.slot_count(SlotKind::Run), 6);
+        // missing node_id: refused as a whole, valid keys beside it are not applied
+        let bad = "[slots]\nrun = 6\n[peers.nixos]\naddr = \"192.168.1.7:7843\"\n";
+        let p = MachinePolicy::from_text(Some(bad), &no_env);
+        assert!(p.peers().peers.is_empty());
+        assert_eq!(p.slot_count(SlotKind::Run), 4);
+        let all = p.problems.join("\n");
+        assert!(all.contains("peers.nixos.node_id: required"), "{all}");
+        assert!(all.contains("refused as a whole"), "{all}");
+        // the grace is an ordinary setting with an environment override
+        let p = MachinePolicy::from_text(None, &env1("TASKS_ALERT_PEER_GRACE_SECS", "5"));
+        assert_eq!(p.peer_grace_secs(), 5);
+        assert_eq!(MachinePolicy::defaults().peer_grace_secs(), 120);
     }
 }

@@ -12,11 +12,14 @@ pub mod cargo_jobs;
 pub mod config;
 pub mod entry;
 pub mod error;
+mod forwarded;
 pub mod forwarder;
 mod handler;
 pub mod holders;
 pub mod logs;
 pub mod machine_policy;
+pub mod peer_link;
+pub mod peers_config;
 mod place;
 pub mod platform;
 pub mod queue_estimate;
@@ -32,9 +35,11 @@ mod supervise;
 mod testkit;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod wiring_tests;
 
 pub use error::DaemonError;
 pub use scheduler::{Scheduler, SchedulerParts, TickReport};
 pub use server::{Daemon, DaemonOptions};
 pub use status::job_view;
-pub use supervise::slot_lock_path;
+pub use tasks_platform::slot_lock_path;

@@ -805,10 +805,18 @@ fn a_peer_decision_forwards_the_job_and_records_it_instead_of_running_it() {
     let id = r.submit(&s);
     assert_eq!(r.tick().forwarded, vec![id]);
     let fw = r.record(id).forward.unwrap();
-    assert_eq!((fw.peer.0.as_str(), fw.remote_job), ("nixos", Some(77)));
+    // registered only: the peer has not been asked yet, but the key is already persisted
+    assert_eq!((fw.peer.0.as_str(), fw.remote_job), ("nixos", None));
+    assert_eq!(
+        fw.remote_key.as_deref(),
+        Some(format!("testbox:{}", id.0).as_str())
+    );
     assert_eq!(r.procs.spawn_count(), 0);
-    assert!(
-        r.tick().started.is_empty(),
+    r.tick();
+    assert_eq!(f.started.lock().unwrap().clone(), vec![id]);
+    assert_eq!(
+        r.procs.spawn_count(),
+        0,
         "a forwarded job is not scheduled locally"
     );
     // a failing forward waits and retries rather than losing the job
@@ -1135,8 +1143,15 @@ impl Store for Flaky {
         id: JobId,
         peer: &MachineName,
         remote_job: Option<i64>,
+        remote_key: Option<&str>,
     ) -> tasks_ledger::Result<()> {
-        self.inner.set_forward(id, peer, remote_job)
+        self.inner.set_forward(id, peer, remote_job, remote_key)
+    }
+    fn clear_forward(&self, id: JobId) -> tasks_ledger::Result<()> {
+        self.inner.clear_forward(id)
+    }
+    fn find_origin(&self, peer: &str, key: &str) -> tasks_ledger::Result<Option<JobId>> {
+        self.inner.find_origin(peer, key)
     }
     fn set_remote_phase(&self, id: JobId, phase: &Phase) -> tasks_ledger::Result<()> {
         self.inner.set_remote_phase(id, phase)

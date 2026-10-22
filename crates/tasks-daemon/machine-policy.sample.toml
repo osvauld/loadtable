@@ -58,6 +58,7 @@
 [alerts]
 # slot_grace_secs = 120   # env TASKS_ALERT_SLOT_GRACE_SECS
 # memory_secs = 60   # env TASKS_ALERT_MEMORY_SECS
+# peer_grace_secs = 120   # env TASKS_ALERT_PEER_GRACE_SECS
 # audit_secs = 300   # env TASKS_AUDIT_SECS
 
 [daemon]
@@ -67,3 +68,11 @@
 [machine]
 # devices = []   # env TASKS_DEVICES
 # tools = []   # env TASKS_TOOLS
+
+# Peers (read at start; restart to change). Remove the leading `#>` to use.
+#> [peers]
+#> bind = "192.168.1.5:7843"
+#> [peers.nixos]
+#> node_id = "<the peer's node id>"
+#> addr = "192.168.1.7:7843"
+#> allow = true
