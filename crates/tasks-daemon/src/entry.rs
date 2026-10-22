@@ -14,7 +14,7 @@ use tasks_platform::{Service, ServiceUnit};
 /// The service name.
 pub const SERVICE_NAME: &str = "tasks2d";
 
-const USAGE: &str = "usage: tasks2d [serve] [OPTIONS]      run the daemon\n\
+const USAGE: &str = "usage: tasks2d [serve] [OPTIONS]      run the daemon (also: tasks2 daemon serve)\n\
        tasks2d install [--dry-run] [OPTIONS]  write the user service unit and print the next command\n\
        tasks2d policy-sample                  print a machine-policy.toml listing every default\n\
 \n\
@@ -84,10 +84,27 @@ pub fn parse_args(args: &[String]) -> Result<Command, DaemonError> {
     })
 }
 
+/// True when `exe` is the daemon binary itself (`tasks2d`), which takes `serve` directly. Any
+/// other executable is the CLI (`tasks2`), whose daemon lives under `tasks2 daemon`.
+fn is_daemon_binary(exe: &str) -> bool {
+    std::path::Path::new(exe)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with(SERVICE_NAME))
+}
+
 /// The service unit for this executable and these directories. Only directories the user
 /// passed explicitly are baked in; the rest resolve from the service's own environment.
+///
+/// The unit starts `tasks2d serve ...` when `exe` is the daemon binary and
+/// `tasks2 daemon serve ...` when it is the CLI, so the installed unit works whichever of the
+/// two ran `install`.
 pub fn service_unit(exe: &str, args: &ConfigArgs) -> ServiceUnit {
-    let mut argv = vec![exe.to_string(), "serve".to_string()];
+    let mut argv = vec![exe.to_string()];
+    if !is_daemon_binary(exe) {
+        argv.push("daemon".to_string());
+    }
+    argv.push("serve".to_string());
     for (flag, v) in [
         ("--state-dir", &args.state_dir),
         ("--config-dir", &args.config_dir),
@@ -107,6 +124,24 @@ pub fn service_unit(exe: &str, args: &ConfigArgs) -> ServiceUnit {
         name: SERVICE_NAME.to_string(),
         argv,
     }
+}
+
+/// The command that installs `unit`: its invocation with `install` in place of `serve`.
+fn install_command(unit: &ServiceUnit) -> String {
+    let mut words: Vec<String> = unit
+        .argv
+        .iter()
+        .take_while(|a| a.as_str() != "serve")
+        .map(|a| {
+            std::path::Path::new(a)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(a)
+                .to_string()
+        })
+        .collect();
+    words.push("install".to_string());
+    words.join(" ")
 }
 
 /// The unit text for this operating system.
@@ -132,9 +167,10 @@ pub fn install_plan(
     );
     out.push_str(&render_unit(unit));
     match service {
-        None => {
-            out.push_str("\ndry run: nothing written. Run `tasks2d install` to write the unit.\n")
-        }
+        None => out.push_str(&format!(
+            "\ndry run: nothing written. Run `{}` to write the unit.\n",
+            install_command(unit)
+        )),
         Some(s) => {
             let plan = s.install(unit)?;
             let state = if plan.contents_written {
@@ -261,6 +297,49 @@ mod tests {
         assert_eq!(
             parse_args(&a(&["policy-sample"])).unwrap(),
             Command::PolicySample
+        );
+    }
+
+    #[test]
+    fn the_unit_starts_the_daemon_whichever_binary_ran_install() {
+        let args = ConfigArgs {
+            state_dir: Some("/s".into()),
+            machine: Some("m".into()),
+            ..ConfigArgs::default()
+        };
+        // the CLI binary: the daemon is its `daemon` subcommand
+        let cli = service_unit("/home/u/.local/bin/tasks2", &args);
+        assert_eq!(
+            cli.argv,
+            [
+                "/home/u/.local/bin/tasks2",
+                "daemon",
+                "serve",
+                "--state-dir",
+                "/s",
+                "--machine",
+                "m"
+            ]
+        );
+        // the daemon binary takes `serve` itself
+        let d = service_unit("/usr/bin/tasks2d", &args);
+        assert_eq!(&d.argv[..2], ["/usr/bin/tasks2d", "serve"]);
+        // the arguments of the unit parse as the daemon's own command line
+        let after_daemon: Vec<String> = cli.argv[2..].to_vec();
+        assert!(matches!(
+            parse_args(&after_daemon).unwrap(),
+            Command::Serve(c) if c.machine.as_deref() == Some("m")
+        ));
+        // the dry-run hint names the command that was actually run
+        assert!(
+            install_plan(&cli, None)
+                .unwrap()
+                .contains("Run `tasks2 daemon install`")
+        );
+        assert!(
+            install_plan(&d, None)
+                .unwrap()
+                .contains("Run `tasks2d install`")
         );
     }
 

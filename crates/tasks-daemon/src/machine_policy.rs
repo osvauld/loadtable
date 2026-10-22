@@ -17,6 +17,7 @@ use tasks_admission::{Gate, Layout, Thresholds};
 use tasks_core::{DeviceId, SlotKind};
 use tasks_ledger::RetentionPolicy;
 use tasks_platform::{Level, PressureThresholds};
+use tasks_policy::submit_rules::BroadTestMode;
 
 const GIB: u64 = 1 << 30;
 const MIB: u64 = 1 << 20;
@@ -34,6 +35,8 @@ enum Ty {
     Level,
     /// Comma-separated words (an array of strings in the file).
     List,
+    /// One of a fixed set of words.
+    Choice(&'static [&'static str]),
 }
 
 /// One setting: key, environment variable, type and default.
@@ -285,6 +288,12 @@ const FIELDS: &[Field] = &[
         Ty::Uint(256, 1_048_576),
         "65536",
     ),
+    f(
+        "submit.broad_test",
+        "TASKS_BROAD_TEST",
+        Ty::Choice(&["refuse", "warn"]),
+        "refuse",
+    ),
     f("machine.devices", "TASKS_DEVICES", Ty::List, ""),
     f("machine.tools", "TASKS_TOOLS", Ty::List, ""),
 ];
@@ -298,6 +307,7 @@ enum Val {
     OptU(Option<u64>),
     Level(Level),
     List(Vec<String>),
+    Choice(String),
 }
 
 impl Val {
@@ -310,6 +320,7 @@ impl Val {
             Val::OptF(None) | Val::OptU(None) => "off".to_string(),
             Val::Level(l) => level_name(*l).to_string(),
             Val::List(v) => v.join(","),
+            Val::Choice(w) => w.clone(),
         }
     }
 }
@@ -362,6 +373,13 @@ fn parse_val(ty: Ty, text: &str) -> Result<Val, String> {
             "critical" => Ok(Val::Level(Level::Critical)),
             other => Err(format!("{other:?} is not normal, warn or critical")),
         },
+        Ty::Choice(words) => {
+            if words.contains(&t) {
+                Ok(Val::Choice(t.to_string()))
+            } else {
+                Err(format!("{t:?} is not {}", words.join(" or ")))
+            }
+        }
         Ty::List => {
             let items: Vec<String> = t
                 .split(',')
@@ -712,6 +730,13 @@ impl MachinePolicy {
                 .and_then(|v| usize::try_from(v).ok()),
         }
     }
+    /// What to do with a broad `cargo test` without the escape (R-191): `refuse` or `warn`.
+    pub fn broad_test_mode(&self) -> BroadTestMode {
+        match self.vals.get("submit.broad_test") {
+            Some(Val::Choice(w)) => BroadTestMode::parse(w).unwrap_or_default(),
+            _ => BroadTestMode::default(),
+        }
+    }
     /// The `cargo -j` ceiling (R-092).
     pub fn cargo_max_jobs(&self) -> u32 {
         u32::try_from(self.u("cargo.max_jobs")).unwrap_or(2)
@@ -792,7 +817,7 @@ impl MachinePolicy {
                 Ty::Level | Ty::OptFloat(..) | Ty::OptUint(..) if d == "off" => {
                     format!("\"{d}\"")
                 }
-                Ty::Level => format!("\"{d}\""),
+                Ty::Level | Ty::Choice(_) => format!("\"{d}\""),
                 Ty::List => "[]".to_string(),
                 _ => d.to_string(),
             };

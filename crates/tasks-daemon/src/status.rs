@@ -34,6 +34,9 @@ pub fn job_view(r: &JobRecord) -> JobView {
         machine: r.machine.as_ref().map(|m| m.0.clone()),
         forwarded_to: r.forward.as_ref().map(|f| (f.peer.0.clone(), f.remote_job)),
         cancel_requested_by: r.cancel.as_ref().map(|c| c.by.clone()),
+        cancel_reason: r.cancel.as_ref().and_then(|c| c.reason.clone()),
+        timeout_secs: r.spec.timeout_secs.or(r.hints.timeout_secs),
+        remote_phase: r.remote_phase.clone(),
         plan: r.plan_id.zip(r.step_name.clone()),
         log_path: r.log_path.clone(),
     }
@@ -53,6 +56,11 @@ impl Scheduler {
     pub fn status(&self) -> StatusSnapshot {
         let policy = self.policy();
         let now = self.clock.now_ms();
+        let drained = if self.draining.load(Ordering::SeqCst) {
+            lock(&self.drained).clone()
+        } else {
+            None
+        };
         let running: Vec<Arc<RunningJob>> = lock(&self.running).values().cloned().collect();
         let active = self
             .ledger
@@ -205,8 +213,11 @@ impl Scheduler {
                 policy_file_loaded: policy.file_loaded,
                 policy_problems: policy.problems.clone(),
                 draining: self.draining.load(Ordering::SeqCst),
+                drained_by: drained.as_ref().map(|d| d.0.clone()),
+                drained_at_ms: drained.as_ref().map(|d| d.1),
                 execution_enabled: self.execution_enabled.load(Ordering::SeqCst),
                 uptime_secs: u64::try_from((now - self.started_ms) / 1000).unwrap_or(0),
+                now_ms: now,
             },
             slots,
             waiting,

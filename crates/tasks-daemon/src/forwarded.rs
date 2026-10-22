@@ -51,7 +51,7 @@ impl Scheduler {
             // after a restart: register again, with the key the ledger holds
             if let Err(e) = self.forwarder.forward(rec, &fw.peer) {
                 let text = format!("cannot forward to {}: {e}", fw.peer.0);
-                self.set_wait(id, LedgerWait::Pressure(text.clone()), &text);
+                self.set_wait(id, LedgerWait::Placement(text.clone()), &text);
                 return None;
             }
         }
@@ -121,7 +121,7 @@ impl Scheduler {
         }
         if let Err(e) = self.forwarder.start(id, &rj.log_path) {
             let text = format!("cannot start forwarding to {}: {e}", fw.peer.0);
-            self.set_wait(id, LedgerWait::Pressure(text.clone()), &text);
+            self.set_wait(id, LedgerWait::Placement(text.clone()), &text);
             return false;
         }
         lock(&self.state).last_wait.remove(&id);
@@ -261,7 +261,7 @@ impl Scheduler {
                     st.fallbacks.insert(id, note.clone());
                     st.last_wait.remove(&id);
                 }
-                self.set_wait(id, LedgerWait::Pressure(note.clone()), &note);
+                self.set_wait(id, LedgerWait::Placement(note.clone()), &note);
                 return;
             }
         }
@@ -375,7 +375,7 @@ fn drive(
                 }
                 if !started && p.mirror != last_mirror {
                     last_mirror = p.mirror.clone();
-                    sch.set_wait(id, LedgerWait::Pressure(p.mirror.clone()), &p.mirror);
+                    sch.set_wait(id, LedgerWait::Placement(p.mirror.clone()), &p.mirror);
                 }
             }
             ForwardPoll::Done(end) => ended = Some(end),

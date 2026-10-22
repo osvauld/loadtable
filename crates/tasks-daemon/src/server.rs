@@ -177,8 +177,10 @@ fn accept_loop(sch: &Arc<Scheduler>, listener: &UnixListener) {
             active.fetch_sub(1, Ordering::SeqCst);
             let mut s = stream;
             let busy = render_reply(Reply::Err(ApiError::new(
-                ErrorCode::Busy,
-                format!("too many connections (limit {MAX_CONNECTIONS})"),
+                ErrorCode::ConnectionLimit,
+                format!(
+                    "too many connections (limit {MAX_CONNECTIONS}); the request was not processed"
+                ),
             )));
             let _ = writeln!(s, "{busy}");
             continue;

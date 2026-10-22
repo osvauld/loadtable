@@ -7,7 +7,7 @@
 
 use crate::scheduler::{RunningJob, Scheduler, lock};
 use std::sync::Arc;
-use tasks_core::{Kind, MachineName, Phase};
+use tasks_core::{Kind, MachineName, Phase, SplitOrigin};
 use tasks_ledger::{
     Finish, LeaseRecord, LedgerError, RetryPolicy, StartInfo, TimeoutReason, retry_busy,
 };
@@ -16,13 +16,15 @@ use tasks_runner::{
     ElisionCaps, End, EnvPolicy, JobStart, Lease, Outcome, Policy as RunPolicy, RunEvents, Runner,
     RunnerError, SystemClock, TimedLine, cap_log_file,
 };
-use tasks_timing::record::{JobResult, samples_from_timeline};
+use tasks_timing::record::{JobResult, samples_from_timeline, split_piece_sample};
 use tasks_timing::{Cache, CargoParser, Event, GradleParser, Sample, SampleKey};
 
 /// Facts about the job the events adapter needs.
 pub(crate) struct JobMeta {
     pub kind: Kind,
     pub recipe: String,
+    /// Set for one piece of a command split by test target: where its time is also filed.
+    pub piece: Option<SplitOrigin>,
 }
 
 enum Parser {
@@ -265,6 +267,12 @@ impl RunEvents for Events {
                 at_ms: u64::try_from(self.sch.clock.now_ms()).unwrap_or(0),
             };
             samples = samples_from_timeline(&job, &tl);
+            // a split piece also teaches the unsplit recipe its own target (R-114)
+            if let Some(origin) = &self.meta.piece
+                && let Some(piece) = split_piece_sample(&job, &tl, &origin.recipe, &origin.target)
+            {
+                samples.push(piece);
+            }
         }
         let mut rest = samples.split_off(samples.len().min(1));
         let first = samples.pop();

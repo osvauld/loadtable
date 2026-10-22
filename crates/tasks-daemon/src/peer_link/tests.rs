@@ -27,6 +27,8 @@ fn record(store: &MemoryStore, root: &Path) -> JobRecord {
         requirements: Requirements::default(),
         placement: Placement::Anywhere,
         after: vec![],
+        timeout_secs: None,
+        broad_test_escape: false,
     };
     let id = store.submit(&spec).unwrap();
     store.get(id).unwrap().unwrap()

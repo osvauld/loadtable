@@ -31,6 +31,14 @@ pub const MAX_CONTEXT: usize = 100;
 pub const MAX_TAIL_LINES: usize = 5000;
 /// Most waiter rows in a status snapshot.
 pub const MAX_STATUS_WAITERS: usize = 100;
+/// Most recipes one `history` request returns.
+pub const MAX_HISTORY_RECIPES: usize = 200;
+/// Samples per series a `history` request returns when it sets no limit.
+pub const DEFAULT_HISTORY_SAMPLES: usize = 30;
+/// Most samples per series a `history` request may ask for.
+pub const MAX_HISTORY_SAMPLES: usize = 200;
+/// Most samples in one `history` reply, over all series; the reply says when it cut.
+pub const MAX_HISTORY_TOTAL_SAMPLES: usize = 20_000;
 
 /// A request to the daemon.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -57,6 +65,9 @@ pub enum Request {
         /// Placement of every step.
         #[serde(default = "default_placement")]
         placement: Placement,
+        /// The submitter passed the broad-test escape for every step (R-191).
+        #[serde(default)]
+        broad_test: bool,
     },
     /// Expand a suite of the repo's run policy and submit it as a plan.
     SubmitSuite {
@@ -75,6 +86,9 @@ pub enum Request {
         /// Drop steps marked `skip_in_quick`.
         #[serde(default)]
         quick: bool,
+        /// The submitter passed the broad-test escape for every step (R-191).
+        #[serde(default)]
+        broad_test: bool,
     },
     /// List jobs, oldest first.
     List {
@@ -114,6 +128,9 @@ pub enum Request {
         id: JobId,
         /// The asking owner.
         who: String,
+        /// Why, kept with the job and shown by `get` and `list`.
+        #[serde(default)]
+        reason: Option<String>,
     },
     /// A snapshot of slots, waiters, running jobs, pressure and alerts.
     Status,
@@ -130,6 +147,23 @@ pub enum Request {
         /// True undoes a drain.
         #[serde(default)]
         cancel: bool,
+        /// Who asks; a drain records it with the time, and `status` shows both (R-189).
+        #[serde(default)]
+        who: Option<String>,
+    },
+    /// Timing samples and known targets per recipe and machine, bounded in size.
+    History {
+        /// Only these recipes (the `RecipeKey` display strings); empty means every recipe the
+        /// ledger has samples for, up to [`MAX_HISTORY_RECIPES`].
+        #[serde(default)]
+        recipes: Vec<String>,
+        /// Only these machines; empty means every machine with samples.
+        #[serde(default)]
+        machines: Vec<String>,
+        /// Newest samples kept per series (default [`DEFAULT_HISTORY_SAMPLES`], at most
+        /// [`MAX_HISTORY_SAMPLES`]).
+        #[serde(default)]
+        max_samples: Option<usize>,
     },
     /// Persist the execution intent: enabled or stopped (R-017).
     Execution {
@@ -247,8 +281,12 @@ pub enum ErrorCode {
     NotFound,
     /// The caller is not the job's owner (R-108).
     NotOwner,
-    /// The daemon refuses because jobs run, or it has too many connections.
+    /// The daemon refuses because jobs run (a shutdown). The request was understood and
+    /// refused, not "not processed": never resend it blindly.
     Busy,
+    /// The daemon has too many connections and answered before reading the request: the
+    /// request was not processed, so any request may be sent again.
+    ConnectionLimit,
     /// The job or plan failed validation.
     Refused,
     /// The ledger stayed busy; this is not a cancellation (R-003).
@@ -413,6 +451,8 @@ pub enum Response {
     Status(Box<StatusSnapshot>),
     /// A duration estimate.
     Estimate(EstimateView),
+    /// Timing history.
+    History(HistoryView),
 }
 
 /// Who the daemon is.
@@ -469,6 +509,16 @@ pub struct JobView {
     pub forwarded_to: Option<(String, Option<i64>)>,
     /// Who asked for a cancel.
     pub cancel_requested_by: Option<String>,
+    /// Why the cancel was asked for, when the requester said.
+    #[serde(default)]
+    pub cancel_reason: Option<String>,
+    /// Wall-clock limit in seconds, when the job has one.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+    /// Last known phase on the peer a forwarded job runs on; the local `phase` stays the
+    /// source of truth (R-015, R-186).
+    #[serde(default)]
+    pub remote_phase: Option<Phase>,
     /// Plan and step name for plan steps.
     pub plan: Option<(i64, String)>,
     /// Log file path.
@@ -550,10 +600,20 @@ pub struct DaemonView {
     pub policy_problems: Vec<String>,
     /// True while draining (R-018).
     pub draining: bool,
+    /// Who drained, when the drain request said (R-189).
+    #[serde(default)]
+    pub drained_by: Option<String>,
+    /// When the drain was requested, ms since epoch (R-189).
+    #[serde(default)]
+    pub drained_at_ms: Option<i64>,
     /// Execution intent (R-017).
     pub execution_enabled: bool,
     /// Seconds since start.
     pub uptime_secs: u64,
+    /// The daemon's clock when it built this snapshot, ms since epoch; lets a client say how
+    /// long ago something happened without trusting its own clock.
+    #[serde(default)]
+    pub now_ms: i64,
 }
 
 /// One slot kind's state.
@@ -718,6 +778,131 @@ pub struct EstimateView {
     pub text: String,
 }
 
+/// One measured duration as the history API shows it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SampleView {
+    /// Duration in seconds.
+    pub secs: f64,
+    /// `warm`, `cold` or `unknown`.
+    pub cache: String,
+    /// `passed`, `failed` or `cancelled`.
+    pub outcome: String,
+    /// When the run finished, ms since epoch.
+    pub at_ms: u64,
+}
+
+/// The newest samples of one target (or of the whole job) of a recipe on a machine.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SeriesView {
+    /// A target label such as `test:lifecycle`; `None` for the whole job.
+    pub target: Option<String>,
+    /// Samples, oldest first.
+    pub samples: Vec<SampleView>,
+}
+
+/// What one machine knows about a recipe.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MachineHistory {
+    /// The machine.
+    pub machine: String,
+    /// Every target label with samples for this recipe on this machine, sorted. Complete even
+    /// when `series` was cut.
+    pub targets: Vec<String>,
+    /// Samples per target.
+    pub series: Vec<SeriesView>,
+}
+
+/// History of one recipe.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecipeHistory {
+    /// The `RecipeKey` display string.
+    pub recipe: String,
+    /// Per machine, sorted by name.
+    pub machines: Vec<MachineHistory>,
+}
+
+/// The answer to a history request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HistoryView {
+    /// Per recipe, sorted by name.
+    pub recipes: Vec<RecipeHistory>,
+    /// True when a bound ([`MAX_HISTORY_RECIPES`], [`MAX_HISTORY_TOTAL_SAMPLES`]) cut the
+    /// answer; narrow the request.
+    pub truncated: bool,
+}
+
+fn cache_name(c: tasks_timing::Cache) -> &'static str {
+    match c {
+        tasks_timing::Cache::Warm => "warm",
+        tasks_timing::Cache::Cold => "cold",
+        tasks_timing::Cache::Unknown => "unknown",
+    }
+}
+
+fn outcome_name(o: tasks_timing::Outcome) -> &'static str {
+    match o {
+        tasks_timing::Outcome::Passed => "passed",
+        tasks_timing::Outcome::Failed => "failed",
+        tasks_timing::Outcome::Cancelled => "cancelled",
+    }
+}
+
+impl SampleView {
+    /// The view of a stored sample.
+    pub fn of(s: &tasks_timing::Sample) -> SampleView {
+        SampleView {
+            secs: s.secs,
+            cache: cache_name(s.cache).to_string(),
+            outcome: outcome_name(s.outcome).to_string(),
+            at_ms: s.at_ms,
+        }
+    }
+
+    /// The sample back; unknown words read as `unknown` warmth and a failed outcome, never as
+    /// a pass.
+    pub fn to_sample(&self) -> tasks_timing::Sample {
+        tasks_timing::Sample {
+            secs: self.secs,
+            cache: match self.cache.as_str() {
+                "warm" => tasks_timing::Cache::Warm,
+                "cold" => tasks_timing::Cache::Cold,
+                _ => tasks_timing::Cache::Unknown,
+            },
+            outcome: match self.outcome.as_str() {
+                "passed" => tasks_timing::Outcome::Passed,
+                "cancelled" => tasks_timing::Outcome::Cancelled,
+                _ => tasks_timing::Outcome::Failed,
+            },
+            at_ms: self.at_ms,
+        }
+    }
+}
+
+impl HistoryView {
+    /// The reply as an in-memory [`tasks_timing::History`], for the code that estimates and
+    /// suggests from history (`tasks_policy::suggest`, `tasks_timing::estimate`).
+    pub fn to_history(&self) -> tasks_timing::MemHistory {
+        let mut h = tasks_timing::MemHistory::new();
+        for r in &self.recipes {
+            for m in &r.machines {
+                for s in &m.series {
+                    for v in &s.samples {
+                        h.add(
+                            tasks_timing::SampleKey {
+                                recipe: r.recipe.clone(),
+                                target: s.target.clone(),
+                                machine: m.machine.clone(),
+                            },
+                            v.to_sample(),
+                        );
+                    }
+                }
+            }
+        }
+        h
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -739,6 +924,7 @@ mod tests {
         let r = Request::Cancel {
             id: JobId(3),
             who: "me".into(),
+            reason: Some("wrong branch".into()),
         };
         let line = serde_json::to_vec(&RequestEnvelope {
             v: PROTOCOL_VERSION,
@@ -762,6 +948,89 @@ mod tests {
                 .code,
             ErrorCode::BadRequest
         );
+    }
+
+    #[test]
+    fn r108_older_requests_without_the_new_fields_still_parse() {
+        let cancel = parse_request(br#"{"v":1,"request":{"op":"cancel","id":3,"who":"me"}}"#);
+        assert_eq!(
+            cancel.unwrap(),
+            Request::Cancel {
+                id: JobId(3),
+                who: "me".into(),
+                reason: None
+            }
+        );
+        let drain = parse_request(br#"{"v":1,"request":{"op":"drain"}}"#).unwrap();
+        assert_eq!(
+            drain,
+            Request::Drain {
+                cancel: false,
+                who: None
+            }
+        );
+        let h = parse_request(br#"{"v":1,"request":{"op":"history"}}"#).unwrap();
+        assert_eq!(
+            h,
+            Request::History {
+                recipes: vec![],
+                machines: vec![],
+                max_samples: None
+            }
+        );
+    }
+
+    #[test]
+    fn the_connection_limit_has_its_own_wire_name() {
+        let line = render_reply(Reply::Err(ApiError::new(
+            ErrorCode::ConnectionLimit,
+            "full",
+        )));
+        assert!(line.contains(r#""code":"connection_limit""#), "{line}");
+        assert_ne!(ErrorCode::ConnectionLimit, ErrorCode::Busy);
+        assert_ne!(ErrorCode::ConnectionLimit, ErrorCode::LedgerUnavailable);
+    }
+
+    #[test]
+    fn history_views_round_trip_into_a_history() {
+        use tasks_timing::{Cache, History, Outcome, Sample, SampleKey};
+        let s = Sample {
+            secs: 2.5,
+            cache: Cache::Cold,
+            outcome: Outcome::Cancelled,
+            at_ms: 9,
+        };
+        assert_eq!(SampleView::of(&s).to_sample(), s);
+        // an unknown outcome is never read as a pass
+        let odd = SampleView {
+            secs: 1.0,
+            cache: "?".into(),
+            outcome: "?".into(),
+            at_ms: 1,
+        };
+        assert_eq!(odd.to_sample().outcome, Outcome::Failed);
+        let view = HistoryView {
+            recipes: vec![RecipeHistory {
+                recipe: "r".into(),
+                machines: vec![MachineHistory {
+                    machine: "m".into(),
+                    targets: vec!["test:a".into()],
+                    series: vec![SeriesView {
+                        target: Some("test:a".into()),
+                        samples: vec![SampleView::of(&s)],
+                    }],
+                }],
+            }],
+            truncated: false,
+        };
+        let h = view.to_history();
+        let key = SampleKey {
+            recipe: "r".into(),
+            target: Some("test:a".into()),
+            machine: "m".into(),
+        };
+        assert_eq!(h.samples(&key).unwrap(), vec![s]);
+        assert_eq!(h.targets("r").unwrap(), ["test:a"]);
     }
 
     #[test]

@@ -13,6 +13,7 @@ use crate::place::Placed;
 use crate::platform::{Ledger, Platform};
 use crate::runjob::{self, JobMeta};
 use crate::stuck::StuckDetector;
+use crate::submit::Via;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -153,6 +154,8 @@ pub struct Scheduler {
     pub(crate) state: Mutex<TickState>,
     pub(crate) wake: Wake,
     pub(crate) draining: AtomicBool,
+    /// Who drained and when (ms); set with `draining`, cleared by a resume (R-189).
+    pub(crate) drained: Mutex<Option<(String, i64)>>,
     pub(crate) execution_enabled: AtomicBool,
     pub(crate) shutdown: AtomicBool,
     pub(crate) started_ms: i64,
@@ -181,6 +184,7 @@ impl Scheduler {
             state: Mutex::new(TickState::default()),
             wake: Wake::default(),
             draining: AtomicBool::new(false),
+            drained: Mutex::new(None),
             execution_enabled: AtomicBool::new(parts.execution_enabled),
             shutdown: AtomicBool::new(false),
             started_ms,
@@ -357,7 +361,7 @@ impl Scheduler {
                     continue;
                 }
                 Placed::Waiting(text) => {
-                    self.set_wait(id, LedgerWait::Pressure(text.clone()), &text);
+                    self.set_wait(id, LedgerWait::Placement(text.clone()), &text);
                     rep.waiting += 1;
                     continue;
                 }
@@ -472,7 +476,7 @@ impl Scheduler {
             Some(Hold::Drain)
         } else if !self.execution_enabled.load(Ordering::SeqCst) {
             Some(Hold::Other(
-                "execution is stopped (start it with `execution enable`)".to_string(),
+                "execution is stopped (start it with `tasks2 execution start`)".to_string(),
             ))
         } else {
             None
@@ -565,6 +569,22 @@ impl Scheduler {
         if let Some(n) = &rewritten.note {
             let _ = notes.note(&log_path, "cargo-jobs", n);
         }
+        // what the submit rules allowed with a warning (a broad test in `warn` mode, or one
+        // deliberately escaped) stays visible with the job (R-191)
+        let via = if rec.origin.is_some() {
+            Via::Peer
+        } else {
+            Via::Local
+        };
+        if let Ok(warnings) = self.check_spec(&rec.spec, via) {
+            for (i, w) in warnings.iter().enumerate() {
+                let _ = notes.note(
+                    &log_path,
+                    &format!("submit-rule-{i}"),
+                    &format!("warning: {w}"),
+                );
+            }
+        }
 
         let slot_kind = tasks_placement::slot_for(rec.spec.kind);
         let rj = Arc::new(RunningJob {
@@ -586,9 +606,11 @@ impl Scheduler {
                 .known_median
                 .or(facts.est.as_ref().map(|e| e.median_secs)),
         });
+        // the spec's own limit, then a plan step's hint (older rows), then the machine default
         let wall = rec
-            .hints
+            .spec
             .timeout_secs
+            .or(rec.hints.timeout_secs)
             .map(Duration::from_secs)
             .or_else(|| policy.wall_timeout());
         let run_policy = RunPolicy {
@@ -609,6 +631,7 @@ impl Scheduler {
         let meta = JobMeta {
             kind: rec.spec.kind,
             recipe: facts.recipe.clone(),
+            piece: rec.hints.split.clone(),
         };
         lock(&self.running).insert(id, rj.clone());
         lock(&self.state).last_wait.remove(&id);
