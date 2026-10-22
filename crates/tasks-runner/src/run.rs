@@ -199,7 +199,7 @@ impl<'a> Runner<'a> {
             if follower.poll(now.saturating_sub(t0), events)? {
                 last_activity = now;
             }
-            match self.procs.try_wait(&live.child) {
+            match self.procs.peek_exit(&live.child) {
                 Ok(Some(code)) => {
                     live.exit = Some(code);
                     break End::Exited;
@@ -217,6 +217,11 @@ impl<'a> Runner<'a> {
             }
             self.clock.sleep(self.policy.poll);
         };
+        if live.exit.is_some() {
+            self.clean_descendants(&live);
+            // The status came from `peek_exit`; reaping only frees the leader.
+            let _ = self.procs.try_wait(&live.child);
+        }
         let wall = self.clock.now().saturating_sub(t0);
         follower.drain(wall, events)?;
         let outcome = Outcome {
@@ -279,7 +284,7 @@ impl<'a> Runner<'a> {
             }
             let deadline = self.clock.now() + self.policy.cancel_grace;
             loop {
-                match self.procs.try_wait(&live.child) {
+                match self.procs.peek_exit(&live.child) {
                     Ok(Some(code)) => {
                         live.exit = Some(code);
                         return;
@@ -292,6 +297,35 @@ impl<'a> Runner<'a> {
                 }
                 self.clock.sleep(self.policy.poll);
             }
+        }
+    }
+}
+
+impl Runner<'_> {
+    /// After the leader exited but before it is reaped (so the group id cannot
+    /// be reused), Term then Kill whatever is left in the group, each followed by
+    /// the grace. The command's own status is kept (R-079).
+    fn clean_descendants(&self, live: &Live) {
+        for sig in [Signal::Term, Signal::Kill] {
+            if self.group_empty(live) {
+                return;
+            }
+            if self.procs.signal_group(live.child.group, sig).is_err() {
+                return;
+            }
+            let deadline = self.clock.now() + self.policy.cancel_grace;
+            while !self.group_empty(live) && self.clock.now() < deadline {
+                self.clock.sleep(self.policy.poll);
+            }
+        }
+    }
+
+    /// True when no live process is left in the group, or the group is gone.
+    fn group_empty(&self, live: &Live) -> bool {
+        match self.procs.usage(live.child.group) {
+            Ok(u) => u.processes == 0,
+            Err(PlatformError::Gone { .. }) => true,
+            Err(_) => false,
         }
     }
 }

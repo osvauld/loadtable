@@ -13,4 +13,5 @@ pub use ids::{DeviceId, JobId, MachineName, Owner, Tool};
 pub use job::{DENIED_DEVICES, JobSpec, Kind, Placement};
 pub use machine::{Arch, Machine, Os};
 pub use phase::{Phase, SlotKind, WaitReason};
+pub use plan::StepHints;
 pub use requirements::{Requirements, Unmet};

@@ -6,7 +6,7 @@ use crate::exe::{ExeKind, TestExe};
 use crate::recipe::basename;
 use std::collections::{BTreeMap, BTreeSet};
 use tasks_core::plan::{Plan, Step};
-use tasks_core::{Kind, Requirements};
+use tasks_core::{Kind, Requirements, StepHints};
 
 /// Flags (with a value, if the bool is true) that select which targets run.
 const SELECTORS: &[(&str, bool)] = &[
@@ -120,6 +120,7 @@ pub fn split_cargo_test(
         after: Vec::new(),
         kind: Kind::Compile,
         requirements: Requirements::default(),
+        hints: StepHints::default(),
     }];
     let mut used: BTreeSet<String> = BTreeSet::from(["build".to_string()]);
     for exe in test_executables {
@@ -152,6 +153,7 @@ pub fn split_cargo_test(
             after: vec!["build".into()],
             kind: Kind::Test,
             requirements: Requirements::default(),
+            hints: StepHints::default(),
         });
     }
     let plan = Plan { steps };

@@ -5,32 +5,26 @@ use crate::model::{Policy, SplitMode, StepDef};
 use crate::timing::{Timing, measure, primary, recipe_of};
 use std::collections::{BTreeMap, BTreeSet};
 use tasks_core::plan::{Plan, Step};
-use tasks_core::{Kind, Requirements};
+use tasks_core::{Kind, Requirements, StepHints};
 use tasks_timing::estimate::Estimate;
 use tasks_timing::{TestExe, label_of, order_longest_first, split_cargo_test};
 
-/// Scheduling hints that `tasks_core::Step` has no field for.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct StepHints {
-    /// Machine placement hint from the policy.
-    pub placement: Option<String>,
-    /// Timeout in seconds.
-    pub timeout_secs: Option<u64>,
-    /// The target must run alone.
-    pub isolate: bool,
-    /// The target is known to be long.
-    pub long: bool,
-    /// Tools the suite needs.
-    pub tools: Vec<String>,
-}
-
-/// A suite expanded to a plan plus per-step hints (keyed by expanded step name).
+/// A suite expanded to a plan; each step carries its policy hints.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Expansion {
     /// The validated plan.
     pub plan: Plan,
-    /// Hints for each step of the plan.
-    pub hints: BTreeMap<String, StepHints>,
+}
+
+impl Expansion {
+    /// Hints of the step named `name`, if the plan has it.
+    pub fn hints(&self, name: &str) -> Option<&StepHints> {
+        self.plan
+            .steps
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| &s.hints)
+    }
 }
 
 /// Options for [`expand`].
@@ -74,6 +68,7 @@ fn pieces(
         after: def.after.clone(),
         kind,
         requirements: Requirements::default(),
+        hints: StepHints::default(),
     };
     let list = exes.get(&def.name).filter(|l| !l.is_empty());
     let (Some(SplitMode::CargoTest), Some(list)) = (def.split, list) else {
@@ -153,7 +148,6 @@ pub fn expand(
         by_step.insert(def.name.as_str(), ps);
     }
     let mut steps = Vec::new();
-    let mut hints = BTreeMap::new();
     for def in suite
         .steps
         .iter()
@@ -175,22 +169,19 @@ pub fn expand(
                 .name
                 .strip_prefix(&format!("{}.", def.name))
                 .and_then(|piece| suite.targets.get(&label_of(piece)));
-            hints.insert(
-                p.name.clone(),
-                StepHints {
-                    placement: def.placement.clone(),
-                    timeout_secs: def.timeout_secs,
-                    isolate: note.is_some_and(|n| n.isolate),
-                    long: note.is_some_and(|n| n.long),
-                    tools: suite.tools.clone(),
-                },
-            );
+            p.hints = StepHints {
+                placement: def.placement.clone(),
+                timeout_secs: def.timeout_secs,
+                isolate: note.is_some_and(|n| n.isolate),
+                long: note.is_some_and(|n| n.long),
+                tools: suite.tools.clone(),
+            };
             steps.push(p);
         }
     }
     let plan = Plan { steps };
     plan.validate()?;
-    Ok(Expansion { plan, hints })
+    Ok(Expansion { plan })
 }
 
 #[cfg(test)]
@@ -287,11 +278,14 @@ after = ["tests"]
             .unwrap();
         assert_eq!(build.after, vec!["fmt"]);
         assert_eq!(
-            e.hints["tests.test-lifecycle"].placement.as_deref(),
+            e.hints("tests.test-lifecycle")
+                .unwrap()
+                .placement
+                .as_deref(),
             Some("nixos")
         );
-        assert!(e.hints["tests.test-lifecycle"].long);
-        assert!(e.hints["tests.test-link"].isolate);
+        assert!(e.hints("tests.test-lifecycle").unwrap().long);
+        assert!(e.hints("tests.test-link").unwrap().isolate);
         assert_eq!(e.plan.validate(), Ok(()));
     }
 

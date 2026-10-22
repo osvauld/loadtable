@@ -73,6 +73,37 @@ pub struct Step {
     /// Step requirements.
     #[serde(default)]
     pub requirements: Requirements,
+    /// Scheduling hints, usually from the repo run policy.
+    #[serde(default, skip_serializing_if = "StepHints::is_empty")]
+    pub hints: StepHints,
+}
+
+/// Scheduling hints for a step. None of them is required to run it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StepHints {
+    /// Preferred machine name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<String>,
+    /// Timeout in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    /// The step must run alone (e.g. network tests).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub isolate: bool,
+    /// The step is known to be long.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub long: bool,
+    /// Tools the step needs on the machine.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
+}
+
+impl StepHints {
+    /// True when no hint is set.
+    pub fn is_empty(&self) -> bool {
+        *self == StepHints::default()
+    }
 }
 
 fn default_kind() -> Kind {
@@ -213,6 +244,7 @@ mod tests {
             after: after.iter().map(|s| s.to_string()).collect(),
             kind: Kind::Compile,
             requirements: Requirements::default(),
+            hints: StepHints::default(),
         }
     }
     fn plan(steps: Vec<Step>) -> Plan {

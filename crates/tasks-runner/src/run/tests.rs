@@ -162,6 +162,31 @@ fn r078_grace_is_a_policy_value_not_a_constant() {
 }
 
 #[test]
+fn r079_normal_exit_cleans_descendants_before_reaping_and_keeps_status() {
+    let mut f = fx();
+    f.procs.exit_at = Some((MS(50), 3));
+    f.procs.strays = 2;
+    let (out, _) = run_fake(&f, policy(), &CancelToken::new());
+    assert_eq!(f.procs.sent(), [Signal::Term]);
+    assert_eq!(out.phase(), Phase::Failed { exit: Some(3) });
+    assert_eq!(out.signal, None);
+}
+
+#[test]
+fn r079_term_exit_of_leader_does_not_strand_a_resistant_descendant() {
+    let mut f = fx();
+    f.procs.strays = 1;
+    f.procs.strays_ignore_term = true;
+    let cancel = CancelToken::new();
+    cancel.cancel();
+    let (out, _) = run_fake(&f, policy(), &cancel);
+    // Term stops the leader; the stray needs a second Term's grace, then Kill.
+    assert_eq!(f.procs.sent(), [Signal::Term, Signal::Term, Signal::Kill]);
+    assert_eq!(out.signal, Some(15));
+    assert_eq!(out.phase(), Phase::Cancelled);
+}
+
+#[test]
 fn cancel_after_exit_is_safe_and_sends_nothing() {
     let mut f = fx();
     f.procs.exit_at = Some((MS(0), 0));
@@ -248,7 +273,7 @@ fn r100_wall_timeout_stops_the_group_and_fails() {
     let (out, _) = run_fake(&f, p, &CancelToken::new());
     assert_eq!(out.end, End::WallTimeout);
     assert!(out.wall >= Duration::from_secs(2));
-    assert_eq!(out.phase(), Phase::Failed { exit: Some(143) });
+    assert_eq!(out.phase(), Phase::TimedOut { exit: Some(143) });
 }
 
 #[test]
@@ -375,6 +400,20 @@ fn r074_r107_cancel_stops_the_whole_group_including_children() {
     h.join().unwrap();
     assert_eq!(out.phase(), Phase::Cancelled);
     assert_eq!(out.signal, Some(15));
+    assert!(took < MS(900), "{took:?}");
+    assert!(!out.lease.still_ours(&native()).unwrap());
+}
+
+#[test]
+fn r079_real_normal_exit_cleans_a_stray_and_keeps_the_status() {
+    let dir = TempDir::new();
+    let (out, _, took) = run_real(
+        &dir,
+        "sleep 5 & exit 3",
+        real_policy(300),
+        &CancelToken::new(),
+    );
+    assert_eq!(out.phase(), Phase::Failed { exit: Some(3) });
     assert!(took < MS(900), "{took:?}");
     assert!(!out.lease.still_ours(&native()).unwrap());
 }

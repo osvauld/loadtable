@@ -5,7 +5,7 @@ use crate::model::{Policy, SCHEMA_VERSION, Suite};
 use std::collections::BTreeSet;
 use std::path::Path;
 use tasks_core::plan::{Plan, PlanError, Step};
-use tasks_core::{Kind, Requirements};
+use tasks_core::{Kind, Requirements, StepHints};
 
 /// Longest accepted timeout: one day.
 pub const MAX_TIMEOUT_SECS: u64 = 86_400;
@@ -105,6 +105,7 @@ fn check_suite(name: &str, suite: &Suite, out: &mut Vec<Violation>) {
                     after: s.after.clone(),
                     kind: Kind::Run,
                     requirements: Requirements::default(),
+                    hints: StepHints::default(),
                 })
                 .collect(),
         };

@@ -53,6 +53,9 @@ pub struct Sample {
 pub trait History {
     /// All samples for `key`, in any order.
     fn samples(&self, key: &SampleKey) -> Result<Vec<Sample>, TimingError>;
+    /// Target labels (`test:lifecycle`) with any sample under `recipe` on any machine, sorted
+    /// and without duplicates. Lets a policy notice new and removed targets.
+    fn targets(&self, recipe: &str) -> Result<Vec<String>, TimingError>;
 }
 
 /// In-memory history for tests.
@@ -89,6 +92,19 @@ impl History for MemHistory {
         }
         Ok(self.map.get(key).cloned().unwrap_or_default())
     }
+
+    fn targets(&self, recipe: &str) -> Result<Vec<String>, TimingError> {
+        if self.fail {
+            return Err(TimingError::History("store unavailable".into()));
+        }
+        let set: std::collections::BTreeSet<&String> = self
+            .map
+            .keys()
+            .filter(|k| k.recipe == recipe)
+            .filter_map(|k| k.target.as_ref())
+            .collect();
+        Ok(set.into_iter().cloned().collect())
+    }
 }
 
 #[cfg(test)]
@@ -115,6 +131,34 @@ mod tests {
         h.add(key("a"), s);
         assert_eq!(h.samples(&key("a")).unwrap(), vec![s]);
         assert!(h.samples(&key("b")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn targets_lists_each_label_once_for_the_recipe() {
+        let mut h = MemHistory::new();
+        let s = Sample {
+            secs: 1.0,
+            cache: Cache::Warm,
+            outcome: Outcome::Passed,
+            at_ms: 5,
+        };
+        for (recipe, target, machine) in [
+            ("r", Some("test:b"), "a"),
+            ("r", Some("test:a"), "a"),
+            ("r", Some("test:a"), "b"),
+            ("r", None, "a"),
+            ("other", Some("test:c"), "a"),
+        ] {
+            let key = SampleKey {
+                recipe: recipe.into(),
+                target: target.map(str::to_string),
+                machine: machine.into(),
+            };
+            h.add(key, s);
+        }
+        assert_eq!(h.targets("r").unwrap(), ["test:a", "test:b"]);
+        assert!(h.targets("none").unwrap().is_empty());
+        assert!(MemHistory::failing().targets("r").is_err());
     }
 
     #[test]

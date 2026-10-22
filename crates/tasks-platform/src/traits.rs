@@ -29,9 +29,12 @@ pub trait Processes {
     fn signal_group(&self, group: GroupId, sig: Signal) -> Result<(), PlatformError>;
     /// Resource usage of a group (live, non-zombie processes). `Gone` on PID reuse.
     fn usage(&self, group: GroupId) -> Result<Usage, PlatformError>;
-    /// Reaps the leader without blocking: `Some(code)` once it exited (128 + n
-    /// when killed by signal n), `None` while running. Keep the leader unreaped
-    /// until descendants are cleaned so its identity still guards the group.
+    /// The leader's exit code without reaping it: `Some(code)` once it exited
+    /// (128 + n when killed by signal n), `None` while running. The unreaped
+    /// leader keeps the group id reserved, so descendants can still be cleaned.
+    fn peek_exit(&self, child: &Child) -> Result<Option<i32>, PlatformError>;
+    /// Reaps the leader without blocking, with the same codes as
+    /// [`Processes::peek_exit`]. Call only after descendants are cleaned.
     fn try_wait(&self, child: &Child) -> Result<Option<i32>, PlatformError>;
 }
 

@@ -167,6 +167,7 @@ fn ordering_respects_dependencies_in_general_plans() {
         after: after.iter().map(|s| s.to_string()).collect(),
         kind: Kind::Run,
         requirements: Requirements::default(),
+        hints: StepHints::default(),
     };
     let plan = Plan {
         steps: vec![step("c", &["b"]), step("b", &[]), step("a", &[])],

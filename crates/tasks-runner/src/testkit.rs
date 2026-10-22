@@ -65,8 +65,12 @@ pub(crate) struct FakeProcs {
     pub(crate) ignores_term: bool,
     /// When true signals fail with `Gone`.
     pub(crate) gone: bool,
-    /// When true `try_wait` fails (lost reaping ownership).
+    /// When true `peek_exit` and `try_wait` fail (lost reaping ownership).
     pub(crate) lost_wait: bool,
+    /// Descendants that outlive the leader until signalled.
+    pub(crate) strays: u32,
+    /// When true the strays ignore `Term` and only `Kill` stops them.
+    pub(crate) strays_ignore_term: bool,
     pub(crate) signals: Mutex<Vec<Signal>>,
     state: Mutex<FakeState>,
 }
@@ -77,6 +81,10 @@ struct FakeState {
     termed: bool,
     killed: bool,
     reaped: bool,
+    /// Strays still alive; set at spawn.
+    strays: u32,
+    /// The leader's code, once known.
+    exit: Option<i32>,
 }
 
 impl FakeProcs {
@@ -88,6 +96,8 @@ impl FakeProcs {
             ignores_term: false,
             gone: false,
             lost_wait: false,
+            strays: 0,
+            strays_ignore_term: false,
             signals: Mutex::new(Vec::new()),
             state: Mutex::new(FakeState::default()),
         }
@@ -100,7 +110,10 @@ impl FakeProcs {
 
 impl Processes for FakeProcs {
     fn spawn_group(&self, cmd: &SpawnSpec) -> Result<Child, PlatformError> {
-        self.state.lock().unwrap().log = Some(cmd.log_path.clone());
+        let mut st = self.state.lock().unwrap();
+        st.log = Some(cmd.log_path.clone());
+        st.strays = self.strays;
+        drop(st);
         std::fs::File::create(&cmd.log_path).unwrap();
         Ok(Child {
             pid: 4242,
@@ -117,21 +130,38 @@ impl Processes for FakeProcs {
         self.signals.lock().unwrap().push(sig);
         let mut st = self.state.lock().unwrap();
         match sig {
-            Signal::Term => st.termed = true,
-            Signal::Kill => st.killed = true,
+            Signal::Term => {
+                st.termed = true;
+                if !self.strays_ignore_term {
+                    st.strays = 0;
+                }
+            }
+            Signal::Kill => {
+                st.killed = true;
+                st.strays = 0;
+            }
             _ => {}
         }
         Ok(())
     }
     fn usage(&self, _g: GroupId) -> Result<Usage, PlatformError> {
+        let st = self.state.lock().unwrap();
+        let leader = u32::from(st.exit.is_none() && !st.reaped);
         Ok(Usage {
             cpu_user_s: self.clock.now().as_secs_f64(),
             cpu_sys_s: 0.0,
             rss_bytes: 1,
-            processes: 1,
+            processes: leader + st.strays,
         })
     }
-    fn try_wait(&self, _c: &Child) -> Result<Option<i32>, PlatformError> {
+    fn try_wait(&self, c: &Child) -> Result<Option<i32>, PlatformError> {
+        let code = self.peek_exit(c)?;
+        if code.is_some() {
+            self.state.lock().unwrap().reaped = true;
+        }
+        Ok(code)
+    }
+    fn peek_exit(&self, _c: &Child) -> Result<Option<i32>, PlatformError> {
         if self.lost_wait {
             return Err(PlatformError::Gone { pgid: 4242 });
         }
@@ -149,17 +179,16 @@ impl Processes for FakeProcs {
                 f.write_all(&b).unwrap();
             }
         }
-        let code = if st.killed {
-            Some(137)
-        } else if st.termed && !self.ignores_term {
-            Some(143)
-        } else {
-            self.exit_at.filter(|(t, _)| *t <= now).map(|(_, c)| c)
-        };
-        if code.is_some() {
-            st.reaped = true;
+        if st.exit.is_none() {
+            st.exit = if st.killed {
+                Some(137)
+            } else if st.termed && !self.ignores_term {
+                Some(143)
+            } else {
+                self.exit_at.filter(|(t, _)| *t <= now).map(|(_, c)| c)
+            };
         }
-        Ok(code)
+        Ok(st.exit)
     }
 }
 

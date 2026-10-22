@@ -62,6 +62,9 @@ impl Processes for Native {
     fn usage(&self, group: GroupId) -> Result<Usage, PlatformError> {
         procs::usage(group)
     }
+    fn peek_exit(&self, child: &Child) -> Result<Option<i32>, PlatformError> {
+        groups::peek_exit(child)
+    }
     fn try_wait(&self, child: &Child) -> Result<Option<i32>, PlatformError> {
         groups::try_wait(child)
     }

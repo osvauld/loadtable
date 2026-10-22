@@ -2,7 +2,7 @@
 //! Only the leader start-time lookup is OS-specific and is passed in.
 
 use crate::{Child, GroupId, PlatformError, Signal, SpawnSpec};
-use rustix::process::{Pid, WaitOptions};
+use rustix::process::{Pid, WaitId, WaitIdOptions, WaitOptions};
 use std::fs::OpenOptions;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
@@ -117,19 +117,43 @@ pub(crate) fn try_wait(child: &Child) -> Result<Option<i32>, PlatformError> {
     let pid = pid_of(child.pid)?;
     match rustix::process::waitpid(Some(pid), WaitOptions::NOHANG) {
         Ok(None) => Ok(None),
-        Ok(Some((_, status))) => {
-            let code = match (status.exit_status(), status.terminating_signal()) {
-                (Some(c), _) => c,
-                (None, Some(s)) => 128 + s,
-                (None, None) => -1,
-            };
-            Ok(Some(code))
-        }
+        Ok(Some((_, status))) => Ok(Some(code_of(
+            status.exit_status(),
+            status.terminating_signal(),
+        ))),
         Err(source) => Err(PlatformError::Syscall {
             syscall: "waitpid",
             path: None,
             source,
         }),
+    }
+}
+
+/// Like [`try_wait`] but leaves the leader a zombie (`WNOWAIT`), so its pid and
+/// group id cannot be reused while descendants are cleaned (R-079).
+pub(crate) fn peek_exit(child: &Child) -> Result<Option<i32>, PlatformError> {
+    let pid = pid_of(child.pid)?;
+    let options = WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT;
+    match rustix::process::waitid(WaitId::Pid(pid), options) {
+        Ok(None) => Ok(None),
+        Ok(Some(status)) => Ok(Some(code_of(
+            status.exit_status(),
+            status.terminating_signal(),
+        ))),
+        Err(source) => Err(PlatformError::Syscall {
+            syscall: "waitid",
+            path: None,
+            source,
+        }),
+    }
+}
+
+/// Exit code, or 128 + signal when killed; -1 when neither is known.
+fn code_of(exit: Option<i32>, signal: Option<i32>) -> i32 {
+    match (exit, signal) {
+        (Some(c), _) => c,
+        (None, Some(s)) => 128 + s,
+        (None, None) => -1,
     }
 }
 
@@ -199,6 +223,36 @@ mod tests {
         assert_eq!(c.group.pgid, c.pid);
         assert_ne!(c.pid, rustix::process::getpgrp().as_raw_pid());
         wait_exit(&p, &c);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // R-079
+    #[test]
+    fn peek_exit_keeps_the_leader_until_reaped() {
+        let dir = tmpdir("peek");
+        let p = crate::native();
+        let c = p
+            .spawn_group(&spec(&dir, "sleep 30 & exec sh -c 'exit 4'"))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let code = loop {
+            if let Some(code) = p.peek_exit(&c).unwrap() {
+                break code;
+            }
+            assert!(Instant::now() < deadline, "leader never exited");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(code, 4);
+        assert_eq!(p.peek_exit(&c).unwrap(), Some(4));
+        // The zombie leader still guards the group, so the stray is reachable.
+        assert_eq!(p.usage(c.group).unwrap().processes, 1);
+        p.signal_group(c.group, Signal::Kill).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while p.usage(c.group).unwrap().processes > 0 {
+            assert!(Instant::now() < deadline, "stray survived Kill");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(p.try_wait(&c).unwrap(), Some(4));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

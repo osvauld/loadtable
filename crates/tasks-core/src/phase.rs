@@ -47,6 +47,11 @@ pub enum Phase {
         /// Exit code, if any.
         exit: Option<i32>,
     },
+    /// Stopped by a wall-clock or output-idle timeout.
+    TimedOut {
+        /// Exit code after the stop, if any.
+        exit: Option<i32>,
+    },
     /// Cancelled by a user.
     Cancelled,
     /// Lost because the runner went away.
@@ -58,7 +63,11 @@ impl Phase {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            Phase::Passed | Phase::Failed { .. } | Phase::Cancelled | Phase::Interrupted
+            Phase::Passed
+                | Phase::Failed { .. }
+                | Phase::TimedOut { .. }
+                | Phase::Cancelled
+                | Phase::Interrupted
         )
     }
 
@@ -70,7 +79,11 @@ impl Phase {
             }
             Phase::Running => matches!(
                 next,
-                Phase::Passed | Phase::Failed { .. } | Phase::Cancelled | Phase::Interrupted
+                Phase::Passed
+                    | Phase::Failed { .. }
+                    | Phase::TimedOut { .. }
+                    | Phase::Cancelled
+                    | Phase::Interrupted
             ),
             _ => false,
         }
@@ -88,6 +101,7 @@ mod tests {
             Phase::Running,
             Phase::Passed,
             Phase::Failed { exit: Some(1) },
+            Phase::TimedOut { exit: Some(143) },
             Phase::Cancelled,
             Phase::Interrupted,
         ]
@@ -106,6 +120,7 @@ mod tests {
                         Phase::Running,
                         Phase::Passed
                             | Phase::Failed { .. }
+                            | Phase::TimedOut { .. }
                             | Phase::Cancelled
                             | Phase::Interrupted
                     )
@@ -118,6 +133,6 @@ mod tests {
     #[test]
     fn terminal() {
         let t: Vec<bool> = all().iter().map(Phase::is_terminal).collect();
-        assert_eq!(t, [false, false, false, true, true, true, true]);
+        assert_eq!(t, [false, false, false, true, true, true, true, true]);
     }
 }

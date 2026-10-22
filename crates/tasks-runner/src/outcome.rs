@@ -41,12 +41,12 @@ pub struct Outcome {
 
 impl Outcome {
     /// The terminal phase, always reachable from `Running` per `Phase::can_move_to`.
-    /// Timeouts are failures; an unknown result is `Interrupted`, never a pass (R-6.9).
+    /// Timeouts are `TimedOut`; an unknown result is `Interrupted`, never a pass (R-6.9).
     pub fn phase(&self) -> Phase {
         match self.end {
             End::Cancelled | End::ClientLost => Phase::Cancelled,
             End::Lost => Phase::Interrupted,
-            End::WallTimeout | End::IdleTimeout => Phase::Failed {
+            End::WallTimeout | End::IdleTimeout => Phase::TimedOut {
                 exit: self.exit_code,
             },
             End::Exited => match self.exit_code {

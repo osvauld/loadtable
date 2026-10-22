@@ -92,6 +92,9 @@ impl Processes for FakePlatform {
     fn usage(&self, _group: GroupId) -> Result<Usage, PlatformError> {
         Ok(self.usage)
     }
+    fn peek_exit(&self, _child: &Child) -> Result<Option<i32>, PlatformError> {
+        Ok(Some(0))
+    }
     fn try_wait(&self, _child: &Child) -> Result<Option<i32>, PlatformError> {
         Ok(Some(0))
     }
