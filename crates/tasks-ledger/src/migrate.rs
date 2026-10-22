@@ -127,11 +127,32 @@ CREATE TABLE trust_meta(
 );
 ";
 
+/// The audit chain (design §8): append-only rows, each carrying the hash of the one before.
+const V6: &str = "
+CREATE TABLE audit(
+    seq INTEGER PRIMARY KEY,
+    at_ms INTEGER NOT NULL,
+    actor TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    action TEXT NOT NULL,
+    job INTEGER,
+    peer TEXT,
+    target TEXT,
+    details TEXT NOT NULL,
+    prev_hash TEXT NOT NULL,
+    hash TEXT NOT NULL
+);
+CREATE INDEX audit_at ON audit(at_ms);
+CREATE INDEX audit_job ON audit(job) WHERE job IS NOT NULL;
+CREATE INDEX audit_peer ON audit(peer) WHERE peer IS NOT NULL;
+CREATE INDEX audit_action ON audit(action, seq);
+";
+
 /// The migrations in order; entry `i` upgrades version `i` to `i + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6];
 
 /// The schema version this build writes.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 fn version(conn: &Connection) -> Result<i64> {
     Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
@@ -208,7 +229,7 @@ mod tests {
         )
         .unwrap();
         migrate(&mut c, MIGRATIONS).unwrap();
-        assert_eq!(uv(&c), 5);
+        assert_eq!(uv(&c), SCHEMA_VERSION);
         let jobs: i64 = c
             .query_row("SELECT count(*) FROM jobs", [], |r| r.get(0))
             .unwrap();
@@ -223,6 +244,52 @@ mod tests {
                 .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
                 .unwrap();
             assert_eq!(n, 0, "{table}");
+        }
+    }
+
+    // R-269
+    #[test]
+    fn r269_a_v5_database_upgrades_to_v6_and_keeps_its_jobs_and_trust_rows() {
+        let mut c = Connection::open_in_memory().unwrap();
+        migrate(&mut c, &MIGRATIONS[..5]).unwrap();
+        assert_eq!(uv(&c), 5);
+        c.execute(
+            "INSERT INTO jobs(spec, phase, phase_tag, submitted_at_ms, owner, cwd, argv, hints)
+             VALUES ('{}', '\"Queued\"', 'queued', 1, 'o', '/', '[]', '{}')",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO trust_peers(name, did, node_id, relay, addrs, paired_ms)
+             VALUES ('nixos', 'did:key:zX', 'ab', NULL, '[]', 7)",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO trust_grants(id, direction, peer_did, peer_node, role, nonce, iat, exp,
+                 token, state, state_at_ms)
+             VALUES ('g', 'issued', 'did:key:zX', 'ab', 'submit', 'n', 1, 2, 'g1.x', 'live', 3)",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO trust_spent_nonces(nonce, spent_at_ms) VALUES ('n', 4)",
+            [],
+        )
+        .unwrap();
+        migrate(&mut c, MIGRATIONS).unwrap();
+        assert_eq!(uv(&c), 6);
+        for (table, want) in [
+            ("jobs", 1),
+            ("trust_peers", 1),
+            ("trust_grants", 1),
+            ("trust_spent_nonces", 1),
+            ("audit", 0),
+        ] {
+            let n: i64 = c
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, want, "{table}");
         }
     }
 

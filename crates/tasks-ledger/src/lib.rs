@@ -1,6 +1,9 @@
 //! The job store: a `Store` trait with in-memory and SQLite implementations, durable plans and
 //! dependencies, and the timing-sample store behind `tasks_timing::History`.
 
+mod audit;
+mod audit_log;
+mod audit_sqlite;
 mod clock;
 mod error;
 mod logic;
@@ -14,6 +17,14 @@ mod sqlite;
 mod suite;
 mod trust;
 
+pub use audit::{
+    ACTION_CHECKPOINT, ACTION_PRUNED, AuditLedger, AuditPruned, AuditQuery, AuditRow, ChainProblem,
+    ChainReport, DidSignatures, GENESIS_HASH, MemoryAudit, NewAudit, ProblemKind, SigVerdict,
+    SignatureCheck, action_matches, verify_chain,
+};
+pub use audit_log::{
+    AuditEvent, AuditLog, DEFAULT_CHECKPOINT_EVERY, MAX_DETAILS_BYTES, Throttle, action,
+};
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use error::LedgerError;
 pub use memory::MemoryStore;
