@@ -5,8 +5,10 @@ use nix::unistd::{Pid, getpgid};
 use std::io;
 
 /// Caller must own the stage child and keep its leader unreaped through escalation.
-/// Identity validation plus killpg is not atomic. Zombie leaders remain signalable so
-/// their descendants can be killed before reaping. Never signal PID 0/1 or wrapped PIDs.
+/// Identity validation plus killpg is not atomic. Linux can observe zombie identity;
+/// Darwin may return ESRCH for it, causing this helper to do nothing. For newly spawned
+/// direct groups requiring zombie-leader cleanup, use owned_group::OwnedChildGroup.
+/// Never signal PID 0/1 or wrapped PIDs.
 pub fn signal_owned_group(expected: &ProcessIdentity, signal: i32) -> io::Result<()> {
     if expected.pid <= 1 || expected.pid > i32::MAX as u32 {
         return Err(io::Error::new(

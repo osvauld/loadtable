@@ -74,6 +74,88 @@ zombie. Its test now captures identity while the child is held alive, permits th
 ESRCH observation, proves it is not live, and always reaps the child. This does NOT prove
 macOS descendant cleanup when its group leader is a zombie; runtime stays disabled.
 
+## Read-only macOS compile-admission candidate
+
+`src/admission/macos.rs` now implements a separately named, read-only candidate policy:
+
+- Native `kern.memorystatus_vm_pressure_level`: only recognized normal state may pass;
+  warning/critical block, and unknown values, failed reads or short replies fail closed.
+- Keep the configured memory, cache-disk and state-disk reserves unchanged. Require the
+  conservative Darwin memory source, valid bounded counters and measurable disk paths.
+- Proposed one-minute runnable-load ceiling: 0.75 per logical CPU, inclusive. This is a
+  lagging scheduler-demand signal, NOT CPU utilization or PSI, and has not been tuned
+  against real builds. Linux's run-slot PSI override does not relax it.
+- Do not claim CPU/I/O stall measurements. Emit no made-up PSI fields or averages.
+- A successful resource evaluation is NOT admission: every report says
+  `runtime_enabled: false`. No slot acquisition, worker enablement, approvals, daemon
+  startup or state creation is added. The original Unsupported pressure backend and
+  CLI/internal runtime guards are unchanged.
+
+Read-only probe (supply actual absolute paths when evaluating a planned cache layout):
+
+```sh
+cargo run --locked --no-default-features --example macos_admission -j 4 -- \
+  /tmp/tasks-macos-candidate-readonly/cache /tmp/tasks-macos-candidate-readonly/state
+```
+
+The probe resolves absent disk paths to their existing ancestors without creating them.
+One real sample reported normal memory pressure, 10 logical CPUs, load 2.40, approximately
+429 MiB of conservative free/purgeable headroom and approximately 114 GiB free on the
+probed filesystem. It correctly returned `available memory below reserve` against the
+unchanged 8 GiB floor. The headroom estimate intentionally excludes reclaimable file
+cache; this is NOT a claim of only 429 MiB of all potentially usable RAM. Policy suitability
+for this 16 GiB Mac must be reviewed before activation; do not silently lower the reserve,
+substitute sysinfo telemetry or equate normal pressure with sufficient headroom.
+
+Candidate validation: 13 new unit/native-read tests, 5 CLI/fixture boundary tests and
+9 existing Linux admission fixture tests passed (27 selected tests; zero failed/ignored
+in the final runs). Warning/critical/unknown-pressure, malformed counters and reserve/load
+boundaries are synthetic tests; actual pressure/load were observed, not stress-induced.
+Headless library/example/boundary Clippy passed with warnings denied, and default-feature
+`cargo check` passed. An initial boundary run exposed colliding parallel timestamp-only
+temp names; the fixture now includes an atomic sequence and has a parallel-creation test.
+Linux native runtime and worker/lease/recovery acceptance remain unrun.
+
+## Direct-child group ownership and lease cleanup
+
+`crates/platform/src/owned_group.rs` adds shared Linux/macOS `OwnedChildGroup`,
+currently **not wired into the worker**. It spawns a dedicated group, privately retains
+its `Child`, and uses `waitid(WNOWAIT)` to pin the leader's PID/PGID until cleanup.
+It does not depend on libproc exposing a zombie's start timestamp. No reaping handle
+or `try_wait` is exposed. TERM escalates to KILL after the grace period or leader exit;
+normal completion also kills remaining group members before reaping. Ordinary Drop
+attempts cleanup but provides no SIGKILL/crash protection, containment or hard timeout.
+
+Ownership requires exclusive child reaping and a stable default SIGCHLD disposition.
+Spawn rejects non-default handlers, SIG_IGN and SA_NOCLDWAIT; lost direct-child ownership
+(ECHILD) is an error before signalling, never permission to act on a numeric group.
+No independent process-wide reaper or later signal-disposition changes are permitted.
+Trusted pre-exec hooks must not undo the requested new group. Processes escaping into
+other sessions are not covered and must not cause their lease to be stolen.
+
+`crates/platform/tests/owned_groups.rs` runs actual subprocesses and flocks. Seven
+behavioral tests plus one subprocess-fixture entry passed: TERM-exiting leader with
+resistant descendant, already-exited leader, grace-period escalation for a resistant
+leader, normal completion, ordinary Drop, auto-reaping rejection and lost ownership.
+Lease cases retain a deliberately inheritable FD, observe exclusion, prove release
+after group cleanup and verify the stable slot inode and an unrelated group's survival.
+Spawn tests are serialized because inheritable FDs are process-global; fixtures expire
+after 15 seconds even if their test parent disappears. No adb/sccache/daemon was launched.
+
+The selected regression run passed 98 tests: platform library 24, direct groups 8
+(including the fixture entry), peer library 10, setup library 17, macOS boundaries 5,
+candidate admission 13, Linux admission fixtures 9, command policy 8, runtime guard 1,
+Apple artifacts 3. Zero failed/ignored; other root tests were filtered. Platform
+all-target Clippy passed with warnings denied, as did the default-feature metadata
+check. These are native macOS results, not Linux runtime regression or worker E2E.
+
+Still required: protect the spawn/pre-exec window and descendants after abrupt
+supervisor death, preserve inherited leases through all cleanup paths, implement
+non-invasive native holder observation and detached-helper descriptor isolation, then
+integrate the ownership handle into the worker. Existing parent-death/FD hooks remain
+ENOTSUP on macOS and runtime entry points remain blocked. The prior conservative-memory
+policy blocker is unchanged.
+
 ## Validation on ARM64 macOS
 
 ```sh
@@ -109,17 +191,20 @@ a linked GUI binary and native window have not been validated.
 
 ## Next bounded work packages
 
-1. **Admission backend.** Shared module boundaries now compile. Define and implement a
-   macOS policy using genuinely supported signals, replacing the explicit Unsupported
-   acquisition result. Do not populate synthetic PSI zeros or weaken the Linux gates.
-   Files: `src/admission.rs`, `src/admission/native.rs`, `src/cache.rs`.
+1. **Admission integration.** The read-only native candidate above exists. Review the
+   conservative-memory floor and proposed load ceiling for this host before activation.
+   Adapt shared gate/status interfaces to distinct native samples (no fabricated PSI),
+   with fresh checks before/after lease acquisition and fail-closed errors. Keep the
+   Unsupported acquisition result until worker/lease safety is accepted; do not weaken
+   Linux gates. Files: `src/admission.rs`, `src/admission/native.rs`, `src/cache.rs`.
 2. **Monitoring/health integration.** Feed macOS snapshots from `MachineSampler`; preserve
    the existing snapshot schema (`pressure: null` when unavailable). Replace Linux-only
    health thread priority/accounting and separate Linux lock parsing from native holder
    discovery. Unknown holder/lock state must not become a false "free". Coordinate shared
    platform API edits separately. Files: `src/metrics/`, `src/health/`.
-3. **Execution and lease safety.** Implement macOS parent-death/supervisor behavior and
-   read-only lock/descriptor inspection. Test daemon/worker crashes, escaped descendants,
+3. **Execution and lease safety.** Direct-child group cleanup is now available and tested,
+   but not integrated. Implement macOS parent-death/supervisor behavior and read-only
+   lock/descriptor inspection. Test daemon/worker crashes, escaped descendants,
    cancellation escalation, inherited leases and PID reuse before enabling local jobs.
    Do not simply remove prctl or use racy lock probes as a replacement for holder scans.
    Files: `src/worker.rs`, `src/lease_audit.rs`, admission holder backend.

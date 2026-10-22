@@ -9,13 +9,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "tasks-macos-boundaries-{}-{unique}",
+            "tasks-macos-boundaries-{}-{unique}-{}",
             std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed),
         ));
         fs::create_dir(&path).unwrap();
         Self(path)
@@ -25,6 +28,14 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+#[test]
+fn fixture_names_are_unique_across_parallel_creators() {
+    let handles: Vec<_> = (0..32).map(|_| std::thread::spawn(Fixture::new)).collect();
+    let fixtures: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let paths: std::collections::HashSet<_> = fixtures.iter().map(|f| &f.0).collect();
+    assert_eq!(paths.len(), fixtures.len());
 }
 
 #[test]

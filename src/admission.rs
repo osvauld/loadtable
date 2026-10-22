@@ -1,6 +1,10 @@
 //! Shared Unix admission policy and leases. Stable flock inodes interoperate with existing
 //! Python clients; holder/wait notes are diagnostics, never authority. No lock deletion.
 //! Native pressure acquisition is target-selected and fails closed when unimplemented.
+/// Read-only candidate policy, not yet wired into worker admission. Never synthesizes PSI.
+#[cfg(any(target_os = "macos", test))]
+#[path = "admission/macos.rs"]
+pub mod macos;
 #[path = "admission/native.rs"]
 mod native;
 use crate::{Result, execution::now, worker};
