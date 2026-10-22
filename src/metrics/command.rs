@@ -16,6 +16,14 @@
 //!
 //! Argument order is kept: `-p video --release` and `--release -p video` are
 //! different kinds.
+//!
+//! `coarse_key` groups kinds that differ only in what they select to run, as a
+//! fallback for ETA history: cargo keeps the subcommand, the sorted package set
+//! and target-class flags (not test filters, `--test NAME`, or anything after
+//! `--`); gradlew keeps the task names; `sh -c TEXT` uses the first cargo or
+//! gradlew command in the text. Anything else has no coarse sharing (its
+//! `coarse_key` is its `kind_key`).
+use std::collections::BTreeSet;
 use std::path::Path;
 
 pub const OFFLOAD_MARKER: &str = "[offload] ";
@@ -24,14 +32,161 @@ pub const OFFLOAD_MARKER: &str = "[offload] ";
 pub struct Normalized {
     pub command: String,
     pub kind_key: String,
+    pub coarse_key: String,
 }
 
 pub fn normalize(argv: &[String]) -> Normalized {
     let command = words(argv).join(" ");
     Normalized {
         kind_key: command.clone(),
+        coarse_key: coarse(argv).unwrap_or_else(|| command.clone()),
         command,
     }
+}
+
+/// Coarse key of one argv; None when the whole `kind_key` applies.
+fn coarse(argv: &[String]) -> Option<String> {
+    let rest = strip_env(argv);
+    let first = rest.first()?;
+    if is_offload_client(first) || crate::peer_link::is_forward_argv(rest) {
+        let inner = rest
+            .iter()
+            .position(|a| a == "--")
+            .map(|i| &rest[i + 1..])
+            .unwrap_or(&[]);
+        return Some(format!(
+            "{OFFLOAD_MARKER}{}",
+            coarse(inner).unwrap_or_else(|| words(inner).join(" "))
+        ));
+    }
+    let prog = program(first);
+    if matches!(prog.as_str(), "sh" | "bash" | "dash" | "zsh")
+        && rest.get(1).is_some_and(|a| a == "-c")
+        && let Some(text) = rest.get(2)
+    {
+        let tokens: Vec<&str> = text.split_whitespace().collect();
+        return first_build_coarse(&tokens);
+    }
+    build_coarse(&prog, &rest[1..])
+}
+
+/// Coarse key of the first cargo/gradlew command in shell text words.
+fn first_build_coarse(tokens: &[&str]) -> Option<String> {
+    let is_sep = |w: &str| matches!(w, "&&" | "||" | ";" | "|") || w.ends_with(';');
+    let mut i = 0;
+    while i < tokens.len() {
+        let t = tokens[i];
+        if is_assignment(t) || t == "env" || t == "export" {
+            i += 1;
+            continue;
+        }
+        let prog = program(t);
+        if matches!(prog.as_str(), "cargo" | "gradlew") {
+            let args: Vec<String> = tokens[i + 1..]
+                .iter()
+                .take_while(|w| !is_sep(w))
+                .map(|w| w.to_string())
+                .collect();
+            return build_coarse(&prog, &args);
+        }
+        // Skip to the next command word.
+        while i < tokens.len() && !is_sep(tokens[i]) {
+            i += 1;
+        }
+        i += 1;
+    }
+    None
+}
+
+fn build_coarse(prog: &str, rest: &[String]) -> Option<String> {
+    match prog {
+        "cargo" => cargo_coarse(rest),
+        "gradlew" => gradle_coarse(rest),
+        _ => None,
+    }
+}
+
+/// `cargo [+toolchain] SUBCOMMAND`, the sorted package set, then the sorted
+/// target-class flags. Test filters, positional words, `--test`/`--bin` names
+/// and everything after `--` are left out.
+fn cargo_coarse(rest: &[String]) -> Option<String> {
+    // Flags whose next word is a value that does not change the class of build.
+    const VALUE_FLAGS: &[&str] = &[
+        "--test",
+        "--bin",
+        "--example",
+        "--bench",
+        "--features",
+        "-F",
+        "--target",
+        "--manifest-path",
+        "--target-dir",
+        "--message-format",
+        "--color",
+    ];
+    const CLASS_FLAGS: &[&str] = &[
+        "--workspace",
+        "--all",
+        "--lib",
+        "--bins",
+        "--examples",
+        "--tests",
+        "--benches",
+        "--doc",
+        "--all-targets",
+        "--release",
+        "-r",
+        "--all-features",
+        "--no-default-features",
+    ];
+    let words = args(rest);
+    let mut it = words.iter().map(String::as_str);
+    let mut head = vec!["cargo".to_string()];
+    let mut sub = None;
+    let mut packages = BTreeSet::new();
+    let mut flags = BTreeSet::new();
+    while let Some(a) = it.next() {
+        if a == "--" {
+            break;
+        }
+        if a == "-p" || a == "--package" {
+            packages.extend(it.next().map(|p| format!("-p {p}")));
+        } else if let Some(p) = a.strip_prefix("--package=") {
+            packages.insert(format!("-p {p}"));
+        } else if let Some(p) = a.strip_prefix("-p").filter(|p| !p.is_empty()) {
+            packages.insert(format!("-p {p}"));
+        } else if a == "--exclude" || a == "--profile" {
+            if let Some(v) = it.next() {
+                flags.insert(format!("{a} {v}"));
+            }
+        } else if VALUE_FLAGS.contains(&a) {
+            it.next();
+        } else if CLASS_FLAGS.contains(&a) {
+            flags.insert(a.to_string());
+        } else if a.starts_with('+') && sub.is_none() {
+            head.push(a.to_string());
+        } else if !a.starts_with('-') && sub.is_none() {
+            sub = Some(a.to_string());
+        }
+    }
+    head.extend(sub);
+    head.extend(packages);
+    head.extend(flags);
+    (head.len() > 1).then(|| head.join(" "))
+}
+
+/// `gradlew` and its task names in order; `-P`/`-D` and other flags dropped.
+fn gradle_coarse(rest: &[String]) -> Option<String> {
+    let mut tasks = vec![];
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        if a == "--tests" {
+            it.next();
+        } else if !a.starts_with('-') {
+            tasks.push(a.as_str());
+        }
+    }
+    (!tasks.is_empty()).then(|| format!("gradlew {}", tasks.join(" ")))
 }
 
 fn is_assignment(word: &str) -> bool {

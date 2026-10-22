@@ -25,6 +25,14 @@ pub fn argv(job: &Job) -> Vec<String> {
     recipe(job).map(|r| r.argv).unwrap_or_default()
 }
 
+/// Coarse ETA grouping key (see `command::normalize`).
+pub fn coarse_key(job: &Job) -> String {
+    match recipe(job) {
+        Some(r) => normalize(&r.argv).coarse_key,
+        None => names(job).1,
+    }
+}
+
 /// (command, kind_key). Typed suites (self-suite, Android trial) have no
 /// argv; they are named by suite and configuration.
 pub fn names(job: &Job) -> (String, String) {
@@ -58,6 +66,7 @@ pub fn exec_seconds(job: &Job) -> Option<f64> {
 pub struct Run {
     pub id: i64,
     pub kind_key: String,
+    pub coarse_key: String,
     pub warmth: Warmth,
     pub crates: Option<u64>,
     pub exec_s: Option<f64>,
@@ -72,6 +81,7 @@ pub fn run_of(job: &Job) -> Option<Run> {
     Some(Run {
         id: job.id,
         kind_key: names(job).1,
+        coarse_key: coarse_key(job),
         warmth: metrics.map_or(Warmth::Unknown, |m| m.warmth),
         crates: metrics.and_then(|m| m.crates_compiled),
         exec_s: exec_seconds(job),
@@ -103,18 +113,25 @@ pub struct Eta {
 pub struct History {
     /// Newest first.
     by_kind: HashMap<String, Vec<Run>>,
+    /// Same runs grouped by coarse key, newest first.
+    by_coarse: HashMap<String, Vec<Run>>,
 }
 
 impl History {
     pub fn from_jobs(jobs: &[Job]) -> Self {
         let mut by_kind: HashMap<String, Vec<Run>> = HashMap::new();
+        let mut by_coarse: HashMap<String, Vec<Run>> = HashMap::new();
         for run in jobs.iter().filter_map(run_of) {
+            by_coarse
+                .entry(run.coarse_key.clone())
+                .or_default()
+                .push(run.clone());
             by_kind.entry(run.kind_key.clone()).or_default().push(run);
         }
-        for runs in by_kind.values_mut() {
+        for runs in by_kind.values_mut().chain(by_coarse.values_mut()) {
             runs.sort_by_key(|r| std::cmp::Reverse(r.id));
         }
-        Self { by_kind }
+        Self { by_kind, by_coarse }
     }
 
     fn runs<'a>(&'a self, kind: &str, exclude: i64) -> impl Iterator<Item = &'a Run> + 'a {
@@ -126,9 +143,21 @@ impl History {
             .filter(move |r| r.id != exclude)
     }
 
-    /// Median execution time of successful runs of `kind` with the same
-    /// warmth, else of any warmth (said in `basis`); None without history.
+    /// `estimate` without the coarse fallback.
     pub fn estimate(&self, kind: &str, warmth: Warmth, exclude: i64) -> Option<Eta> {
+        self.estimate_with(kind, None, warmth, exclude)
+    }
+
+    /// Median execution time of successful runs of `kind` with the same
+    /// warmth, else of any warmth (said in `basis`); then, with a `coarse`
+    /// key, the same two steps over similar commands. None without history.
+    pub fn estimate_with(
+        &self,
+        kind: &str,
+        coarse: Option<&str>,
+        warmth: Warmth,
+        exclude: i64,
+    ) -> Option<Eta> {
         let passed = |same: bool| -> Vec<f64> {
             self.runs(kind, exclude)
                 .filter(|r| r.passed && (!same || r.warmth == warmth))
@@ -158,15 +187,48 @@ impl History {
             });
         }
         let mut any = passed(false);
-        let total = median(&mut any)?;
-        let n = any.len();
+        if let Some(total) = median(&mut any) {
+            let n = any.len();
+            return Some(Eta {
+                total_s: total,
+                samples: n as u32,
+                basis: format!(
+                    "median of {n} {} of this kind on this machine, any warmth (no {} history)",
+                    label(n),
+                    warmth.as_str()
+                ),
+            });
+        }
+        let coarse = coarse?;
+        let similar = |same: bool| -> Vec<f64> {
+            self.by_coarse
+                .get(coarse)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+                .iter()
+                .filter(|r| r.id != exclude && r.passed && (!same || r.warmth == warmth))
+                .filter_map(|r| r.exec_s)
+                .take(MAX_SAMPLES)
+                .collect()
+        };
+        let mut same = similar(true);
+        let (mut found, note) = if median(&mut same).is_some() {
+            let note = match warmth {
+                Warmth::Unknown => " (warmth unknown)".to_string(),
+                w => format!(", {}", w.as_str()),
+            };
+            (same, note)
+        } else {
+            (similar(false), ", any warmth".to_string())
+        };
+        let total = median(&mut found)?;
+        let n = found.len();
         Some(Eta {
             total_s: total,
             samples: n as u32,
             basis: format!(
-                "median of {n} {} of this kind on this machine, any warmth (no {} history)",
-                label(n),
-                warmth.as_str()
+                "median of {n} {} of similar commands ({coarse}) on this machine{note}",
+                label(n)
             ),
         })
     }

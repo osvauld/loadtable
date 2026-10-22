@@ -697,6 +697,156 @@ fn estimate_prefers_same_warmth_then_falls_back_with_a_note() {
     );
 }
 
+fn coarse(words: &[&str]) -> String {
+    normalize(&argv(words)).coarse_key
+}
+
+#[test]
+fn coarse_key_ignores_filters_test_names_and_sh_wrappers_but_not_packages() {
+    let base = coarse(&["cargo", "test", "-j", "2", "-p", "p2pcore", "--lib"]);
+    assert_eq!(base, "cargo test -p p2pcore --lib");
+    // Test filters, positional words, --test lists and `--` tails do not matter.
+    assert_eq!(
+        coarse(&[
+            "cargo",
+            "test",
+            "-p",
+            "p2pcore",
+            "--lib",
+            "ledger::",
+            "--",
+            "--nocapture"
+        ]),
+        base
+    );
+    assert_eq!(
+        coarse(&[
+            "cargo",
+            "test",
+            "--lib",
+            "--package=p2pcore",
+            "--test",
+            "a",
+            "--test",
+            "b"
+        ]),
+        base
+    );
+    // A different package set, subcommand or target class is a different group.
+    assert_ne!(
+        coarse(&["cargo", "test", "-p", "p2pcore", "-p", "media", "--lib"]),
+        base
+    );
+    assert_ne!(coarse(&["cargo", "test", "-p", "media", "--lib"]), base);
+    assert_ne!(coarse(&["cargo", "build", "-p", "p2pcore", "--lib"]), base);
+    assert_ne!(
+        coarse(&["cargo", "test", "-p", "p2pcore", "--release", "--lib"]),
+        base
+    );
+    // Package order is irrelevant.
+    assert_eq!(
+        coarse(&["cargo", "test", "-p", "b", "-p", "a"]),
+        coarse(&["cargo", "test", "-p", "a", "-p", "b"])
+    );
+    // sh -c around one cargo command shares its group; the offload marker stays.
+    assert_eq!(
+        coarse(&[
+            "sh",
+            "-c",
+            "cd /x && FOO=1 cargo test -p p2pcore --lib foo -- --nocapture"
+        ]),
+        base
+    );
+    assert_eq!(
+        coarse(&[
+            "tasks-offload",
+            "--who",
+            "a",
+            "--",
+            "cargo",
+            "test",
+            "-p",
+            "p2pcore",
+            "--lib",
+            "x"
+        ]),
+        format!("[offload] {base}")
+    );
+    // Gradle: task names only; other programs and plain shell keep their kind.
+    assert_eq!(
+        coarse(&["./gradlew", "-Pfoo=1", ":app:test", "--tests", "X", "-Dy=2"]),
+        "gradlew :app:test"
+    );
+    let n = normalize(&argv(&["sh", "-c", "echo hi"]));
+    assert_eq!(n.coarse_key, n.kind_key);
+    let n = normalize(&argv(&["ls", "-la"]));
+    assert_eq!(n.coarse_key, n.kind_key);
+}
+
+fn run_with(id: i64, words: &[&str], build: f64, warmth: Warmth) -> Job {
+    job(
+        id,
+        words,
+        Resource::Compile,
+        Phase::Passed,
+        vec![stage("build", build)],
+        measured(warmth, 1),
+    )
+}
+
+#[test]
+fn estimate_falls_back_to_similar_commands_and_exact_still_wins() {
+    let tested = ["cargo", "test", "-p", "p2pcore", "--lib", "alpha"];
+    let other_filter = ["cargo", "test", "-p", "p2pcore", "--lib", "beta"];
+    let wrapped = ["sh", "-c", "cargo test -p p2pcore --lib gamma"];
+    let other_pkg = ["cargo", "test", "-p", "media", "--lib", "alpha"];
+    let jobs = vec![
+        run_with(1, &tested, 100.0, Warmth::Warm),
+        run_with(2, &tested, 200.0, Warmth::Warm),
+    ];
+    let h = History::from_jobs(&jobs);
+    let key = |w: &[&str]| {
+        let n = normalize(&argv(w));
+        (n.kind_key, n.coarse_key)
+    };
+    // Same command: exact basis.
+    let (k, c) = key(&tested);
+    let e = h.estimate_with(&k, Some(&c), Warmth::Warm, 99).unwrap();
+    assert_eq!((e.total_s, e.samples), (150.0, 2));
+    assert_eq!(
+        e.basis,
+        "median of 2 warm runs of this kind on this machine"
+    );
+    // Different test filter, and a sh -c wrapper: coarse hit.
+    for w in [&other_filter[..], &wrapped[..]] {
+        let (k, c) = key(w);
+        assert!(h.estimate(&k, Warmth::Warm, 99).is_none());
+        let e = h.estimate_with(&k, Some(&c), Warmth::Warm, 99).unwrap();
+        assert_eq!((e.total_s, e.samples), (150.0, 2));
+        assert_eq!(
+            e.basis,
+            "median of 2 runs of similar commands (cargo test -p p2pcore --lib) on this machine, warm"
+        );
+        let e = h.estimate_with(&k, Some(&c), Warmth::Cold, 99).unwrap();
+        assert!(
+            e.basis.ends_with("on this machine, any warmth"),
+            "{}",
+            e.basis
+        );
+    }
+    // Different package set: nothing.
+    let (k, c) = key(&other_pkg);
+    assert!(h.estimate_with(&k, Some(&c), Warmth::Warm, 99).is_none());
+    // An exact-kind run beats the coarse group even when it is the only one.
+    let mut more = jobs.clone();
+    more.push(run_with(3, &other_filter, 10.0, Warmth::Cold));
+    let h = History::from_jobs(&more);
+    let (k, c) = key(&other_filter);
+    let e = h.estimate_with(&k, Some(&c), Warmth::Warm, 99).unwrap();
+    assert_eq!((e.total_s, e.samples), (10.0, 1));
+    assert!(e.basis.contains("of this kind"), "{}", e.basis);
+}
+
 #[test]
 fn backfill_uses_old_rows_without_metrics_as_unknown_warmth() {
     // Ledger rows written before metrics existed: argv + stage seconds only.
