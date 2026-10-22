@@ -170,6 +170,21 @@ fn arguments_are_checked_before_any_daemon_request() {
             json!({"id": 1}),
             "missing required argument \"who\"",
         ),
+        (
+            "submit_steps",
+            json!({"who": "a", "cwd": "/", "steps": [{"name": "a", "argv": ["x"], "after": ["ghost"]}]}),
+            "not a step",
+        ),
+        (
+            "submit_steps",
+            json!({"who": "a", "cwd": "/", "steps": []}),
+            "at least one",
+        ),
+        (
+            "submit",
+            json!({"who": "a", "cwd": "/", "argv": ["ls"], "after": ["x"]}),
+            "after must be",
+        ),
     ] {
         let result = call(name, args);
         assert_eq!(result["isError"], true, "{result}");

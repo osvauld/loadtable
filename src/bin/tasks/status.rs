@@ -9,12 +9,17 @@ pub fn run(json: bool) -> Result<()> {
     let socket = state_dir().join("taskd.sock");
     crate::ensure_daemon(&socket)?;
     let reply = request_status(&socket, Duration::from_secs(60))?;
-    let Some(snapshot) = reply.status else {
+    let Some(mut snapshot) = reply.status else {
         return Err(reply
             .error
             .unwrap_or_else(|| "daemon returned no status".into())
             .into());
     };
+    tinline_task_manager::forward_live::overlay_from_daemon(
+        &socket,
+        Duration::from_secs(3),
+        &mut snapshot.jobs,
+    );
     if json {
         println!("{}", serde_json::to_string(&snapshot)?);
     } else {
