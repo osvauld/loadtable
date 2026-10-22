@@ -53,7 +53,7 @@ pub struct Deps<'a> {
     pub read_input: &'a dyn Fn(&Path) -> std::io::Result<String>,
     /// The file system for the repo run policy.
     pub policy_fs: &'a dyn PolicyFs,
-    /// Timing history, when the daemon can serve it.
+    /// Timing history to use instead of asking the daemon for it (`None` asks the daemon).
     pub history: Option<&'a dyn History>,
     /// The daemon client for these arguments, and where this shell would put the slot locks.
     pub client_for: ClientFor<'a>,

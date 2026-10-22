@@ -153,8 +153,12 @@ fn r100_a_mutation_whose_reply_is_lost_is_never_resent() {
         Request::Cancel {
             id: JobId(1),
             who: "me".into(),
+            reason: None,
         },
-        Request::Drain { cancel: false },
+        Request::Drain {
+            cancel: false,
+            who: None,
+        },
         Request::Execution { enabled: true },
     ] {
         let before = count.load(Ordering::SeqCst);
@@ -175,6 +179,11 @@ fn only_read_only_requests_are_classified_as_safe_to_resend() {
         list_req(),
         Request::Get { id: JobId(1) },
         Request::Status,
+        Request::History {
+            recipes: vec![],
+            machines: vec![],
+            max_samples: None,
+        },
     ] {
         assert!(is_read_only(&r), "{r:?}");
     }
@@ -182,8 +191,12 @@ fn only_read_only_requests_are_classified_as_safe_to_resend() {
         Request::Cancel {
             id: JobId(1),
             who: "a".into(),
+            reason: None,
         },
-        Request::Drain { cancel: true },
+        Request::Drain {
+            cancel: true,
+            who: None,
+        },
         Request::Execution { enabled: false },
         Request::Shutdown,
         Request::SubmitSuite {
@@ -193,6 +206,7 @@ fn only_read_only_requests_are_classified_as_safe_to_resend() {
             env: vec![],
             placement: Placement::Here,
             quick: false,
+            broad_test: false,
         },
     ] {
         assert!(!is_read_only(&r), "{r:?}");
@@ -201,13 +215,18 @@ fn only_read_only_requests_are_classified_as_safe_to_resend() {
 
 // R-101
 #[test]
-fn r101_a_busy_submit_reply_is_safely_resent_but_other_busy_replies_are_not() {
+fn r101_a_connection_limit_reply_is_safely_resent_but_a_busy_reply_is_not() {
     let dir = temp("busy");
     let sock = dir.join("s");
     let submitted = ok_line(Response::Submitted { id: JobId(9) });
     let count = serve(&sock, move |n, line| {
-        if line.contains("\"op\":\"shutdown\"") || n == 0 {
-            Act::Reply(err_line(ErrorCode::Busy, "too many connections (limit 64)"))
+        if line.contains("\"op\":\"shutdown\"") {
+            Act::Reply(err_line(ErrorCode::Busy, "2 job(s) are running"))
+        } else if n == 0 {
+            Act::Reply(err_line(
+                ErrorCode::ConnectionLimit,
+                "too many connections (limit 64)",
+            ))
         } else {
             Act::Reply(submitted.clone())
         }
@@ -222,6 +241,8 @@ fn r101_a_busy_submit_reply_is_safely_resent_but_other_busy_replies_are_not() {
         requirements: Default::default(),
         placement: Placement::Here,
         after: vec![],
+        timeout_secs: None,
+        broad_test_escape: false,
     };
     let r = c.call(&Request::Submit { spec }).unwrap();
     assert_eq!(r, Response::Submitted { id: JobId(9) });
@@ -405,7 +426,11 @@ fn r103_a_missing_socket_starts_the_daemon_before_sending() {
     let (s, calls) = starter(&sock, Ok(()));
     let c = UnixClient::new(&sock).with_timeouts(fast()).with_starter(s);
     assert_eq!(
-        c.call(&Request::Drain { cancel: false }).unwrap(),
+        c.call(&Request::Drain {
+            cancel: false,
+            who: None
+        })
+        .unwrap(),
         Response::Ack
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -459,7 +484,12 @@ fn r103_a_startup_failure_is_reported_without_sending() {
         Err("the daemon exited (exit status: 1) before it listened".into()),
     );
     let c = UnixClient::new(&sock).with_timeouts(fast()).with_starter(s);
-    let e = c.call(&Request::Drain { cancel: false }).unwrap_err();
+    let e = c
+        .call(&Request::Drain {
+            cancel: false,
+            who: None,
+        })
+        .unwrap_err();
     assert!(matches!(e, ClientError::StartFailed(_)), "{e}");
     assert!(
         e.to_string()

@@ -4,7 +4,8 @@ use crate::fake::FakeClient;
 use crate::testutil::{ClosedPipe, Harness, Pieces, api_err, argv, job};
 use std::sync::{Arc, Mutex};
 use tasks_daemon::api::{
-    GrepGroup, GrepLine, HelloInfo, JobGrep, LogSearchQuery as Q, Request, Response,
+    GrepGroup, GrepLine, HelloInfo, HistoryView, JobGrep, LogSearchQuery as Q, MachineHistory,
+    RecipeHistory, Request, Response, SampleView, SeriesView,
 };
 
 fn chunk(data: &str, next: u64, done: bool) -> Response {
@@ -510,86 +511,86 @@ fn never_called() -> Arc<FakeClient> {
     }))
 }
 
-#[test]
-fn r191_a_broad_cargo_test_is_refused_before_any_daemon_request() {
-    let c = never_called();
-    let r = Harness::default().run(&c, &["run", "--", "cargo", "test", "-p", "x", "video_call"]);
-    assert_eq!(r.code, 2);
-    assert!(
-        r.err
-            .contains("refused: this builds every test target of -p x"),
-        "{}",
-        r.err
-    );
-    assert!(r.err.contains("--broad-test"));
-    assert!(
-        c.requests().is_empty(),
-        "arguments are checked before any daemon request"
-    );
+/// A daemon that answers every submit with `refused` and the given text.
+fn refusing(text: &'static str) -> Arc<FakeClient> {
+    Arc::new(FakeClient::from_fn(move |req| match req {
+        Request::List { .. } => Ok(Response::Jobs {
+            jobs: vec![],
+            truncated: false,
+        }),
+        Request::Submit { .. } => Err(api_err(ErrorCode::Refused, text)),
+        other => Err(ClientError::BadReply(format!("unexpected {other:?}"))),
+    }))
+}
+
+fn submitted_spec(c: &FakeClient) -> JobSpec {
+    let Some(Request::Submit { spec }) = c
+        .requests()
+        .into_iter()
+        .find(|r| matches!(r, Request::Submit { .. }))
+    else {
+        panic!("no submit")
+    };
+    spec
 }
 
 #[test]
-fn r191_the_escape_hatch_and_a_warn_policy_let_it_through() {
+fn r191_the_daemons_refusal_of_a_broad_test_is_shown_and_exits_2() {
+    let text = "refused: this builds every test target of -p x; your filter 'video_call' matches: --lib. Re-run with those, or pass --broad-test (MCP: broad_test: true) to build every target deliberately.";
+    let c = refusing(text);
+    let r = Harness::default().run(&c, &["run", "--", "cargo", "test", "-p", "x", "video_call"]);
+    assert_eq!(r.code, 2);
+    assert!(r.err.contains(text), "{}", r.err);
+    assert_eq!(submits(&c), 1, "the daemon is the one that decides");
+    assert!(!submitted_spec(&c).broad_test_escape);
+}
+
+#[test]
+fn r191_the_escape_flag_travels_on_the_spec_and_the_environment_is_not_read() {
     let c = daemon(1, vec![], finished(1, Phase::Passed));
     let r = Harness::default().run(
         &c,
         &["enqueue", "--broad-test", "--", "cargo", "test", "foo"],
     );
     assert_eq!(r.code, 0, "{}", r.err);
-    assert!(
-        r.err
-            .contains("--broad-test: building every target deliberately"),
-        "{}",
-        r.err
-    );
+    assert!(submitted_spec(&c).broad_test_escape);
+    // TASKS_BROAD_TEST is the daemon's policy now: setting it here changes nothing
     let mut h = Harness::default();
     h.env.insert("TASKS_BROAD_TEST".into(), "warn".into());
+    let c = daemon(1, vec![], finished(1, Phase::Passed));
     let r = h.run(&c, &["enqueue", "--", "cargo", "test", "foo"]);
     assert_eq!(r.code, 0);
-    assert!(
-        r.err
-            .contains("tasks: warning: this builds every test target"),
-        "{}",
-        r.err
-    );
-    h.env.insert("TASKS_BROAD_TEST".into(), "sometimes".into());
-    let r = h.run(&never_called(), &["enqueue", "--", "cargo", "test", "foo"]);
-    assert_eq!(r.code, 2);
-    assert!(r.err.contains("TASKS_BROAD_TEST ignored"));
+    assert!(!submitted_spec(&c).broad_test_escape);
+    assert!(!r.err.contains("TASKS_BROAD_TEST"), "{}", r.err);
 }
 
 #[test]
-fn r191_the_refusal_names_the_test_targets_found_on_disk() {
-    let dir = std::env::temp_dir().join(format!("tasks-cli-known-{}", std::process::id()));
-    let pkg = dir.join("crates/core");
-    std::fs::create_dir_all(pkg.join("tests")).unwrap();
-    std::fs::create_dir_all(pkg.join("src")).unwrap();
-    std::fs::write(pkg.join("Cargo.toml"), "[package]\nname=\"core\"\n").unwrap();
-    std::fs::write(pkg.join("src/lib.rs"), "").unwrap();
-    std::fs::write(pkg.join("tests/video_calls.rs"), "").unwrap();
-    std::fs::write(pkg.join("tests/other.rs"), "").unwrap();
-    let k = scan_known_targets(&dir, &["core".to_string()]).unwrap();
-    assert_eq!(
-        (k.total, k.test_names.clone()),
-        (3, vec!["other".to_string(), "video_calls".to_string()])
+fn r191_plans_and_suites_carry_the_escape_too() {
+    let c = Arc::new(FakeClient::from_fn(|req| match req {
+        Request::SubmitPlan { .. } | Request::SubmitSuite { .. } => Ok(Response::PlanSubmitted {
+            plan_id: 1,
+            jobs: vec![("a".into(), JobId(1))],
+        }),
+        other => Err(ClientError::BadReply(format!("{other:?}"))),
+    }));
+    let mut h = Harness::default();
+    h.files.insert(
+        PathBuf::from("plan.json"),
+        r#"{"steps":[{"name":"a","argv":["cargo","test","foo"]}]}"#.into(),
     );
-    let h = Harness {
-        cwd: dir.clone(),
-        ..Harness::default()
-    };
-    let r = h.run(
-        &never_called(),
-        &["run", "--", "cargo", "test", "-p", "core", "video_call"],
-    );
-    assert!(r.err.contains("all 3 test targets of -p core"), "{}", r.err);
-    assert!(
-        r.err
-            .contains("'video_call' matches: --lib, --test video_calls"),
-        "{}",
-        r.err
-    );
-    assert_eq!(scan_known_targets(&dir, &["a".into(), "b".into()]), None);
-    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(h.run(&c, &["steps", "plan.json", "--broad-test"]).code, 0);
+    assert_eq!(h.run(&c, &["steps", "plan.json"]).code, 0);
+    assert_eq!(h.run(&c, &["suite", "run", "core", "--broad-test"]).code, 0);
+    let flags: Vec<bool> =
+        c.requests()
+            .iter()
+            .map(|r| match r {
+                Request::SubmitPlan { broad_test, .. }
+                | Request::SubmitSuite { broad_test, .. } => *broad_test,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+    assert_eq!(flags, [true, false, true]);
 }
 
 #[test]
@@ -618,29 +619,33 @@ fn r190_option_conflicts_are_reported_before_any_daemon_request() {
 }
 
 #[test]
-fn a_timeout_is_refused_until_the_daemon_can_enforce_it() {
-    let r = Harness::default().run(&never_called(), &["run", "--timeout", "30", "--", "x"]);
+fn r095_a_timeout_travels_on_the_spec() {
+    let c = daemon(1, vec![], finished(1, Phase::Passed));
+    let r = Harness::default().run(&c, &["enqueue", "--timeout", "30", "--", "x"]);
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert_eq!(submitted_spec(&c).timeout_secs, Some(30));
+    let c = daemon(1, vec![], finished(1, Phase::Passed));
+    Harness::default().run(&c, &["enqueue", "--", "x"]);
+    assert_eq!(submitted_spec(&c).timeout_secs, None);
+    // an impossible limit is refused here, as the daemon would
+    let r = Harness::default().run(&never_called(), &["enqueue", "--timeout", "0", "--", "x"]);
     assert_eq!(r.code, 2);
-    assert!(
-        r.err
-            .contains("--timeout is not supported by this daemon yet"),
-        "{}",
-        r.err
-    );
+    assert!(r.err.contains("timeout of 0 s"), "{}", r.err);
 }
 
 #[test]
-fn a_denied_device_is_refused_in_any_form() {
-    let c = never_called();
-    for args in [
-        &["run", "--", "adb", "-s", "zd22257p6g", "devices"][..],
+fn r210_a_denied_device_is_the_daemons_to_refuse_and_the_device_travels_as_a_resource() {
+    let c = refusing("refused: the command names the denied device ZD22257P6G");
+    let r = Harness::default().run(
+        &c,
         &["run", "--device", "ZD22257P6G", "--", "adb", "devices"],
-    ] {
-        let r = Harness::default().run(&c, args);
-        assert_eq!(r.code, 2, "{args:?}");
-        assert!(r.err.contains("refused"), "{}", r.err);
-    }
-    assert!(c.requests().is_empty());
+    );
+    assert_eq!(r.code, 2);
+    assert!(r.err.contains("denied device"), "{}", r.err);
+    assert_eq!(
+        submitted_spec(&c).requirements.device,
+        Some(DeviceId("ZD22257P6G".into()))
+    );
 }
 
 #[test]
@@ -995,9 +1000,31 @@ fn r231_admission_flags_a_shell_that_disagrees_with_the_daemon_about_the_lock_di
 }
 
 #[test]
+fn r108_cancel_sends_the_reason_to_the_daemon() {
+    let c = Arc::new(FakeClient::from_fn(|req| match req {
+        Request::Cancel { id, .. } => Ok(Response::Cancelled {
+            id: *id,
+            result: "cancelled".into(),
+        }),
+        other => Err(ClientError::BadReply(format!("{other:?}"))),
+    }));
+    let r = Harness::default().run(&c, &["cancel", "1", "--reason", "wrong branch"]);
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(r.out.contains("(reason: wrong branch)"), "{}", r.out);
+    assert_eq!(
+        c.requests(),
+        [Request::Cancel {
+            id: JobId(1),
+            who: "me".into(),
+            reason: Some("wrong branch".into())
+        }]
+    );
+}
+
+#[test]
 fn cancel_reports_each_outcome_and_the_refusals() {
     let c = Arc::new(FakeClient::from_fn(|req| match req {
-        Request::Cancel { id, who } => match id.0 {
+        Request::Cancel { id, who, .. } => match id.0 {
             1 => Ok(Response::Cancelled {
                 id: *id,
                 result: "cancelled".into(),
@@ -1045,7 +1072,8 @@ fn cancel_reports_each_outcome_and_the_refusals() {
         c.requests().first(),
         Some(&Request::Cancel {
             id: JobId(1),
-            who: "me".into()
+            who: "me".into(),
+            reason: None,
         })
     );
 }
@@ -1069,8 +1097,14 @@ fn r188_execution_and_drain_print_one_line() {
         [
             Request::Execution { enabled: false },
             Request::Execution { enabled: true },
-            Request::Drain { cancel: false },
-            Request::Drain { cancel: true },
+            Request::Drain {
+                cancel: false,
+                who: Some("me".into())
+            },
+            Request::Drain {
+                cancel: true,
+                who: Some("me".into())
+            },
         ]
     );
 }
@@ -1168,7 +1202,7 @@ fn steps_submits_a_plan_and_lists_the_jobs() {
 }
 
 #[test]
-fn steps_refuses_a_bad_file_a_missing_file_and_a_broad_step() {
+fn steps_refuses_a_bad_file_and_a_missing_file_and_shows_the_daemons_refusal_of_a_step() {
     let mut h = Harness::default();
     h.files.insert(
         PathBuf::from("bad.json"),
@@ -1186,10 +1220,20 @@ fn steps_refuses_a_bad_file_a_missing_file_and_a_broad_step() {
     assert!(r.err.contains("depends on itself"), "{}", r.err);
     assert_eq!(h.run(&c, &["steps", "junk.json"]).code, 2);
     assert_eq!(h.run(&c, &["steps", "missing.json"]).code, 4);
-    let r = h.run(&c, &["steps", "broad.json"]);
+    assert!(c.requests().is_empty(), "nothing is sent for a bad file");
+    // the step rules are the daemon's: its refusal comes back naming the step
+    let d = Arc::new(FakeClient::from_fn(|req| match req {
+        Request::SubmitPlan {
+            broad_test: false, ..
+        } => Err(api_err(
+            ErrorCode::Refused,
+            "step \"t\": refused: this builds every test target",
+        )),
+        other => Err(ClientError::BadReply(format!("{other:?}"))),
+    }));
+    let r = h.run(&d, &["steps", "broad.json"]);
     assert_eq!(r.code, 2);
     assert!(r.err.contains("step \"t\": refused"), "{}", r.err);
-    assert!(c.requests().is_empty());
 }
 
 #[test]
@@ -1259,19 +1303,48 @@ command = ["cargo", "test", "-p", "p2pcore", "--lib"]
 "#;
 
 #[test]
-fn policy_suggest_needs_the_daemons_history_and_says_so() {
+fn r114_policy_suggest_asks_the_daemon_for_the_policys_recipes_on_this_machine() {
     let mut h = Harness::default();
     h.fs.files.insert(
         PathBuf::from("/w/repo/.tasks/run-policy.toml"),
         POLICY.into(),
     );
-    let r = h.run(&never_called(), &["policy", "suggest"]);
-    assert_eq!(r.code, 3);
-    assert!(
-        r.err.contains("needs the daemon's timing history"),
-        "{}",
-        r.err
+    let c = Arc::new(FakeClient::from_fn(|req| match req {
+        Request::Hello => Ok(Response::Hello(HelloInfo {
+            protocol: 1,
+            version: String::new(),
+            pid: 1,
+            state_dir: PathBuf::new(),
+            lock_dir: PathBuf::new(),
+            machine: "laptop".into(),
+        })),
+        Request::History { .. } => Ok(Response::History(HistoryView {
+            recipes: vec![],
+            truncated: false,
+        })),
+        other => Err(ClientError::BadReply(format!("{other:?}"))),
+    }));
+    let r = h.run(&c, &["policy", "suggest"]);
+    assert_eq!(r.code, 0, "{}", r.err);
+    let Some(Request::History {
+        recipes,
+        machines,
+        max_samples,
+    }) = c.requests().into_iter().nth(1)
+    else {
+        panic!("a history request expected");
+    };
+    assert_eq!(
+        recipes,
+        ["cargo test pkg=p2pcore profile=dev sel=lib"]
+            .map(String::from)
+            .to_vec()
     );
+    assert_eq!(machines, ["laptop"]);
+    assert_eq!(max_samples, Some(tasks_daemon::api::MAX_HISTORY_SAMPLES));
+    // a daemon without the answer is an error, not an empty proposal
+    let r = h.run(&never_called(), &["policy", "suggest"]);
+    assert_ne!(r.code, 0);
 }
 
 #[test]
@@ -1338,6 +1411,7 @@ fn stats_groups_finished_jobs_by_recipe_and_leaves_out_cancelled_ones() {
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!((rows[0].runs, rows[0].passed), (2, 1));
     assert_eq!((rows[0].median_secs, rows[0].p90_secs), (10.0, 30.0));
+    // with --who the finished jobs are read: the history has no owners
     let reply = vec![job(1, "a", "/w", Phase::Passed, "echo hi")];
     let c = Arc::new(FakeClient::from_fn(move |_| {
         Ok(Response::Jobs {
@@ -1347,9 +1421,84 @@ fn stats_groups_finished_jobs_by_recipe_and_leaves_out_cancelled_ones() {
     }));
     assert!(
         Harness::default()
-            .run(&c, &["stats"])
+            .run(&c, &["stats", "--who", "a"])
             .out
             .contains("RECIPE")
+    );
+}
+
+fn series(target: Option<&str>, secs: &[(f64, &str)]) -> SeriesView {
+    SeriesView {
+        target: target.map(str::to_string),
+        samples: secs
+            .iter()
+            .enumerate()
+            .map(|(i, (s, o))| SampleView {
+                secs: *s,
+                cache: "warm".into(),
+                outcome: (*o).into(),
+                at_ms: i as u64,
+            })
+            .collect(),
+    }
+}
+
+fn sample_history() -> HistoryView {
+    HistoryView {
+        recipes: vec![RecipeHistory {
+            recipe: "cargo test pkg=x".into(),
+            machines: vec![
+                MachineHistory {
+                    machine: "laptop".into(),
+                    targets: vec!["test:a".into()],
+                    series: vec![
+                        series(
+                            None,
+                            &[(10.0, "passed"), (30.0, "failed"), (99.0, "cancelled")],
+                        ),
+                        series(Some("test:a"), &[(4.0, "passed")]),
+                    ],
+                },
+                MachineHistory {
+                    machine: "nixos".into(),
+                    targets: vec![],
+                    series: vec![series(None, &[(5.0, "passed")])],
+                },
+            ],
+        }],
+        truncated: false,
+    }
+}
+
+#[test]
+fn r114_stats_come_from_the_history_per_machine_and_leave_out_cancelled_samples() {
+    let rows = history_rows(&sample_history(), None, false);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    let laptop = rows
+        .iter()
+        .find(|r| r.machine.as_deref() == Some("laptop"))
+        .unwrap();
+    assert_eq!((laptop.runs, laptop.passed), (2, 1));
+    assert_eq!((laptop.median_secs, laptop.p90_secs), (10.0, 30.0));
+    // targets only on request, and the recipe filter narrows
+    let with = history_rows(&sample_history(), None, true);
+    assert_eq!(with.len(), 3);
+    assert!(with.iter().any(|r| r.target.as_deref() == Some("test:a")));
+    assert!(history_rows(&sample_history(), Some("gradle"), true).is_empty());
+    let c = Arc::new(FakeClient::from_fn(|req| match req {
+        Request::History { .. } => Ok(Response::History(sample_history())),
+        other => Err(ClientError::BadReply(format!("{other:?}"))),
+    }));
+    let r = Harness::default().run(&c, &["stats", "--targets", "--machine", "laptop"]);
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(r.out.contains("@laptop  > test:a"), "{}", r.out);
+    assert_eq!(
+        c.requests(),
+        [Request::History {
+            recipes: vec![],
+            machines: vec!["laptop".into()],
+            max_samples: Some(200)
+        }]
     );
 }
 

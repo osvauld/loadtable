@@ -48,6 +48,9 @@ pub fn job(id: i64, owner: &str, cwd: &str, phase: Phase, cmd: &str) -> JobView 
         machine: Some("laptop".into()),
         forwarded_to: None,
         cancel_requested_by: None,
+        cancel_reason: None,
+        timeout_secs: None,
+        remote_phase: None,
         plan: None,
         log_path: None,
     }
@@ -228,8 +231,11 @@ pub fn status_snapshot() -> StatusSnapshot {
             policy_file_loaded: true,
             policy_problems: vec!["slots.compile: 9 is above 8".into()],
             draining: false,
+            drained_by: None,
+            drained_at_ms: None,
             execution_enabled: true,
             uptime_secs: 3725,
+            now_ms: NOW,
         },
         slots: vec![SlotGroupView {
             kind: "compile".into(),
