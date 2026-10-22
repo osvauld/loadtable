@@ -143,6 +143,8 @@ pub struct Live {
 pub struct Progress {
     pub crates_compiled: Option<u64>,
     pub crates_expected: Option<u64>,
+    pub test_targets_built: Option<u64>,
+    pub test_targets_expected: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -1610,6 +1612,18 @@ fn running_card(
         job.progress
             .as_ref()
             .and_then(|p| match (p.crates_compiled, p.crates_expected) {
+                _ if p.test_targets_expected.is_some_and(|t| t > 0)
+                    && p.test_targets_built.is_some_and(|b| b > 0) =>
+                {
+                    let (done, total) = (
+                        p.test_targets_built.unwrap_or(0),
+                        p.test_targets_expected.unwrap_or(0),
+                    );
+                    Some((
+                        Some((done as f32 / total as f32).clamp(0.0, 1.0)),
+                        format!("{done}/{total} test targets"),
+                    ))
+                }
                 (Some(done), Some(total)) if total > 0 => Some((
                     Some((done as f32 / total as f32).clamp(0.0, 1.0)),
                     format!("{done}/{total} crates"),

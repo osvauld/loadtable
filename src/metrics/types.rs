@@ -200,6 +200,9 @@ pub struct Progress {
     /// crates seen live, whichever is larger). Absent until one is seen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_targets_built: Option<u64>,
+    /// `--test NAME` targets the command names; the total for `test_targets_built`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_targets_expected: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]

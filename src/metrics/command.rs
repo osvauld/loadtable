@@ -495,6 +495,24 @@ impl CargoInvocation {
 }
 
 /// True when the job builds with Cargo locally (directly or in `sh -c`).
+/// Integration test targets a command names with `--test NAME` (also inside an `sh -c`
+/// script or a forwarded command), for a "target 12/23" progress count. None when the
+/// command names none, so a bare `cargo test` shows no total it cannot know.
+pub fn test_targets_expected(argv: &[String]) -> Option<u64> {
+    let mut names = std::collections::HashSet::new();
+    let words: Vec<&str> = argv.iter().flat_map(|a| a.split_whitespace()).collect();
+    for (i, word) in words.iter().enumerate() {
+        if let Some(name) = word.strip_prefix("--test=") {
+            names.insert(name);
+        } else if *word == "--test"
+            && let Some(name) = words.get(i + 1)
+        {
+            names.insert(*name);
+        }
+    }
+    (!names.is_empty()).then_some(names.len() as u64)
+}
+
 pub fn is_cargo(argv: &[String]) -> bool {
     cargo_invocation(argv).is_some()
 }

@@ -61,6 +61,9 @@ fn job_line(j: &JobView) -> String {
         .unwrap();
     }
     if let Some(p) = &j.progress {
+        if let (Some(built), Some(total)) = (p.test_targets_built, p.test_targets_expected) {
+            write!(line, " | {built}/{total} test targets").unwrap();
+        }
         match p.crates_expected {
             Some(e) => write!(line, " | {}/{e} crates", p.crates_compiled).unwrap(),
             None => write!(line, " | {} crates", p.crates_compiled).unwrap(),

@@ -1281,3 +1281,20 @@ fn a_flock_on_a_btrfs_subvolume_file_is_found_by_inode_despite_the_anonymous_dev
     }
     std::fs::remove_file(&path).unwrap();
 }
+
+#[test]
+fn test_targets_expected_counts_named_integration_targets() {
+    use super::command::test_targets_expected;
+    let argv = |s: &str| vec!["bash".to_string(), "-c".to_string(), s.to_string()];
+    assert_eq!(
+        test_targets_expected(&argv(
+            "ulimit -n 65536; cargo test -j 6 -p x --test calls --test gcall --test=link"
+        )),
+        Some(3)
+    );
+    assert_eq!(
+        test_targets_expected(&argv("cargo test --test a --test a")),
+        Some(1)
+    );
+    assert_eq!(test_targets_expected(&argv("cargo test -p x")), None);
+}

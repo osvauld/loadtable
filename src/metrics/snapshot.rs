@@ -318,6 +318,7 @@ fn job_view(job: &Job, inputs: &Inputs, history: &History) -> JobView {
         crates_compiled: crates_now,
         crates_expected: history.crates_expected(&kind_key, warmth, job.id),
         test_targets_built: extras.test_targets_so_far.filter(|&n| n > 0),
+        test_targets_expected: super::command::test_targets_expected(&argv),
     });
     let estimate = (!terminal)
         .then(|| history.estimate_with(&kind_key, Some(&coarse), warmth, job.id))
