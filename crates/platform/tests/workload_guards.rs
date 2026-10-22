@@ -91,6 +91,115 @@ fn subprocess_fixture() {
         std::process::exit(99);
     });
     match role.as_str() {
+        "combined-controller" => {
+            let phase = std::env::var("TASKS_WORKLOAD_GUARD_PHASE").unwrap();
+            let (mut controller, guardian) = UnixStream::pair().unwrap();
+            controller
+                .set_read_timeout(Some(Duration::from_secs(6)))
+                .unwrap();
+            let mut cmd = helper("combined-guardian");
+            cmd.stdin(Stdio::from(OwnedFd::from(guardian)));
+            let mut child = TestChild(cmd.spawn().unwrap());
+            let mut ready = [0];
+            controller.read_exact(&mut ready).unwrap();
+            assert_eq!(ready, [READY]);
+            if phase != "before" {
+                controller.write_all(&[START]).unwrap();
+                match phase.as_str() {
+                    "spawn" => until(|| {
+                        fs::metadata(root.join("spawn-blocked")).is_ok_and(|m| m.len() == 1)
+                    }),
+                    "running" | "guardian-running" => {
+                        until(|| root.join("workload-ready").exists())
+                    }
+                    "partial" => until(|| root.join("partial-report").exists()),
+                    _ => {}
+                }
+            }
+            if matches!(phase.as_str(), "normal" | "exec-error" | "early-exit") {
+                assert!(child.0.wait().unwrap().success());
+                fs::write(root.join("finished"), b"cleaned").unwrap();
+                return;
+            }
+            fs::write(root.join("guardian-ready"), b"armed").unwrap();
+            if phase == "guardian-running" {
+                until(|| root.join("kill-guardian").exists());
+                child.0.kill().unwrap();
+                assert_eq!(child.0.wait().unwrap().signal(), Some(libc::SIGKILL));
+                return;
+            }
+            loop {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        "combined-guardian" => {
+            use task_manager_platform::supervisor::{self, Reason};
+            let controller =
+                UnixStream::from(std::io::stdin().as_fd().try_clone_to_owned().unwrap());
+            let phase = std::env::var("TASKS_WORKLOAD_GUARD_PHASE").unwrap();
+            let (guardian, wrapper) = UnixStream::pair().unwrap();
+            let mut cmd = helper(match phase.as_str() {
+                "partial" => "partial-wrapper",
+                "early-exit" => "exiting-wrapper",
+                _ => "wrapper",
+            });
+            cmd.stdin(Stdio::from(OwnedFd::from(wrapper)));
+            let group = OwnedChildGroup::spawn(&mut cmd).unwrap();
+            let outcome =
+                supervisor::supervise(group, guardian, controller, Duration::from_millis(20));
+            let phase = std::env::var("TASKS_WORKLOAD_GUARD_PHASE").unwrap();
+            if matches!(phase.as_str(), "normal" | "exec-error") {
+                assert_eq!(outcome.reason, Reason::CommandReported);
+                assert!(outcome.error.is_none());
+                outcome.cleanup.unwrap();
+                fs::write(root.join("report"), report_text(outcome.report.unwrap())).unwrap();
+            } else {
+                assert_eq!(
+                    outcome.reason,
+                    if phase == "early-exit" {
+                        Reason::WrapperExited
+                    } else {
+                        Reason::ControllerLost
+                    }
+                );
+                if phase == "early-exit" {
+                    assert!(outcome.report.is_none());
+                    eprintln!(
+                        "synthetic early-wrapper cleanup (not completion): {:?}",
+                        outcome.cleanup
+                    );
+                }
+                if phase == "partial" {
+                    assert!(outcome.report.is_none());
+                }
+                // Cleanup errors must stay errors, never imply success/replay.
+                fs::write(
+                    root.join("interrupted"),
+                    format!("{:?} cleanup={:?}", outcome.reason, outcome.cleanup),
+                )
+                .unwrap();
+            }
+        }
+        "partial-wrapper" | "exiting-wrapper" => {
+            // Deliberately incomplete protocol peer, not a real workload watcher.
+            unsafe {
+                libc::signal(libc::SIGTERM, libc::SIG_IGN);
+            }
+            let mut control =
+                UnixStream::from(std::io::stdin().as_fd().try_clone_to_owned().unwrap());
+            control.write_all(&[READY]).unwrap();
+            let mut start = [0];
+            control.read_exact(&mut start).unwrap();
+            assert_eq!(start, [START]);
+            if role == "exiting-wrapper" {
+                return;
+            }
+            control.write_all(b"D\0").unwrap();
+            fs::write(root.join("partial-report"), b"partial").unwrap();
+            loop {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
         "guardian" => {
             let phase = std::env::var("TASKS_WORKLOAD_GUARD_PHASE").unwrap();
             let (mut guardian, wrapper) = UnixStream::pair().unwrap();
@@ -258,6 +367,9 @@ fn subprocess_fixture() {
 }
 
 fn phase_case(phase: &str) {
+    run_case(phase, "guardian");
+}
+fn run_case(phase: &str, role: &str) {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let fixture = Fixture::new();
     let lock = fixture.0.join("stable-slot.lock");
@@ -275,14 +387,14 @@ fn phase_case(phase: &str) {
     let fd = unsafe { libc::fcntl(lease.as_raw_fd(), libc::F_DUPFD, 64) };
     assert!(fd >= 64);
     let inherited = unsafe { File::from_raw_fd(fd) };
-    let mut cmd = helper("guardian");
+    let mut cmd = helper(role);
     cmd.env(ROOT, &fixture.0)
         .env(FD, fd.to_string())
         .env("TASKS_WORKLOAD_GUARD_PHASE", phase);
     let mut guardian = TestChild(cmd.spawn().unwrap());
     drop(inherited);
     drop(lease);
-    let normal = matches!(phase, "normal" | "exec-error" | "bad-grant");
+    let normal = matches!(phase, "normal" | "exec-error" | "bad-grant" | "early-exit");
     until(|| {
         fixture
             .0
@@ -304,20 +416,43 @@ fn phase_case(phase: &str) {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let outside = OwnedChildGroup::spawn(&mut outside_cmd).unwrap();
-    if !normal {
+    if phase == "guardian-running" {
+        fs::write(fixture.0.join("kill-guardian"), b"kill").unwrap();
+    } else if !normal {
         guardian.0.kill().unwrap();
     }
     let status = guardian.0.wait().unwrap();
-    if normal {
+    if normal || phase == "guardian-running" {
         assert!(status.success());
     } else {
         assert_eq!(status.signal(), Some(libc::SIGKILL));
     }
     until(|| !busy(&observer));
+    if phase == "early-exit" {
+        assert!(
+            fs::read_to_string(fixture.0.join("interrupted"))
+                .unwrap()
+                .starts_with("WrapperExited")
+        );
+    }
+    if phase == "guardian-running" {
+        assert!(!fixture.0.join("report").exists());
+        assert!(!fixture.0.join("interrupted").exists());
+    }
+    if role == "combined-controller" && !normal && phase != "guardian-running" {
+        assert!(
+            fs::read_to_string(fixture.0.join("interrupted"))
+                .unwrap()
+                .starts_with("ControllerLost")
+        );
+    }
     assert!(!outside.has_exited().unwrap());
     let metadata = fs::metadata(&lock).unwrap();
     assert_eq!(key, (metadata.dev(), metadata.ino()));
-    if matches!(phase, "before" | "spawn" | "bad-grant" | "exec-error") {
+    if matches!(
+        phase,
+        "before" | "spawn" | "bad-grant" | "exec-error" | "partial" | "early-exit"
+    ) {
         assert!(!fixture.0.join("entered-once").exists());
     } else {
         assert!(fixture.0.join("entered-once").exists());
@@ -386,6 +521,38 @@ fn inheritable_endpoint_is_refused_before_arming() {
     // This dedicated rejection fixture starts no command/descendants.
     assert!(cmd.process_group(0).status().unwrap().success());
     assert!(!fixture.0.join("entered-once").exists());
+}
+#[test]
+fn combined_controller_loss_before_grant_prevents_entry() {
+    run_case("before", "combined-controller");
+}
+#[test]
+fn combined_controller_loss_during_pre_exec_releases_lease() {
+    run_case("spawn", "combined-controller");
+}
+#[test]
+fn combined_controller_loss_cleans_resistant_descendant() {
+    run_case("running", "combined-controller");
+}
+#[test]
+fn combined_guardian_sigkill_leaves_no_report_and_wrapper_cleans_group() {
+    run_case("guardian-running", "combined-controller");
+}
+#[test]
+fn combined_normal_result_preserves_command_status() {
+    run_case("normal", "combined-controller");
+}
+#[test]
+fn combined_spawn_error_is_not_command_success() {
+    run_case("exec-error", "combined-controller");
+}
+#[test]
+fn early_wrapper_exit_and_native_cleanup_error_are_not_completion() {
+    run_case("early-exit", "combined-controller");
+}
+#[test]
+fn partial_wrapper_report_does_not_block_controller_loss() {
+    run_case("partial", "combined-controller");
 }
 #[test]
 fn malformed_and_truncated_reports_are_not_terminal_results() {

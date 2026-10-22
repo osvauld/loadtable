@@ -7,6 +7,45 @@ when built with UI); other commands reject before connecting to a daemon, creati
 submitting jobs. No macOS daemon, GUI, scheduler, recovery or local execution acceptance is
 claimed.
 
+## Composed shared supervisor checkpoint (experimental)
+
+`crates/platform/src/supervisor.rs` now composes both lifetimes in a separate guardian:
+controller -> guardian -> watched wrapper -> command/descendants. It forwards READY only
+after the wrapper watcher is armed, then forwards one controller START after a fresh
+channel check. Both channels remain open through owned TERM/KILL/reaping. The caller
+still supplies the private wrapper group, authoritative leases and independent output
+drainers; this is not a new worker, admission backend or public execution command.
+
+The event loop incrementally reads the fixed-size host-local report, rather than blocking
+on a partial frame. Its outcome separates command report, controller/wrapper/protocol
+reason, protocol error and cleanup result. `CommandReported` deliberately does NOT mean
+passed. A zero exit cannot overwrite a cleanup error; controller loss observed during
+cleanup remains interruption. Native holder checks and ledger reconciliation still have
+to establish completion. There is no respawn/retry path in this primitive.
+
+Eight new native behaviors exercise the composed path: controller loss before grant,
+during blocked command pre-exec and during execution; guardian SIGKILL during execution;
+normal command status and spawn error reporting; partial-report/controller-loss handling;
+and early-wrapper exit. Guardian loss leaves no result and the watched group still releases
+its lease. The last two use deliberately incomplete protocol peers, not real armed watchers. The
+early-exit case reproduced empty retained-zombie group EPERM and preserves it as an error,
+with no command report/completed outcome. No permission/ownership error is suppressed.
+All relevant subprocess fixtures still check inherited-lease release, stable lock inode,
+unrelated-group survival and non-entry where appropriate.
+
+Selected checkpoint: **189 passed, zero failed/ignored**, the prior 181 selection plus
+these eight. The expanded 20-entry workload/composition suite passed three repeated runs.
+Headless/default-feature checks, platform all-target Clippy, headless library/CLI/example/
+boundary Clippy with warnings denied and owned-file formatting/diff checks passed. No
+fixture processes remained; logs stay outside Git. Linux validation remains deferred.
+
+**Still blocked:** native empty-group/holder observation, descriptor allowlists, real
+admission integration, durable interrupted/uncertain ledger transitions and restart/no-replay
+acceptance. The guards are now composed here but are NOT invoked by the worker. No SQLite,
+installed-runtime, policy, service, device or key/config changes occurred. The memory-policy
+blocker and fail-closed Mac runtime refusal remain. This is bootstrap/source validation,
+not task-submission experience or evidence of full crash-safe execution.
+
 ## Workload-side guardian-loss checkpoint (experimental)
 
 `crates/platform/src/workload_guard.rs` now supplies the other side of supervision:

@@ -4,9 +4,9 @@
 
 The preparation below has now been merged with the native Mac compile-boundary work.
 On ARM64 macOS, the headless coordinator links, default UI/MCP code passes `cargo check`,
-and the latest selected native checkpoint passes 181 tests. Shared controller-loss and
-workload-side guardian-loss experiments now have real SIGKILL/lease fixtures, but are not
-integrated into the worker. The setup command remains independent
+and the latest selected native checkpoint passes 189 tests. Shared controller/workload
+lifetimes are now composed in an experimental guardian with real SIGKILL/lease fixtures,
+but are not integrated into the worker or ledger. The setup command remains independent
 of the daemon. Local runtime, pairing and remote execution are still explicitly blocked:
 lease observation, descriptor hygiene, native admission and supervisor cleanup remain
 unfinished. No real peer, app build or GUI launch acceptance is claimed.

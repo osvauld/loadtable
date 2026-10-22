@@ -51,6 +51,10 @@ impl Report {
 pub fn read_report(control: &mut UnixStream) -> io::Result<Report> {
     let mut frame = [0; 5];
     control.read_exact(&mut frame)?;
+    decode_report(frame)
+}
+
+pub(crate) fn decode_report(frame: [u8; 5]) -> io::Result<Report> {
     let raw = i32::from_be_bytes(frame[1..].try_into().expect("four bytes"));
     match frame[0] {
         b'D' if (0..=0xffff).contains(&raw) => {
@@ -68,7 +72,7 @@ pub fn read_report(control: &mut UnixStream) -> io::Result<Report> {
     ))
 }
 
-fn send_control(control: &UnixStream, mut bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn send_control(control: &UnixStream, mut bytes: &[u8]) -> io::Result<()> {
     while !bytes.is_empty() {
         // Explicitly suppress SIGPIPE even for a socket imported from another
         // launcher. Report-write failure must not kill only the wrapper and

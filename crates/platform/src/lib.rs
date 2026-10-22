@@ -14,6 +14,7 @@ mod memory;
 pub mod owned_group;
 pub mod process;
 mod process_control;
+pub mod supervisor;
 mod telemetry;
 pub mod thread;
 mod usage;
