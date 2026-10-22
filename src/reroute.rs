@@ -28,7 +28,19 @@
 //!   position (the admission wait note keeps its first timestamp), with a note. An uncertain
 //!   submission is never reverted: the peer link's idempotent key decides, nothing runs twice.
 //!
-//! The decision ([`decide`]) is pure and unit-tested; the daemon side is `peer::reroute`.
+//! * **Pull-back.** The other way: a job that was forwarded (a local `tasks peer-forward` bridge)
+//!   and still WAITS on the peer, blocked by a pressure gate (PSI, available memory, CPU), comes
+//!   back when this machine's compile slot is free and unpressured and the same `min_ratio` /
+//!   `min_gain_s` rule holds (here = run now, there = the peer's remaining wait + run). Only a
+//!   placement-chosen forward (`--anywhere`: its placement record says `anywhere`) may come
+//!   back, never one sent to a named peer or pinned, and a pull-back counts as a move
+//!   ([`MAX_MOVES`]). The peer's copy is cancelled FIRST over the peer link; only a confirmed
+//!   cancel lets [`Store::claim_pull_back`] restore the local spec (the bridge then ends and
+//!   the worker queues the job here, like a failed move). An uncertain cancel restores nothing:
+//!   the job is never run twice. See [`decide_pull_back`]; knob `pull_back` / [`PULL_BACK_ENV`].
+//!
+//! The decisions ([`decide`], [`decide_pull_back`]) are pure and unit-tested; the daemon side is
+//! `peer::reroute`.
 use crate::local_command::{Recipe, Resource};
 use crate::metrics::{JobView, SlotKind, Snapshot, Warmth, command::normalize};
 use crate::placement::{self, BLOCKED_S, Peer, UNKNOWN_S, duration};
@@ -46,6 +58,9 @@ pub const INTERVAL_ENV: &str = "TASKS_REROUTE_INTERVAL_S";
 pub const MIN_RATIO_ENV: &str = "TASKS_REROUTE_MIN_RATIO";
 /// Minimum seconds saved, 0..=86400 (default [`DEFAULT_MIN_GAIN_S`]).
 pub const MIN_GAIN_ENV: &str = "TASKS_REROUTE_MIN_GAIN_S";
+/// `0`, `off`, `false` or `no` stops pulling a waiting forward back from a pressured peer
+/// (default: on; see [`decide_pull_back`]).
+pub const PULL_BACK_ENV: &str = "TASKS_REROUTE_PULL_BACK";
 pub const DEFAULT_INTERVAL_S: u64 = 20;
 pub const DEFAULT_MIN_RATIO: f64 = 2.0;
 pub const DEFAULT_MIN_GAIN_S: f64 = 300.0;
@@ -57,7 +72,8 @@ pub const MAX_MOVES: u32 = 1;
 /// is known anywhere: a cold build is assumed to take this long (placement's unknown guess).
 pub const COLD_GUESS_S: f64 = UNKNOWN_S;
 // The same knobs can be set in the policy file's `reroute::` section ([`ReroutePolicy`];
-// src/policy.rs): `enabled`, `interval_s`, `min_ratio`, `min_gain_s`. The variables above win.
+// src/policy.rs): `enabled`, `interval_s`, `min_ratio`, `min_gain_s`, `pull_back`. The
+// variables above win.
 
 /// Test-only (debug builds): `1` moves every eligible job at each tick, to the best usable
 /// worker peer or else the first configured one, ignoring the thresholds and its link state.
@@ -73,6 +89,8 @@ pub const TEST_ADMIT_HOLD_ENV: &str = "TASKS_TEST_ADMIT_HOLD";
 pub const STATE_MOVING: &str = "moving";
 pub const STATE_MOVED: &str = "moved";
 pub const STATE_RETURNED: &str = "returned";
+/// The forward was cancelled on its peer and the job runs here (see [`decide_pull_back`]).
+pub const STATE_PULLED_BACK: &str = "pulled_back";
 
 /// The `reroute::` section of the policy file. Every key is optional; absent = not set there.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -86,6 +104,8 @@ pub struct ReroutePolicy {
     pub min_ratio: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_gain_s: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_back: Option<bool>,
 }
 
 impl ReroutePolicy {
@@ -101,6 +121,8 @@ pub struct Policy {
     pub interval: Duration,
     pub min_ratio: f64,
     pub min_gain_s: f64,
+    /// Pull a forward that still waits on a pressured peer back here ([`decide_pull_back`]).
+    pub pull_back: bool,
     /// Test-only, see [`TEST_FORCE_ENV`].
     pub force: bool,
 }
@@ -112,6 +134,7 @@ impl Default for Policy {
             interval: Duration::from_secs(DEFAULT_INTERVAL_S),
             min_ratio: DEFAULT_MIN_RATIO,
             min_gain_s: DEFAULT_MIN_GAIN_S,
+            pull_back: true,
             force: false,
         }
     }
@@ -138,6 +161,15 @@ impl Policy {
             };
         } else if let Some(enabled) = file.enabled {
             p.enabled = enabled;
+        }
+        if let Some(v) = get(PULL_BACK_ENV) {
+            p.pull_back = match v.trim().to_ascii_lowercase().as_str() {
+                "1" | "on" | "true" | "yes" => true,
+                "0" | "off" | "false" | "no" => false,
+                other => return Err(format!("{PULL_BACK_ENV} must be on or off, got {other:?}")),
+            };
+        } else if let Some(pull_back) = file.pull_back {
+            p.pull_back = pull_back;
         }
         let number = |name: &str,
                       key: &str,
@@ -224,6 +256,10 @@ impl Reroute {
                 self.moved_from,
                 self.moved_to,
                 self.note.as_deref().unwrap_or("nothing was submitted")
+            ),
+            STATE_PULLED_BACK => format!(
+                "pulled back {} -> {}: {}",
+                self.moved_from, self.moved_to, self.reason
             ),
             STATE_MOVED => match self.remote_job_id {
                 Some(remote) => format!("{} [job {remote} on {}]", self.reason, self.moved_to),
@@ -801,6 +837,368 @@ pub fn moved_spec(
     crate::peer_link::forwarded_spec(&inner, peer, &[], state, exe)
 }
 
+// ---- pull-back ----------------------------------------------------------------------------------
+
+/// Remote phases of a job that has not started executing there.
+pub fn waiting_remote_phase(phase: &str) -> bool {
+    matches!(
+        phase,
+        "approved" | "preparing" | "waiting_build" | "waiting_run"
+    )
+}
+
+/// Whether an admission `waiting_for` text names a pressure gate (PSI, available memory, CPU)
+/// rather than a busy slot or a queue position.
+pub fn pressure_blocker(text: &str) -> bool {
+    text.contains("PSI")
+        || text.starts_with("available memory below")
+        || text.starts_with("invalid pressure metric")
+}
+
+/// One forwarded job (the local bridge) as pull-back sees it, with what the link record and
+/// the placement record know about the remote copy.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Forwarded {
+    pub id: i64,
+    pub phase: Phase,
+    /// The peer it was forwarded to.
+    pub peer: String,
+    /// The command as forwarded (the peer's Cargo `-j`).
+    pub argv: Vec<String>,
+    /// The class the forward carries; only a compile job comes back.
+    pub resource: Resource,
+    pub source: String,
+    pub owner: String,
+    pub cancel_requested: bool,
+    pub moves: u32,
+    pub pinned: Option<String>,
+    /// The `requested` field of the job's placement record: `anywhere`, `local`, or a peer
+    /// name. None when nothing was recorded (`tasks run --peer NAME` records nothing).
+    pub requested: Option<String>,
+    pub remote_job_id: Option<i64>,
+    /// The link record's last remote phase and state (`attached`, `uncertain`, ...).
+    pub remote_phase: Option<String>,
+    pub remote_state: Option<String>,
+}
+
+impl Forwarded {
+    /// None for anything that is not a `peer-forward` bridge.
+    pub fn from_job(
+        job: &Job,
+        pinned: Option<String>,
+        requested: Option<String>,
+        remote: (Option<i64>, Option<String>, Option<String>),
+    ) -> Option<Self> {
+        let recipe = Recipe::from_spec_unvalidated(&job.spec).ok()?;
+        let args = crate::peer_link::ForwardArgs::from_recipe_argv(&recipe.argv)?.ok()?;
+        let e = job.execution.as_ref();
+        Some(Self {
+            id: job.id,
+            phase: job.phase.clone(),
+            peer: args.peer,
+            argv: args.argv,
+            resource: match args.resource {
+                crate::peer_link::ForwardResource::Compile => Resource::Compile,
+                crate::peer_link::ForwardResource::Run => Resource::Run,
+                crate::peer_link::ForwardResource::Device(serial) => Resource::Device(serial),
+            },
+            source: job.spec.source.clone(),
+            owner: job.spec.owner.clone(),
+            cancel_requested: e.is_some_and(|e| e.cancel_requested),
+            moves: e
+                .and_then(|e| e.reroute.as_ref())
+                .map_or(0, |r| r.moves.max(1)),
+            pinned,
+            requested,
+            remote_job_id: remote.0,
+            remote_phase: remote.1,
+            remote_state: remote.2,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum PullAction {
+    Pull {
+        peer: String,
+        /// The command as it runs here (Cargo `-j` replaced by this machine's cap).
+        argv: Vec<String>,
+        /// The peer's pressure gate that holds the job there.
+        blocker: String,
+    },
+    Stay {
+        why: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct PullVerdict {
+    pub job: i64,
+    pub action: PullAction,
+    pub here_s: f64,
+    pub there_s: f64,
+    /// The reason to stay, or the decision as one line for a pull-back.
+    pub line: String,
+}
+
+impl PullVerdict {
+    pub fn pulls(&self) -> bool {
+        matches!(self.action, PullAction::Pull { .. })
+    }
+}
+
+/// Why forward `f` is never pulled back, or None when it may be (peer state not looked at).
+pub fn pull_back_ineligible(f: &Forwarded) -> Option<String> {
+    if f.resource != Resource::Compile {
+        return Some("only the compile class comes back".into());
+    }
+    if f.phase != Phase::Building {
+        return Some(format!("the bridge is not running ({:?})", f.phase));
+    }
+    // Only a forward the placement chose may come back: a named peer, `--peer NAME` (no
+    // record at all) or a local request is the submitter's wish.
+    match f.requested.as_deref() {
+        Some("anywhere") => {}
+        Some(other) => return Some(format!("sent to {other:?} on request")),
+        None => return Some("no placement record: sent to a named peer".into()),
+    }
+    if let Some(why) = &f.pinned {
+        return Some(format!("pinned ({why})"));
+    }
+    if f.moves >= MAX_MOVES {
+        return Some("already moved once".into());
+    }
+    if f.cancel_requested {
+        return Some("cancel requested".into());
+    }
+    if f.remote_job_id.is_none() {
+        return Some("not submitted to the peer yet".into());
+    }
+    match f.remote_state.as_deref() {
+        None | Some("attached") => {}
+        Some(other) => return Some(format!("the remote state is {other}")),
+    }
+    if !f.remote_phase.as_deref().is_some_and(waiting_remote_phase) {
+        return Some(format!(
+            "already started there ({})",
+            f.remote_phase.as_deref().unwrap_or("unknown")
+        ));
+    }
+    None
+}
+
+/// Why this machine cannot start a compile job right now, or None when its compile slot is free
+/// and nothing waits ahead or is blocked.
+pub fn local_busy(local: &Snapshot) -> Option<String> {
+    if let Some(blocker) = &local.machine.blocker {
+        return Some(format!("blocked here too: {blocker}"));
+    }
+    let (_, held) = holder_wait(local);
+    let slots = local
+        .machine
+        .slots
+        .iter()
+        .filter(|s| s.kind == SlotKind::Compile)
+        .count()
+        .max(1);
+    if held.len() >= slots {
+        return Some(held.join(", "));
+    }
+    local
+        .jobs
+        .iter()
+        .find(|j| {
+            j.resource == SlotKind::Compile
+                && waiting_view(&j.phase)
+                && j.queue.as_ref().is_some_and(|q| q.position.is_some())
+        })
+        .map(|j| format!("compile job #{} waits here first", j.id))
+}
+
+/// The remaining wait of forward `remote` on the peer: placement's compile wait minus the job's
+/// own run (placement counts every positioned waiter, this one included).
+fn remote_wait(snapshot: &Snapshot, remote: i64) -> (f64, String) {
+    let (mut wait, basis) = placement::compile_wait(snapshot);
+    if let Some(job) = snapshot.jobs.iter().find(|j| j.id == remote)
+        && job.resource == SlotKind::Compile
+        && waiting_view(&job.phase)
+        && job.queue.as_ref().is_some_and(|q| q.position.is_some())
+    {
+        wait = (wait - job.estimate.as_ref().map_or(UNKNOWN_S, |e| e.total_s)).max(0.0);
+    }
+    (wait, basis)
+}
+
+/// Decides, for each forwarded job, whether to pull it back from its peer. It comes back when
+/// ALL hold: it is a placement-chosen, unpinned compile forward that never moved before; the
+/// peer's copy has not started (remote phase approved / preparing / waiting_build /
+/// waiting_run, in the link record and in the peer's snapshot) and the peer's queue text for
+/// it names a pressure blocker; this machine's compile slot is free with no pressure blocker;
+/// and running here now beats the peer's remaining wait plus run by `min_ratio` and
+/// `min_gain_s`. One job per round (the slot goes to it).
+pub fn decide_pull_back(
+    forwards: &[Forwarded],
+    local: &Snapshot,
+    local_jobs: u64,
+    peers: &[Peer],
+    policy: &Policy,
+) -> Vec<PullVerdict> {
+    let busy = local_busy(local);
+    let mut taken: Option<i64> = None;
+    let mut out = vec![];
+    for f in forwards {
+        let stay = |why: String| PullVerdict {
+            job: f.id,
+            action: PullAction::Stay { why: why.clone() },
+            here_s: 0.0,
+            there_s: 0.0,
+            line: why,
+        };
+        if !policy.pull_back {
+            out.push(stay("pull-back is off".into()));
+            continue;
+        }
+        if let Some(why) = pull_back_ineligible(f) {
+            out.push(stay(why));
+            continue;
+        }
+        if let Some(why) = &busy {
+            out.push(stay(format!("stays on {}: {why}", f.peer)));
+            continue;
+        }
+        if let Some(id) = taken {
+            out.push(stay(format!(
+                "stays on {}: the compile slot goes to #{id}",
+                f.peer
+            )));
+            continue;
+        }
+        let Some(peer) = peers.iter().find(|p| p.name == f.peer) else {
+            out.push(stay(format!("peer {} is not configured", f.peer)));
+            continue;
+        };
+        if let Some(why) = peer.unusable() {
+            out.push(stay(format!("peer {} {why}", f.peer)));
+            continue;
+        }
+        let (Some(snap), Some(remote)) = (peer.snapshot.as_ref(), f.remote_job_id) else {
+            out.push(stay("no snapshot of the peer".into()));
+            continue;
+        };
+        let Some(view) = snap.jobs.iter().find(|j| j.id == remote) else {
+            out.push(stay(format!(
+                "job {remote} is not in {}'s snapshot",
+                f.peer
+            )));
+            continue;
+        };
+        if !movable_phase(&view.phase) || view.live.is_some() {
+            out.push(stay(format!(
+                "already started on {} ({:?})",
+                f.peer, view.phase
+            )));
+            continue;
+        }
+        let Some(blocker) = view
+            .queue
+            .as_ref()
+            .and_then(|q| q.waiting_for.clone())
+            .filter(|w| pressure_blocker(w))
+        else {
+            out.push(stay(format!(
+                "stays on {}: not blocked by pressure ({})",
+                f.peer,
+                view.queue
+                    .as_ref()
+                    .and_then(|q| q.waiting_for.as_deref())
+                    .unwrap_or("no queue text")
+            )));
+            continue;
+        };
+        let kind = normalize(&placement::strip_jobs(&f.argv)).kind_key;
+        let (run, run_basis) = match placement::history(local, &kind) {
+            Some((m, n)) => (m, format!("median of {n} runs here")),
+            None => (UNKNOWN_S, "no history".into()),
+        };
+        let (wait, _) = remote_wait(snap, remote);
+        let (peer_run_s, _, label) = peer_run(
+            &kind,
+            &f.source,
+            local,
+            snap,
+            local_jobs,
+            snap.machine.cargo_jobs_max,
+        );
+        // The peer's pressure gate (+ BLOCKED_S) is part of `wait` only when its machine
+        // blocker says so; the job's own queue text is the evidence here, so add it once.
+        let there = wait
+            + peer_run_s
+            + if snap.machine.blocker.is_none() {
+                BLOCKED_S
+            } else {
+                0.0
+            };
+        let ratio_ok = run * policy.min_ratio <= there;
+        let gain_ok = there - run >= policy.min_gain_s;
+        if !(ratio_ok && gain_ok) {
+            let mut v = stay(format!(
+                "stays on {}: ~{} here vs ~{} there (needs >= {}x and >= {} sooner)",
+                f.peer,
+                duration(run),
+                duration(there),
+                policy.min_ratio,
+                duration(policy.min_gain_s)
+            ));
+            (v.here_s, v.there_s) = (run, there);
+            out.push(v);
+            continue;
+        }
+        let cap = local.machine.cargo_jobs_max.unwrap_or(local_jobs);
+        let argv = if placement::is_cargo(&f.argv) {
+            placement::apply_jobs(&f.argv, cap)
+        } else {
+            f.argv.clone()
+        };
+        taken = Some(f.id);
+        out.push(PullVerdict {
+            job: f.id,
+            action: PullAction::Pull {
+                peer: f.peer.clone(),
+                argv,
+                blocker: blocker.clone(),
+            },
+            here_s: run,
+            there_s: there,
+            line: format!(
+                "pulled back {} → {}: {blocker} (~{} run here, {run_basis}, vs ~{} {label} there incl. wait)",
+                f.peer,
+                local.machine.id,
+                duration(run),
+                duration(there)
+            ),
+        });
+    }
+    out
+}
+
+/// The local spec a pull-back restores: the forwarded command (as decided) run here, owner
+/// and cwd unchanged, the `--broad-test` escape kept.
+pub fn pulled_spec(forward: &JobSpec, argv: &[String]) -> Result<JobSpec> {
+    Recipe {
+        argv: argv.to_vec(),
+        resource: Resource::Compile,
+        broad_test: Recipe::from_spec_unvalidated(forward).is_ok_and(|r| r.broad_test),
+    }
+    .unchecked_spec(forward.owner.clone(), PathBuf::from(&forward.source))
+}
+
+/// `<job dir>/pull-back-pending`: the daemon is cancelling the peer's copy of job `id` and may
+/// restore its local spec next. The worker, when the bridge ends, waits briefly for that.
+pub fn pull_back_marker(state: &Path, id: i64) -> PathBuf {
+    job_dir(state, id).join("pull-back-pending")
+}
+
 // ---- ledger transactions ------------------------------------------------------------------------
 
 /// The canonical text of a spec, for "is it still the spec I read" comparisons.
@@ -853,6 +1251,19 @@ impl Store {
             }
         }
         Ok(jobs)
+    }
+
+    /// Live jobs whose stage executes (building), by id: where a forward's bridge runs.
+    pub fn building_jobs(&self) -> Result<Vec<Job>> {
+        let ids: Vec<i64> = {
+            let mut statement = self
+                .0
+                .prepare("SELECT id FROM jobs WHERE phase='building' ORDER BY id")?;
+            statement
+                .query_map([], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        Ok(ids.into_iter().filter_map(|id| self.job(id).ok()).collect())
     }
 
     /// The reroute claim: in ONE immediate transaction, checks that job `id` is still exactly
@@ -917,6 +1328,69 @@ impl Store {
         tx.execute(
             "UPDATE jobs SET spec=?2 WHERE id=?1",
             params![id, serde_json::to_string(moved)?],
+        )?;
+        tx.execute(
+            "UPDATE executions SET data=?2 WHERE job_id=?1",
+            params![id, serde_json::to_string(&e)?],
+        )?;
+        tx.commit()?;
+        Ok(Claim::Claimed)
+    }
+
+    /// The pull-back claim: in ONE immediate transaction, checks that forward `id` is still
+    /// exactly `expected` (its bridge running, no cancel request, no earlier move) and rewrites
+    /// its spec into `pulled`, recording `record`. Call it only after the peer's copy was
+    /// cancelled: when the bridge returns, the worker sees the new spec and queues the job
+    /// here, as for a failed move. At most [`MAX_MOVES`] counts this one.
+    pub fn claim_pull_back(
+        &mut self,
+        id: i64,
+        expected: &JobSpec,
+        pulled: &JobSpec,
+        record: &Reroute,
+    ) -> Result<Claim> {
+        use rusqlite::{OptionalExtension, TransactionBehavior, params};
+        let tx = self
+            .0
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row: Option<(String, String)> = tx
+            .query_row("SELECT phase, spec FROM jobs WHERE id=?1", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()?;
+        let Some((phase, spec)) = row else {
+            return Ok(Claim::Refused("no such job".into()));
+        };
+        let phase = Phase::from_db(&phase)?;
+        if phase != Phase::Building {
+            return Ok(Claim::Refused(format!("phase is now {phase:?}")));
+        }
+        if stored_key(&spec)? != spec_key(expected)? {
+            return Ok(Claim::Refused("its spec changed".into()));
+        }
+        let data: Option<String> = tx
+            .query_row("SELECT data FROM executions WHERE job_id=?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        let Some(data) = data else {
+            return Ok(Claim::Refused("not approved".into()));
+        };
+        let mut e: crate::execution::Execution = serde_json::from_str(&data)?;
+        if e.cancel_requested {
+            return Ok(Claim::Refused("cancel requested".into()));
+        }
+        if e.reroute.as_ref().is_some_and(|r| r.moves >= MAX_MOVES) {
+            return Ok(Claim::Refused("already moved once".into()));
+        }
+        let mut record = record.clone();
+        record.moves = e.reroute.as_ref().map_or(0, |r| r.moves) + 1;
+        record.original_spec = Some(serde_json::from_str(&spec)?);
+        e.detail = format!("{}; running here", record.reason);
+        e.reroute = Some(record);
+        tx.execute(
+            "UPDATE jobs SET spec=?2 WHERE id=?1",
+            params![id, serde_json::to_string(pulled)?],
         )?;
         tx.execute(
             "UPDATE executions SET data=?2 WHERE job_id=?1",
@@ -1070,6 +1544,9 @@ pub fn archive_stage_files(dir: &Path, stage: &str, tag: &str, keep_queued_at: b
     }
 }
 
+/// How long the worker waits, after the bridge of a pull-back ended, for the spec to change.
+const PULL_BACK_WAIT: Duration = Duration::from_secs(20);
+
 /// What the worker does after a stage of a live command returned.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Next {
@@ -1089,12 +1566,33 @@ pub fn after_stage(
     ran: &str,
     stage: &str,
 ) -> Result<Next> {
-    let job = store.job(id)?;
+    let mut job = store.job(id)?;
     let dir = job_dir(state, id);
+    // A pull-back cancels the peer's copy (this stage's bridge ends) before it restores the
+    // spec: give it a moment instead of recording the bridge's exit as the job's result.
+    let end = std::time::Instant::now() + PULL_BACK_WAIT;
+    while spec_key(&job.spec)? == ran
+        && pull_back_marker(state, id).exists()
+        && std::time::Instant::now() < end
+    {
+        std::thread::sleep(Duration::from_millis(100));
+        job = store.job(id)?;
+    }
     let record = job.execution.as_ref().and_then(|e| e.reroute.clone());
     let cancel = job.execution.as_ref().is_some_and(|e| e.cancel_requested);
     if spec_key(&job.spec)? != ran {
         archive_stage_files(&dir, stage, "moved", true);
+        if let Some(r) = record.as_ref().filter(|r| r.state == STATE_PULLED_BACK) {
+            let link_path = state.join("peer/links").join(format!("{id}.json"));
+            let _ = std::fs::rename(
+                &link_path,
+                link_path.with_extension("json.reroute-pulled-back"),
+            );
+            return Ok(Next::Respec(format!(
+                "tasks: the copy on {} is cancelled; job {id} now queues here\n",
+                r.moved_from
+            )));
+        }
         let to = record.as_ref().map_or("a peer", |r| r.moved_to.as_str());
         return Ok(Next::Respec(format!(
             "tasks: local {stage} admission withdrawn before anything ran here: job {id} was rerouted to {to}\n"

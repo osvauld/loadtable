@@ -463,17 +463,21 @@ fn policy_reads_its_knobs_and_refuses_bad_values() {
         (INTERVAL_ENV, "15"),
         (MIN_RATIO_ENV, "3"),
         (MIN_GAIN_ENV, "120"),
+        (PULL_BACK_ENV, "no"),
     ]))
     .unwrap();
     assert!(!p.enabled);
     assert_eq!(p.interval, Duration::from_secs(15));
     assert_eq!((p.min_ratio, p.min_gain_s), (3.0, 120.0));
+    assert!(!p.pull_back);
+    assert!(Policy::default().pull_back, "pull-back is on by default");
     for bad in [
         (ENABLE_ENV, "maybe"),
         (INTERVAL_ENV, "0"),
         (MIN_RATIO_ENV, "0.5"),
         (MIN_GAIN_ENV, "-1"),
         (MIN_GAIN_ENV, "NaN"),
+        (PULL_BACK_ENV, "sometimes"),
     ] {
         let pairs: &'static [(&str, &str)] = Box::leak(Box::new([bad]));
         assert!(Policy::from_lookup(env(pairs)).is_err(), "{bad:?}");
@@ -562,19 +566,23 @@ fn policy_file_knobs_apply_and_the_environment_wins() {
         interval_s: Some(60.0),
         min_ratio: Some(1.5),
         min_gain_s: None,
+        pull_back: Some(false),
     };
     let p = Policy::from_sources(&file, |_| None).unwrap();
     assert!(!p.enabled);
+    assert!(!p.pull_back, "from the file");
     assert_eq!(p.interval, Duration::from_secs(60));
     assert_eq!(p.min_ratio, 1.5);
     assert_eq!(p.min_gain_s, DEFAULT_MIN_GAIN_S);
     let env = |name: &str| match name {
         ENABLE_ENV => Some("on".to_string()),
         MIN_RATIO_ENV => Some("3".to_string()),
+        PULL_BACK_ENV => Some("on".to_string()),
         _ => None,
     };
     let p = Policy::from_sources(&file, env).unwrap();
     assert!(p.enabled, "env wins");
+    assert!(p.pull_back, "env wins over the file");
     assert_eq!(p.min_ratio, 3.0);
     assert_eq!(p.interval, Duration::from_secs(60), "file value kept");
     let bad = ReroutePolicy {
@@ -763,4 +771,296 @@ fn queue_time_is_kept_for_a_second_attempt() {
     assert!(dir.join("build-waiting.json.reroute-moved").exists());
     assert_eq!(queued_since(&dir, "build"), Some(first));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- pull-back ----------------------------------------------------------------------------------
+
+const PSI: &str = "memory PSI full avg10 above 0.5%";
+
+/// Forward #7 (peer job 77): placement-chosen, never moved, waiting on the peer.
+fn forwarded() -> Forwarded {
+    Forwarded {
+        id: 7,
+        phase: Phase::Building,
+        peer: "nixos".into(),
+        argv: words(TEST),
+        resource: Resource::Compile,
+        source: CHECKOUT.into(),
+        owner: "agent".into(),
+        cancel_requested: false,
+        moves: 0,
+        pinned: None,
+        requested: Some("anywhere".into()),
+        remote_job_id: Some(77),
+        remote_phase: Some("waiting_build".into()),
+        remote_state: Some("attached".into()),
+    }
+}
+
+/// An idle laptop that ran TEST in `run_s`, and a worker holding job 77 in `waiting_for`.
+fn pull_world(run_s: f64, waiting_for: &str) -> (Snapshot, Vec<Peer>) {
+    let local = machine(
+        "kurukkan",
+        None,
+        vec![passed(900, TEST, run_s, "warm", CHECKOUT)],
+        2,
+    );
+    let mut remote = waiting(77, TEST, run_s, 1, "warm");
+    remote["queue"]["waiting_for"] = json!(waiting_for);
+    let worker = machine("nixos", None, vec![remote], 8);
+    (local, vec![peer("nixos", worker)])
+}
+
+fn pull(f: &[Forwarded], local: &Snapshot, peers: &[Peer], policy: &Policy) -> PullVerdict {
+    decide_pull_back(f, local, 2, peers, policy)
+        .into_iter()
+        .next()
+        .unwrap()
+}
+
+#[test]
+fn a_blocked_forward_comes_back_when_this_machine_is_free() {
+    let (local, peers) = pull_world(300.0, PSI);
+    let v = pull(&[forwarded()], &local, &peers, &Policy::default());
+    let PullAction::Pull {
+        peer,
+        argv,
+        blocker,
+    } = &v.action
+    else {
+        panic!("{v:?}");
+    };
+    assert_eq!((peer.as_str(), blocker.as_str()), ("nixos", PSI));
+    assert_eq!(
+        argv,
+        &placement::apply_jobs(&words(TEST), 2),
+        "Cargo -j is this machine's cap"
+    );
+    assert!(v.line.starts_with("pulled back nixos"), "{}", v.line);
+    assert!(v.there_s >= 2.0 * v.here_s && v.there_s - v.here_s >= 300.0);
+    // Off: stays.
+    let off = Policy {
+        pull_back: false,
+        ..Policy::default()
+    };
+    assert!(!pull(&[forwarded()], &local, &peers, &off).pulls());
+}
+
+#[test]
+fn the_peer_jobs_cap_is_replaced_by_this_machines() {
+    let (local, peers) = pull_world(300.0, PSI);
+    let mut f = forwarded();
+    f.argv = words("cargo test --offline --locked -j 8 -p video");
+    let v = pull(&[f], &local, &peers, &Policy::default());
+    let PullAction::Pull { argv, .. } = &v.action else {
+        panic!("{v:?}");
+    };
+    assert_eq!(argv, &placement::apply_jobs(&words(TEST), 2));
+    assert!(!argv.iter().any(|a| a == "8"), "{argv:?}");
+}
+
+#[test]
+fn a_forward_stays_when_it_started_or_is_not_blocked_by_pressure() {
+    let (local, peers) = pull_world(300.0, PSI);
+    let policy = Policy::default();
+    // Started per the link record.
+    for phase in ["building", "running", "passed"] {
+        let mut f = forwarded();
+        f.remote_phase = Some(phase.into());
+        let v = pull(&[f], &local, &peers, &policy);
+        assert!(!v.pulls() && v.line.contains("started"), "{phase}: {v:?}");
+    }
+    // Started per the peer's own snapshot (the link is a poll behind).
+    let local2 = local.clone();
+    let mut remote = waiting(77, TEST, 300.0, 1, "warm");
+    remote["phase"] = json!("building");
+    let started = vec![peer("nixos", machine("nixos", None, vec![remote], 8))];
+    let v = pull(&[forwarded()], &local2, &started, &policy);
+    assert!(!v.pulls() && v.line.contains("started"), "{v:?}");
+    // Waiting behind a busy slot or a queue, not a pressure gate: it will run soon enough.
+    for text in ["compile slot held by #3", "behind #4 in the compile queue"] {
+        let (local, peers) = pull_world(300.0, text);
+        let v = pull(&[forwarded()], &local, &peers, &policy);
+        assert!(
+            !v.pulls() && v.line.contains("not blocked"),
+            "{text}: {v:?}"
+        );
+    }
+    for text in [
+        "memory PSI some avg10 above 1%",
+        "CPU PSI some avg10 above 40%",
+        "I/O PSI some avg10 above 20%",
+        "available memory below 2.0 GiB",
+    ] {
+        assert!(pressure_blocker(text), "{text}");
+    }
+    for text in [
+        "compile slot held by #3",
+        "worker pickup",
+        "admission check",
+    ] {
+        assert!(!pressure_blocker(text), "{text}");
+    }
+    // Not submitted yet, or the remote state is uncertain.
+    let mut f = forwarded();
+    f.remote_job_id = None;
+    assert!(!pull(&[f], &local, &peers, &policy).pulls());
+    let mut f = forwarded();
+    f.remote_state = Some("uncertain".into());
+    assert!(!pull(&[f], &local, &peers, &policy).pulls());
+}
+
+#[test]
+fn only_a_placement_chosen_unpinned_forward_comes_back() {
+    let (local, peers) = pull_world(300.0, PSI);
+    let policy = Policy::default();
+    for (requested, pinned, why) in [
+        (None, None, "named peer"),
+        (Some("nixos"), None, "named peer"),
+        (Some("local"), None, "local"),
+        (Some("anywhere"), Some("--pin at submit"), "pinned"),
+    ] {
+        let mut f = forwarded();
+        f.requested = requested.map(str::to_owned);
+        f.pinned = pinned.map(str::to_owned);
+        let v = pull(&[f], &local, &peers, &policy);
+        assert!(!v.pulls(), "{why}: {v:?}");
+    }
+    let mut f = forwarded();
+    f.cancel_requested = true;
+    assert!(!pull(&[f], &local, &peers, &policy).pulls());
+    let mut f = forwarded();
+    f.resource = Resource::Run;
+    assert!(!pull(&[f], &local, &peers, &policy).pulls());
+}
+
+#[test]
+fn a_forward_stays_when_this_machine_is_pressured_or_busy_too() {
+    let (mut local, peers) = pull_world(300.0, PSI);
+    let policy = Policy::default();
+    local.machine.blocker = Some("CPU PSI some avg10 above 40%".into());
+    let v = pull(&[forwarded()], &local, &peers, &policy);
+    assert!(!v.pulls() && v.line.contains("blocked here too"), "{v:?}");
+    // The compile slot is held here.
+    let mut busy = machine(
+        "kurukkan",
+        Some((9, 1200.0)),
+        vec![passed(900, TEST, 300.0, "warm", CHECKOUT)],
+        2,
+    );
+    let v = pull(&[forwarded()], &busy, &peers, &policy);
+    assert!(!v.pulls() && v.line.contains("slot held by #9"), "{v:?}");
+    // A compile job already waits here for the free slot.
+    busy = machine(
+        "kurukkan",
+        None,
+        vec![waiting(12, TEST, 60.0, 1, "warm")],
+        2,
+    );
+    let v = pull(&[forwarded()], &busy, &peers, &policy);
+    assert!(!v.pulls() && v.line.contains("#12"), "{v:?}");
+}
+
+#[test]
+fn the_ratio_and_gain_rule_applies_and_one_job_comes_back_per_round() {
+    // A long job: ~700s here vs ~1200s there (cold guess + gate) is under 2x.
+    let (local, peers) = pull_world(700.0, PSI);
+    let v = pull(&[forwarded()], &local, &peers, &Policy::default());
+    assert!(!v.pulls() && v.line.contains("needs >="), "{v:?}");
+    let loose = Policy {
+        min_ratio: 1.0,
+        min_gain_s: 0.0,
+        ..Policy::default()
+    };
+    assert!(pull(&[forwarded()], &local, &peers, &loose).pulls());
+    // Two forwards: the first takes the slot.
+    let (local, peers) = pull_world(300.0, PSI);
+    let mut second = forwarded();
+    second.id = 8;
+    let out = decide_pull_back(
+        &[forwarded(), second],
+        &local,
+        2,
+        &peers,
+        &Policy::default(),
+    );
+    assert!(out[0].pulls());
+    assert!(
+        !out[1].pulls() && out[1].line.contains("goes to #7"),
+        "{:?}",
+        out[1]
+    );
+}
+
+#[test]
+fn a_job_never_flaps_back_and_forth() {
+    let (local, peers) = pull_world(300.0, PSI);
+    let mut f = forwarded();
+    f.moves = MAX_MOVES;
+    let v = pull(&[f], &local, &peers, &Policy::default());
+    assert!(!v.pulls() && v.line.contains("already moved once"), "{v:?}");
+}
+
+#[test]
+fn the_pull_back_claim_restores_the_local_spec_once() {
+    let mut l = ledger("pull-back");
+    let forward = moved(&l);
+    // The bridge runs: swap in the forward spec as a placement-chosen job has it.
+    l.store
+        .0
+        .execute(
+            "UPDATE jobs SET spec=?2 WHERE id=?1",
+            rusqlite::params![l.id, serde_json::to_string(&forward).unwrap()],
+        )
+        .unwrap();
+    let argv = l.spec_argv();
+    let pulled = pulled_spec(&forward, &argv).unwrap();
+    assert_eq!(pulled, l.spec, "the local command comes back unchanged");
+    let mut rec = record();
+    rec.state = STATE_PULLED_BACK.into();
+    // Preparing is not a running bridge.
+    assert_eq!(
+        l.store
+            .claim_pull_back(l.id, &forward, &pulled, &rec)
+            .unwrap(),
+        Claim::Refused("phase is now Preparing".into())
+    );
+    let e = l.store.execution(l.id).unwrap().unwrap();
+    l.store.update_execution(l.id, Phase::Building, e).unwrap();
+    // A changed spec is refused; the matching one is claimed.
+    assert_eq!(
+        l.store
+            .claim_pull_back(l.id, &l.spec.clone(), &pulled, &rec)
+            .unwrap(),
+        Claim::Refused("its spec changed".into())
+    );
+    assert_eq!(
+        l.store
+            .claim_pull_back(l.id, &forward, &pulled, &rec)
+            .unwrap(),
+        Claim::Claimed
+    );
+    let job = l.store.job(l.id).unwrap();
+    assert_eq!(job.spec, pulled);
+    let r = job.execution.unwrap().reroute.unwrap();
+    assert_eq!((r.moves, r.state.as_str()), (1, STATE_PULLED_BACK));
+    assert_eq!(r.original_spec.as_ref(), Some(&forward));
+    assert!(
+        r.summary().starts_with("pulled back kurukkan"),
+        "{}",
+        r.summary()
+    );
+    // The count is spent: neither a pull-back nor a move may claim it again.
+    assert_eq!(
+        l.store
+            .claim_pull_back(l.id, &pulled, &forward, &rec)
+            .unwrap(),
+        Claim::Refused("already moved once".into())
+    );
+    assert_eq!(
+        l.store
+            .claim_move(&l.dir, l.id, &pulled, &forward, &record())
+            .unwrap(),
+        Claim::Refused("phase is now Building".into())
+    );
 }
