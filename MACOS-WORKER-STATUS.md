@@ -4,7 +4,9 @@
 
 The preparation below has now been merged with the native Mac compile-boundary work.
 On ARM64 macOS, the headless coordinator links, default UI/MCP code passes `cargo check`,
-and the latest selected native checkpoint passes 189 tests. Shared controller/workload
+and the latest native selection passes 217 distinct cases (218 test executions). A
+status-only iroh diagnostic is ready for an isolated LAN pairing check, without SSH or
+worker activation; see docs/PEER-TRANSPORT-CHECK.md. Shared controller/workload
 lifetimes are now composed in an experimental guardian with real SIGKILL/lease fixtures,
 but are not integrated into the worker or ledger. The setup command remains independent
 of the daemon. Local runtime, pairing and remote execution are still explicitly blocked:

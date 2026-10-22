@@ -7,6 +7,43 @@ when built with UI); other commands reject before connecting to a daemon, creati
 submitting jobs. No macOS daemon, GUI, scheduler, recovery or local execution acceptance is
 claimed.
 
+## Latest dev merge and native iroh status check
+
+Merged `origin/dev` through `827b64e` (merge `32bbfe7`): durable step dependencies,
+`tasks steps`/MCP `submit_steps`, and forwarded-job live CPU/RAM/progress. The single
+`src/lib.rs` conflict kept incoming steps plus our shared retention/runtime modules;
+no Linux-only gate was reintroduced for shared retention. Runtime guards remain.
+
+The regular Mac daemon rejects before peer startup. For the first connection test,
+`crates/peer/examples/status_probe.rs` embeds the **existing peer library** with only
+status ALPN/services, observer allowlists and disposable identities. No daemon/SQLite,
+job/source/artifact service, status-source subprocess, existing config or service changes.
+Its diagnostic snapshot is explicitly transport-only, not real worker/admission/UI status.
+See [PEER-TRANSPORT-CHECK.md](PEER-TRANSPORT-CHECK.md) for the exact Linux/Mac setup.
+
+Native tests perform actual loopback UDP/QUIC and signed status exchange, reject an
+unknown identity, and prove jobs/source/artifact ALPNs cannot negotiate. The Mac also
+completed a two-second bind on its actual LAN interface, with zero relays/address lookup,
+no allowed peers and execution disabled, then shut down normally. A new random disposable
+key was created outside Git (0600 in a 0700 directory), not substituted for any existing
+key. **No cross-machine Linux handshake is claimed:** the Linux probe's verified public ID
+is needed before allowing it and starting the timed listener for the real check.
+
+Validation: **217 distinct cases, 218 passing test executions**, zero failed/ignored.
+The prior selected regression commands contribute 189 executions, incoming library/CLI
+steps/dependency/live-metric tests 20, headless MCP unit tests 6, and the transport example
+3. The confirmed-cancel test matches two existing filters and is counted once in the
+distinct total. Other root tests and Linux-only native metrics remain unrun. Headless and
+default-feature checks, headless/MCP and platform/peer all-target warning-denied Clippy,
+owned-file formatting/diff checks and the standalone probe build passed. Default-feature
+metadata checks are not UI link/launch acceptance. Logs/identities stay outside Git.
+
+The first deliverable is Linux -> iroh -> Mac task-manager build, then UI build/launch;
+Tinline macOS/iOS is later. Transport success alone cannot enable the blocked Mac worker.
+Admission/memory semantics, native holder/error observation, FD policy and ledger/recovery
+integration still require acceptance. No reserve lowering, service install/restart or
+implicit relay/SSH setup was performed.
+
 ## Composed shared supervisor checkpoint (experimental)
 
 `crates/platform/src/supervisor.rs` now composes both lifetimes in a separate guardian:
