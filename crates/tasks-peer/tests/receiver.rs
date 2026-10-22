@@ -198,34 +198,41 @@ fn unsynced_checkouts_and_unsafe_cwds_are_refused() {
 }
 
 #[test]
-fn a_resync_of_a_checkout_with_a_live_remote_job_is_refused_busy_until_it_ends() {
+fn r308_a_resync_of_a_checkout_with_a_live_remote_job_is_refused_busy_until_it_ends() {
     let w = synced_world();
     let checkout = CheckoutId::derive("laptop", &w.root);
     let resync = |w: &World| {
-        conn(w).request(Body::SyncHaveRequest {
+        conn(w).request(Body::SyncOffer {
             checkout: CheckoutId::derive("laptop", &w.root),
-            hashes: vec![],
+            repo: CheckoutId::derive("laptop", &w.root.join(".git")),
         })
     };
     assert!(matches!(
         resync(&w),
         Err(PeerError::Refused(Refusal::Busy { checkout: ref c })) if *c == checkout
     ));
-    let page = conn(&w).request(Body::SyncManifestPage {
+    let tree = tasks_peer::GitId::parse(&"b".repeat(40)).unwrap();
+    let apply = conn(&w).request(Body::SyncApply(tasks_peer::proto::SyncApply {
         checkout: checkout.clone(),
+        repo: CheckoutId::derive("laptop", &w.root.join(".git")),
         session: 1,
-        index: 0,
-        last: true,
-        entries: vec![],
-    });
+        tree,
+        extras_tree: None,
+        commit: None,
+        base: None,
+        dirty: 0,
+        files: 0,
+        pack_bytes: 0,
+        pack_sha256: None,
+    }));
     assert!(matches!(
-        page,
+        apply,
         Err(PeerError::Refused(Refusal::Busy { .. }))
     ));
     // another checkout of the same peer is not affected
-    let other = conn(&w).request(Body::SyncHaveRequest {
+    let other = conn(&w).request(Body::SyncOffer {
         checkout: CheckoutId::derive("laptop", std::path::Path::new("/elsewhere")),
-        hashes: vec![],
+        repo: CheckoutId::derive("laptop", &w.root.join(".git")),
     });
     assert!(!matches!(
         other,

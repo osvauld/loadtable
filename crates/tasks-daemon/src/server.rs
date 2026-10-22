@@ -152,11 +152,16 @@ impl Daemon {
         let mut keepalive = None;
         if let Some(rt) = peer_rt {
             sch.set_trust(rt.trust);
+            for hook in rt.maintenance {
+                sch.add_maintenance(hook);
+            }
             if let Some(serve) = rt.serving {
-                serve(crate::peer_link::serve::build_receiver(
+                let store = crate::peer_link::serve::build_store(
                     &sch,
                     sch.config().state_dir.join("peer-store"),
-                ));
+                );
+                sch.add_maintenance(crate::peer_link::serve::sweep_hook(&sch, store.clone()));
+                serve(crate::peer_link::serve::build_receiver_with(&sch, store));
             }
             keepalive = Some(rt.keepalive);
         }

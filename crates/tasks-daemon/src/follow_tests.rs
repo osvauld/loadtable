@@ -8,6 +8,7 @@ use crate::testkit::{FakeForwarder, FakeProcs, Rig, TempDir};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tasks_core::plan::{Plan, Step};
 use tasks_core::{
     JobId, Kind, MachineName, Phase, Placement, Requirements, SplitOrigin, StepHints, WaitReason,
@@ -49,6 +50,20 @@ fn key(recipe: &str, target: Option<&str>, machine: &str) -> SampleKey {
         recipe: recipe.into(),
         target: target.map(str::to_string),
         machine: machine.into(),
+    }
+}
+
+/// The samples filed under `k` once `n` have arrived. A split piece's per-target samples are
+/// written after the job's own terminal write, so reading right after `until_done` races them
+/// when the machine is busy.
+fn samples_when(r: &Rig, k: &SampleKey, n: usize) -> Vec<Sample> {
+    let t0 = Instant::now();
+    loop {
+        let s = r.store.samples(k).unwrap();
+        if s.len() >= n || t0.elapsed() > Duration::from_secs(5) {
+            return s;
+        }
+        std::thread::sleep(Duration::from_millis(2));
     }
 }
 
@@ -605,10 +620,7 @@ fn r114_a_split_piece_teaches_the_unsplit_recipe_its_target() {
         }),
     );
     assert_eq!(r.until_done(id), Phase::Passed);
-    let filed = r
-        .store
-        .samples(&key(unsplit, Some("test:a"), "testbox"))
-        .unwrap();
+    let filed = samples_when(&r, &key(unsplit, Some("test:a"), "testbox"), 1);
     assert_eq!(
         filed.len(),
         1,
@@ -664,10 +676,7 @@ fn r114_a_failed_piece_is_filed_as_failed_and_a_cancelled_one_as_cancelled() {
         }),
     );
     assert!(matches!(r.until_done(id), Phase::Failed { .. }));
-    let filed = r
-        .store
-        .samples(&key(unsplit, Some("test:a"), "testbox"))
-        .unwrap();
+    let filed = samples_when(&r, &key(unsplit, Some("test:a"), "testbox"), 1);
     assert_eq!(filed.len(), 1);
     assert_eq!(filed[0].outcome, Outcome::Failed);
 }

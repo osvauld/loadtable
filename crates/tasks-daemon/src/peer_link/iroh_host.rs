@@ -19,6 +19,7 @@ use tasks_ledger::SystemClock;
 use tasks_peer::iroh::{
     EndpointAddrs, EndpointOptions, IrohError, IrohTransport, RelayChoice, endpoint, serve,
 };
+use tasks_peer::sync::{GixSnapshot, GixTransfer, OriginRetention, OriginSync, SyncLimits};
 use tasks_peer::trust::{AddressBook, TrustedHandler, TrustedTransport};
 use tasks_peer::{Handler, Receiver};
 use thiserror::Error;
@@ -101,7 +102,18 @@ impl PeerRuntimeFactory for IrohFactory {
             Some(trusted.clone()),
             Arc::new(EndpointAddrs(host.endpoint.clone())),
         );
-        let mut opts = PeerLinkOptions::new(&cfg.machine, Vec::new());
+        let origin = Arc::new(
+            OriginSync::new(
+                Arc::new(GixSnapshot::new(&cfg.state_dir)),
+                Arc::new(GixTransfer::new()),
+                SyncLimits::default(),
+                cfg.state_dir.clone(),
+            )
+            .with_extras(Arc::new(super::PolicyExtras))
+            .with_observer(Arc::new(crate::audited::AuditSync::new(ctx.audit.clone()))),
+        );
+        let prune = origin.clone();
+        let mut opts = PeerLinkOptions::new(&cfg.machine, Vec::new(), origin);
         opts.source = Some(Arc::new(NodePeers(rt.node.clone())));
         opts.observer = Some(Arc::new(crate::audited::AuditLinks::new(
             ctx.audit.clone(),
@@ -121,6 +133,10 @@ impl PeerRuntimeFactory for IrohFactory {
             trust: Arc::new(trust),
             serving: Some(serving),
             keepalive: Box::new((host, rt)),
+            // the origin's snapshot objects: only the newest per checkout stay
+            maintenance: vec![Box::new(move |_policy| {
+                prune.prune(&OriginRetention::default());
+            })],
         })
     }
 }

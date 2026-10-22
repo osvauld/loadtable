@@ -17,9 +17,8 @@
 
 use crate::ids::{CheckoutId, IdError, PeerId, RemoteJobId, SubmitKey};
 use crate::locks::{Acquire, CheckoutLocks, LockOwner};
-use crate::manifest::{FileLister, SyncLimits, build_manifest};
 use crate::proto::{Body, JobEvent, Refusal, SubmitJob, Submitted, WireOutcome};
-use crate::sync::{SyncError, SyncReport, SyncSource, push_checkout};
+use crate::sync::{SyncDriver, SyncError, SyncJob, SyncReport};
 use crate::transport::{Connection, EventStream, PeerError, StreamPoll, Transport};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -46,8 +45,6 @@ pub struct ForwardPolicy {
     pub remote_queue_timeout: Option<Duration>,
     /// Most events handled per tick.
     pub max_events_per_tick: usize,
-    /// Sync limits.
-    pub sync_limits: SyncLimits,
 }
 
 impl Default for ForwardPolicy {
@@ -61,7 +58,6 @@ impl Default for ForwardPolicy {
             cancel_grace: Duration::from_secs(30),
             remote_queue_timeout: None,
             max_events_per_tick: 256,
-            sync_limits: SyncLimits::default(),
         }
     }
 }
@@ -132,10 +128,8 @@ impl ForwardJob {
 pub struct ForwardIo<'a> {
     /// Opens links.
     pub transport: &'a dyn Transport,
-    /// Lists the checkout's files.
-    pub lister: &'a dyn FileLister,
-    /// Reads file bytes for the sync.
-    pub source: &'a dyn SyncSource,
+    /// Snapshots the checkout and syncs it to the peer.
+    pub sync: &'a dyn SyncDriver,
     /// The local log.
     pub log: &'a mut dyn LogSink,
 }
@@ -445,35 +439,34 @@ impl Forward {
         if now < self.next_try {
             return;
         }
-        let result = (|| -> Result<SyncReport, (String, bool)> {
-            let report = build_manifest(&self.job.root, io.lister, &self.policy.sync_limits)
-                .map_err(|e| (e.to_string(), false))?;
-            self.connect(io).map_err(|e| (e.to_string(), false))?;
+        let result = (|| -> Result<SyncReport, (String, bool, bool)> {
+            self.connect(io)
+                .map_err(|e| (e.to_string(), false, false))?;
             let conn = self
                 .conn
                 .as_mut()
-                .ok_or(("no connection".to_string(), false))?;
-            push_checkout(
-                conn.as_mut(),
-                &self.checkout,
-                &report,
-                io.source,
-                u64::try_from(self.job.local_id)
-                    .unwrap_or(0)
-                    .wrapping_add(attempt as u64),
-            )
-            .map_err(|e: SyncError| {
-                let busy = matches!(
-                    &e,
-                    SyncError::Peer(PeerError::Refused(Refusal::Busy { .. }))
-                );
-                (e.to_string(), busy)
-            })
+                .ok_or(("no connection".to_string(), false, false))?;
+            io.sync
+                .push(
+                    conn.as_mut(),
+                    &SyncJob {
+                        root: &self.job.root,
+                        checkout: &self.checkout,
+                        origin_host: &self.job.origin_host,
+                        peer: &self.job.peer,
+                        local_job: self.job.local_id,
+                        session: u64::try_from(self.job.local_id)
+                            .unwrap_or(0)
+                            .wrapping_mul(1000)
+                            .wrapping_add(u64::from(attempt)),
+                    },
+                )
+                .map_err(|e: SyncError| (e.to_string(), e.is_busy(), e.is_fatal()))
         })();
         match result {
             // The peer still runs an earlier job from this checkout: wait for it without
             // spending a sync attempt, but not for ever, and nothing has been submitted.
-            Err((e, true)) => {
+            Err((e, true, _)) => {
                 self.conn = None;
                 let since = *self.busy_since.get_or_insert(now);
                 if now.saturating_sub(since) >= self.policy.lost_grace {
@@ -506,7 +499,15 @@ impl Forward {
                 self.sync_report = Some(rep);
                 self.state = ForwardState::Submitting;
             }
-            Err((e, _)) if attempt < self.policy.sync_attempts => {
+            // refused by name (LFS pointer, secret, size): trying again cannot change that
+            Err((e, _, true)) => self.finish_unsubmitted(
+                Phase::Failed { exit: None },
+                format!(
+                    "sync to {} refused: {e}; nothing was submitted",
+                    self.job.peer
+                ),
+            ),
+            Err((e, _, false)) if attempt < self.policy.sync_attempts => {
                 self.notes
                     .push(format!("sync attempt {attempt} failed ({e}); retrying"));
                 self.conn = None;
@@ -515,7 +516,7 @@ impl Forward {
                     attempt: attempt + 1,
                 };
             }
-            Err((e, _)) => self.finish_unsubmitted(
+            Err((e, _, _)) => self.finish_unsubmitted(
                 Phase::Failed { exit: None },
                 format!(
                     "sync to {} failed after {attempt} attempts: {e}; nothing was submitted",

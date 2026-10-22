@@ -155,6 +155,8 @@ pub struct Scheduler {
     pub(crate) audit: Mutex<Option<Arc<crate::audited::AuditSink>>>,
     /// Trust control (identity, pairing, peers); set by the daemon when the trust runtime is up.
     pub(crate) trust: Mutex<Option<Arc<dyn crate::trust_control::TrustControl>>>,
+    /// Extra hourly work from the peer runtime (sync retention).
+    pub(crate) maintenance_hooks: Mutex<Vec<crate::trust_runtime::MaintenanceHook>>,
     pub(crate) state: Mutex<TickState>,
     pub(crate) wake: Wake,
     pub(crate) draining: AtomicBool,
@@ -187,6 +189,7 @@ impl Scheduler {
             alerts: Mutex::new(AlertBook::new()),
             audit: Mutex::new(None),
             trust: Mutex::new(None),
+            maintenance_hooks: Mutex::new(Vec::new()),
             state: Mutex::new(TickState::default()),
             wake: Wake::default(),
             draining: AtomicBool::new(false),
@@ -206,6 +209,11 @@ impl Scheduler {
             a.set_trust(trust.clone());
         }
         *lock(&self.trust) = Some(trust);
+    }
+
+    /// Adds work to the hourly maintenance (sync retention).
+    pub fn add_maintenance(&self, hook: crate::trust_runtime::MaintenanceHook) {
+        lock(&self.maintenance_hooks).push(hook);
     }
 
     /// Plugs in the audit log: `Audit*` requests, drain and refusal rows, retention.

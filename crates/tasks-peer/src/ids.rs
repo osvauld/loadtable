@@ -284,6 +284,54 @@ impl fmt::Display for Hash {
     }
 }
 
+/// A git object id: 40 (SHA-1) or 64 (SHA-256) lowercase hex characters.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct GitId(String);
+
+impl GitId {
+    /// Parses 40 or 64 lowercase hex characters.
+    pub fn parse(s: &str) -> Result<GitId, IdError> {
+        if (s.len() == 40 || s.len() == 64) && unhex(s).is_some() {
+            Ok(GitId(s.to_string()))
+        } else {
+            Err(IdError::BadHex {
+                what: "git object id",
+                len: 40,
+            })
+        }
+    }
+    /// The full hex text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+    /// The first 12 characters, for log lines.
+    pub fn short(&self) -> &str {
+        self.0.get(..12).unwrap_or(&self.0)
+    }
+}
+impl TryFrom<String> for GitId {
+    type Error = IdError;
+    fn try_from(s: String) -> Result<Self, IdError> {
+        GitId::parse(&s)
+    }
+}
+impl From<GitId> for String {
+    fn from(p: GitId) -> String {
+        p.0
+    }
+}
+impl fmt::Debug for GitId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "GitId({})", self.short())
+    }
+}
+impl fmt::Display for GitId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,6 +361,20 @@ mod tests {
         assert_ne!(a, CheckoutId::derive("laptop", Path::new("/w/b")));
         assert!(CheckoutId::parse(a.as_str()).is_ok());
         assert!(CheckoutId::parse("../../etc").is_err());
+    }
+
+    #[test]
+    fn r296_git_ids_are_sha1_or_sha256_hex_and_nothing_else() {
+        let sha1 = "a".repeat(40);
+        let sha256 = "0123456789abcdef".repeat(4);
+        assert_eq!(GitId::parse(&sha1).unwrap().short(), "aaaaaaaaaaaa");
+        assert!(GitId::parse(&sha256).is_ok());
+        assert!(GitId::parse(&"a".repeat(39)).is_err());
+        assert!(GitId::parse(&"A".repeat(40)).is_err());
+        assert!(GitId::parse("../../etc").is_err());
+        let json = serde_json::to_string(&GitId::parse(&sha1).unwrap()).unwrap();
+        assert!(serde_json::from_str::<GitId>(&json).is_ok());
+        assert!(serde_json::from_str::<GitId>("\"zz\"").is_err());
     }
 
     #[test]

@@ -365,3 +365,35 @@ fn an_unknown_peer_is_a_named_error() {
         .unwrap_err();
     assert!(e.to_string().contains("ghost"));
 }
+
+// R-322
+#[test]
+fn r322_the_repo_run_policy_names_the_ignored_files_that_travel() {
+    use tasks_peer::sync::ExtrasProvider;
+    let w = PeerWorld::new();
+    let none = super::PolicyExtras.extras(&w.root_a);
+    assert_eq!(none, Ok(Vec::new()), "no policy file means no extras");
+    std::fs::create_dir_all(w.root_a.join(".tasks")).unwrap();
+    std::fs::write(
+        w.root_a.join(".tasks/run-policy.toml"),
+        "version = 1\n[sync]\nextra = [\"local.properties\", \"config/*.json\"]\n",
+    )
+    .unwrap();
+    assert_eq!(
+        super::PolicyExtras.extras(&w.root_a),
+        Ok(vec![
+            "local.properties".to_string(),
+            "config/*.json".to_string()
+        ])
+    );
+    std::fs::write(
+        w.root_a.join(".tasks/run-policy.toml"),
+        "version = 1\n[sync]\nextra = [\"../x\"]\n",
+    )
+    .unwrap();
+    let bad = super::PolicyExtras.extras(&w.root_a).unwrap_err();
+    assert!(
+        bad.contains("run policy cannot be used") && bad.contains("[sync] extra"),
+        "{bad}"
+    );
+}

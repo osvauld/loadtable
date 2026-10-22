@@ -34,8 +34,8 @@ use std::sync::{Arc, Mutex, TryLockError};
 use std::time::{Duration, Instant};
 use tasks_core::{Arch, JobId, Machine, MachineName, Os, SlotKind};
 use tasks_ledger::JobRecord;
-use tasks_peer::manifest::FileLister;
 use tasks_peer::proto::{Body, PeerStatus};
+use tasks_peer::sync::SyncDriver;
 use tasks_peer::transport::{LinkInfo as PathInfo, PeerError, Transport};
 use tasks_peer::{
     CheckoutId, CheckoutLocks, Forward, ForwardJob, ForwardPolicy, LockOwner, PeerId, Refusal,
@@ -80,6 +80,20 @@ pub trait LinkObserver: Send + Sync {
     fn changed(&self, peer: &PeerSpec, change: LinkChange);
 }
 
+/// Reads the files that must travel with a checkout beyond its git working tree from the repo's
+/// run policy (`[sync] extra` in `.tasks/run-policy.toml`). No policy file means none.
+pub struct PolicyExtras;
+
+impl tasks_peer::sync::ExtrasProvider for PolicyExtras {
+    fn extras(&self, root: &Path) -> Result<Vec<String>, String> {
+        match tasks_policy::load(&tasks_policy::RealFs, root) {
+            Ok(loaded) => Ok(loaded.policy.sync.extra),
+            Err(tasks_policy::PolicyError::NotFound(_)) => Ok(Vec::new()),
+            Err(e) => Err(format!("the repo run policy cannot be used: {e}")),
+        }
+    }
+}
+
 /// How the adapter behaves. [`PeerLinkOptions::new`] gives the production values.
 #[derive(Clone)]
 pub struct PeerLinkOptions {
@@ -91,8 +105,8 @@ pub struct PeerLinkOptions {
     pub source: Option<Arc<dyn PeerSource>>,
     /// Forward timeouts and retry knobs.
     pub policy: ForwardPolicy,
-    /// Lists a checkout's files for the sync (`git ls-files` in production).
-    pub lister: Arc<dyn FileLister + Send + Sync>,
+    /// Snapshots a checkout and syncs it to a worker (git objects over the link).
+    pub sync: Arc<dyn SyncDriver>,
     /// How often peer status is probed.
     pub status_every: Duration,
     /// A peer that answered but not this recently is `Stale`.
@@ -108,15 +122,18 @@ pub struct PeerLinkOptions {
 }
 
 impl PeerLinkOptions {
-    /// Production values: probe every 5 s, stale after 20 s, a driver tick every 50 ms, git
-    /// listing.
-    pub fn new(local_name: &str, peers: Vec<PeerSpec>) -> PeerLinkOptions {
+    /// Production values: probe every 5 s, stale after 20 s, a driver tick every 50 ms.
+    pub fn new(
+        local_name: &str,
+        peers: Vec<PeerSpec>,
+        sync: Arc<dyn SyncDriver>,
+    ) -> PeerLinkOptions {
         PeerLinkOptions {
             local_name: local_name.to_string(),
             peers,
             source: None,
             policy: ForwardPolicy::default(),
-            lister: Arc::new(tasks_peer::manifest::GitLister),
+            sync,
             status_every: Duration::from_secs(5),
             stale_after: Duration::from_secs(20),
             probe_timeout: Duration::from_secs(5),
@@ -139,7 +156,6 @@ pub(crate) struct Published {
 /// One registered job.
 pub(crate) struct Job {
     pub id: JobId,
-    pub root: PathBuf,
     pub checkout: CheckoutId,
     /// The checkout lock a resumed job holds while it is followed, so later forwards of the
     /// same checkout wait for it instead of syncing over its files.
@@ -570,7 +586,6 @@ impl<T: Transport + 'static> Forwarder for PeerLink<T> {
         let entry = Arc::new(Job {
             id: rec.id,
             checkout: CheckoutId::derive(&self.inner.opts.local_name, &root),
-            root,
             resumed_lock: None,
             ticket: ticket.clone(),
             fwd: Mutex::new(Some(fwd)),
@@ -646,7 +661,6 @@ impl<T: Transport + 'static> Forwarder for PeerLink<T> {
         let entry = Arc::new(Job {
             id: rec.id,
             checkout: checkout.clone(),
-            root,
             resumed_lock: Some((checkout, owner)),
             ticket: ForwardTicket {
                 remote_job: fw.remote_job,

@@ -578,6 +578,89 @@ fn r292_old_rows_are_pruned_by_the_policys_retention_and_the_chain_still_verifie
     assert!(v.pruned_before.is_some());
 }
 
+// R-315
+#[test]
+fn r315_sync_traffic_refusals_and_retention_are_audited_with_tree_ids_and_bytes() {
+    use tasks_peer::sync::{Deleted, SyncEvent, SyncObserver};
+    let clock = Arc::new(ManualClock::new(1_000_000));
+    let store = Arc::new(MemoryAudit::new());
+    let sink = AuditSink::new(Arc::new(AuditLog::new(store.clone(), clock, "did:key:zMe")));
+    sink.set_trust(stub_with(&[("laptop", "did:key:zLaptop")]));
+    let obs = crate::audited::AuditSync::new(sink);
+    let peer = PeerId::new("laptop-node").unwrap();
+    let checkout = tasks_peer::CheckoutId::derive("laptop", std::path::Path::new("/w"));
+    let id = |c: char| tasks_peer::GitId::parse(&c.to_string().repeat(40)).unwrap();
+    obs.event(&SyncEvent::Sent {
+        peer: peer.clone(),
+        checkout: checkout.clone(),
+        job: Some(7),
+        tree: id('a'),
+        base: Some(id('b')),
+        dirty: 3,
+        files: 120,
+        bytes: 4096,
+    });
+    obs.event(&SyncEvent::Received {
+        peer: peer.clone(),
+        checkout: checkout.clone(),
+        tree: id('a'),
+        bytes: 4096,
+        written: 3,
+        removed: 1,
+    });
+    obs.event(&SyncEvent::Refused {
+        peer: peer.clone(),
+        checkout: checkout.clone(),
+        job: Some(8),
+        files: vec![("models/net.bin".into(), "lfs_pointer")],
+    });
+    obs.event(&SyncEvent::Deleted {
+        kind: Deleted::WorkingCopy,
+        peer: Some(peer),
+        target: checkout.to_string(),
+        bytes: 123_456,
+    });
+    obs.event(&SyncEvent::Deleted {
+        kind: Deleted::OriginObjects,
+        peer: None,
+        target: "repo".into(),
+        bytes: 9,
+    });
+    let rows = store.scan(0, 100).unwrap();
+    assert_eq!(
+        acts(&rows),
+        [
+            "data.sync_sent",
+            "data.sync_received",
+            "data.sync_refused",
+            "data.retention",
+            "data.retention"
+        ]
+    );
+    let sent = rows[0].details_json();
+    assert_eq!(rows[0].peer.as_deref(), Some("did:key:zLaptop"));
+    assert_eq!(rows[0].job, Some(7));
+    assert_eq!(sent["tree"], "a".repeat(40));
+    assert_eq!(sent["base"], "b".repeat(40));
+    assert_eq!(
+        (sent["bytes"].as_u64(), sent["dirty_files"].as_u64()),
+        (Some(4096), Some(3))
+    );
+    assert_eq!(rows[1].details_json()["written"], 3);
+    assert_eq!(
+        rows[2].details_json()["files"][0],
+        "models/net.bin: lfs_pointer"
+    );
+    let del = rows[3].details_json();
+    assert_eq!(
+        (del["what"].as_str(), del["bytes_freed"].as_u64()),
+        (Some("working_copy"), Some(123_456))
+    );
+    assert_eq!(rows[3].peer.as_deref(), Some("did:key:zLaptop"));
+    assert_eq!(rows[4].details_json()["what"], "origin_objects");
+    assert_eq!(rows[4].peer, None);
+}
+
 // R-293
 #[test]
 fn r293_link_probes_that_find_nothing_new_add_no_rows_and_state_changes_add_one_each() {

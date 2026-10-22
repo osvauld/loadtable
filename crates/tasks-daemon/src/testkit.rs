@@ -606,14 +606,17 @@ impl PeerWorld {
     pub fn new() -> PeerWorld {
         let dir = TempDir::new("peerworld");
         let mk = |name: &str| {
+            use tasks_peer::sync::testrepo;
             let root = dir.path().join("origin").join(name);
             std::fs::create_dir_all(root.join("src")).unwrap();
+            testrepo::init_repo(&root).unwrap();
             std::fs::write(root.join("Cargo.toml"), "[package]\n").unwrap();
             std::fs::write(
                 root.join("src/main.rs"),
                 format!("fn main() {{}} // {name}\n"),
             )
             .unwrap();
+            testrepo::commit_all(&root, "initial").unwrap();
             root
         };
         let (root_a, root_b) = (mk("a"), mk("b"));
@@ -638,7 +641,7 @@ impl PeerWorld {
     /// store, as after a restart of the worker.
     pub fn restart_worker(&self) {
         use tasks_peer::receiver::{AllowAll, Allowlist, Receiver};
-        use tasks_peer::store::{CheckoutStore, StoreLimits};
+        use tasks_peer::sync::{GixTransfer, SyncLimits, SyncStore};
         let status = tasks_peer::proto::PeerStatus {
             machine: tasks_core::Machine {
                 name: MachineName("nixos".into()),
@@ -663,9 +666,10 @@ impl PeerWorld {
         let r = Receiver::new(
             "nixos",
             Allowlist::new([self.origin.clone()]),
-            Arc::new(CheckoutStore::new(
+            Arc::new(SyncStore::new(
                 self.dir.path().join("peer-store"),
-                StoreLimits::default(),
+                SyncLimits::default(),
+                Arc::new(GixTransfer::new()),
             )),
             self.runner.clone(),
             Arc::new(tasks_peer::fake::FakeStatus(status)),
@@ -679,6 +683,14 @@ impl PeerWorld {
     /// Options for a link whose timeouts are short enough for a test.
     pub fn options(&self) -> crate::peer_link::PeerLinkOptions {
         use crate::peer_link::PeerLinkOptions;
+        use tasks_peer::sync::{GixSnapshot, GixTransfer, OriginSync, SyncLimits};
+        let state = self.dir.path().join("origin-state");
+        let origin = OriginSync::new(
+            Arc::new(GixSnapshot::new(&state)),
+            Arc::new(GixTransfer::new()),
+            SyncLimits::default(),
+            &state,
+        );
         let mut o = PeerLinkOptions::new(
             "laptop",
             vec![crate::peers_config::PeerSpec {
@@ -686,6 +698,7 @@ impl PeerWorld {
                 node_id: self.nixos.clone(),
                 did: String::new(),
             }],
+            Arc::new(origin),
         );
         o.policy.reattach_interval = Duration::from_millis(5);
         o.policy.lost_grace = Duration::from_secs(30);
@@ -694,10 +707,6 @@ impl PeerWorld {
         o.tick_every = Duration::from_millis(2);
         o.stale_after = Duration::from_secs(20);
         o.background_status = false;
-        o.lister = Arc::new(tasks_peer::manifest::StaticLister(vec![
-            "Cargo.toml".into(),
-            "src/main.rs".into(),
-        ]));
         o
     }
 

@@ -235,6 +235,13 @@ const FIELDS: &[Field] = &[
         "200",
     ),
     f(
+        "sync.idle_days",
+        "TASKS_SYNC_IDLE_DAYS",
+        Ty::Uint(1, 3650),
+        "7",
+    ),
+    f("sync.gc_days", "TASKS_SYNC_GC_DAYS", Ty::Uint(1, 365), "7"),
+    f(
         "audit.retention_days",
         "TASKS_AUDIT_RETENTION_DAYS",
         Ty::OptUint(1, 3650),
@@ -742,6 +749,16 @@ impl MachinePolicy {
                 .and_then(|v| usize::try_from(v).ok()),
         }
     }
+    /// How long a synced working copy may sit unused, and how often mirrors are collected
+    /// (design §6 retention).
+    pub fn sync_retention(&self) -> tasks_peer::sync::WorkerRetention {
+        let day = |d: u64| Duration::from_secs(d.saturating_mul(86_400));
+        tasks_peer::sync::WorkerRetention {
+            idle: day(self.u("sync.idle_days")),
+            gc_every: day(self.u("sync.gc_days")),
+            ..tasks_peer::sync::WorkerRetention::default()
+        }
+    }
     /// How long audit rows are kept (design D5); `None` keeps them for good.
     pub fn audit_retention(&self) -> Option<Duration> {
         self.ou("audit.retention_days")
@@ -1022,6 +1039,28 @@ mod tests {
             Some(Duration::from_secs(30 * 86_400))
         );
         let bad = MachinePolicy::from_text(Some("[audit]\nretention_days = 0\n"), &no_env);
+        assert!(!bad.problems.is_empty());
+    }
+
+    // R-321
+    #[test]
+    fn r321_synced_copies_idle_for_seven_days_go_and_mirrors_are_collected_weekly() {
+        let d = MachinePolicy::defaults().sync_retention();
+        assert_eq!(d.idle, Duration::from_secs(7 * 86_400));
+        assert_eq!(d.gc_every, Duration::from_secs(7 * 86_400));
+        let p = MachinePolicy::from_text(Some("[sync]\nidle_days = 2\ngc_days = 30\n"), &no_env);
+        assert!(p.problems.is_empty(), "{:?}", p.problems);
+        let r = p.sync_retention();
+        assert_eq!(
+            (r.idle, r.gc_every),
+            (
+                Duration::from_secs(2 * 86_400),
+                Duration::from_secs(30 * 86_400)
+            )
+        );
+        let env = MachinePolicy::from_text(None, &env1("TASKS_SYNC_IDLE_DAYS", "3"));
+        assert_eq!(env.sync_retention().idle, Duration::from_secs(3 * 86_400));
+        let bad = MachinePolicy::from_text(Some("[sync]\nidle_days = 0\n"), &no_env);
         assert!(!bad.problems.is_empty());
     }
 

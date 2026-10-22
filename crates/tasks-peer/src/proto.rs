@@ -4,7 +4,7 @@
 //! older version, an unknown message or an oversized frame is answered with a
 //! named [`Refusal`]; decoding never panics and never waits for more input.
 
-use crate::ids::{CheckoutId, Hash, RemoteJobId, SubmitKey, hexbytes};
+use crate::ids::{CheckoutId, GitId, Hash, RemoteJobId, SubmitKey, hexbytes};
 use crate::trust::wire::{PairDone, PairRedeem, PresentAck};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -23,16 +23,12 @@ pub const ALPN: &[u8] = b"tasks/1";
 pub const MAX_CHUNK_BYTES: usize = 128 * 1024;
 /// Limit for small control messages.
 pub const MAX_CONTROL_BYTES: usize = 64 * 1024;
-/// Limit for one manifest page.
-pub const MAX_MANIFEST_PAGE_BYTES: usize = 256 * 1024;
 /// Limit for a message carrying one data chunk (hex doubles it, plus framing).
 pub const MAX_DATA_FRAME_BYTES: usize = MAX_CHUNK_BYTES * 2 + 4 * 1024;
 /// Absolute ceiling for any frame, checked before parsing.
 pub const MAX_FRAME_BYTES: usize = MAX_DATA_FRAME_BYTES;
-/// Most hashes in one have-request.
-pub const MAX_HASHES_PER_REQUEST: usize = 512;
-/// Most entries in one manifest page.
-pub const MAX_ENTRIES_PER_PAGE: usize = 1024;
+/// Most snapshots a worker reports in one [`Body::SyncHave`].
+pub const MAX_SYNC_TIPS: usize = 32;
 /// Most paths in one fetch listing request.
 pub const MAX_FETCH_PATHS: usize = 256;
 /// Longest relative path accepted on the wire.
@@ -110,11 +106,17 @@ pub enum Refusal {
         /// The offset to resume from.
         expected: u64,
     },
-    /// The manifest names blobs the receiver does not have.
-    #[error("{} blobs are still missing", missing.len())]
-    Incomplete {
-        /// Hashes still needed (at most a page of them).
-        missing: Vec<Hash>,
+    /// The pack did not arrive whole, or git rejected it.
+    #[error("pack refused: {detail}")]
+    BadPack {
+        /// What was wrong.
+        detail: String,
+    },
+    /// The sync names objects the receiver does not have (and was sent no pack for).
+    #[error("objects missing on the receiver: {what}")]
+    MissingObjects {
+        /// Which.
+        what: String,
     },
     /// Received content does not match its hash.
     #[error("content does not match its hash")]
@@ -175,8 +177,8 @@ impl Capability {
     pub const STATUS: &'static str = "status";
     /// Forwarded jobs.
     pub const JOBS: &'static str = "jobs";
-    /// Checkout sync.
-    pub const SYNC: &'static str = "sync";
+    /// Checkout sync as git objects (tree ids, thin packs).
+    pub const SYNC: &'static str = "sync-git";
     /// Output fetch.
     pub const FETCH: &'static str = "fetch";
     /// Log resume from an offset.
@@ -504,23 +506,52 @@ pub enum CancelState {
     AlreadyFinished,
 }
 
-/// One file of a manifest.
+/// A snapshot the worker already holds: the commit the origin sent, its tree and the extras
+/// tree it was sent with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FileEntry {
-    /// Path relative to the checkout root, `/` separated.
-    pub path: String,
-    /// Content hash.
-    pub hash: Hash,
-    /// Size in bytes.
-    pub size: u64,
-    /// Executable bit.
-    pub exec: bool,
+pub struct SyncTip {
+    /// The snapshot commit.
+    pub commit: GitId,
+    /// Its tree.
+    pub tree: GitId,
+    /// The extras tree synced with it.
+    pub extras: Option<GitId>,
+}
+
+/// Finish a sync: the snapshot to apply and the pack that carried it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncApply {
+    /// The checkout.
+    pub checkout: CheckoutId,
+    /// The repo the checkout belongs to (the worker keeps one mirror per repo).
+    pub repo: CheckoutId,
+    /// Session of the pack chunks sent before.
+    pub session: u64,
+    /// Tree id of the working tree.
+    pub tree: GitId,
+    /// Tree id of the allowlisted extras.
+    pub extras_tree: Option<GitId>,
+    /// The snapshot commit the pack was built around (absent when the worker already held the
+    /// tree and no pack was sent).
+    pub commit: Option<GitId>,
+    /// HEAD of the origin's repo at snapshot time.
+    pub base: Option<GitId>,
+    /// Files that differ from HEAD.
+    pub dirty: u32,
+    /// Files in the tree.
+    pub files: u64,
+    /// Bytes of pack sent.
+    pub pack_bytes: u64,
+    /// SHA-256 of the pack bytes; required when `pack_bytes` is not 0.
+    pub pack_sha256: Option<Hash>,
 }
 
 /// Result of applying a sync.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncSummary {
-    /// Files in the new manifest.
+    /// The tree now in the working copy.
+    pub tree: GitId,
+    /// Files in the tree.
     pub files: u64,
     /// Files written or replaced.
     pub written: u64,
@@ -528,6 +559,10 @@ pub struct SyncSummary {
     pub unchanged: u64,
     /// Files removed.
     pub removed: u64,
+    /// Allowlisted extra files in place.
+    pub extras: u64,
+    /// Bytes of pack received.
+    pub pack_bytes: u64,
 }
 
 /// One answer of a fetch listing.
@@ -606,50 +641,37 @@ pub enum Body {
         /// What happened.
         state: CancelState,
     },
-    /// Which of these blobs do you have?
-    SyncHaveRequest {
+    /// Start a sync: which snapshots of this checkout do you hold?
+    SyncOffer {
         /// The checkout.
         checkout: CheckoutId,
-        /// At most [`MAX_HASHES_PER_REQUEST`] hashes.
-        hashes: Vec<Hash>,
+        /// The repo it belongs to.
+        repo: CheckoutId,
     },
-    /// The ones the receiver already has.
+    /// The snapshots the receiver holds for the repo, newest first (at most [`MAX_SYNC_TIPS`]).
     SyncHave {
-        /// Present hashes.
-        present: Vec<Hash>,
+        /// The tips.
+        tips: Vec<SyncTip>,
     },
-    /// A chunk of a blob.
-    SyncBlob {
-        /// The checkout.
-        checkout: CheckoutId,
-        /// The blob hash.
-        hash: Hash,
-        /// Offset of this chunk.
-        offset: u64,
-        /// Total blob size.
-        total: u64,
-        /// The bytes.
-        #[serde(with = "hexbytes")]
-        data: Vec<u8>,
-    },
-    /// Bytes of the blob received so far (resume point).
-    SyncBlobAck {
-        /// Received length.
-        received: u64,
-    },
-    /// One page of the full manifest; the last page commits the sync.
-    SyncManifestPage {
+    /// The next bytes of the thin pack.
+    SyncPackChunk {
         /// The checkout.
         checkout: CheckoutId,
         /// Sender-chosen session id.
         session: u64,
-        /// Page number from 0.
-        index: u32,
-        /// True on the final page.
-        last: bool,
-        /// Entries.
-        entries: Vec<FileEntry>,
+        /// Offset of this chunk; must continue where the last one ended.
+        offset: u64,
+        /// The bytes.
+        #[serde(with = "hexbytes")]
+        data: Vec<u8>,
     },
+    /// Bytes of the pack received so far.
+    SyncPackAck {
+        /// Received length.
+        received: u64,
+    },
+    /// The pack is complete: index it and make the working copy match the tree.
+    SyncApply(SyncApply),
     /// Generic acknowledgement.
     Ok,
     /// Sync applied.
@@ -725,10 +747,9 @@ impl Body {
     /// The size limit of this message.
     pub fn limit(&self) -> usize {
         match self {
-            Body::Event(JobEvent::Log { .. }) | Body::SyncBlob { .. } | Body::FetchData { .. } => {
-                MAX_DATA_FRAME_BYTES
-            }
-            Body::SyncManifestPage { .. } => MAX_MANIFEST_PAGE_BYTES,
+            Body::Event(JobEvent::Log { .. })
+            | Body::SyncPackChunk { .. }
+            | Body::FetchData { .. } => MAX_DATA_FRAME_BYTES,
             _ => MAX_CONTROL_BYTES,
         }
     }
@@ -840,17 +861,36 @@ mod tests {
             Body::Cancel {
                 remote: RemoteJobId(3),
             },
-            Body::SyncHaveRequest {
+            Body::SyncOffer {
                 checkout: c.clone(),
-                hashes: vec![h],
+                repo: c.clone(),
             },
-            Body::SyncBlob {
+            Body::SyncHave {
+                tips: vec![SyncTip {
+                    commit: GitId::parse(&"a".repeat(40)).unwrap(),
+                    tree: GitId::parse(&"b".repeat(40)).unwrap(),
+                    extras: None,
+                }],
+            },
+            Body::SyncPackChunk {
                 checkout: c.clone(),
-                hash: h,
+                session: 1,
                 offset: 0,
-                total: 1,
                 data: vec![1],
             },
+            Body::SyncApply(SyncApply {
+                checkout: c.clone(),
+                repo: c.clone(),
+                session: 1,
+                tree: GitId::parse(&"b".repeat(40)).unwrap(),
+                extras_tree: None,
+                commit: None,
+                base: None,
+                dirty: 0,
+                files: 1,
+                pack_bytes: 1,
+                pack_sha256: Some(h),
+            }),
             Body::FetchList {
                 checkout: c,
                 paths: vec!["a".into()],
@@ -992,9 +1032,9 @@ mod tests {
         // Right type, wrong field.
         let r = decode(br#"{"v":1,"body":{"type":"cancel","remote":"x"}}"#);
         assert!(matches!(r, Err(Refusal::Malformed { .. })));
-        // Bad hash text is refused at the type, not later.
+        // A bad id is refused at the type, not later.
         let r = decode(
-            br#"{"v":1,"body":{"type":"sync_have_request","checkout":"00000000000000000000000000000000","hashes":["nope"]}}"#,
+            br#"{"v":1,"body":{"type":"sync_offer","checkout":"nope","repo":"00000000000000000000000000000000"}}"#,
         );
         assert!(matches!(r, Err(Refusal::Malformed { .. })));
     }
@@ -1005,10 +1045,13 @@ mod tests {
         let big = vec![b' '; MAX_FRAME_BYTES + 1];
         assert!(matches!(decode(&big), Err(Refusal::TooLarge { .. })));
         // A control message over its own limit is refused on both sides.
-        let hashes = vec![Hash::of(b"a"); 2000];
-        let b = Body::SyncHaveRequest {
-            checkout: CheckoutId::derive("h", std::path::Path::new("/p")),
-            hashes,
+        let tip = SyncTip {
+            commit: GitId::parse(&"a".repeat(40)).unwrap(),
+            tree: GitId::parse(&"b".repeat(40)).unwrap(),
+            extras: None,
+        };
+        let b = Body::SyncHave {
+            tips: vec![tip; 2000],
         };
         assert!(
             matches!(encode(&b), Err(Refusal::TooLarge { limit, .. }) if limit == MAX_CONTROL_BYTES)

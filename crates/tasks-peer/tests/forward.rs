@@ -76,7 +76,12 @@ fn r149_a_forwarded_job_streams_its_log_mirrors_the_exit_code_and_returns_timing
     assert_eq!(r.samples.len(), 1);
     assert_eq!(r.samples[0].0.machine, "nixos");
     assert_eq!(r.samples[0].1.secs, 41.5);
-    assert!(r.sync.as_ref().unwrap().blobs_sent >= 3);
+    let sync = r.sync.as_ref().unwrap();
+    assert!(
+        sync.pack_bytes_sent > 0 && sync.files == 4,
+        "{}",
+        sync.line()
+    );
     // The spec reached the peer rewritten into the synced copy.
     assert_eq!(w.runner.submitted().len(), 1);
 }
@@ -446,6 +451,29 @@ fn r157_sync_is_retried_once_before_the_job_fails() {
 }
 
 #[test]
+fn r316_a_file_refused_by_name_ends_the_forward_at_once_without_retrying() {
+    let w = World::new();
+    write(
+        &w.root,
+        "models/net.bin",
+        "version https://git-lfs.github.com/spec/v1\noid sha256:aa\nsize 9\n",
+    );
+    let mut f = w.forward(1, fast_policy());
+    let mut log = Vec::new();
+    w.tick(&mut f, secs(1), &mut log);
+    let r = f.result().expect("ended on the first attempt, not retried");
+    assert!(r.nothing_submitted, "the job may still run here");
+    assert_eq!(r.phase, Phase::Failed { exit: None });
+    assert!(
+        r.reason.contains("models/net.bin") && r.reason.contains("Git LFS"),
+        "{}",
+        r.reason
+    );
+    assert!(w.runner.submitted().is_empty());
+    assert!(w.locks.holder(f.checkout()).is_none());
+}
+
+#[test]
 fn r3_a_job_queued_too_long_on_the_peer_is_cancelled_with_the_reason() {
     let w = World::new();
     let policy = ForwardPolicy {
@@ -524,18 +552,13 @@ fn r230_three_same_checkout_jobs_and_an_unrelated_one_all_make_progress() {
     // ready_to_start, so waiters hold nothing.
     let w = World::new();
     let other_root = w.tmp.path().join("origin/other");
-    std::fs::create_dir_all(&other_root).unwrap();
-    // Job 4's checkout has the same files (the harness lister is shared), different root.
+    make_repo(&other_root);
     let mut jobs: Vec<Forward> = vec![
         w.forward(1, fast_policy()),
         w.forward(2, fast_policy()),
         w.forward(3, fast_policy()),
         w.forward_at(4, &other_root, fast_policy()),
     ];
-    // Job 4's files must exist under its own root.
-    for rel in &w.files {
-        write(&other_root, rel, "other checkout");
-    }
     let mut logs: Vec<Vec<u8>> = vec![Vec::new(); 4];
     let mut slot_of: BTreeMap<usize, bool> = BTreeMap::new();
     let slots = 2usize;
@@ -556,16 +579,9 @@ fn r230_three_same_checkout_jobs_and_an_unrelated_one_all_make_progress() {
         }
         for i in 0..jobs.len() {
             if slot_of.contains_key(&i) {
-                let lister = w.lister();
-                let src = tasks_peer::sync::DirSource(if i == 3 {
-                    other_root.clone()
-                } else {
-                    w.root.clone()
-                });
                 let mut io = tasks_peer::ForwardIo {
                     transport: &w.transport,
-                    lister: &lister,
-                    source: &src,
+                    sync: &*w.origin_sync,
                     log: &mut logs[i],
                 };
                 jobs[i].tick(clock, &mut io);
@@ -625,22 +641,17 @@ fn r230_three_same_checkout_jobs_and_an_unrelated_one_all_make_progress() {
 fn a_waiting_forward_holds_no_traffic_and_does_not_block_other_checkouts() {
     let w = World::new();
     let other_root = w.tmp.path().join("origin/other2");
-    for rel in &w.files {
-        write(&other_root, rel, "other");
-    }
+    make_repo(&other_root);
     let mut a = w.forward(1, fast_policy());
     let mut b = w.forward(2, fast_policy());
     let mut c = w.forward_at(3, &other_root, fast_policy());
     let mut log = Vec::new();
     w.tick(&mut a, secs(1), &mut log);
     w.tick(&mut b, secs(1), &mut log);
-    let lister = w.lister();
-    let src = tasks_peer::sync::DirSource(other_root.clone());
     let mut lc = Vec::new();
     let mut io = tasks_peer::ForwardIo {
         transport: &w.transport,
-        lister: &lister,
-        source: &src,
+        sync: &*w.origin_sync,
         log: &mut lc,
     };
     c.tick(secs(1), &mut io);

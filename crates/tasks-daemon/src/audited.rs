@@ -153,6 +153,109 @@ impl crate::peer_link::LinkObserver for AuditLinks {
     }
 }
 
+/// Writes sync traffic and retention to the audit log (`data.*`, design §8): what was sent or
+/// received (tree id, bytes), files the snapshot refused by name, and every deletion with the
+/// bytes it freed.
+pub struct AuditSync {
+    sink: Arc<AuditSink>,
+}
+
+impl AuditSync {
+    /// Records into `sink`.
+    pub fn new(sink: Arc<AuditSink>) -> AuditSync {
+        AuditSync { sink }
+    }
+
+    fn peer(&self, ev: AuditEvent, node: &tasks_peer::PeerId) -> AuditEvent {
+        // a node id the trust layer does not know stays as it is
+        let did = self
+            .sink
+            .did_of_node(node.as_str())
+            .unwrap_or_else(|| node.to_string());
+        ev.peer(did)
+    }
+}
+
+fn job_of(ev: AuditEvent, job: Option<i64>) -> AuditEvent {
+    match job {
+        Some(j) => ev.job(j),
+        None => ev,
+    }
+}
+
+impl tasks_peer::sync::SyncObserver for AuditSync {
+    fn event(&self, event: &tasks_peer::sync::SyncEvent) {
+        use tasks_peer::sync::SyncEvent as E;
+        let ev = match event {
+            E::Sent {
+                peer,
+                checkout,
+                job,
+                tree,
+                base,
+                dirty,
+                files,
+                bytes,
+            } => self
+                .peer(job_of(AuditEvent::new(action::DATA_SYNC_SENT), *job), peer)
+                .target(checkout.to_string())
+                .detail("tree", tree.to_string())
+                .detail_opt("base", base.as_ref().map(ToString::to_string))
+                .detail("dirty_files", *dirty)
+                .detail("files", *files)
+                .detail("bytes", *bytes),
+            E::Received {
+                peer,
+                checkout,
+                tree,
+                bytes,
+                written,
+                removed,
+            } => self
+                .peer(AuditEvent::new(action::DATA_SYNC_RECEIVED), peer)
+                .target(checkout.to_string())
+                .detail("tree", tree.to_string())
+                .detail("bytes", *bytes)
+                .detail("written", *written)
+                .detail("removed", *removed),
+            E::Refused {
+                peer,
+                checkout,
+                job,
+                files,
+            } => self
+                .peer(
+                    job_of(AuditEvent::new(action::DATA_SYNC_REFUSED), *job),
+                    peer,
+                )
+                .target(checkout.to_string())
+                .detail(
+                    "files",
+                    files
+                        .iter()
+                        .map(|(p, why)| format!("{p}: {why}"))
+                        .collect::<Vec<_>>(),
+                ),
+            E::Deleted {
+                kind,
+                peer,
+                target,
+                bytes,
+            } => {
+                let ev = AuditEvent::new(action::DATA_RETENTION)
+                    .target(target.clone())
+                    .detail("what", kind.name())
+                    .detail("bytes_freed", *bytes);
+                match peer {
+                    Some(p) => self.peer(ev, p),
+                    None => ev,
+                }
+            }
+        };
+        self.sink.record(ev);
+    }
+}
+
 fn placement_text(p: &Placement) -> String {
     match p {
         Placement::Here => "here".to_string(),

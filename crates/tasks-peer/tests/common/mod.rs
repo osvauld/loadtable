@@ -13,24 +13,24 @@ use std::sync::Arc;
 use std::time::Duration;
 use tasks_core::{JobSpec, Kind, MachineName, Owner, Placement, Requirements};
 use tasks_peer::fake::{FakeNet, FakeRunner, FakeStatus, FakeTransport};
-use tasks_peer::manifest::StaticLister;
 use tasks_peer::outputs::FetchPolicy;
 use tasks_peer::receiver::{AllowAll, Allowlist, Receiver, SubmitPolicy};
-use tasks_peer::store::{CheckoutStore, StoreLimits};
-use tasks_peer::sync::DirSource;
+use tasks_peer::sync::{GixSnapshot, GixTransfer, OriginSync, SyncLimits, SyncStore, testrepo};
 use tasks_peer::{CheckoutLocks, Forward, ForwardIo, ForwardJob, ForwardPolicy, Handler, PeerId};
 
 pub struct World {
     pub tmp: tempfile::TempDir,
     pub net: FakeNet,
     pub runner: Arc<FakeRunner>,
-    pub store: Arc<CheckoutStore>,
+    pub store: Arc<SyncStore>,
+    /// The origin side of sync: gix snapshots, thin packs over the fake network.
+    pub origin_sync: Arc<OriginSync>,
+    pub origin_state: PathBuf,
     pub origin: PeerId,
     pub nixos: PeerId,
     pub transport: FakeTransport,
     pub locks: Arc<CheckoutLocks>,
     pub root: PathBuf,
-    pub files: Vec<String>,
 }
 
 pub fn write(root: &Path, rel: &str, body: &str) {
@@ -41,25 +41,36 @@ pub fn write(root: &Path, rel: &str, body: &str) {
     fs::write(p, body).unwrap();
 }
 
+/// A committed git repository with the three sample files, at `root`.
+pub fn make_repo(root: &Path) {
+    fs::create_dir_all(root).unwrap();
+    testrepo::init_repo(root).unwrap();
+    write(root, "Cargo.toml", "[package]\n");
+    write(root, "src/main.rs", "fn main() {}\n");
+    write(root, "tests/fixtures/run.log", "fixture log line\n");
+    write(root, ".gitignore", "target/\n");
+    testrepo::commit_all(root, "initial").unwrap();
+}
+
 impl World {
     pub fn new() -> World {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("origin/checkout");
-        fs::create_dir_all(&root).unwrap();
-        write(&root, "Cargo.toml", "[package]\n");
-        write(&root, "src/main.rs", "fn main() {}\n");
-        write(&root, "tests/fixtures/run.log", "fixture log line\n");
-        let files = vec![
-            "Cargo.toml".to_string(),
-            "src/main.rs".to_string(),
-            "tests/fixtures/run.log".to_string(),
-        ];
+        make_repo(&root);
+        let origin_state = tmp.path().join("origin-state");
+        let origin_sync = Arc::new(OriginSync::new(
+            Arc::new(GixSnapshot::new(&origin_state)),
+            Arc::new(GixTransfer::new()),
+            SyncLimits::default(),
+            &origin_state,
+        ));
         let net = FakeNet::new();
         let origin = PeerId::new("laptop-node").unwrap();
         let nixos = PeerId::new("nixos-node").unwrap();
-        let store = Arc::new(CheckoutStore::new(
+        let store = Arc::new(SyncStore::new(
             tmp.path().join("peer-store"),
-            StoreLimits::default(),
+            SyncLimits::default(),
+            Arc::new(GixTransfer::new()),
         ));
         let runner = Arc::new(FakeRunner::new());
         let w = World {
@@ -67,12 +78,13 @@ impl World {
             net,
             runner,
             store,
+            origin_sync,
+            origin_state,
             origin,
             nixos,
             locks: Arc::new(CheckoutLocks::new()),
             root,
             tmp,
-            files,
         };
         w.restart_receiver(Arc::clone(&w.runner));
         w
@@ -93,6 +105,20 @@ impl World {
             policy,
             fetch,
         ))
+    }
+
+    /// Replaces the daemon behind `nixos` with one that keeps its copies in `store`.
+    pub fn serve_store(&self, store: Arc<SyncStore>) {
+        let r = Receiver::new(
+            "nixos",
+            Allowlist::new([self.origin.clone()]),
+            store,
+            Arc::clone(&self.runner) as Arc<dyn tasks_peer::JobRunner>,
+            Arc::new(FakeStatus::nixos()),
+            Arc::new(AllowAll),
+            FetchPolicy::default(),
+        );
+        self.net.serve(&self.nixos, Arc::new(r) as Arc<dyn Handler>);
     }
 
     /// Replaces the daemon behind `nixos` (a restart) over the given runner.
@@ -116,10 +142,6 @@ impl World {
         }
     }
 
-    pub fn lister(&self) -> StaticLister {
-        StaticLister(self.files.clone())
-    }
-
     pub fn forward(&self, id: i64, policy: ForwardPolicy) -> Forward {
         self.forward_at(id, &self.root, policy)
     }
@@ -140,12 +162,9 @@ impl World {
     }
 
     pub fn tick(&self, f: &mut Forward, now: Duration, log: &mut Vec<u8>) {
-        let lister = self.lister();
-        let source = DirSource(self.root.clone());
         let mut io = ForwardIo {
             transport: &self.transport,
-            lister: &lister,
-            source: &source,
+            sync: &*self.origin_sync,
             log,
         };
         f.tick(now, &mut io);

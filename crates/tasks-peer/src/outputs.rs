@@ -2,8 +2,8 @@
 //! the checkout (R-159, REQUIREMENTS 7.13).
 
 use crate::ids::{CheckoutId, Hash};
-use crate::manifest::{check_rel_path, hash_file};
 use crate::proto::{Body, FetchEntry, MAX_CHUNK_BYTES, MAX_FETCH_PATHS, Refusal};
+use crate::sync::{check_rel_path, hash_file};
 use crate::transport::{Connection, PeerError};
 use sha2::{Digest, Sha256};
 use std::fs;

@@ -16,7 +16,6 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tasks_core::Phase;
 use tasks_peer::proto::{JobEvent, WireOutcome};
-use tasks_peer::sync::DirSource;
 use tasks_peer::transport::{PeerError, StreamPoll, Transport};
 use tasks_peer::{ForwardIo, ForwardResult, ForwardState, LogSink, PeerId, Refusal, RemoteJobId};
 
@@ -131,7 +130,6 @@ fn drive_forward<T: Transport>(inner: &Inner<T>, job: &Job, log_path: &Path) {
             return;
         }
     };
-    let source = DirSource(job.root.clone());
     loop {
         if inner.stop.load(Ordering::SeqCst) {
             return;
@@ -148,8 +146,7 @@ fn drive_forward<T: Transport>(inner: &Inner<T>, job: &Job, log_path: &Path) {
         {
             let mut io = ForwardIo {
                 transport: &inner.transport,
-                lister: &*inner.opts.lister,
-                source: &source,
+                sync: &*inner.opts.sync,
                 log: &mut log,
             };
             fwd.tick(now, &mut io);

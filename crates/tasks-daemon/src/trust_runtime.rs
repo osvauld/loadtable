@@ -138,7 +138,12 @@ pub struct PeerRuntime {
     pub serving: Option<Box<dyn FnOnce(Arc<Receiver>) + Send>>,
     /// Kept alive as long as the daemon (the transport runtime lives here).
     pub keepalive: Box<dyn std::any::Any + Send>,
+    /// Run with the hourly retention (origin snapshot pruning).
+    pub maintenance: Vec<MaintenanceHook>,
 }
+
+/// Work done on the scheduler's hourly maintenance, with the machine policy of the moment.
+pub type MaintenanceHook = Box<dyn Fn(&MachinePolicy) + Send + Sync>;
 
 /// Builds the peer runtime inside [`crate::Daemon::start`], after the one-daemon lock is held
 /// and before the scheduler exists. A stray second daemon therefore never binds an endpoint.
@@ -170,6 +175,7 @@ impl PeerRuntimeFactory for LocalOnly {
             trust: Arc::new(trust),
             serving: None,
             keepalive: Box::new(rt),
+            maintenance: Vec::new(),
         })
     }
 }

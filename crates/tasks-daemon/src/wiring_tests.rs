@@ -607,3 +607,31 @@ fn a_job_forwarded_to_a_worker_daemon_runs_there_as_an_ordinary_queue_job() {
     // the worker's timing sample came back
     assert!(r.record(id).forward.is_some());
 }
+
+// R-315
+#[test]
+fn r315_a_worker_daemon_audits_the_snapshot_it_applied() {
+    let w = PeerWorld::new();
+    let worker = Rig::new();
+    worker.procs.auto_exit(0);
+    let receiver =
+        crate::peer_link::serve::build_receiver(&worker.sch, worker.dir.path().join("peer-store"));
+    w.net.serve(&w.nixos, receiver);
+    let (origin_rig, _link) = origin(&w, "");
+    let id = pinned(&origin_rig, &w.root_a);
+    within("passed on the laptop", || {
+        origin_rig.tick();
+        worker.tick();
+        origin_rig.phase(id) == Phase::Passed
+    });
+    use tasks_ledger::AuditLedger as _;
+    let rows = worker.audit_store.scan(0, 1000).unwrap();
+    let got = rows
+        .iter()
+        .find(|r| r.action == "data.sync_received")
+        .expect("the worker audits what it applied");
+    let d = got.details_json();
+    assert_eq!(d["tree"].as_str().map(str::len), Some(40));
+    assert!(d["bytes"].as_u64().unwrap() > 0);
+    assert_eq!(d["written"], 2);
+}

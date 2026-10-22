@@ -20,7 +20,7 @@ use tasks_peer::proto::{
 use tasks_peer::receiver::{
     Allowlist, FinishedJob, JobRunner, JobView, Receiver, StatusSource, SubmitPolicy,
 };
-use tasks_peer::store::{CheckoutStore, StoreLimits};
+use tasks_peer::sync::{GixTransfer, SyncLimits, SyncStore};
 use tasks_peer::{PeerId, RemoteJobId, SubmitKey};
 use tasks_timing::{Cache, Outcome as TimingOutcome, RecipeKey, Sample, SampleKey};
 
@@ -217,20 +217,52 @@ fn read_range(path: &Path, offset: u64, max: usize) -> Vec<u8> {
     buf
 }
 
-/// The receiver this daemon hosts: jobs into the ledger, synced copies under `store_dir`. Who may
+/// The store of synced copies under `store_dir`: bare mirrors and working copies, with sync
+/// and retention events going to the audit log.
+pub fn build_store(sch: &Arc<Scheduler>, store_dir: std::path::PathBuf) -> Arc<SyncStore> {
+    let mut store = SyncStore::new(
+        store_dir,
+        SyncLimits::default(),
+        Arc::new(GixTransfer::new()),
+    );
+    if let Some(sink) = sch.audit_sink() {
+        store = store.with_observer(Arc::new(crate::audited::AuditSync::new(sink)));
+    }
+    Arc::new(store)
+}
+
+/// Retention for the synced copies, run hourly: idle working copies and unused mirrors go,
+/// mirrors are collected weekly, and a copy with a live job is never touched.
+pub fn sweep_hook(
+    sch: &Arc<Scheduler>,
+    store: Arc<SyncStore>,
+) -> crate::trust_runtime::MaintenanceHook {
+    let runner = DaemonRunner::new(sch.clone());
+    Box::new(move |policy| {
+        let busy = |peer: &PeerId, tree: &Path| runner.checkout_busy(peer, tree);
+        store.sweep(&policy.sync_retention(), &busy);
+    })
+}
+
+/// The receiver this daemon hosts: jobs into the ledger, synced copies in `store`. Who may
 /// call it is decided in front of it by the trust gate (`tasks_peer::trust::TrustedHandler`), on
 /// grants; the receiver itself admits every caller it is handed.
-pub fn build_receiver(sch: &Arc<Scheduler>, store_dir: std::path::PathBuf) -> Arc<Receiver> {
+pub fn build_receiver_with(sch: &Arc<Scheduler>, store: Arc<SyncStore>) -> Arc<Receiver> {
     Arc::new(Receiver::new(
         &sch.cfg.machine,
         Allowlist::open(),
-        Arc::new(CheckoutStore::new(store_dir, StoreLimits::default())),
+        store,
         Arc::new(DaemonRunner::new(sch.clone())),
         Arc::new(DaemonStatus::new(sch.clone())),
         // the receiving peer applies the same rules as the local API (R-153)
         Arc::new(DaemonRules::new(sch.clone())),
         FetchPolicy::default(),
     ))
+}
+
+/// [`build_receiver_with`] over a fresh store at `store_dir`.
+pub fn build_receiver(sch: &Arc<Scheduler>, store_dir: std::path::PathBuf) -> Arc<Receiver> {
+    build_receiver_with(sch, build_store(sch, store_dir))
 }
 
 /// The submit rules of this daemon as the receiver's policy: a forwarded job gets the answer a

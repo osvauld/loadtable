@@ -5,13 +5,12 @@
 //! module owns the protocol rules and nothing else.
 
 use crate::ids::{PeerId, RemoteJobId, SubmitKey};
-use crate::manifest::check_rel_path;
 use crate::outputs::{self, FetchPolicy};
 use crate::proto::{
     Body, CancelState, Hello, JobEvent, MAX_CHUNK_BYTES, PeerStatus, Refusal, SubmitJob, Submitted,
-    WireEnd, WireOutcome, WireSample,
+    SyncApply, WireEnd, WireOutcome, WireSample,
 };
-use crate::store::CheckoutStore;
+use crate::sync::{SyncStore, check_rel_path};
 use crate::transport::{EventStream, Handler, PeerError, StreamPoll};
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -126,7 +125,7 @@ impl SubmitPolicy for AllowAll {
 pub struct Receiver {
     name: String,
     allow: Allowlist,
-    store: Arc<CheckoutStore>,
+    store: Arc<SyncStore>,
     runner: Arc<dyn JobRunner>,
     status: Arc<dyn StatusSource>,
     policy: Arc<dyn SubmitPolicy>,
@@ -138,7 +137,7 @@ impl Receiver {
     pub fn new(
         name: &str,
         allow: Allowlist,
-        store: Arc<CheckoutStore>,
+        store: Arc<SyncStore>,
         runner: Arc<dyn JobRunner>,
         status: Arc<dyn StatusSource>,
         policy: Arc<dyn SubmitPolicy>,
@@ -168,6 +167,7 @@ impl Receiver {
         self.policy
             .check_from(from, &job.spec)
             .map_err(|reason| Refusal::PolicyDenied { reason })?;
+        self.store.touch(from, &job.checkout);
         let tree = self.store.tree_root(from, &job.checkout);
         let cwd = if job.rel_cwd.is_empty() {
             tree.clone()
@@ -231,50 +231,38 @@ impl Receiver {
                 Some(state) => Body::CancelAck { remote, state },
                 None => Body::Refuse(Refusal::UnknownJob { remote }),
             },
-            Body::SyncHaveRequest { checkout, .. } | Body::SyncManifestPage { checkout, .. }
+            Body::SyncOffer { checkout, .. } | Body::SyncApply(SyncApply { checkout, .. })
                 if self
                     .runner
                     .checkout_busy(from, &self.store.tree_root(from, &checkout)) =>
             {
                 Body::Refuse(Refusal::Busy { checkout })
             }
-            Body::SyncHaveRequest { checkout, hashes } => {
-                match self.store.have(from, &checkout, &hashes) {
-                    Ok(present) => Body::SyncHave { present },
-                    Err(r) => Body::Refuse(r),
-                }
-            }
-            Body::SyncBlob {
+            Body::SyncOffer { repo, .. } => match self.store.tips(from, &repo) {
+                Ok(tips) => Body::SyncHave { tips },
+                Err(r) => Body::Refuse(r),
+            },
+            Body::SyncPackChunk {
                 checkout,
-                hash,
+                session,
                 offset,
-                total,
                 data,
             } => match self
                 .store
-                .put_chunk(from, &checkout, &hash, offset, total, &data)
+                .put_chunk(from, &checkout, session, offset, &data)
             {
-                Ok(received) => Body::SyncBlobAck { received },
+                Ok(received) => Body::SyncPackAck { received },
                 Err(r) => Body::Refuse(r),
             },
-            Body::SyncManifestPage {
-                checkout,
-                session,
-                index,
-                last,
-                entries,
-            } => match self
-                .store
-                .manifest_page(from, &checkout, session, index, last, entries)
-            {
-                Ok(Some(summary)) => Body::SyncApplied(summary),
-                Ok(None) => Body::Ok,
+            Body::SyncApply(apply) => match self.store.apply(from, &apply) {
+                Ok(summary) => Body::SyncApplied(summary),
                 Err(r) => Body::Refuse(r),
             },
             Body::FetchList { checkout, paths } => {
                 if !self.store.is_synced(from, &checkout) {
                     return Body::Refuse(Refusal::NotSynced { checkout });
                 }
+                self.store.touch(from, &checkout);
                 let tree = self.store.tree_root(from, &checkout);
                 match outputs::list(&tree, &paths, &self.fetch) {
                     Ok(entries) => Body::FetchListing { entries },

@@ -91,6 +91,9 @@ impl Scheduler {
         if prune_due {
             let _ = self.guard("prune", self.ledger.prune(&policy.retention()));
             self.maintain_audit(policy);
+            for hook in lock(&self.maintenance_hooks).iter() {
+                hook(policy);
+            }
         }
         if audit_due {
             self.audit_holders(policy);
