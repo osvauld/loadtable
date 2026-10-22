@@ -2,8 +2,8 @@
 //! the regression row (`r0xx`) it covers.
 
 use crate::{
-    CancelOutcome, Finish, LeaseRecord, LedgerError, ListFilter, ManualClock, PlanContext,
-    RetentionPolicy, StartInfo, Store, TimeoutReason,
+    CancelOutcome, Finish, LeaseRecord, LedgerError, ListFilter, ManualClock, NewJob, Origin,
+    PlanContext, RetentionPolicy, StartInfo, Store, TimeoutReason,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -64,6 +64,10 @@ const CASES: &[Case] = &[
     (
         "r015_remote_state_never_changes_the_local_phase",
         r015_remote,
+    ),
+    (
+        "r152_forward_key_is_kept_and_an_origin_is_unique",
+        r152_forward_key_and_origin,
     ),
     ("r022_r026_list_filters", list_filters),
     ("retention_prunes_only_old_finished_work", retention),
@@ -321,7 +325,7 @@ fn r007_no_lost_update(e: &Env) {
     let s = &*e.store;
     let id = s.submit(&spec("a", vec![])).unwrap();
     s.start(id, &info()).unwrap();
-    s.set_forward(id, &MachineName("nixos".into()), Some(77))
+    s.set_forward(id, &MachineName("nixos".into()), Some(77), None)
         .unwrap();
     s.request_cancel(id, "u").unwrap();
     s.set_log_path(id, Path::new("/logs/new.txt")).unwrap();
@@ -843,12 +847,12 @@ fn r015_remote(e: &Env) {
     let id = s.submit(&spec("a", vec![])).unwrap();
     run_to(s, id, Phase::Interrupted);
     let peer = MachineName("nixos".into());
-    s.set_forward(id, &peer, None).unwrap();
+    s.set_forward(id, &peer, None, None).unwrap();
     assert_eq!(
         s.get(id).unwrap().unwrap().forward.unwrap().remote_job,
         None
     );
-    s.set_forward(id, &peer, Some(12)).unwrap();
+    s.set_forward(id, &peer, Some(12), None).unwrap();
     s.set_remote_phase(id, &Phase::Passed).unwrap();
     let r = s.get(id).unwrap().unwrap();
     assert_eq!(r.phase, Phase::Interrupted);
@@ -857,9 +861,50 @@ fn r015_remote(e: &Env) {
     assert_eq!((f.peer, f.remote_job), (peer, Some(12)));
     assert_eq!(r.remote_phase, Some(Phase::Passed));
     assert!(matches!(
-        s.set_forward(JobId(80), &MachineName("x".into()), None),
+        s.set_forward(JobId(80), &MachineName("x".into()), None, None),
         Err(LedgerError::NotFound(_))
     ));
+}
+
+// R-152: the (peer, key) pair of a forward is recorded before the submit and survives later
+// updates; a received job is unique per (peer, key).
+fn r152_forward_key_and_origin(e: &Env) {
+    let s = &*e.store;
+    let id = s.submit(&spec("a", vec![])).unwrap();
+    let peer = MachineName("nixos".into());
+    s.set_forward(id, &peer, None, Some("laptop:1")).unwrap();
+    let f = s.get(id).unwrap().unwrap().forward.unwrap();
+    assert_eq!(f.remote_key.as_deref(), Some("laptop:1"));
+    // learning the remote id keeps the key
+    s.set_forward(id, &peer, Some(9), None).unwrap();
+    let f = s.get(id).unwrap().unwrap().forward.unwrap();
+    assert_eq!(
+        (f.remote_job, f.remote_key.as_deref()),
+        (Some(9), Some("laptop:1"))
+    );
+    s.clear_forward(id).unwrap();
+    assert!(s.get(id).unwrap().unwrap().forward.is_none());
+
+    let mut job = NewJob::new(spec("remote-owner", vec![]));
+    job.origin = Some(Origin {
+        peer: "peer-a".into(),
+        key: "k1".into(),
+    });
+    let first = s.submit_job(&job).unwrap();
+    assert_eq!(s.find_origin("peer-a", "k1").unwrap(), Some(first));
+    assert_eq!(s.find_origin("peer-b", "k1").unwrap(), None);
+    assert!(matches!(
+        s.submit_job(&job),
+        Err(LedgerError::DuplicateOrigin { .. })
+    ));
+    let mut other = job.clone();
+    other.origin = Some(Origin {
+        peer: "peer-b".into(),
+        key: "k1".into(),
+    });
+    assert!(s.submit_job(&other).is_ok());
+    let r = s.get(first).unwrap().unwrap();
+    assert_eq!(r.origin.unwrap().peer, "peer-a");
 }
 
 // R-022 to R-024 and R-026: id, recent and active filters.

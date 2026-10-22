@@ -109,6 +109,14 @@ impl Store for MemoryStore {
         job.spec.validate()?;
         let mut s = self.lock()?;
         check_deps(&job.spec.after, |d| s.phase_of(d))?;
+        if let Some(o) = &job.origin
+            && s.jobs.values().any(|j| j.origin.as_ref() == Some(o))
+        {
+            return Err(LedgerError::DuplicateOrigin {
+                peer: o.peer.clone(),
+                key: o.key.clone(),
+            });
+        }
         let id = s.insert(job, self.clock.now_ms());
         s.changes += 1;
         Ok(id)
@@ -221,14 +229,44 @@ impl Store for MemoryStore {
         Ok(out)
     }
 
-    fn set_forward(&self, id: JobId, peer: &MachineName, remote_job: Option<i64>) -> Result<()> {
+    fn set_forward(
+        &self,
+        id: JobId,
+        peer: &MachineName,
+        remote_job: Option<i64>,
+        remote_key: Option<&str>,
+    ) -> Result<()> {
         let mut s = self.lock()?;
-        s.job(id)?.forward = Some(Forward {
+        let job = s.job(id)?;
+        let key = remote_key
+            .map(str::to_string)
+            .or_else(|| job.forward.as_ref().and_then(|f| f.remote_key.clone()));
+        job.forward = Some(Forward {
             peer: peer.clone(),
             remote_job,
+            remote_key: key,
         });
         s.changes += 1;
         Ok(())
+    }
+
+    fn clear_forward(&self, id: JobId) -> Result<()> {
+        let mut s = self.lock()?;
+        s.job(id)?.forward = None;
+        s.changes += 1;
+        Ok(())
+    }
+
+    fn find_origin(&self, peer: &str, key: &str) -> Result<Option<JobId>> {
+        let s = self.lock()?;
+        Ok(s.jobs
+            .values()
+            .find(|j| {
+                j.origin
+                    .as_ref()
+                    .is_some_and(|o| o.peer == peer && o.key == key)
+            })
+            .map(|j| j.id))
     }
 
     fn set_remote_phase(&self, id: JobId, phase: &Phase) -> Result<()> {

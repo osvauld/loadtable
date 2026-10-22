@@ -5,7 +5,7 @@ use crate::logic::{
     plan_jobs, validate_sample,
 };
 use crate::migrate::{MIGRATIONS, migrate};
-use crate::record::{CancelRequest, Forward, LeaseRecord, TimeoutReason, phase_tag};
+use crate::record::{CancelRequest, Forward, LeaseRecord, Origin, TimeoutReason, phase_tag};
 use crate::request::{PruneRow, select_prune};
 use crate::{
     CancelOutcome, ChangeToken, Clock, Finish, JobRecord, LedgerError, ListFilter, NewJob,
@@ -121,7 +121,8 @@ impl SqliteStore {
 
 const COLS: &str = "id, spec, hints, plan_id, step_name, phase, wait_text, submitted_at_ms, \
     started_at_ms, finished_at_ms, machine, exit_code, signal, timeout, summary, lease_pgid, \
-    lease_start, log_path, fwd_peer, fwd_job, remote_phase, cancel_by, cancel_at_ms";
+    lease_start, log_path, fwd_peer, fwd_job, remote_phase, cancel_by, cancel_at_ms, fwd_key, \
+    origin_peer, origin_key";
 
 struct Raw {
     id: i64,
@@ -147,6 +148,9 @@ struct Raw {
     remote_phase: Option<String>,
     cancel_by: Option<String>,
     cancel_at: Option<i64>,
+    fwd_key: Option<String>,
+    origin_peer: Option<String>,
+    origin_key: Option<String>,
 }
 
 fn raw(r: &Row<'_>) -> rusqlite::Result<Raw> {
@@ -174,6 +178,9 @@ fn raw(r: &Row<'_>) -> rusqlite::Result<Raw> {
         remote_phase: r.get(20)?,
         cancel_by: r.get(21)?,
         cancel_at: r.get(22)?,
+        fwd_key: r.get(23)?,
+        origin_peer: r.get(24)?,
+        origin_key: r.get(25)?,
     })
 }
 
@@ -222,7 +229,12 @@ fn record(r: Raw) -> Result<JobRecord> {
         forward: r.fwd_peer.map(|p| Forward {
             peer: MachineName(p),
             remote_job: r.fwd_job,
+            remote_key: r.fwd_key,
         }),
+        origin: match (r.origin_peer, r.origin_key) {
+            (Some(peer), Some(key)) => Some(Origin { peer, key }),
+            _ => None,
+        },
         remote_phase: r
             .remote_phase
             .as_deref()
@@ -264,9 +276,9 @@ fn query_ids(conn: &Connection, sql: &str) -> Result<Vec<JobId>> {
 
 /// Writes every mutable column of the record.
 fn write_record(tx: &Connection, r: &JobRecord) -> Result<()> {
-    let (fwd_peer, fwd_job) = match &r.forward {
-        Some(f) => (Some(f.peer.0.clone()), f.remote_job),
-        None => (None, None),
+    let (fwd_peer, fwd_job, fwd_key) = match &r.forward {
+        Some(f) => (Some(f.peer.0.clone()), f.remote_job, f.remote_key.clone()),
+        None => (None, None, None),
     };
     let lease_start = r
         .lease
@@ -277,8 +289,9 @@ fn write_record(tx: &Connection, r: &JobRecord) -> Result<()> {
         "UPDATE jobs SET phase = ?1, phase_tag = ?2, wait_text = ?3, started_at_ms = ?4,
              finished_at_ms = ?5, machine = ?6, exit_code = ?7, signal = ?8, timeout = ?9,
              summary = ?10, lease_pgid = ?11, lease_start = ?12, log_path = ?13, fwd_peer = ?14,
-             fwd_job = ?15, remote_phase = ?16, cancel_by = ?17, cancel_at_ms = ?18
-         WHERE id = ?19",
+             fwd_job = ?15, remote_phase = ?16, cancel_by = ?17, cancel_at_ms = ?18,
+             fwd_key = ?19
+         WHERE id = ?20",
         params![
             serde_json::to_string(&r.phase)?,
             phase_tag(&r.phase),
@@ -303,6 +316,7 @@ fn write_record(tx: &Connection, r: &JobRecord) -> Result<()> {
                 .transpose()?,
             r.cancel.as_ref().map(|c| c.by.clone()),
             r.cancel.as_ref().map(|c| c.at_ms),
+            fwd_key,
             r.id.0,
         ],
     )?;
@@ -325,8 +339,8 @@ fn insert_job(tx: &Connection, job: &NewJob, now: i64) -> Result<JobId> {
     let rec = new_record(JobId(0), job, now);
     tx.execute(
         "INSERT INTO jobs(spec, phase, phase_tag, submitted_at_ms, owner, cwd, argv, hints,
-                          plan_id, step_name)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                          plan_id, step_name, origin_peer, origin_key)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             serde_json::to_string(&job.spec)?,
             serde_json::to_string(&rec.phase)?,
@@ -338,8 +352,21 @@ fn insert_job(tx: &Connection, job: &NewJob, now: i64) -> Result<JobId> {
             serde_json::to_string(&job.hints)?,
             rec.plan_id,
             rec.step_name,
+            rec.origin.as_ref().map(|o| o.peer.clone()),
+            rec.origin.as_ref().map(|o| o.key.clone()),
         ],
-    )?;
+    )
+    .map_err(|e| match (&job.origin, &e) {
+        (Some(o), rusqlite::Error::SqliteFailure(f, _))
+            if f.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            LedgerError::DuplicateOrigin {
+                peer: o.peer.clone(),
+                key: o.key.clone(),
+            }
+        }
+        _ => LedgerError::from(e),
+    })?;
     let id = tx.last_insert_rowid();
     for d in &job.spec.after {
         tx.execute(
@@ -515,14 +542,43 @@ impl Store for SqliteStore {
         self.modify(id, |r, now| Ok(apply_cancel(r, by, now)))
     }
 
-    fn set_forward(&self, id: JobId, peer: &MachineName, remote_job: Option<i64>) -> Result<()> {
+    fn set_forward(
+        &self,
+        id: JobId,
+        peer: &MachineName,
+        remote_job: Option<i64>,
+        remote_key: Option<&str>,
+    ) -> Result<()> {
         self.modify(id, |r, _| {
+            let key = remote_key
+                .map(str::to_string)
+                .or_else(|| r.forward.as_ref().and_then(|f| f.remote_key.clone()));
             r.forward = Some(Forward {
                 peer: peer.clone(),
                 remote_job,
+                remote_key: key,
             });
             Ok(())
         })
+    }
+
+    fn clear_forward(&self, id: JobId) -> Result<()> {
+        self.modify(id, |r, _| {
+            r.forward = None;
+            Ok(())
+        })
+    }
+
+    fn find_origin(&self, peer: &str, key: &str) -> Result<Option<JobId>> {
+        let conn = self.lock()?;
+        Ok(conn
+            .query_row(
+                "SELECT id FROM jobs WHERE origin_peer = ?1 AND origin_key = ?2",
+                params![peer, key],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+            .map(JobId))
     }
 
     fn set_remote_phase(&self, id: JobId, phase: &Phase) -> Result<()> {
@@ -868,6 +924,60 @@ mod tests {
             .unwrap();
         assert_eq!(found.len(), 3);
         assert!(store.submit(&spec("new")).unwrap() > JobId(3));
+    }
+
+    // R-152, R-173: the (peer, key) pair of a forward and the origin of a received job survive a
+    // restart, and a version-2 database migrates with its forwarded rows keeping no key.
+    #[test]
+    fn r152_forward_key_and_origin_survive_reopening_and_a_v2_database_migrates() {
+        let db = TempDb::new();
+        let clock = Arc::new(ManualClock::new(10));
+        let peer = MachineName("nixos".into());
+        let (fwd, recv) = {
+            let s = SqliteStore::open_with(&db.0, &opts(&clock, 1000)).unwrap();
+            let fwd = s.submit(&spec("a")).unwrap();
+            s.set_forward(fwd, &peer, None, Some("laptop:1")).unwrap();
+            let mut job = NewJob::new(spec("remote"));
+            job.origin = Some(crate::Origin {
+                peer: "p".into(),
+                key: "k".into(),
+            });
+            (fwd, s.submit_job(&job).unwrap())
+        };
+        let s = SqliteStore::open_with(&db.0, &opts(&clock, 1000)).unwrap();
+        let f = s.get(fwd).unwrap().unwrap().forward.unwrap();
+        assert_eq!((f.peer, f.remote_key.as_deref()), (peer, Some("laptop:1")));
+        assert_eq!(s.find_origin("p", "k").unwrap(), Some(recv));
+        drop(s);
+
+        let old = TempDb::new();
+        {
+            let c = Connection::open(&old.0).unwrap();
+            c.execute_batch(MIGRATIONS[0]).unwrap();
+            c.execute_batch(MIGRATIONS[1]).unwrap();
+            c.pragma_update(None, "user_version", 2).unwrap();
+            let js = serde_json::to_string(&spec("old")).unwrap();
+            c.execute(
+                "INSERT INTO jobs(id, spec, phase, submitted_at_ms, fwd_peer, fwd_job)
+                 VALUES (1, ?1, '\"Running\"', 5, 'nixos', 7)",
+                params![js],
+            )
+            .unwrap();
+        }
+        let s = SqliteStore::open_with(&old.0, &opts(&clock, 1000)).unwrap();
+        let f = s.get(JobId(1)).unwrap().unwrap().forward.unwrap();
+        assert_eq!((f.remote_job, f.remote_key), (Some(7), None));
+        s.set_forward(JobId(1), &MachineName("nixos".into()), Some(7), Some("k"))
+            .unwrap();
+        assert_eq!(
+            s.get(JobId(1))
+                .unwrap()
+                .unwrap()
+                .forward
+                .unwrap()
+                .remote_key,
+            Some("k".into())
+        );
     }
 
     // R-012: the queue survives reopening the ledger.

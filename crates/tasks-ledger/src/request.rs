@@ -1,6 +1,6 @@
 //! Inputs to store operations.
 
-use crate::record::{LeaseRecord, TimeoutReason};
+use crate::record::{LeaseRecord, Origin, TimeoutReason};
 use std::path::PathBuf;
 use std::time::Duration;
 use tasks_core::{JobId, JobSpec, MachineName, Owner, Phase, Placement, StepHints};
@@ -14,6 +14,8 @@ pub struct NewJob {
     pub hints: StepHints,
     /// Plan and step name when this job is a step.
     pub step: Option<(i64, String)>,
+    /// The peer and key this job was received under; at most one job per pair.
+    pub origin: Option<Origin>,
 }
 
 impl NewJob {
@@ -23,6 +25,7 @@ impl NewJob {
             spec,
             hints: StepHints::default(),
             step: None,
+            origin: None,
         }
     }
 }
