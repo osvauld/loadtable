@@ -9,3 +9,24 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[[bin]]
+name = "tasks2d"
+path = "src/bin/tasks2d.rs"
+
+[dependencies]
+tasks-core.workspace = true
+tasks-platform.workspace = true
+tasks-ledger.workspace = true
+tasks-timing.workspace = true
+tasks-admission.workspace = true
+tasks-runner.workspace = true
+tasks-placement.workspace = true
+tasks-policy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+rustix.workspace = true
+
+[dev-dependencies]
+tasks-platform = { workspace = true, features = ["fake"] }

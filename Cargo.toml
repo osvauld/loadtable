@@ -21,6 +21,10 @@ tasks-platform = { path = "crates/tasks-platform" }
 tasks-ledger = { path = "crates/tasks-ledger" }
 tasks-timing = { path = "crates/tasks-timing" }
 toml = "0.9"
+tasks-admission = { path = "crates/tasks-admission" }
+tasks-runner = { path = "crates/tasks-runner" }
+tasks-placement = { path = "crates/tasks-placement" }
+tasks-policy = { path = "crates/tasks-policy" }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"

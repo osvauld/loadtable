@@ -341,6 +341,21 @@ dependencies = [
 [[package]]
 name = "tasks-daemon"
 version = "0.1.0"
+dependencies = [
+ "rustix",
+ "serde",
+ "serde_json",
+ "tasks-admission",
+ "tasks-core",
+ "tasks-ledger",
+ "tasks-placement",
+ "tasks-platform",
+ "tasks-policy",
+ "tasks-runner",
+ "tasks-timing",
+ "thiserror",
+ "toml",
+]
 
 [[package]]
 name = "tasks-ledger"
