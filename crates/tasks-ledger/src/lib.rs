@@ -43,7 +43,7 @@ pub use trust::{GrantDirection, GrantRecord, MemoryTrust, PeerRecord, TrustLedge
 use std::path::Path;
 use std::time::Duration;
 use tasks_core::plan::Plan;
-use tasks_core::{JobFigures, JobId, JobSpec, MachineName, Phase, WaitReason};
+use tasks_core::{JobFigures, JobId, JobSpec, MachineName, Phase, Priority, WaitReason};
 use tasks_timing::{Sample, SampleKey};
 
 /// Result type for ledger operations.
@@ -141,6 +141,11 @@ pub trait Store {
     /// Records what the job cost the machine (latest sample while it runs, the final figures when
     /// it ends). Allowed in any phase: figures describe the past and change no outcome.
     fn set_figures(&self, id: JobId, figures: &JobFigures) -> Result<()>;
+    /// Changes the queue class of a job that has not started (`prioritize`). A `blocking` class
+    /// needs a reason. A running or finished job is refused with `NotQueued`: priority orders
+    /// the queue and never preempts. Returns the class the job had.
+    fn set_priority(&self, id: JobId, priority: Priority, reason: Option<&str>)
+    -> Result<Priority>;
     /// Jobs recorded as running, for restart reconciliation.
     fn find_running(&self) -> Result<Vec<JobRecord>> {
         Ok(self

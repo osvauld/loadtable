@@ -1,8 +1,8 @@
 //! In-memory store, used by tests and as a reference implementation.
 
 use crate::logic::{
-    apply_cancel, apply_finish, apply_log_path, apply_start, apply_wait, check_deps, new_record,
-    validate_sample,
+    apply_cancel, apply_finish, apply_log_path, apply_priority, apply_start, apply_wait,
+    check_deps, new_record, validate_sample,
 };
 use crate::record::dep_failed;
 use crate::request::{PruneRow, select_prune};
@@ -16,7 +16,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tasks_core::plan::Plan;
-use tasks_core::{JobFigures, JobId, MachineName, Phase, WaitReason};
+use tasks_core::{JobFigures, JobId, MachineName, Phase, Priority, WaitReason};
 use tasks_timing::{History, Sample, SampleKey, TimingError};
 
 #[derive(Debug, Clone, Default)]
@@ -25,6 +25,8 @@ struct Inner {
     last_id: i64,
     last_plan: i64,
     samples: Vec<(SampleKey, Sample)>,
+    /// Peak memory of the job behind each whole-job sample, in the order they were recorded.
+    peaks: Vec<(SampleKey, Option<u64>)>,
     changes: u64,
 }
 
@@ -214,6 +216,11 @@ impl Store for MemoryStore {
         s.jobs.insert(id.0, r);
         if let Some((k, smp)) = sample {
             s.samples.push((k.clone(), *smp));
+            if k.target.is_none() {
+                let peak = s.jobs.get(&id.0).and_then(|r| r.figures.as_ref());
+                let peak = peak.and_then(|f| f.mem_peak_bytes);
+                s.peaks.push((k.clone(), peak));
+            }
         }
         s.changes += 1;
         Ok(())
@@ -295,6 +302,18 @@ impl Store for MemoryStore {
         Ok(())
     }
 
+    fn set_priority(
+        &self,
+        id: JobId,
+        priority: Priority,
+        reason: Option<&str>,
+    ) -> Result<Priority> {
+        let mut s = self.lock()?;
+        let before = apply_priority(s.job(id)?, priority, reason)?;
+        s.changes += 1;
+        Ok(before)
+    }
+
     fn find_recent_spec(
         &self,
         owner: &str,
@@ -323,6 +342,10 @@ impl Store for MemoryStore {
         validate_sample(sample)?;
         let mut s = self.lock()?;
         s.samples.push((key.clone(), *sample));
+        if key.target.is_none() {
+            // no job row here (a peer measured it): its memory is unknown
+            s.peaks.push((key.clone(), None));
+        }
         s.changes += 1;
         Ok(())
     }
@@ -420,6 +443,19 @@ impl History for MemoryStore {
             .iter()
             .filter(|(k, _)| k == key)
             .map(|(_, v)| *v)
+            .collect())
+    }
+
+    fn recent_peaks(&self, key: &SampleKey) -> std::result::Result<Vec<Option<u64>>, TimingError> {
+        let s = self
+            .lock()
+            .map_err(|e| TimingError::History(e.to_string()))?;
+        Ok(s.peaks
+            .iter()
+            .rev()
+            .filter(|(k, _)| k == key)
+            .take(tasks_timing::history::RECENT_PEAKS)
+            .map(|(_, p)| *p)
             .collect())
     }
 

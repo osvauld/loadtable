@@ -208,6 +208,8 @@ pub(crate) mod tests {
                 after: vec![],
                 timeout_secs: None,
                 broad_test_escape: false,
+                priority: tasks_core::Priority::Normal,
+                priority_reason: None,
             },
             hints: StepHints::default(),
             plan_id: None,

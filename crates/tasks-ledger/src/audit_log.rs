@@ -57,6 +57,9 @@ pub mod action {
     pub const JOB_CANCELLED: &str = "job.cancelled";
     /// A job hit its wall or idle limit.
     pub const JOB_TIMEOUT: &str = "job.timeout";
+    /// A job was given a queue class other than normal, at submit or by `prioritize`: who,
+    /// which class and the reason a blocking claim needs.
+    pub const JOB_PRIORITY: &str = "job.priority";
     /// A submit rule refused a job.
     pub const JOB_REFUSED: &str = "job.refused";
     /// A checkout snapshot was sent to a peer (tree id, bytes).
@@ -96,6 +99,7 @@ pub mod action {
         JOB_ENDED,
         JOB_CANCELLED,
         JOB_TIMEOUT,
+        JOB_PRIORITY,
         JOB_REFUSED,
         DATA_SYNC_SENT,
         DATA_SYNC_RECEIVED,

@@ -76,6 +76,9 @@ fn check_suite(name: &str, suite: &Suite, out: &mut Vec<Violation>) {
         if s.placement.as_deref().is_some_and(|p| p.trim().is_empty()) {
             add(sn, Problem::EmptyPlacement);
         }
+        if s.priority == Some(tasks_core::Priority::Blocking) {
+            add(sn, Problem::BlockingInPolicy);
+        }
         if s.split.is_some() && !is_cargo_test(&s.command) {
             add(sn, Problem::SplitNotCargoTest);
         }
@@ -222,6 +225,23 @@ mod tests {
             p("version = 1\n[sync]\nbogus = 1\n"),
             Err(PolicyError::Parse { .. })
         ));
+    }
+
+    #[test]
+    fn r340_a_step_may_ask_for_background_but_not_blocking() {
+        let step = |prio: &str| {
+            format!(
+                "{HEAD}[[suites.s.steps]]\nname=\"a\"\ncommand=[\"true\"]\npriority=\"{prio}\"\n"
+            )
+        };
+        let ok = p(&step("background")).unwrap();
+        assert_eq!(
+            ok.suites["s"].steps[0].priority,
+            Some(tasks_core::Priority::Background)
+        );
+        assert!(p(&step("normal")).is_ok());
+        assert_eq!(problems(&step("blocking")), vec![Problem::BlockingInPolicy]);
+        assert!(matches!(p(&step("urgent")), Err(PolicyError::Parse { .. })));
     }
 
     #[test]

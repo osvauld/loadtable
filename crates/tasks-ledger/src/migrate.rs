@@ -154,11 +154,17 @@ const V7: &str = "
 ALTER TABLE jobs ADD COLUMN figures TEXT;
 ";
 
+/// The peak memory of the job behind a whole-job timing sample (scheduling, design §10): the
+/// short lane admits a recipe only when history says it is small as well as quick.
+const V8: &str = "
+ALTER TABLE samples ADD COLUMN mem_peak INTEGER;
+";
+
 /// The migrations in order; entry `i` upgrades version `i` to `i + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8];
 
 /// The schema version this build writes.
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 fn version(conn: &Connection) -> Result<i64> {
     Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
@@ -317,7 +323,7 @@ mod tests {
             [],
         )
         .unwrap();
-        migrate(&mut c, MIGRATIONS).unwrap();
+        migrate(&mut c, &MIGRATIONS[..7]).unwrap();
         assert_eq!(uv(&c), 7);
         let (jobs, figures): (i64, Option<String>) = c
             .query_row("SELECT count(*), max(figures) FROM jobs", [], |r| {
@@ -329,6 +335,37 @@ mod tests {
             .query_row("SELECT count(*) FROM audit", [], |r| r.get(0))
             .unwrap();
         assert_eq!(audit, 1);
+    }
+
+    // R-346
+    #[test]
+    fn r346_a_v7_database_upgrades_to_v8_and_keeps_jobs_and_samples() {
+        let mut c = Connection::open_in_memory().unwrap();
+        migrate(&mut c, &MIGRATIONS[..7]).unwrap();
+        assert_eq!(uv(&c), 7);
+        c.execute(
+            "INSERT INTO jobs(spec, phase, phase_tag, submitted_at_ms, owner, cwd, argv, hints)
+             VALUES ('{}', '\"Queued\"', 'queued', 1, 'o', '/', '[]', '{}')",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO samples(recipe, target, machine, secs, cache, outcome, at_ms)
+             VALUES ('cargo check', NULL, 'm', 4.5, 'warm', 'passed', 9)",
+            [],
+        )
+        .unwrap();
+        migrate(&mut c, MIGRATIONS).unwrap();
+        assert_eq!(uv(&c), 8);
+        let (jobs, samples, peak): (i64, i64, Option<i64>) = c
+            .query_row(
+                "SELECT (SELECT count(*) FROM jobs), count(*), max(mem_peak) FROM samples",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        // old samples have no peak: unknown, so never short
+        assert_eq!((jobs, samples, peak), (1, 1, None));
     }
 
     #[test]

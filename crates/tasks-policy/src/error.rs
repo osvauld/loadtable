@@ -40,6 +40,8 @@ pub enum Problem {
     /// A `[sync] extra` pattern is empty, absolute, climbs out of the checkout or names `.git`;
     /// or there are too many.
     BadSyncExtra(String),
+    /// A step asks for `priority = "blocking"`, which only a submit with a reason can claim.
+    BlockingInPolicy,
 }
 
 impl Problem {
@@ -65,6 +67,9 @@ impl Problem {
             }
             Problem::BadTargetKey(_) => "name targets like \"test:lifecycle\" or \"lib:mycrate\"".into(),
             Problem::NoSteps => "add a `[[suites.NAME.steps]]` entry or delete the suite".into(),
+            Problem::BlockingInPolicy => {
+                "use `priority = \"background\"` (or leave it out); claim blocking with `--priority blocking --reason TEXT` when submitting".into()
+            }
             Problem::BadSyncExtra(_) => {
                 "list `[sync] extra` entries as relative paths like \"local.properties\" or \"config/*.json\"".into()
             }
@@ -92,6 +97,7 @@ impl fmt::Display for Problem {
             Problem::BadTargetKey(k) => write!(f, "bad target key {k:?}"),
             Problem::NoSteps => write!(f, "suite has no steps"),
             Problem::BadSyncExtra(why) => write!(f, "bad [sync] extra entry: {why}"),
+            Problem::BlockingInPolicy => write!(f, "priority \"blocking\" in the run policy"),
         }
     }
 }

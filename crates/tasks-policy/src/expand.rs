@@ -175,6 +175,7 @@ pub fn expand(
                 isolate: note.is_some_and(|n| n.isolate),
                 long: note.is_some_and(|n| n.long),
                 tools: suite.tools.clone(),
+                priority: def.priority.filter(|p| *p != tasks_core::Priority::Normal),
                 // set by `split_cargo_test`; the suite's hints must not lose it
                 split: p.hints.split.clone(),
             };
@@ -238,6 +239,33 @@ after = ["tests"]
     }
     fn names(e: &Expansion) -> Vec<&str> {
         e.plan.steps.iter().map(|s| s.name.as_str()).collect()
+    }
+
+    // R-340
+    #[test]
+    fn r340_a_background_step_hints_background_to_the_queue_and_others_hint_nothing() {
+        let text = r#"
+version = 1
+[suites.s]
+[[suites.s.steps]]
+name = "warm"
+command = ["cargo", "build"]
+priority = "background"
+[[suites.s.steps]]
+name = "check"
+command = ["cargo", "check"]
+"#;
+        let pol = parse(text, Path::new("p.toml")).unwrap();
+        let e = expand(&pol, "s", &Executables::new(), &ExpandOptions::default()).unwrap();
+        let hint = |n: &str| {
+            e.plan
+                .steps
+                .iter()
+                .find(|s| s.name == n)
+                .and_then(|s| s.hints.priority)
+        };
+        assert_eq!(hint("warm"), Some(tasks_core::Priority::Background));
+        assert_eq!(hint("check"), None);
     }
 
     #[test]

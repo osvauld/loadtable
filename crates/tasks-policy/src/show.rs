@@ -47,6 +47,9 @@ pub fn show(
             if s.skip_in_quick {
                 attrs.push("skipped in quick runs".into());
             }
+            if let Some(p) = s.priority.filter(|p| !p.is_normal()) {
+                attrs.push(format!("priority {p}"));
+            }
             if !attrs.is_empty() {
                 let _ = writeln!(out, "    {}", attrs.join("; "));
             }

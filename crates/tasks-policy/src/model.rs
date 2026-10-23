@@ -91,6 +91,11 @@ pub struct StepDef {
     /// True if a quick check may skip this step.
     #[serde(default)]
     pub skip_in_quick: bool,
+    /// Queue class: `background` for warm-ups and long sweeps that may wait behind the rest
+    /// (`normal` is the default). `blocking` is not a policy setting; it needs a person's reason
+    /// at submit time.
+    #[serde(default)]
+    pub priority: Option<tasks_core::Priority>,
 }
 
 /// Notes about one test target.

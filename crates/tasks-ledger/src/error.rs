@@ -19,6 +19,15 @@ pub enum LedgerError {
         /// Requested phase.
         to: Phase,
     },
+    /// The priority of a job that has started or ended cannot change: it would not move the job
+    /// and a running job is never preempted.
+    #[error("job {id:?} is {phase:?}; only a queued or waiting job can change priority")]
+    NotQueued {
+        /// The job.
+        id: JobId,
+        /// Its phase.
+        phase: Phase,
+    },
     /// A dependency names a job that does not exist.
     #[error("unknown dependency {0:?}")]
     UnknownDependency(JobId),

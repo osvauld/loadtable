@@ -3,7 +3,7 @@
 use crate::record::{LeaseRecord, Origin, TimeoutReason};
 use std::path::PathBuf;
 use std::time::Duration;
-use tasks_core::{JobId, JobSpec, MachineName, Owner, Phase, Placement, StepHints};
+use tasks_core::{JobId, JobSpec, MachineName, Owner, Phase, Placement, Priority, StepHints};
 
 /// A job to submit: the spec plus ledger-only metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +43,34 @@ pub struct PlanContext {
     pub placement: Placement,
     /// The submitter passed the broad-test escape; every step's spec carries it (R-191).
     pub broad_test_escape: bool,
+    /// The class the submitter asked for every step; `Normal` leaves each step's own hint.
+    pub priority: Priority,
+    /// Why `blocking`, when it is.
+    pub priority_reason: Option<String>,
+}
+
+impl PlanContext {
+    /// The class the submitter asked for every step, checked with its reason.
+    pub fn with_priority(
+        mut self,
+        priority: Priority,
+        reason: Option<String>,
+    ) -> Result<PlanContext, tasks_core::CoreError> {
+        tasks_core::check_reason(priority, reason.as_deref())?;
+        self.priority = priority;
+        self.priority_reason = reason;
+        Ok(self)
+    }
+
+    /// The class and reason a step is stored with: the submitter's when it asked for one, else
+    /// the step's hint from the repo run policy, else normal.
+    pub fn step_priority(&self, hints: &StepHints) -> (Priority, Option<String>) {
+        if self.priority != Priority::Normal {
+            (self.priority, self.priority_reason.clone())
+        } else {
+            (hints.priority.unwrap_or_default(), None)
+        }
+    }
 }
 
 /// The result of submitting a plan.

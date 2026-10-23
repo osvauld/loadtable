@@ -16,6 +16,7 @@ mod recipe_cargo;
 mod recipe_gradle;
 pub mod record;
 mod shell;
+pub mod short;
 pub mod split;
 pub mod timeline;
 

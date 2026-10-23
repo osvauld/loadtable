@@ -6,7 +6,7 @@ use crate::{JobRecord, LedgerError, Result};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use tasks_core::plan::Plan;
-use tasks_core::{JobId, JobSpec, Phase, WaitReason};
+use tasks_core::{JobId, JobSpec, Phase, Priority, WaitReason};
 use tasks_timing::Sample;
 
 /// Builds the queued record for a new job.
@@ -71,6 +71,29 @@ pub(crate) fn apply_wait(
     r.phase = next;
     r.wait_text = text;
     Ok(())
+}
+
+/// Changes the class of a job that has not started, validating the class with its reason.
+/// Returns the class it had. A job that is running or over is refused: nothing is preempted.
+pub(crate) fn apply_priority(
+    r: &mut JobRecord,
+    priority: Priority,
+    reason: Option<&str>,
+) -> Result<Priority> {
+    if !matches!(r.phase, Phase::Queued | Phase::Waiting(_)) {
+        return Err(LedgerError::NotQueued {
+            id: r.id,
+            phase: r.phase.clone(),
+        });
+    }
+    tasks_core::check_reason(priority, reason)?;
+    let before = r.spec.priority;
+    r.spec.priority = priority;
+    r.spec.priority_reason = reason
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string);
+    Ok(before)
 }
 
 /// Queued or waiting -> running, recording machine, lease and log path together.
@@ -166,6 +189,7 @@ pub(crate) fn plan_jobs(
             .iter()
             .filter_map(|d| ids.get(d.as_str()).copied())
             .collect();
+        let (priority, priority_reason) = ctx.step_priority(&step.hints);
         let job = NewJob {
             spec: JobSpec {
                 owner: ctx.owner.clone(),
@@ -179,6 +203,8 @@ pub(crate) fn plan_jobs(
                 // the step's own hint fills the spec's limit (R-095's sibling)
                 timeout_secs: step.hints.timeout_secs,
                 broad_test_escape: ctx.broad_test_escape,
+                priority,
+                priority_reason,
             },
             hints: step.hints.clone(),
             step: Some((plan_id, step.name.clone())),

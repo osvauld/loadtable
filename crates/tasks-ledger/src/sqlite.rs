@@ -1,8 +1,8 @@
 //! SQLite-backed store.
 
 use crate::logic::{
-    apply_cancel, apply_finish, apply_log_path, apply_start, apply_wait, check_deps, new_record,
-    plan_jobs, validate_sample,
+    apply_cancel, apply_finish, apply_log_path, apply_priority, apply_start, apply_wait,
+    check_deps, new_record, plan_jobs, validate_sample,
 };
 use crate::migrate::{MIGRATIONS, migrate};
 use crate::record::{CancelRequest, Forward, LeaseRecord, Origin, TimeoutReason, phase_tag};
@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tasks_core::plan::Plan;
-use tasks_core::{JobFigures, JobId, MachineName, Phase, WaitReason};
+use tasks_core::{JobFigures, JobId, MachineName, Phase, Priority, WaitReason};
 use tasks_timing::{Cache, History, Outcome, Sample, SampleKey, TimingError};
 
 const ACTIVE: &str = "('queued','waiting','running')";
@@ -401,12 +401,19 @@ fn outcome_text(o: Outcome) -> &'static str {
     }
 }
 
-fn insert_sample(tx: &Connection, key: &SampleKey, s: &Sample) -> Result<()> {
+/// Stores a timing sample; `mem_peak` is the peak memory of the job behind a whole-job sample.
+fn insert_sample(
+    tx: &Connection,
+    key: &SampleKey,
+    s: &Sample,
+    mem_peak: Option<u64>,
+) -> Result<()> {
     validate_sample(s)?;
     let at = i64::try_from(s.at_ms).map_err(|_| LedgerError::InvalidSample("timestamp"))?;
+    let mem = mem_peak.and_then(|m| i64::try_from(m).ok());
     tx.execute(
-        "INSERT INTO samples(recipe, target, machine, secs, cache, outcome, at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO samples(recipe, target, machine, secs, cache, outcome, at_ms, mem_peak)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             key.recipe,
             key.target,
@@ -414,7 +421,8 @@ fn insert_sample(tx: &Connection, key: &SampleKey, s: &Sample) -> Result<()> {
             s.secs,
             cache_text(s.cache),
             outcome_text(s.outcome),
-            at
+            at,
+            mem
         ],
     )?;
     Ok(())
@@ -540,7 +548,9 @@ impl Store for SqliteStore {
             apply_finish(&mut r, outcome, now)?;
             write_record(tx, &r)?;
             if let Some((k, s)) = sample {
-                insert_sample(tx, k, s)?;
+                // the job's final figures are already in its row (written before the finish)
+                let peak = r.figures.as_ref().and_then(|f| f.mem_peak_bytes);
+                insert_sample(tx, k, s, k.target.is_none().then_some(peak).flatten())?;
             }
             Ok(())
         })
@@ -624,6 +634,24 @@ impl Store for SqliteStore {
         )
     }
 
+    fn set_priority(
+        &self,
+        id: JobId,
+        priority: Priority,
+        reason: Option<&str>,
+    ) -> Result<Priority> {
+        self.write(|tx, _| {
+            let mut r = get_on(tx, id)?.ok_or(LedgerError::NotFound(id))?;
+            let before = apply_priority(&mut r, priority, reason)?;
+            // the class lives in the spec column, which `write_record` leaves alone
+            tx.execute(
+                "UPDATE jobs SET spec = ?1 WHERE id = ?2",
+                params![serde_json::to_string(&r.spec)?, id.0],
+            )?;
+            Ok(before)
+        })
+    }
+
     fn find_recent_spec(
         &self,
         owner: &str,
@@ -653,7 +681,7 @@ impl Store for SqliteStore {
 
     fn record_sample(&self, key: &SampleKey, sample: &Sample) -> Result<()> {
         validate_sample(sample)?;
-        self.write(|tx, _| insert_sample(tx, key, sample))
+        self.write(|tx, _| insert_sample(tx, key, sample, None))
     }
 
     fn sample_keys(&self, recipes: &[String], limit: usize) -> Result<Vec<SampleKey>> {
@@ -818,6 +846,29 @@ impl History for SqliteStore {
             .collect()
     }
 
+    fn recent_peaks(&self, key: &SampleKey) -> std::result::Result<Vec<Option<u64>>, TimingError> {
+        let conn = self.lock().map_err(hist_err)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT mem_peak FROM samples
+                 WHERE recipe = ?1 AND machine = ?2 AND target IS ?3 AND outcome != 'cancelled'
+                 ORDER BY id DESC LIMIT ?4",
+            )
+            .map_err(hist_err)?;
+        let limit = i64::try_from(tasks_timing::history::RECENT_PEAKS).unwrap_or(3);
+        let rows = stmt
+            .query_map(params![key.recipe, key.machine, key.target, limit], |r| {
+                r.get::<_, Option<i64>>(0)
+            })
+            .map_err(hist_err)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(hist_err)?;
+        Ok(rows
+            .into_iter()
+            .map(|m| m.and_then(|m| u64::try_from(m).ok()))
+            .collect())
+    }
+
     fn targets(&self, recipe: &str) -> std::result::Result<Vec<String>, TimingError> {
         let conn = self.lock().map_err(hist_err)?;
         let mut stmt = conn
@@ -882,6 +933,8 @@ mod tests {
             after: vec![],
             timeout_secs: None,
             broad_test_escape: false,
+            priority: tasks_core::Priority::Normal,
+            priority_reason: None,
         }
     }
 

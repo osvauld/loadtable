@@ -83,6 +83,18 @@ const CASES: &[Case] = &[
         "r186_placement_waits_are_their_own_reason",
         r186_placement_wait,
     ),
+    (
+        "r339_set_priority_changes_a_queued_job_and_refuses_a_started_one",
+        r339_set_priority,
+    ),
+    (
+        "r340_a_plans_background_hint_and_the_submitters_class_reach_the_specs",
+        r340_plan_priority,
+    ),
+    (
+        "r342_a_finished_job_leaves_its_peak_memory_beside_its_timing_sample",
+        r342_peak_memory,
+    ),
     ("r022_r026_list_filters", list_filters),
     ("retention_prunes_only_old_finished_work", retention),
     ("r025_change_token_moves_on_commit", change_token),
@@ -108,6 +120,8 @@ fn spec(owner: &str, after: Vec<JobId>) -> JobSpec {
         after,
         timeout_secs: None,
         broad_test_escape: false,
+        priority: tasks_core::Priority::Normal,
+        priority_reason: None,
     }
 }
 
@@ -145,6 +159,8 @@ fn ctx() -> PlanContext {
         env: vec![("A".into(), "1".into())],
         placement: Placement::Here,
         broad_test_escape: false,
+        priority: tasks_core::Priority::Normal,
+        priority_reason: None,
     }
 }
 
@@ -1214,4 +1230,133 @@ fn change_token(e: &Env) {
     assert_eq!(s.change_token().unwrap(), t1);
     s.request_cancel(id, "u").unwrap();
     assert_ne!(s.change_token().unwrap(), t1);
+}
+
+// R-339: a queued job changes class (blocking needs its reason); a started one is refused.
+fn r339_set_priority(e: &Env) {
+    let s = &*e.store;
+    let id = s.submit(&spec("a", vec![])).unwrap();
+    assert!(matches!(
+        s.set_priority(id, tasks_core::Priority::Blocking, None),
+        Err(LedgerError::Invalid(
+            tasks_core::CoreError::BlockingNeedsReason
+        ))
+    ));
+    assert_eq!(
+        s.get(id).unwrap().unwrap().spec.priority,
+        tasks_core::Priority::Normal
+    );
+    let before = s
+        .set_priority(id, tasks_core::Priority::Blocking, Some("  release gate "))
+        .unwrap();
+    assert_eq!(before, tasks_core::Priority::Normal);
+    let r = s.get(id).unwrap().unwrap();
+    assert_eq!(r.spec.priority, tasks_core::Priority::Blocking);
+    assert_eq!(r.spec.priority_reason.as_deref(), Some("release gate"));
+    // a waiting job changes too, and back to normal clears the reason
+    s.set_wait(id, WaitReason::Disk, "disk").unwrap();
+    let before = s
+        .set_priority(id, tasks_core::Priority::Normal, None)
+        .unwrap();
+    assert_eq!(before, tasks_core::Priority::Blocking);
+    let r = s.get(id).unwrap().unwrap();
+    assert_eq!(
+        (r.spec.priority, r.spec.priority_reason),
+        (tasks_core::Priority::Normal, None)
+    );
+    // never preempts: a running or finished job is refused and keeps its class
+    s.start(id, &info()).unwrap();
+    assert!(matches!(
+        s.set_priority(id, tasks_core::Priority::Blocking, Some("now")),
+        Err(LedgerError::NotQueued { .. })
+    ));
+    s.finish(id, &Finish::from_phase(Phase::Passed)).unwrap();
+    assert!(matches!(
+        s.set_priority(id, tasks_core::Priority::Background, None),
+        Err(LedgerError::NotQueued { .. })
+    ));
+    assert_eq!(
+        s.get(id).unwrap().unwrap().spec.priority,
+        tasks_core::Priority::Normal
+    );
+    assert!(matches!(
+        s.set_priority(JobId(99), tasks_core::Priority::Background, None),
+        Err(LedgerError::NotFound(_))
+    ));
+}
+
+// R-340: the run policy's background hint fills the step's class; a class the submitter asked
+// for covers every step.
+fn r340_plan_priority(e: &Env) {
+    let s = &*e.store;
+    let mut warm = step("warm", &[]);
+    warm.hints.priority = Some(tasks_core::Priority::Background);
+    let plain = step("plain", &[]);
+    let plan = Plan {
+        steps: vec![warm, plain],
+    };
+    let done = s.submit_plan(&ctx(), &plan).unwrap();
+    let class = |name: &str| {
+        let id = done.jobs.iter().find(|(n, _)| n == name).unwrap().1;
+        s.get(id).unwrap().unwrap().spec.priority
+    };
+    assert_eq!(class("warm"), tasks_core::Priority::Background);
+    assert_eq!(class("plain"), tasks_core::Priority::Normal);
+    let mut c = ctx();
+    c.priority = tasks_core::Priority::Blocking;
+    c.priority_reason = Some("agent waiting".into());
+    let done = s.submit_plan(&c, &plan).unwrap();
+    for (_, id) in &done.jobs {
+        let r = s.get(*id).unwrap().unwrap();
+        assert_eq!(r.spec.priority, tasks_core::Priority::Blocking);
+        assert_eq!(r.spec.priority_reason.as_deref(), Some("agent waiting"));
+    }
+}
+
+// R-342: a whole-job sample keeps the peak memory the job's figures ended with, newest first;
+// a run with no figures, a peer's sample and an old row are unknown, never zero.
+fn r342_peak_memory(e: &Env) {
+    let s = &*e.store;
+    let k = key(None);
+    assert_eq!(s.recent_peaks(&k).unwrap(), Vec::<Option<u64>>::new());
+    let run = |peak: Option<u64>, at: u64| {
+        let id = s.submit(&spec("a", vec![])).unwrap();
+        s.start(id, &info()).unwrap();
+        if let Some(p) = peak {
+            let mut f = tasks_core::JobFigures::empty(tasks_core::Attribution::Cgroup);
+            f.mem_peak_bytes = Some(p);
+            s.set_figures(id, &f).unwrap();
+        }
+        s.finish_recording(
+            id,
+            &Finish::from_phase(Phase::Passed),
+            Some((&k, &sample(2.0, at))),
+        )
+        .unwrap();
+    };
+    run(Some(100), 1);
+    run(None, 2);
+    run(Some(300), 3);
+    assert_eq!(
+        s.recent_peaks(&k).unwrap(),
+        vec![Some(300), None, Some(100)]
+    );
+    run(Some(50), 4);
+    // only the latest three
+    assert_eq!(s.recent_peaks(&k).unwrap(), vec![Some(50), Some(300), None]);
+    // a per-target sample is not a whole-job run and a peer's sample knows no memory
+    s.record_sample(&key(Some("test:x")), &sample(1.0, 5))
+        .unwrap();
+    assert!(
+        s.recent_peaks(&key(Some("test:x")))
+            .unwrap()
+            .iter()
+            .all(Option::is_none)
+    );
+    s.record_sample(&k, &sample(1.0, 6)).unwrap();
+    assert_eq!(s.recent_peaks(&k).unwrap()[0], None);
+    // another machine's series is separate
+    let mut other = key(None);
+    other.machine = "elsewhere".into();
+    assert!(s.recent_peaks(&other).unwrap().is_empty());
 }

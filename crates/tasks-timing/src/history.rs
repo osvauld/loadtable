@@ -56,7 +56,16 @@ pub trait History {
     /// Target labels (`test:lifecycle`) with any sample under `recipe` on any machine, sorted
     /// and without duplicates. Lets a policy notice new and removed targets.
     fn targets(&self, recipe: &str) -> Result<Vec<String>, TimingError>;
+    /// The peak memory in bytes that the latest runs of the whole-job series `key` measured,
+    /// newest first, at most [`RECENT_PEAKS`]; `None` for a run that measured none. A store
+    /// that keeps no memory figures returns an empty list: unknown.
+    fn recent_peaks(&self, _key: &SampleKey) -> Result<Vec<Option<u64>>, TimingError> {
+        Ok(Vec::new())
+    }
 }
+
+/// Most entries [`History::recent_peaks`] returns.
+pub const RECENT_PEAKS: usize = 3;
 
 /// In-memory history for tests.
 #[derive(Debug, Default, Clone)]
