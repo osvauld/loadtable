@@ -17,5 +17,7 @@ ui = ["dep:eframe", "dep:png"]
 tasks-core.workspace = true
 tasks-daemon.workspace = true
 serde_json.workspace = true
+# local clock times in the side panel; reads the system zone on Linux and macOS
+jiff = "0.2"
 eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"], optional = true }
 png = { version = "0.17", optional = true }

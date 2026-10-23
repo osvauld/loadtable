@@ -3,53 +3,32 @@
 
 use crate::actions::{self, Avail};
 use crate::audit::{self, AuditData, AuditFilter};
-use crate::columns::{self, ACTION_BAR_WIDTH, Col, ColSpec, GAP, MIN_WINDOW_WIDTH};
+use crate::columns::{self, MIN_WINDOW_WIDTH};
+use crate::detail;
 use crate::feed::{self, ActionOutcome, Dashboard, DashboardResult, Feed, Wake};
 use crate::format;
 use crate::link::DaemonLink;
 use crate::logview::{LogSnapshot, SearchHits};
 use crate::mailbox::Mailbox;
-use crate::model::{self, JobRow, MachineCard, Online, PhaseClass, Section, Tab, ViewModel};
+use crate::model::{self, JobRow, NoticeLevel, Online, Section, Tab, ViewModel};
+use crate::paint;
 use crate::stalls::{self, StallData};
 use crate::stats;
-use eframe::egui::{self, Align, Color32, Layout, RichText, Sense, Stroke, vec2};
+use crate::theme::{self, LABEL, Palette, SECONDARY};
+use eframe::egui::{
+    self, Align, Color32, Key, Layout, Margin, Modifiers, RichText, Sense, Stroke, vec2,
+};
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tasks_core::JobId;
 use tasks_daemon::api::HistoryView;
 
-const ROW_H: f32 = 20.0;
-const CARD_W: f32 = 330.0;
 const REFRESH: Duration = Duration::from_secs(1);
-
-fn rgb(c: [u8; 3]) -> Color32 {
-    Color32::from_rgb(c[0], c[1], c[2])
-}
-
-fn phase_color(c: PhaseClass, dark: bool) -> Color32 {
-    match (c, dark) {
-        (PhaseClass::Running, true) => Color32::from_rgb(110, 190, 255),
-        (PhaseClass::Running, false) => Color32::from_rgb(10, 90, 170),
-        (PhaseClass::Passed, true) => Color32::from_rgb(120, 210, 130),
-        (PhaseClass::Passed, false) => Color32::from_rgb(20, 120, 40),
-        (PhaseClass::Failed, true) => Color32::from_rgb(255, 120, 110),
-        (PhaseClass::Failed, false) => Color32::from_rgb(190, 30, 30),
-        (PhaseClass::Waiting, true) => Color32::from_rgb(235, 200, 100),
-        (PhaseClass::Waiting, false) => Color32::from_rgb(150, 100, 0),
-        (PhaseClass::Neutral, true) => Color32::from_gray(170),
-        (PhaseClass::Neutral, false) => Color32::from_gray(90),
-    }
-}
-
-fn online_color(o: Online) -> Color32 {
-    match o {
-        Online::Online => Color32::from_rgb(70, 190, 90),
-        Online::Stale => Color32::from_rgb(230, 170, 40),
-        Online::Offline => Color32::from_rgb(210, 70, 60),
-        Online::Unknown => Color32::from_gray(140),
-    }
-}
+/// Width of the side panel, and the window width from which it sits beside the list.
+const DETAIL_W: f32 = 440.0;
+const SIDE_BY_SIDE_FROM: f32 = 960.0;
 
 struct CancelDialog {
     id: i64,
@@ -83,8 +62,10 @@ pub struct App {
     tab: Tab,
     selected: Option<i64>,
     selected_row: Option<JobRow>,
+    scroll_to_selected: bool,
     raw_open: BTreeSet<i64>,
     cancel: Option<CancelDialog>,
+    confirm_drain: bool,
     action_box: Arc<Mailbox<ActionOutcome>>,
     status_line: Option<(bool, String)>,
     log: Option<LogWindow>,
@@ -101,6 +82,8 @@ pub struct App {
     stalls: Option<Result<StallData, String>>,
     stalls_loading: bool,
     stalls_asked: bool,
+    tz: jiff::tz::TimeZone,
+    home: Option<PathBuf>,
 }
 
 impl App {
@@ -130,11 +113,13 @@ impl App {
             vm: None,
             error: None,
             last_ok: None,
-            tab: Tab::Dashboard,
+            tab: Tab::Queue,
             selected: None,
             selected_row: None,
+            scroll_to_selected: false,
             raw_open: BTreeSet::new(),
             cancel: None,
+            confirm_drain: false,
             action_box: Arc::new(Mailbox::new()),
             status_line: None,
             log: None,
@@ -151,6 +136,8 @@ impl App {
             stalls: None,
             stalls_loading: false,
             stalls_asked: false,
+            tz: jiff::tz::TimeZone::system(),
+            home: std::env::var_os("HOME").map(PathBuf::from),
         }
     }
 
@@ -159,6 +146,10 @@ impl App {
         let mut app = App::bare(link, "screenshot".into(), Arc::new(|| {}));
         app.vm = Some(model::build(dash, 0));
         app.last_ok = Some(Instant::now());
+        // the fixtures live under /home/demo, and screenshots should not depend on the zone
+        // of the machine that renders them
+        app.home = Some(PathBuf::from("/home/demo"));
+        app.tz = jiff::tz::TimeZone::UTC;
         app
     }
 
@@ -167,13 +158,13 @@ impl App {
         self.tab = tab;
     }
 
-    /// Selects a job so the details bar shows it (for screenshots).
+    /// Selects a job so the side panel shows it (for screenshots).
     pub fn select(&mut self, id: i64) {
         self.selected = Some(id);
         self.refresh_selected_row();
     }
 
-    /// Gives the Stats tab a history (for screenshots).
+    /// Gives the Timings tab a history (for screenshots).
     pub fn set_history(&mut self, h: HistoryView) {
         self.history = Some(Ok(h));
         self.stats_asked = true;
@@ -185,7 +176,7 @@ impl App {
         self.audit_asked = true;
     }
 
-    /// Gives the Pressure events tab its rows (for screenshots).
+    /// Gives the Stalls tab its rows (for screenshots).
     pub fn set_stalls(&mut self, data: StallData) {
         self.stalls = Some(Ok(data));
         self.stalls_asked = true;
@@ -194,6 +185,16 @@ impl App {
     /// Opens the cancel dialog for a job (for screenshots).
     pub fn ask_cancel(&mut self, id: i64) {
         self.open_cancel(id);
+    }
+
+    /// Opens the drain confirmation (for screenshots and tests).
+    pub fn ask_drain(&mut self) {
+        self.confirm_drain = true;
+    }
+
+    /// The selected job's id.
+    pub fn selected_id(&self) -> Option<i64> {
+        self.selected
     }
 
     /// The view model on screen.
@@ -208,13 +209,7 @@ impl App {
         let Some(vm) = &self.vm else {
             return;
         };
-        if let Some(r) = vm
-            .running
-            .iter()
-            .chain(&vm.queued)
-            .chain(&vm.recent)
-            .find(|r| r.id == id)
-        {
+        if let Some(r) = vm.find(id) {
             self.selected_row = Some(r.clone());
         }
     }
@@ -266,17 +261,7 @@ impl App {
     }
 
     fn open_cancel(&mut self, id: i64) {
-        let row = self
-            .vm
-            .as_ref()
-            .and_then(|vm| {
-                vm.running
-                    .iter()
-                    .chain(&vm.queued)
-                    .chain(&vm.recent)
-                    .find(|r| r.id == id)
-            })
-            .cloned();
+        let row = self.vm.as_ref().and_then(|vm| vm.find(id)).cloned();
         if let Some(r) = row {
             self.cancel = Some(CancelDialog {
                 id,
@@ -323,166 +308,397 @@ impl App {
     /// Draws one frame.
     pub fn draw(&mut self, ctx: &egui::Context) {
         self.pump();
-        let dark = ctx.style().visuals.dark_mode;
+        let p = Palette::current(ctx);
+        self.keys(ctx);
 
-        egui::TopBottomPanel::top("top").show(ctx, |ui| self.top_bar(ui));
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-            ui.horizontal(|ui| match &self.status_line {
-                Some((true, t)) => {
-                    ui.label(RichText::new(t).color(phase_color(PhaseClass::Passed, dark)));
-                }
-                Some((false, t)) => {
-                    ui.label(RichText::new(t).color(phase_color(PhaseClass::Failed, dark)));
-                }
-                None => {
-                    ui.weak("Click a row for details. Hover an agent for the full owner.");
-                }
-            });
-        });
-        if self.tab == Tab::Dashboard && self.selected_row.is_some() {
-            egui::TopBottomPanel::bottom("details")
-                .resizable(true)
-                .default_height(260.0)
-                .min_height(120.0)
-                .show(ctx, |ui| self.details(ui));
+        egui::TopBottomPanel::top("bar")
+            .exact_height(40.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(p.panel)
+                    .inner_margin(Margin::symmetric(14, 0)),
+            )
+            .show(ctx, |ui| self.top_bar(ui, p));
+        self.notice_rows(ctx, p);
+        egui::TopBottomPanel::bottom("foot")
+            .exact_height(26.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(p.panel)
+                    .inner_margin(Margin::symmetric(14, 0)),
+            )
+            .show(ctx, |ui| self.footer(ui, p));
+
+        let listing = matches!(self.tab, Tab::Queue | Tab::History);
+        if self.tab == Tab::Queue
+            && let Some(vm) = &self.vm
+        {
+            egui::TopBottomPanel::top("machines")
+                .frame(egui::Frame::new().fill(p.panel))
+                .show_separator_line(false)
+                .show(ctx, |ui| {
+                    ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                    paint::machine_strip(ui, p, &vm.machines);
+                });
         }
-        egui::CentralPanel::default().show(ctx, |ui| match self.tab {
-            Tab::Dashboard => self.dashboard(ui),
-            Tab::Stats => self.stats_tab(ui),
-            Tab::Audit => self.audit_tab(ui),
-            Tab::PressureEvents => self.stalls_tab(ui),
-        });
+        let wide = ctx.content_rect().width() >= SIDE_BY_SIDE_FROM;
+        if listing && self.vm.is_some() {
+            let frame = egui::Frame::new().fill(p.panel);
+            if wide {
+                egui::SidePanel::right("detail")
+                    .exact_width(DETAIL_W)
+                    .resizable(false)
+                    .frame(frame)
+                    .show(ctx, |ui| self.side_panel(ui, p));
+            } else if self.selected_row.is_some() {
+                egui::TopBottomPanel::bottom("detail-below")
+                    .resizable(true)
+                    .default_height(330.0)
+                    .min_height(140.0)
+                    .frame(frame)
+                    .show(ctx, |ui| self.side_panel(ui, p));
+            }
+        }
+        let central = if listing {
+            egui::Frame::new().fill(p.win)
+        } else {
+            egui::Frame::new()
+                .fill(p.win)
+                .inner_margin(Margin::symmetric(14, 12))
+        };
+        egui::CentralPanel::default()
+            .frame(central)
+            .show(ctx, |ui| match self.tab {
+                Tab::Queue | Tab::History => self.job_list(ui, p),
+                Tab::Timings => self.stats_tab(ui, p),
+                Tab::Audit => self.audit_tab(ui, p),
+                Tab::Stalls => self.stalls_tab(ui, p),
+            });
         self.cancel_dialog(ctx);
+        self.drain_dialog(ctx);
         self.log_window(ctx);
     }
 
-    fn top_bar(&mut self, ui: &mut egui::Ui) {
-        let dark = ui.visuals().dark_mode;
-        ui.horizontal_wrapped(|ui| {
-            ui.heading("tasks");
-            ui.separator();
+    /// Arrow keys move the selection, Enter opens the log, Escape lets go (R-587).
+    fn keys(&mut self, ctx: &egui::Context) {
+        if !matches!(self.tab, Tab::Queue | Tab::History)
+            || ctx.wants_keyboard_input()
+            || self.cancel.is_some()
+            || self.confirm_drain
+        {
+            return;
+        }
+        let (down, up, enter, esc) = ctx.input_mut(|i| {
+            (
+                i.consume_key(Modifiers::NONE, Key::ArrowDown),
+                i.consume_key(Modifiers::NONE, Key::ArrowUp),
+                i.consume_key(Modifiers::NONE, Key::Enter),
+                i.consume_key(Modifiers::NONE, Key::Escape),
+            )
+        });
+        if down || up {
+            if let Some(vm) = &self.vm {
+                let ids = if self.tab == Tab::History {
+                    vm.recent.iter().map(|r| r.id).collect()
+                } else {
+                    vm.queue_ids()
+                };
+                self.selected = model::step_selection(&ids, self.selected, if up { -1 } else { 1 });
+                self.scroll_to_selected = true;
+            }
+            self.refresh_selected_row();
+        }
+        if esc {
+            self.selected = None;
+            self.selected_row = None;
+        }
+        if enter
+            && let Some(row) = self.selected_row.clone()
+            && row.actions.log.is_enabled()
+        {
+            self.open_log(&row);
+        }
+    }
+
+    fn top_bar(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+            ui.label(
+                RichText::new("tasks")
+                    .font(theme::sans_semibold(theme::TITLE))
+                    .color(p.ink),
+            );
+            ui.add_space(14.0);
+            let open = self.vm.as_ref().map(ViewModel::open_jobs);
             for t in Tab::SHOWN {
-                if ui.selectable_label(self.tab == t, t.label()).clicked() {
+                let count = if t == Tab::Queue { open } else { None };
+                if tab_button(ui, p, t.label(), count, self.tab == t) {
                     self.tab = t;
                 }
             }
-            for t in Tab::PLANNED {
-                ui.add_enabled(false, egui::Button::new(t.label()).frame(false))
-                    .on_disabled_hover_text("Planned: see docs/DESIGN-peers-sync-audit.md");
-            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if let Some(vm) = &self.vm {
-                    let (label, cancel) = if vm.draining {
-                        ("Resume", true)
-                    } else {
-                        ("Drain", false)
-                    };
-                    let tip = if cancel {
-                        "Let queued jobs start again."
-                    } else {
-                        "Stop starting queued jobs. Running jobs finish."
-                    };
-                    if ui.button(label).on_hover_text(tip).clicked() {
-                        let who = self.who.clone();
-                        self.spawn_action(move |l| feed::set_drain(l, cancel, &who));
-                    }
-                }
-                match (&self.error, self.last_ok) {
-                    (Some(_), _) => {
-                        ui.label(
-                            RichText::new("daemon unreachable")
-                                .color(phase_color(PhaseClass::Failed, dark)),
-                        );
-                    }
-                    (None, Some(_)) => {
-                        ui.label(
-                            RichText::new("live").color(phase_color(PhaseClass::Passed, dark)),
-                        );
-                    }
-                    (None, None) => {
-                        ui.weak("connecting...");
-                    }
-                }
+                self.more_menu(ui, p);
+                ui.add_space(6.0);
+                let (color, text) = match (&self.error, self.last_ok, &self.vm) {
+                    (Some(_), _, _) => (p.bad, "daemon unreachable".to_string()),
+                    (None, Some(_), Some(vm)) => (p.ok, live_text(vm)),
+                    _ => (p.faint, "connecting…".to_string()),
+                };
+                ui.label(
+                    RichText::new(text)
+                        .font(theme::sans(SECONDARY))
+                        .color(p.dim),
+                );
+                let (r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+                ui.painter().circle_filled(r.center(), 4.0, color);
             });
         });
+    }
+
+    /// The `⋯` menu: operator actions that are not navigation (R-589).
+    fn more_menu(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        let (rect, resp) = ui.allocate_exact_size(vec2(30.0, 24.0), Sense::click());
+        let fill = if resp.hovered() {
+            p.raise
+        } else {
+            Color32::TRANSPARENT
+        };
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::same(4), fill);
+        for dx in [-5.0, 0.0, 5.0] {
+            ui.painter()
+                .circle_filled(rect.center() + vec2(dx, 0.0), 1.6, p.dim);
+        }
+        let resp = resp.on_hover_text("More");
+        let draining = self.vm.as_ref().is_some_and(|vm| vm.draining);
+        let mut resume = false;
+        let mut ask_drain = false;
+        egui::Popup::menu(&resp).show(|ui| {
+            ui.set_min_width(200.0);
+            if draining {
+                if ui
+                    .button("Resume queue")
+                    .on_hover_text("Let queued jobs start again.")
+                    .clicked()
+                {
+                    resume = true;
+                    ui.close();
+                }
+            } else if ui
+                .button("Drain queue…")
+                .on_hover_text("Stop starting queued jobs. Running jobs finish.")
+                .clicked()
+            {
+                ask_drain = true;
+                ui.close();
+            }
+        });
+        if resume {
+            let who = self.who.clone();
+            self.spawn_action(move |l| feed::set_drain(l, true, &who));
+        }
+        if ask_drain {
+            self.confirm_drain = true;
+        }
+    }
+
+    /// One full-width row per notice: bold title, plain sentence (R-582).
+    fn notice_rows(&self, ctx: &egui::Context, p: &Palette) {
+        let mut rows: Vec<(NoticeLevel, String, String)> = Vec::new();
         if let Some(e) = &self.error {
             let since = self.last_ok.map_or_else(
                 || "never".to_string(),
                 |t| format!("{} ago", format::duration(t.elapsed().as_secs_f64())),
             );
-            ui.colored_label(
-                phase_color(PhaseClass::Failed, dark),
-                format!("Cannot reach the daemon: {e}. Showing data from {since}."),
-            );
+            rows.push((
+                NoticeLevel::Critical,
+                "Cannot reach the daemon".into(),
+                format!("{e}. Showing data from {since}."),
+            ));
         }
         if let Some(vm) = &self.vm {
-            if let Some(b) = &vm.banner {
-                egui::Frame::new()
-                    .fill(if dark {
-                        Color32::from_rgb(80, 60, 10)
-                    } else {
-                        Color32::from_rgb(255, 238, 190)
-                    })
-                    .inner_margin(egui::Margin::same(6))
-                    .corner_radius(egui::CornerRadius::same(4))
-                    .show(ui, |ui| {
-                        ui.label(RichText::new(b).strong());
-                    });
-            }
-            for a in &vm.alerts {
-                ui.colored_label(phase_color(PhaseClass::Waiting, dark), a);
-            }
-            for p in &vm.problems {
-                ui.colored_label(
-                    phase_color(PhaseClass::Failed, dark),
-                    format!("policy: {p}"),
-                );
-            }
+            rows.extend(
+                vm.notices
+                    .iter()
+                    .map(|n| (n.level, n.title.clone(), n.text.clone())),
+            );
         }
+        if rows.is_empty() {
+            return;
+        }
+        egui::TopBottomPanel::top("notices")
+            .frame(egui::Frame::new().fill(p.win))
+            .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for (level, title, text) in rows {
+                    let (tint, accent) = match level {
+                        NoticeLevel::Info => (p.raise, p.dim),
+                        NoticeLevel::Warn => (theme::mix(p.win, p.warn, 10), p.warn),
+                        NoticeLevel::Critical => (theme::mix(p.win, p.bad, 10), p.bad),
+                    };
+                    egui::Frame::new()
+                        .fill(tint)
+                        .inner_margin(Margin::symmetric(14, 8))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing.x = 10.0;
+                                ui.label(
+                                    RichText::new(title)
+                                        .font(theme::sans_semibold(theme::BODY))
+                                        .color(accent),
+                                );
+                                ui.label(
+                                    RichText::new(text)
+                                        .font(theme::sans(SECONDARY))
+                                        .color(p.dim),
+                                );
+                            });
+                        });
+                    let (r, _) =
+                        ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
+                    ui.painter()
+                        .hline(r.x_range(), r.min.y, Stroke::new(1.0_f32, p.line));
+                }
+            });
     }
 
-    fn dashboard(&mut self, ui: &mut egui::Ui) {
+    fn footer(&self, ui: &mut egui::Ui, p: &Palette) {
+        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+            match &self.status_line {
+                Some((ok, t)) => {
+                    ui.label(
+                        RichText::new(t)
+                            .font(theme::sans(LABEL + 1.0))
+                            .color(if *ok { p.ok } else { p.bad }),
+                    );
+                }
+                None => {
+                    let hint = if matches!(self.tab, Tab::Queue | Tab::History) {
+                        "↑↓ select  ·  Enter log  ·  Esc deselect"
+                    } else {
+                        ""
+                    };
+                    ui.label(
+                        RichText::new(hint)
+                            .font(theme::sans(LABEL + 1.0))
+                            .color(p.faint),
+                    );
+                }
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let text = match self.last_ok {
+                    Some(t) => format!("updated {}s ago", t.elapsed().as_secs()),
+                    None => "no data yet".to_string(),
+                };
+                ui.label(
+                    RichText::new(text)
+                        .font(theme::sans(LABEL + 1.0))
+                        .color(p.faint),
+                );
+            });
+        });
+    }
+
+    /// The one list of jobs (Queue) or all finished jobs (History).
+    fn job_list(&mut self, ui: &mut egui::Ui, p: &Palette) {
         let Some(vm) = self.vm.clone() else {
             ui.add_space(20.0);
-            ui.weak(if self.error.is_some() {
-                "No data yet."
-            } else {
-                "Asking the daemon..."
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    RichText::new(if self.error.is_some() {
+                        "No data yet."
+                    } else {
+                        "Asking the daemon…"
+                    })
+                    .color(p.faint),
+                );
             });
             return;
         };
+        let groups: Vec<(Section, &str, Vec<&JobRow>, String)> = if self.tab == Tab::History {
+            vec![(
+                Section::Recent,
+                "Finished",
+                vm.recent.iter().collect(),
+                "newest first".to_string(),
+            )]
+        } else {
+            vec![
+                (
+                    Section::Running,
+                    "Running",
+                    vm.running.iter().collect(),
+                    String::new(),
+                ),
+                (
+                    Section::Queued,
+                    "Waiting",
+                    vm.queued.iter().collect(),
+                    "in start order".to_string(),
+                ),
+                (
+                    Section::Recent,
+                    "Finished",
+                    vm.finished_recently(),
+                    "last hour · the rest is in History".to_string(),
+                ),
+            ]
+        };
         let mut click: Option<i64> = None;
-        egui::ScrollArea::both()
+        let selected = self.selected;
+        let scroll_to = std::mem::take(&mut self.scroll_to_selected);
+        egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                let per_row = ((ui.available_width() / CARD_W) as usize).max(1);
-                for chunk in vm.machines.chunks(per_row) {
-                    ui.horizontal_top(|ui| {
-                        for m in chunk {
-                            ui.vertical(|ui| machine_card(ui, m));
-                        }
-                    });
-                }
-                ui.add_space(6.0);
-                for (section, rows) in [
-                    (Section::Running, &vm.running),
-                    (Section::Queued, &vm.queued),
-                    (Section::Recent, &vm.recent),
-                ] {
-                    ui.separator();
-                    ui.label(
-                        RichText::new(format!("{} ({})", section.title(), rows.len())).strong(),
-                    );
+                ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                let cols =
+                    columns::visible(ui.available_width().max(MIN_WINDOW_WIDTH) - 2.0 * paint::PAD);
+                let mut any = false;
+                for (_, title, rows, note) in &groups {
                     if rows.is_empty() {
-                        ui.weak("none");
                         continue;
                     }
-                    if let Some(id) = job_table(ui, section, rows, self.selected) {
-                        click = Some(id);
+                    any = true;
+                    paint::group_header(ui, p, title, rows.len(), note);
+                    for row in rows {
+                        let sel = selected == Some(row.id);
+                        let resp = ui
+                            .scope(|ui| {
+                                if row.stale {
+                                    ui.set_opacity(0.55);
+                                }
+                                paint::job_row(ui, p, row, &cols, sel)
+                            })
+                            .inner;
+                        if sel && scroll_to {
+                            resp.scroll_to_me(None);
+                        }
+                        if resp.clicked() {
+                            click = Some(row.id);
+                        }
                     }
                 }
+                if !any {
+                    ui.add_space(24.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            RichText::new(if self.tab == Tab::History {
+                                "No finished jobs yet."
+                            } else {
+                                "Nothing is running or waiting."
+                            })
+                            .font(theme::sans(theme::BODY))
+                            .color(p.faint),
+                        );
+                    });
+                }
                 if vm.truncated {
-                    ui.weak("The job list was cut at the daemon's row limit.");
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new("The job list was cut at the daemon's row limit.")
+                            .font(theme::sans(SECONDARY))
+                            .color(p.faint),
+                    );
                 }
             });
         if let Some(id) = click {
@@ -491,140 +707,189 @@ impl App {
         }
     }
 
-    fn details(&mut self, ui: &mut egui::Ui) {
+    /// One job in depth: who and how it is going, what it can do, when, and the facts.
+    fn side_panel(&mut self, ui: &mut egui::Ui, p: &Palette) {
         let Some(row) = self.selected_row.clone() else {
+            ui.add_space(40.0);
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    RichText::new("Select a job to see its phases, folder and actions.")
+                        .font(theme::sans(SECONDARY))
+                        .color(p.faint),
+                );
+            });
             return;
         };
-        let listed = self.vm.as_ref().is_some_and(|vm| {
-            vm.running
-                .iter()
-                .chain(&vm.queued)
-                .chain(&vm.recent)
-                .any(|r| r.id == row.id)
-        });
-        ui.horizontal_wrapped(|ui| {
-            dot(ui, rgb(row.color));
-            ui.label(RichText::new(format!("#{} {}", row.id, row.agent)).strong())
-                .on_hover_text(&row.owner);
-            ui.label(
-                RichText::new(&row.phase).color(phase_color(row.class, ui.visuals().dark_mode)),
-            );
-            ui.set_min_width(ACTION_BAR_WIDTH.min(ui.available_width()));
-            let cancel_ok = row.actions.cancel.is_enabled() && listed;
-            let cancel = ui.add_enabled(cancel_ok, egui::Button::new("Cancel..."));
-            let cancel = match (&row.actions.cancel, listed) {
-                (Avail::Disabled(r), _) => cancel.on_disabled_hover_text(r),
-                (Avail::Enabled, false) => {
-                    cancel.on_disabled_hover_text("This job is no longer in the list.")
+        let now_ms = self.vm.as_ref().map_or(0, |vm| vm.now_ms);
+        let listed = self.vm.as_ref().is_some_and(|vm| vm.find(row.id).is_some());
+        let d = detail::detail(&row, now_ms, &self.tz, self.home.as_deref());
+        let mut open_log = false;
+        let mut open_cancel = false;
+        let mut move_up = false;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
+                let pad = Margin::symmetric(16, 14);
+                // header
+                egui::Frame::new().inner_margin(pad).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!("#{}", row.id))
+                                .font(theme::mono(theme::BODY - 0.5))
+                                .color(p.faint),
+                        );
+                        agent_label(ui, p, &row);
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(
+                                RichText::new(&d.state)
+                                    .font(theme::sans_medium(SECONDARY))
+                                    .color(paint::tone_color(p, d.tone)),
+                            );
+                        });
+                    });
+                    ui.add_space(4.0);
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(&row.command)
+                                .font(theme::mono_medium(theme::BODY))
+                                .color(p.ink),
+                        )
+                        .selectable(true)
+                        .wrap(),
+                    );
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        let log =
+                            paint::button(ui, p, "Log", true, false, row.actions.log.is_enabled());
+                        match &row.actions.log {
+                            Avail::Disabled(r) => {
+                                log.on_hover_text(r);
+                            }
+                            Avail::Enabled => {
+                                if log
+                                    .on_hover_text("Tail, follow and search the log.")
+                                    .clicked()
+                                {
+                                    open_log = true;
+                                }
+                            }
+                        }
+                        let up_ok = row.actions.move_up.is_enabled() && listed;
+                        let up = paint::button(ui, p, "Move up", false, false, up_ok);
+                        match &row.actions.move_up {
+                            Avail::Disabled(r) => {
+                                up.on_hover_text(r);
+                            }
+                            Avail::Enabled => {
+                                if up
+                                    .on_hover_text("Ask for the next queue class up.")
+                                    .clicked()
+                                    && up_ok
+                                {
+                                    move_up = true;
+                                }
+                            }
+                        }
+                        let cancel_ok = row.actions.cancel.is_enabled() && listed;
+                        let cancel = paint::button(ui, p, "Cancel…", false, true, cancel_ok);
+                        match (&row.actions.cancel, listed) {
+                            (Avail::Disabled(r), _) => {
+                                cancel.on_hover_text(r);
+                            }
+                            (Avail::Enabled, false) => {
+                                cancel.on_hover_text("This job is no longer in the list.");
+                            }
+                            (Avail::Enabled, true) => {
+                                if cancel
+                                    .on_hover_text("Ask for a reason, then cancel.")
+                                    .clicked()
+                                {
+                                    open_cancel = true;
+                                }
+                            }
+                        }
+                    });
+                });
+                rule(ui, p);
+                if let Some(strip) = &d.strip {
+                    egui::Frame::new().inner_margin(pad).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        paint::phase_strip(ui, p, strip);
+                    });
+                    rule(ui, p);
                 }
-                (Avail::Enabled, true) => cancel.on_hover_text("Ask for a reason, then cancel."),
-            };
-            if cancel.clicked() {
-                self.open_cancel(row.id);
-            }
-            let log = ui.add_enabled(row.actions.log.is_enabled(), egui::Button::new("Log"));
-            let log = match &row.actions.log {
-                Avail::Disabled(r) => log.on_disabled_hover_text(r),
-                Avail::Enabled => log.on_hover_text("Tail, follow and search the log."),
-            };
-            if log.clicked() {
-                self.open_log(&row);
-            }
-            if ui.button("Close").clicked() {
-                self.selected = None;
-                self.selected_row = None;
-            }
-        });
-        ui.separator();
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            let j = &row.job;
-            egui::Grid::new("details_grid").num_columns(2).show(ui, |ui| {
-                let kv = |ui: &mut egui::Ui, k: &str, v: String| {
-                    ui.label(RichText::new(k).weak());
-                    ui.add(egui::Label::new(v).wrap());
-                    ui.end_row();
-                };
-                kv(ui, "Owner", j.owner.clone());
-                if let Some(f) = &j.figures {
-                    kv(ui, "Cost", f.summary());
-                }
-                kv(ui, "Command", row.command.clone());
-                kv(ui, "Directory", j.cwd.display().to_string());
-                kv(ui, "Kind / placement", format!("{:?} / {:?}", j.kind, j.placement));
-                kv(
-                    ui,
-                    "Machine",
-                    match &j.forwarded_to {
-                        Some((m, Some(id))) => format!("{} (forwarded to {m}, remote job #{id})", row.machine),
-                        Some((m, None)) => format!("{} (forwarded to {m})", row.machine),
-                        None => row.machine.clone(),
-                    },
-                );
-                if let Some(p) = &row.remote_phase {
-                    kv(ui, "Remote phase", p.clone());
-                }
-                if let Some((plan, step)) = &j.plan {
-                    kv(ui, "Plan", format!("#{plan} step {step}"));
-                }
-                if !j.after.is_empty() {
-                    let ids: Vec<_> = j.after.iter().map(|i| format!("#{}", i.0)).collect();
-                    kv(ui, "After", ids.join(", "));
-                }
-                kv(
-                    ui,
-                    "Environment",
-                    "Not sent by the daemon. Variables passed on the command line (NAME=value) are in the command above, long values cut.".into(),
-                );
-                if let Some(w) = &row.wait {
-                    kv(ui, "Waiting for", w.clone());
-                }
-                if !row.queue_class.is_empty() {
-                    let why = if row.queue_note.is_empty() {
-                        row.queue_class.clone()
-                    } else {
-                        format!("{}: {}", row.queue_class, row.queue_note)
-                    };
-                    kv(ui, "Queue class", why);
-                }
-                if j.priority != tasks_core::Priority::Normal {
-                    let mut p = format!("submitted {}", j.priority);
-                    if let Some(r) = &j.priority_reason {
-                        p.push_str(&format!(" (reason: {r})"));
+                egui::Frame::new()
+                    .inner_margin(Margin::symmetric(16, 12))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        egui::Grid::new("facts")
+                            .num_columns(2)
+                            .min_col_width(92.0)
+                            .spacing(vec2(12.0, 6.0))
+                            .show(ui, |ui| {
+                                for (k, v) in &d.facts {
+                                    ui.label(
+                                        RichText::new(*k)
+                                            .font(theme::sans(SECONDARY))
+                                            .color(p.faint),
+                                    );
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(v)
+                                                .font(theme::sans(SECONDARY))
+                                                .color(p.ink),
+                                        )
+                                        .wrap(),
+                                    );
+                                    ui.end_row();
+                                }
+                            });
+                    });
+                rule(ui, p);
+                // the live metrics (step 2) go here: graphs, then the process table
+                egui::Frame::new()
+                    .inner_margin(Margin::symmetric(16, 0))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        paint::resources_placeholder(ui, p);
+                    });
+                rule(ui, p);
+                egui::Frame::new().inner_margin(pad).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    let open = self.raw_open.contains(&row.id);
+                    if paint::button(ui, p, "Raw JSON", false, false, true).clicked() {
+                        if open {
+                            self.raw_open.remove(&row.id);
+                        } else {
+                            self.raw_open.insert(row.id);
+                        }
                     }
-                    kv(ui, "Priority", p);
-                }
-                if let Some(t) = &row.timeout {
-                    kv(ui, "Wall-clock limit", t.clone());
-                }
-                if let Some(e) = j.exit {
-                    kv(ui, "Exit", e.to_string());
-                }
-                if let Some(s) = &row.summary {
-                    kv(ui, "Outcome", s.clone());
-                }
+                    if open {
+                        let text = serde_json::to_string_pretty(&row.job).unwrap_or_default();
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(text)
+                                    .font(theme::mono(LABEL + 0.5))
+                                    .color(p.dim),
+                            )
+                            .selectable(true),
+                        );
+                    }
+                });
             });
-            ui.add_space(4.0);
-            ui.label(RichText::new("Timeline").strong());
-            for (t, what) in timeline(j) {
-                ui.label(format!("{}  {what}", format::utc_time(t)));
-            }
-            ui.add_space(4.0);
-            let open = self.raw_open.contains(&row.id);
-            if ui
-                .button(if open { "Hide raw JSON" } else { "Show raw JSON" })
-                .clicked()
-            {
-                if open {
-                    self.raw_open.remove(&row.id);
-                } else {
-                    self.raw_open.insert(row.id);
-                }
-            }
-            if open {
-                let text = serde_json::to_string_pretty(j).unwrap_or_default();
-                ui.add(egui::Label::new(RichText::new(text).monospace().small()).selectable(true));
-            }
-        });
+        if open_log {
+            self.open_log(&row);
+        }
+        if open_cancel {
+            self.open_cancel(row.id);
+        }
+        if move_up && let Some(to) = actions::class_above(row.job.priority) {
+            let owner = row.job.owner.clone();
+            self.spawn_action(move |l| feed::move_up(l, JobId(row.id), &owner, to));
+        }
     }
 
     fn cancel_dialog(&mut self, ctx: &egui::Context) {
@@ -666,11 +931,41 @@ impl App {
         }
     }
 
+    fn drain_dialog(&mut self, ctx: &egui::Context) {
+        if !self.confirm_drain {
+            return;
+        }
+        let mut decision: Option<bool> = None;
+        egui::Window::new("Drain the queue?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label("Queued jobs stop starting until someone resumes. Running jobs finish.");
+                ui.horizontal(|ui| {
+                    if ui.button("Drain").clicked() {
+                        decision = Some(true);
+                    }
+                    if ui.button("Keep going").clicked() {
+                        decision = Some(false);
+                    }
+                });
+            });
+        if let Some(go) = decision {
+            self.confirm_drain = false;
+            if go {
+                let who = self.who.clone();
+                self.spawn_action(move |l| feed::set_drain(l, false, &who));
+            }
+        }
+    }
+
     fn log_window(&mut self, ctx: &egui::Context) {
         let Some(l) = &mut self.log else {
             return;
         };
         let mut open = true;
+        let bad = Palette::current(ctx).bad;
         let link = Arc::clone(&self.link);
         let wake = Arc::clone(&self.wake);
         egui::Window::new(l.title.clone())
@@ -712,7 +1007,7 @@ impl App {
                     }
                 });
                 if let Some(e) = &l.snap.error {
-                    ui.colored_label(Color32::from_rgb(220, 90, 80), e);
+                    ui.colored_label(bad, e);
                 }
                 ui.separator();
                 let mono = egui::TextStyle::Monospace;
@@ -747,7 +1042,7 @@ impl App {
         }
     }
 
-    fn audit_tab(&mut self, ui: &mut egui::Ui) {
+    fn audit_tab(&mut self, ui: &mut egui::Ui, p: &Palette) {
         if !self.audit_asked {
             self.audit_asked = true;
             self.audit_loading = true;
@@ -807,40 +1102,27 @@ impl App {
                 ui.weak("No audit rows loaded yet.");
             }
             Some(Err(e)) => {
-                ui.colored_label(Color32::from_rgb(220, 90, 80), e);
+                ui.colored_label(p.bad, e);
             }
             Some(Ok(d)) => {
                 ui.weak(audit::summary(d));
-                egui::ScrollArea::both()
+                let rows: Vec<Vec<String>> =
+                    d.rows.iter().map(|r| audit::cells(r).to_vec()).collect();
+                egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        egui::Grid::new("audit-table")
-                            .striped(true)
-                            .num_columns(audit::COLUMNS.len())
-                            .show(ui, |ui| {
-                                for t in audit::COLUMNS {
-                                    ui.label(RichText::new(t).strong());
-                                }
-                                ui.end_row();
-                                for r in &d.rows {
-                                    let c = audit::cells(r);
-                                    for (i, text) in c.iter().enumerate() {
-                                        let l = if i == 0 || i == 4 {
-                                            RichText::new(text).monospace()
-                                        } else {
-                                            RichText::new(text)
-                                        };
-                                        ui.add(egui::Label::new(l).truncate()).on_hover_text(text);
-                                    }
-                                    ui.end_row();
-                                }
-                            });
+                        let cols: Vec<(&str, f32)> = audit::COLUMNS
+                            .iter()
+                            .copied()
+                            .zip([150.0, 150.0, 90.0, 130.0, 60.0, 90.0, 0.0])
+                            .collect();
+                        paint::table(ui, p, egui::Id::new("audit"), &cols, &rows, &[0, 4], &[]);
                     });
             }
         }
     }
 
-    fn stalls_tab(&mut self, ui: &mut egui::Ui) {
+    fn stalls_tab(&mut self, ui: &mut egui::Ui, p: &Palette) {
         if !self.stalls_asked {
             self.stalls_asked = true;
             self.stalls_loading = true;
@@ -867,39 +1149,27 @@ impl App {
                 ui.weak("No pressure trips loaded yet.");
             }
             Some(Err(e)) => {
-                ui.colored_label(Color32::from_rgb(220, 90, 80), e);
+                ui.colored_label(p.bad, e);
             }
             Some(Ok(d)) => {
                 ui.weak(stalls::summary(d));
-                egui::ScrollArea::both()
+                let rows: Vec<Vec<String>> =
+                    d.rows.iter().map(|r| stalls::cells(r).to_vec()).collect();
+                egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        egui::Grid::new("stalls-table")
-                            .striped(true)
-                            .num_columns(stalls::COLUMNS.len())
-                            .show(ui, |ui| {
-                                for t in stalls::COLUMNS {
-                                    ui.label(RichText::new(t).strong());
-                                }
-                                ui.end_row();
-                                for r in &d.rows {
-                                    for (i, text) in stalls::cells(r).iter().enumerate() {
-                                        let l = if i == 0 {
-                                            RichText::new(text).monospace()
-                                        } else {
-                                            RichText::new(text)
-                                        };
-                                        ui.add(egui::Label::new(l).truncate()).on_hover_text(text);
-                                    }
-                                    ui.end_row();
-                                }
-                            });
+                        let cols: Vec<(&str, f32)> = stalls::COLUMNS
+                            .iter()
+                            .copied()
+                            .zip([150.0, 80.0, 60.0, 250.0, 300.0, 0.0])
+                            .collect();
+                        paint::table(ui, p, egui::Id::new("stalls"), &cols, &rows, &[0], &[]);
                     });
             }
         }
     }
 
-    fn stats_tab(&mut self, ui: &mut egui::Ui) {
+    fn stats_tab(&mut self, ui: &mut egui::Ui, p: &Palette) {
         if !self.stats_asked {
             self.stats_asked = true;
             self.history_loading = true;
@@ -926,7 +1196,7 @@ impl App {
                 ui.weak("No history loaded yet.");
             }
             Some(Err(e)) => {
-                ui.colored_label(Color32::from_rgb(220, 90, 80), e);
+                ui.colored_label(p.bad, e);
             }
             Some(Ok(h)) => {
                 let rows = stats::rows(h);
@@ -942,55 +1212,57 @@ impl App {
                         let mut recipes: Vec<&str> =
                             rows.iter().map(|r| r.recipe.as_str()).collect();
                         recipes.dedup();
+                        let secs = |v: Option<f64>| {
+                            v.map_or_else(|| format::UNKNOWN.to_string(), format::duration)
+                        };
                         for recipe in recipes {
-                            egui::CollapsingHeader::new(RichText::new(recipe).strong())
-                                .id_salt(("recipe", recipe))
-                                .default_open(true)
-                                .show(ui, |ui| {
-                                    egui::Grid::new(("stats", recipe))
-                                        .striped(true)
-                                        .num_columns(9)
-                                        .show(ui, |ui| {
-                                            for t in [
-                                                "Machine",
-                                                "Target",
-                                                "Samples",
-                                                "Passed",
-                                                "Median",
-                                                "p90",
-                                                "Last",
-                                                "Last result",
-                                                "Cold",
-                                            ] {
-                                                ui.label(RichText::new(t).strong());
-                                            }
-                                            ui.end_row();
-                                            for r in rows.iter().filter(|r| r.recipe == recipe) {
-                                                let secs = |v: Option<f64>| {
-                                                    v.map_or_else(
-                                                        || format::UNKNOWN.to_string(),
-                                                        format::duration,
-                                                    )
-                                                };
-                                                ui.label(&r.machine);
-                                                ui.label(
-                                                    r.target.as_deref().unwrap_or("(whole job)"),
-                                                );
-                                                ui.label(r.samples.to_string());
-                                                ui.label(r.passed.to_string());
-                                                ui.label(secs(r.median));
-                                                ui.label(secs(r.p90));
-                                                ui.label(secs(r.last));
-                                                ui.label(
-                                                    r.last_outcome
-                                                        .as_deref()
-                                                        .unwrap_or(format::UNKNOWN),
-                                                );
-                                                ui.label(r.cold.to_string());
-                                                ui.end_row();
-                                            }
-                                        });
-                                });
+                            ui.add_space(6.0);
+                            ui.label(
+                                RichText::new(recipe)
+                                    .font(theme::sans_semibold(theme::BODY))
+                                    .color(p.ink),
+                            );
+                            ui.add_space(4.0);
+                            let table: Vec<Vec<String>> = rows
+                                .iter()
+                                .filter(|r| r.recipe == recipe)
+                                .map(|r| {
+                                    vec![
+                                        r.machine.clone(),
+                                        r.target.clone().unwrap_or_else(|| "(whole job)".into()),
+                                        r.samples.to_string(),
+                                        r.passed.to_string(),
+                                        secs(r.median),
+                                        secs(r.p90),
+                                        secs(r.last),
+                                        r.last_outcome
+                                            .clone()
+                                            .unwrap_or_else(|| format::UNKNOWN.to_string()),
+                                        r.cold.to_string(),
+                                    ]
+                                })
+                                .collect();
+                            let cols = [
+                                ("Machine", 120.0),
+                                ("Target", 200.0),
+                                ("Samples", 70.0),
+                                ("Passed", 70.0),
+                                ("Median", 80.0),
+                                ("p90", 80.0),
+                                ("Last", 80.0),
+                                ("Last result", 110.0),
+                                ("Cold", 60.0),
+                            ];
+                            paint::table(
+                                ui,
+                                p,
+                                egui::Id::new(("timings", recipe)),
+                                &cols,
+                                &table,
+                                &[],
+                                &[2, 3, 4, 5, 6, 8],
+                            );
+                            ui.add_space(14.0);
                         }
                     });
             }
@@ -1002,258 +1274,95 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.draw(ctx);
         // ages tick between refreshes
-        ctx.request_repaint_after(Duration::from_secs(2));
+        ctx.request_repaint_after(Duration::from_secs(1));
     }
 }
 
-fn dot(ui: &mut egui::Ui, color: Color32) {
-    let (rect, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
-    ui.painter().circle_filled(rect.center(), 4.5, color);
-}
-
-fn timeline(j: &tasks_daemon::api::JobView) -> Vec<(i64, String)> {
-    let mut t = vec![(j.submitted_at_ms, "submitted".to_string())];
-    if let Some(s) = j.started_at_ms {
-        let on = match &j.forwarded_to {
-            Some((m, _)) => format!("started (on {m})"),
-            None => "started".to_string(),
-        };
-        t.push((s, on));
-    }
-    if let Some(f) = j.finished_at_ms {
-        let mut w = format!("finished: {}", model::phase_text(&j.phase).0);
-        if let Some(by) = &j.cancel_requested_by {
-            w.push_str(&format!(", cancel asked by {by}"));
-            if let Some(r) = &j.cancel_reason {
-                w.push_str(&format!(" ({r})"));
-            }
-        }
-        t.push((f, w));
-    }
-    t.sort_by_key(|(at, _)| *at);
-    t
-}
-
-fn machine_card(ui: &mut egui::Ui, m: &MachineCard) {
-    let dark = ui.visuals().dark_mode;
-    let fill = if dark {
-        Color32::from_gray(32)
-    } else {
-        Color32::from_gray(244)
-    };
-    egui::Frame::new()
-        .fill(fill)
-        .stroke(Stroke::new(
-            1.0,
-            ui.visuals().widgets.noninteractive.bg_stroke.color,
-        ))
-        .inner_margin(egui::Margin::same(8))
-        .corner_radius(egui::CornerRadius::same(6))
-        .show(ui, |ui| {
-            ui.set_width(300.0);
-            if m.greyed {
-                ui.set_opacity(0.6);
-            }
-            ui.horizontal(|ui| {
-                dot(ui, online_color(m.online));
-                ui.label(RichText::new(&m.name).heading());
-                if m.local {
-                    ui.weak("this machine");
-                }
-            });
-            ui.label(&m.status_text);
-            ui.label(&m.cpu);
-            ui.label(&m.ram);
-            ui.label(&m.swap);
-            ui.label(format!("Pressure: {}", m.pressure));
-            if let Some(b) = &m.blocker {
-                ui.colored_label(
-                    phase_color(PhaseClass::Waiting, dark),
-                    format!("New compiles wait: {b}"),
-                );
-            }
-            ui.label(format!("{} running, {} waiting", m.running, m.waiting));
-            for s in &m.slots {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(
-                        RichText::new(format!("{} {}/{} free", s.kind, s.free, s.total)).strong(),
-                    );
-                    for h in &s.holders {
-                        if let Some(c) = h.color {
-                            dot(ui, rgb(c));
-                        }
-                        ui.label(&h.label);
-                    }
-                });
-            }
-            if !m.agents.is_empty() {
-                ui.horizontal_wrapped(|ui| {
-                    ui.weak("agents here:");
-                    for (a, c, n) in &m.agents {
-                        dot(ui, rgb(*c));
-                        ui.label(format!("{a} ({n})"));
-                    }
-                });
-            }
-            for n in &m.notes {
-                ui.weak(n);
-            }
-        });
-}
-
-/// Draws one table; returns the job whose row was clicked.
-fn job_table(
-    ui: &mut egui::Ui,
-    section: Section,
-    rows: &[JobRow],
-    selected: Option<i64>,
-) -> Option<i64> {
-    let cols = columns::visible(section, ui.available_width().max(MIN_WINDOW_WIDTH));
-    let fixed: f32 = cols
+/// `live · 2 peers`.
+fn live_text(vm: &ViewModel) -> String {
+    let up = vm
+        .machines
         .iter()
-        .filter(|c| c.col != Col::Command)
-        .map(|c| c.width)
-        .sum::<f32>()
-        + GAP * cols.len().saturating_sub(1) as f32;
-    let command_w = (ui.available_width() - fixed).max(200.0);
-    let width_of = |c: &ColSpec| {
-        if c.col == Col::Command {
-            command_w
-        } else {
-            c.width
-        }
-    };
-    let mut clicked = None;
-    let dark = ui.visuals().dark_mode;
-
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = GAP;
-        for c in &cols {
-            ui.allocate_ui_with_layout(
-                vec2(width_of(c), ROW_H),
-                Layout::left_to_right(Align::Center),
-                |ui| {
-                    ui.set_min_width(width_of(c));
-                    ui.label(RichText::new(c.title).weak().small());
-                },
-            );
-        }
-    });
-    for row in rows {
-        let sel = selected == Some(row.id);
-        let fill = if sel {
-            ui.visuals().selection.bg_fill.gamma_multiply(0.5)
-        } else {
-            Color32::TRANSPARENT
-        };
-        egui::Frame::new().fill(fill).show(ui, |ui| {
-            if row.stale {
-                ui.set_opacity(0.55);
-            }
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = GAP;
-                for c in &cols {
-                    ui.allocate_ui_with_layout(
-                        vec2(width_of(c), ROW_H),
-                        Layout::left_to_right(Align::Center),
-                        |ui| {
-                            ui.set_min_width(width_of(c));
-                            ui.set_max_width(width_of(c));
-                            if let Some(r) = cell(ui, row, c.col, dark)
-                                && r.clicked()
-                            {
-                                clicked = Some(row.id);
-                            }
-                        },
-                    );
-                }
-            });
-        });
+        .filter(|m| !m.local && m.online == Online::Online)
+        .count();
+    match up {
+        0 => "live · no peers".to_string(),
+        1 => "live · 1 peer".to_string(),
+        n => format!("live · {n} peers"),
     }
-    clicked
 }
 
-/// Draws one cell. Returns the response of the part that selects the row.
-fn cell(ui: &mut egui::Ui, row: &JobRow, col: Col, dark: bool) -> Option<egui::Response> {
-    let text = columns::cell(row, col);
-    match col {
-        Col::Id => {
-            Some(ui.add(egui::Label::new(RichText::new(text).monospace()).sense(Sense::click())))
-        }
-        Col::Agent => {
-            dot(ui, rgb(row.color));
-            ui.add(egui::Label::new(RichText::new(&row.agent).color(rgb(row.color))).truncate())
-                .on_hover_text(&row.owner);
-            None
-        }
-        Col::Command => {
-            let r = ui
-                .add(
-                    egui::Label::new(RichText::new(&text).monospace())
-                        .truncate()
-                        .sense(Sense::click()),
-                )
-                .on_hover_text(&text);
-            Some(r)
-        }
-        Col::Phase => {
-            let r = ui.add(
-                egui::Label::new(RichText::new(&text).color(phase_color(row.class, dark)))
-                    .truncate(),
-            );
-            if let Some(s) = &row.summary {
-                r.on_hover_text(s);
-            }
-            None
-        }
-        Col::Progress => {
-            match row.progress {
-                Some(f) => {
-                    ui.add(
-                        egui::ProgressBar::new(f)
-                            .desired_width(70.0)
-                            .desired_height(10.0),
-                    );
-                    ui.label(&text);
-                }
-                None => {
-                    ui.weak(&text);
-                }
-            }
-            None
-        }
-        Col::Machine => {
-            let color = if row.remote {
-                Color32::from_rgb(120, 160, 230)
-            } else {
-                ui.visuals().weak_text_color()
-            };
-            ui.label(RichText::new(&text).color(color).small());
-            None
-        }
-        Col::Eta => {
-            let r = ui.add(egui::Label::new(&text).truncate());
-            if !row.eta_basis.is_empty() {
-                r.on_hover_text(format!("ETA basis: {}", row.eta_basis));
-            }
-            None
-        }
-        Col::Wait => {
-            let r = ui.add(
-                egui::Label::new(
-                    RichText::new(&text).color(phase_color(PhaseClass::Waiting, dark)),
-                )
-                .truncate(),
-            );
-            r.on_hover_text(&text);
-            None
-        }
-        _ => {
-            ui.add(egui::Label::new(&text).truncate())
-                .on_hover_text(&text);
-            None
-        }
+/// The agent's stripe, name and vendor on one line.
+fn agent_label(ui: &mut egui::Ui, p: &Palette, row: &JobRow) {
+    let (r, _) = ui.allocate_exact_size(vec2(3.0, 16.0), Sense::hover());
+    ui.painter()
+        .rect_filled(r, egui::CornerRadius::same(2), p.agent(row.hue));
+    ui.add_space(-2.0);
+    ui.label(
+        RichText::new(&row.agent)
+            .font(theme::sans_medium(theme::BODY))
+            .color(p.ink),
+    )
+    .on_hover_text(&row.owner);
+    if let Some(v) = row.vendor {
+        ui.label(
+            RichText::new(v)
+                .font(theme::sans(LABEL + 0.5))
+                .color(p.faint),
+        );
     }
+}
+
+/// A table header cell.
+fn head(t: &str, p: &Palette) -> RichText {
+    RichText::new(t)
+        .font(theme::sans_medium(SECONDARY))
+        .color(p.dim)
+}
+
+/// A 1px full-width line between side panel blocks.
+fn rule(ui: &mut egui::Ui, p: &Palette) {
+    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
+    ui.painter()
+        .hline(r.x_range(), r.min.y, Stroke::new(1.0_f32, p.line));
+}
+
+/// A tab in the top bar; true when clicked.
+fn tab_button(ui: &mut egui::Ui, p: &Palette, label: &str, count: Option<usize>, on: bool) -> bool {
+    let font = if on {
+        theme::sans_medium(theme::BODY)
+    } else {
+        theme::sans(theme::BODY)
+    };
+    let color = if on { p.ink } else { p.dim };
+    let g = ui.painter().layout_no_wrap(label.to_string(), font, color);
+    let c = count.map(|n| {
+        ui.painter()
+            .layout_no_wrap(n.to_string(), theme::sans(SECONDARY), p.faint)
+    });
+    let w = g.size().x + c.as_ref().map_or(0.0, |c| c.size().x + 5.0) + 20.0;
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 26.0), Sense::click());
+    if on {
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::same(4), p.raise);
+    } else if resp.hovered() {
+        ui.painter().rect_filled(
+            rect,
+            egui::CornerRadius::same(4),
+            theme::mix(p.panel, p.ink, 5),
+        );
+    }
+    let y = rect.center().y;
+    let mut x = rect.min.x + 10.0;
+    let gw = g.size().x;
+    ui.painter()
+        .galley(egui::pos2(x, y - g.size().y / 2.0), g, Color32::PLACEHOLDER);
+    x += gw + 5.0;
+    if let Some(c) = c {
+        ui.painter()
+            .galley(egui::pos2(x, y - c.size().y / 2.0), c, Color32::PLACEHOLDER);
+    }
+    resp.clicked()
 }
 
 /// Starts the window and blocks until it closes.
@@ -1261,7 +1370,7 @@ pub fn run(link: Arc<dyn DaemonLink>, who: String) -> Result<(), String> {
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("tasks")
-            .with_inner_size([1180.0, 780.0])
+            .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([MIN_WINDOW_WIDTH, 420.0]),
         ..Default::default()
     };
@@ -1269,6 +1378,7 @@ pub fn run(link: Arc<dyn DaemonLink>, who: String) -> Result<(), String> {
         "tasks",
         opts,
         Box::new(move |cc| {
+            theme::install(&cc.egui_ctx);
             let ctx = cc.egui_ctx.clone();
             let wake: Wake = Arc::new(move || ctx.request_repaint());
             Ok(Box::new(App::new(link, who, wake)))

@@ -153,10 +153,11 @@ impl Raster {
 /// Draws `app` for a window of `size` physical pixels and returns RGB bytes.
 pub fn render(app: &mut App, size: [usize; 2], ppp: f32, dark: bool) -> Vec<u8> {
     let ctx = egui::Context::default();
-    ctx.set_visuals(if dark {
-        egui::Visuals::dark()
+    crate::theme::install(&ctx);
+    ctx.set_theme(if dark {
+        egui::ThemePreference::Dark
     } else {
-        egui::Visuals::light()
+        egui::ThemePreference::Light
     });
     ctx.set_pixels_per_point(ppp);
     let screen = egui::Rect::from_min_size(
@@ -180,11 +181,7 @@ pub fn render(app: &mut App, size: [usize; 2], ppp: f32, dark: bool) -> Vec<u8> 
         return Vec::new();
     };
     let prims = ctx.tessellate(out.shapes, out.pixels_per_point);
-    let bg = if dark {
-        egui::Visuals::dark().panel_fill
-    } else {
-        egui::Visuals::light().panel_fill
-    };
+    let bg = crate::theme::Palette::of(dark).win;
     raster.draw(&prims, out.pixels_per_point, size, bg)
 }
 
@@ -231,58 +228,107 @@ mod tests {
     }
 
     #[test]
-    fn r205_symbols_used_by_the_window_exist_in_the_default_fonts() {
+    fn r205_symbols_used_by_the_window_exist_in_the_embedded_fonts() {
         let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
         let _ = ctx.run(egui::RawInput::default(), |_| {});
         let mut texts = String::new();
-        for d in [fixtures::busy(), fixtures::offline(), fixtures::idle()] {
+        for d in [
+            fixtures::busy(),
+            fixtures::offline(),
+            fixtures::idle(),
+            fixtures::three_machines(),
+        ] {
             let vm = model::build(&d, 0);
             for m in &vm.machines {
                 texts.push_str(&format!(
-                    "{} {} {} {} {} {} {:?}",
-                    m.name, m.status_text, m.cpu, m.ram, m.swap, m.pressure, m.notes
+                    "{} {} {} {} {} {} {} {} {:?} {:?}",
+                    m.name,
+                    m.role,
+                    m.status_text,
+                    m.cpu,
+                    m.ram,
+                    m.swap,
+                    m.pressure,
+                    m.ram_free,
+                    m.away_note,
+                    m.notes
                 ));
                 for s in &m.slots {
+                    texts.push_str(&s.kind);
                     for h in &s.holders {
                         texts.push_str(&h.label);
                     }
                 }
             }
             for r in vm.running.iter().chain(&vm.queued).chain(&vm.recent) {
-                for section in [
-                    model::Section::Running,
-                    model::Section::Queued,
-                    model::Section::Recent,
-                ] {
-                    for c in crate::columns::specs(section) {
-                        texts.push_str(c.title);
-                        texts.push_str(&crate::columns::cell(r, c.col));
+                for c in crate::columns::specs() {
+                    texts.push_str(&crate::columns::cell(r, c.col));
+                }
+                let det = crate::detail::detail(r, vm.now_ms, &jiff::tz::TimeZone::UTC, None);
+                texts.push_str(&det.state);
+                for (k, v) in &det.facts {
+                    texts.push_str(k);
+                    texts.push_str(v);
+                }
+                if let Some(s) = &det.strip {
+                    texts.push_str(&s.times.join(" "));
+                    for g in &s.segments {
+                        texts.push_str(&g.caption);
                     }
                 }
             }
-            texts.push_str(&vm.banner.unwrap_or_default());
-            texts.push_str(&vm.alerts.join(" "));
+            for n in &vm.notices {
+                texts.push_str(&n.title);
+                texts.push_str(&n.text);
+            }
         }
         for t in Tab::SHOWN.iter().chain(&Tab::PLANNED) {
             texts.push_str(t.label());
         }
-        texts
-            .push_str("Cancel... Log Close Drain Resume Follow Search Clear Refresh Show raw JSON");
+        for s in [
+            model::Section::Running,
+            model::Section::Queued,
+            model::Section::Recent,
+        ] {
+            texts.push_str(s.title());
+        }
+        texts.push_str(
+            "Log Move up Cancel… Cancel job Keep it running Drain queue… Resume queue Drain \
+             Keep going Follow Search Clear Refresh Raw JSON live · connecting… daemon unreachable \
+             Resources Machine Memory stall CPU RAM free Slots ↑↓ select · Enter log · Esc deselect \
+             updated 3s ago Select a job to see its phases, folder and actions. \
+             Live CPU, memory and disk for this job will show here. last hour · the rest is in History",
+        );
         // the Audit tab: filters, column titles and the rows' own symbols
         texts.push_str("Action Peer Job Apply all name or DID id #101 did:key:z6Mk…EGta");
         for t in crate::audit::COLUMNS.iter().chain(&crate::audit::FAMILIES) {
             texts.push_str(t);
         }
-        let font = egui::FontId::proportional(14.0);
-        let mono = egui::FontId::monospace(14.0);
-        let missing: Vec<char> = ctx.fonts_mut(|f| {
-            texts
-                .chars()
-                .filter(|c| !c.is_control())
-                .filter(|c| !f.has_glyph(&font, *c) || !f.has_glyph(&mono, *c))
+        let families = [
+            egui::FontFamily::Proportional,
+            egui::FontFamily::Monospace,
+            crate::theme::medium_family(),
+            crate::theme::semibold_family(),
+            crate::theme::mono_medium_family(),
+        ];
+        let missing: Vec<(egui::FontFamily, char)> = ctx.fonts_mut(|f| {
+            families
+                .iter()
+                .flat_map(|fam| {
+                    let font = egui::FontId::new(14.0, fam.clone());
+                    texts
+                        .chars()
+                        .filter(|c| !c.is_control())
+                        .filter(|c| !f.has_glyph(&font, *c))
+                        .map(|c| (fam.clone(), c))
+                        .collect::<Vec<_>>()
+                })
                 .collect()
         });
         assert!(missing.is_empty(), "no glyph for {missing:?}");
+        // the faces are Plex's own: the first font of the family has the Latin letters
+        assert!(!texts.is_empty());
     }
 
     /// Writes screenshots when `TASKS_UI_SCREENSHOT_DIR` is set; otherwise only checks that
@@ -291,27 +337,42 @@ mod tests {
     fn screenshots() {
         let dir = std::env::var_os("TASKS_UI_SCREENSHOT_DIR").map(std::path::PathBuf::from);
         let history = history();
+        let main = |dark: bool| {
+            let mut a = App::fixed(&fixtures::three_machines(), dead_link());
+            a.select(101);
+            (a, [1400, 900], dark)
+        };
         let shots: Vec<(&str, App, [usize; 2], bool)> = vec![
+            ("main-dark", main(true).0, main(true).1, true),
+            ("main-light", main(false).0, main(false).1, false),
             (
-                "busy-dark",
+                "offline-light",
+                {
+                    let mut a = App::fixed(&fixtures::offline(), dead_link());
+                    a.select(103);
+                    a
+                },
+                [1400, 860],
+                false,
+            ),
+            (
+                "waiting-dark",
+                {
+                    let mut a = App::fixed(&fixtures::three_machines(), dead_link());
+                    a.select(111);
+                    a
+                },
+                [1400, 900],
+                true,
+            ),
+            (
+                "narrow-dark",
                 {
                     let mut a = App::fixed(&fixtures::busy(), dead_link());
                     a.select(101);
                     a
                 },
-                [1400, 960],
-                true,
-            ),
-            (
-                "offline-light",
-                App::fixed(&fixtures::offline(), dead_link()),
-                [1400, 820],
-                false,
-            ),
-            (
-                "narrow-dark",
-                App::fixed(&fixtures::busy(), dead_link()),
-                [700, 900],
+                [700, 1000],
                 true,
             ),
             (
@@ -322,7 +383,50 @@ mod tests {
                     a.ask_cancel(110);
                     a
                 },
-                [1100, 760],
+                [1280, 800],
+                true,
+            ),
+            (
+                "drain-dark",
+                {
+                    let mut a = App::fixed(&fixtures::three_machines(), dead_link());
+                    a.ask_drain();
+                    a
+                },
+                [1100, 620],
+                true,
+            ),
+            (
+                "history-dark",
+                {
+                    let mut a = App::fixed(&fixtures::busy(), dead_link());
+                    a.show_tab(Tab::History);
+                    a.select(91);
+                    a
+                },
+                [1280, 600],
+                true,
+            ),
+            (
+                "timings-dark",
+                {
+                    let mut a = App::fixed(&fixtures::idle(), dead_link());
+                    a.show_tab(Tab::Timings);
+                    a.set_history(history.clone());
+                    a
+                },
+                [1100, 600],
+                true,
+            ),
+            (
+                "stalls-dark",
+                {
+                    let mut a = App::fixed(&fixtures::idle(), dead_link());
+                    a.show_tab(Tab::Stalls);
+                    a.set_stalls(stall_rows());
+                    a
+                },
+                [1280, 500],
                 true,
             ),
             (
@@ -350,17 +454,6 @@ mod tests {
                 [900, 400],
                 false,
             ),
-            (
-                "stats-dark",
-                {
-                    let mut a = App::fixed(&fixtures::idle(), dead_link());
-                    a.show_tab(Tab::Stats);
-                    a.set_history(history.clone());
-                    a
-                },
-                [1100, 600],
-                true,
-            ),
         ];
         for (name, mut app, size, dark) in shots {
             let rgb = render(&mut app, size, 1.0, dark);
@@ -372,6 +465,105 @@ mod tests {
                     Ok(())
                 );
             }
+        }
+    }
+
+    /// Runs one frame of `app` with `events` as input.
+    fn frame(app: &mut App, ctx: &egui::Context, events: Vec<egui::Event>) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1400.0, 900.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| app.draw(ctx));
+    }
+
+    fn key(k: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key: k,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn r587_arrow_keys_move_the_selection_and_escape_lets_go() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut app = App::fixed(&fixtures::busy(), dead_link());
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.selected_id(), None);
+        frame(&mut app, &ctx, vec![key(egui::Key::ArrowDown)]);
+        assert_eq!(app.selected_id(), Some(101), "the first row");
+        frame(&mut app, &ctx, vec![key(egui::Key::ArrowDown)]);
+        assert_eq!(app.selected_id(), Some(102));
+        frame(&mut app, &ctx, vec![key(egui::Key::ArrowUp)]);
+        assert_eq!(app.selected_id(), Some(101));
+        frame(&mut app, &ctx, vec![key(egui::Key::Escape)]);
+        assert_eq!(app.selected_id(), None);
+        // Enter on a job with a log opens the log window: its feed asks the daemon
+        let link = dead_link();
+        let mut app = App::fixed(&fixtures::busy(), link.clone());
+        app.select(101);
+        frame(&mut app, &ctx, vec![key(egui::Key::Enter)]);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            !link.requests().is_empty(),
+            "the log feed asked the daemon for job 101"
+        );
+    }
+
+    #[test]
+    fn r589_drain_asks_first_and_sends_nothing_until_confirmed() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let link = dead_link();
+        let mut app = App::fixed(&fixtures::busy(), link.clone());
+        app.ask_drain();
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![]);
+        assert!(
+            link.requests()
+                .iter()
+                .all(|r| !matches!(r, tasks_daemon::api::Request::Drain { .. })),
+            "nothing was drained by opening the question"
+        );
+        // while the question is open the arrow keys do not move the list behind it
+        frame(&mut app, &ctx, vec![key(egui::Key::ArrowDown)]);
+        assert_eq!(app.selected_id(), None);
+    }
+
+    fn stall_rows() -> crate::stalls::StallData {
+        use tasks_daemon::api::{TripDetails, TripProc};
+        let row = |seq: i64, resource: &str, reason: &str| crate::stalls::StallRow {
+            seq,
+            at_ms: fixtures::NOW_MS - seq * 600_000,
+            trip: TripDetails {
+                resource: resource.into(),
+                source: "psi".into(),
+                reason: reason.into(),
+                top_io: vec![TripProc {
+                    pid: 99,
+                    name: "firefox".into(),
+                    io_bytes: 25 << 30,
+                    rss_bytes: 1 << 30,
+                }],
+                ..TripDetails::default()
+            },
+        };
+        crate::stalls::StallData {
+            rows: vec![
+                row(1, "memory", "memory stalls 12% over 10%"),
+                row(2, "io", "I/O pressure 22% >= 10%"),
+                row(3, "cpu", "CPU pressure 64% >= 40%"),
+            ],
+            truncated: false,
+            unreadable: 0,
         }
     }
 
