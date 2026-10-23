@@ -6,9 +6,11 @@ use crate::{
     ProcessTable, Processes, Service, ServiceStatus, ServiceUnit, Signal, SlotGuard, SlotLocks,
     SpawnSpec, Usage,
 };
+use crate::{InhibitGuard, PowerReading, PowerSource, SleepGuard};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use tasks_core::SlotKind;
 use tasks_core::{Attribution, JobFigures};
 
@@ -347,5 +349,74 @@ mod tests {
             Service::status(&f, "x").unwrap(),
             ServiceStatus::NotInstalled
         );
+    }
+}
+
+/// A scripted power state and sleep guard: counts acquisitions and releases.
+#[derive(Debug)]
+pub struct FakePower {
+    reading: Mutex<PowerReading>,
+    refuse: Mutex<Option<String>>,
+    held: Arc<AtomicUsize>,
+    acquired: AtomicUsize,
+}
+
+impl Default for FakePower {
+    fn default() -> Self {
+        FakePower {
+            reading: Mutex::new(PowerReading::AC),
+            refuse: Mutex::new(None),
+            held: Arc::new(AtomicUsize::new(0)),
+            acquired: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl FakePower {
+    /// Sets what [`PowerSource::power`] returns.
+    pub fn set_power(&self, r: PowerReading) {
+        if let Ok(mut g) = self.reading.lock() {
+            *g = r;
+        }
+    }
+
+    /// Makes [`SleepGuard::keep_awake`] fail with this reason (`None` makes it work again).
+    pub fn refuse_with(&self, why: Option<&str>) {
+        if let Ok(mut g) = self.refuse.lock() {
+            *g = why.map(str::to_string);
+        }
+    }
+
+    /// Guards currently held.
+    pub fn held(&self) -> usize {
+        self.held.load(Ordering::SeqCst)
+    }
+
+    /// Guards ever taken.
+    pub fn acquired(&self) -> usize {
+        self.acquired.load(Ordering::SeqCst)
+    }
+}
+
+impl PowerSource for FakePower {
+    fn power(&self) -> Result<PowerReading, PlatformError> {
+        Ok(*self.reading.lock().map_err(poisoned)?)
+    }
+}
+
+impl SleepGuard for FakePower {
+    fn keep_awake(&self, _why: &str) -> Result<InhibitGuard, PlatformError> {
+        if let Some(why) = self.refuse.lock().map_err(poisoned)?.clone() {
+            return Err(PlatformError::Command {
+                command: "fake-inhibit".into(),
+                detail: why,
+            });
+        }
+        self.held.fetch_add(1, Ordering::SeqCst);
+        self.acquired.fetch_add(1, Ordering::SeqCst);
+        let held = self.held.clone();
+        Ok(InhibitGuard::new(move || {
+            held.fetch_sub(1, Ordering::SeqCst);
+        }))
     }
 }

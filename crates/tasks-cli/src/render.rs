@@ -668,6 +668,11 @@ pub fn status(s: &StatusSnapshot) -> String {
     for a in &s.alerts {
         let _ = writeln!(out, "alert [{}] {}", a.level, a.message);
     }
+    // an older daemon sends no power view
+    if let Some(pw) = &s.power {
+        let _ = writeln!(out, "{}", pw.source_line());
+        let _ = writeln!(out, "{}", pw.awake_line());
+    }
     // an older daemon sends no attribution line
     if !s.attribution.is_empty() {
         let _ = writeln!(out, "{}", s.attribution);
@@ -792,9 +797,10 @@ fn peers_section(out: &mut String, peers: &[tasks_daemon::api::PeerView]) {
                 .map(|x| format!("{} {}/{}", x.kind, x.used, x.total))
                 .collect::<Vec<_>>()
                 .join(", ");
+            let power = m.power.as_ref().map_or(String::new(), |p| format!("; {p}"));
             let _ = writeln!(
                 out,
-                "    {} cores, {}; slots {slots}; {} waiting, {} running",
+                "    {} cores, {}; slots {slots}; {} waiting, {} running{power}",
                 m.cores,
                 fmt_size(m.memory_bytes),
                 m.waiting,

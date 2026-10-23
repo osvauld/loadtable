@@ -619,6 +619,7 @@ fn r356_status_lists_each_peer_with_state_path_latencies_roles_and_its_last_repo
                 swap_used: Some(1 << 30),
                 swap_in_per_s: Some(0),
                 swap_out_per_s: Some(2048),
+                power: Some("on battery 80%".into()),
             }),
         },
         PeerView {
@@ -719,4 +720,83 @@ fn r504_get_lists_each_fetch_result_and_a_passed_job_with_a_failed_one_exits_one
     );
     j.fetch.truncate(1);
     assert_eq!(job_exit_code(&j), 0);
+}
+
+// R-609, R-611: status shows the power source, the stay-awake hold and a peer's power
+#[test]
+fn r609_status_shows_the_power_source_and_whether_the_machine_is_kept_awake() {
+    use tasks_daemon::api::PowerView;
+    let mut s = snapshot();
+    let mut pw = PowerView {
+        on_battery: false,
+        battery_pct: None,
+        awake_jobs: 2,
+        holding: true,
+        linger_secs: None,
+        guard_error: None,
+        battery_held: 0,
+        peer_jobs_on_battery: false,
+    };
+    s.power = Some(pw.clone());
+    let t = status(&s);
+    assert!(t.contains("power: on AC\nkeeping awake: 2 jobs\n"), "{t}");
+    pw.holding = false;
+    pw.awake_jobs = 0;
+    pw.on_battery = true;
+    pw.battery_pct = Some(80);
+    pw.battery_held = 1;
+    s.power = Some(pw.clone());
+    let t = status(&s);
+    assert!(
+        t.contains("power: on battery 80%; 1 job from peers wait for AC"),
+        "{t}"
+    );
+    assert!(t.contains("\nsleep allowed\n"), "{t}");
+    pw.holding = true;
+    pw.linger_secs = Some(80);
+    s.power = Some(pw);
+    assert!(status(&s).contains("keeping awake: no jobs, releases in 1m20s"));
+    // an older daemon sends none
+    s.power = None;
+    assert!(!status(&s).contains("keeping awake"));
+}
+
+#[test]
+fn r611_a_peers_power_is_shown_with_its_last_report() {
+    let t = status(&{
+        let mut s = snapshot();
+        s.peers = vec![tasks_daemon::api::PeerView {
+            name: "mac".into(),
+            node_id: "n".into(),
+            state: "offline".into(),
+            last_seen_ago_secs: Some(78),
+            detail: String::new(),
+            did: String::new(),
+            roles_out: vec![],
+            roles_in: vec![],
+            grant_expires_at: None,
+            path: String::new(),
+            rtt_ms: None,
+            reply_ms: None,
+            machine: Some(tasks_daemon::api::PeerMachineView {
+                cores: 8,
+                memory_bytes: 8 << 30,
+                slots: vec![],
+                waiting: 0,
+                running: 0,
+                cpu_pct: None,
+                memory_pct: None,
+                io_pct: None,
+                pressure_summary: String::new(),
+                cpu_busy_pct: None,
+                swap_total: None,
+                swap_used: None,
+                swap_in_per_s: None,
+                swap_out_per_s: None,
+                power: Some("on battery 80%".into()),
+            }),
+        }];
+        s
+    });
+    assert!(t.contains("0 running; on battery 80%"), "{t}");
 }

@@ -1378,6 +1378,9 @@ fn status_text(s: &StatusSnapshot) -> String {
     for a in &s.alerts {
         t.push_str(&format!("alert [{}] {}\n", a.level, a.message));
     }
+    if let Some(pw) = &s.power {
+        t.push_str(&format!("{}\n{}\n", pw.source_line(), pw.awake_line()));
+    }
     if !s.attribution.is_empty() {
         t.push_str(&format!("{}\n", s.attribution));
     }
@@ -1423,8 +1426,9 @@ fn status_text(s: &StatusSnapshot) -> String {
             let busy = m
                 .cpu_busy_pct
                 .map_or(String::new(), |c| format!(", cpu busy {c}%"));
+            let power = m.power.as_ref().map_or(String::new(), |p| format!(", {p}"));
             t.push_str(&format!(
-                "  {} cores, slots {slots}, {} waiting, {} running{busy}{swap}\n",
+                "  {} cores, slots {slots}, {} waiting, {} running{busy}{swap}{power}\n",
                 m.cores, m.waiting, m.running
             ));
         }

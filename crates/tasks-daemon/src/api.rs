@@ -1056,6 +1056,9 @@ pub struct PeerMachineView {
     /// Swap write-out rate, bytes per second.
     #[serde(default)]
     pub swap_out_per_s: Option<u64>,
+    /// Where its power comes from (`on battery 80%`), when it reports it.
+    #[serde(default)]
+    pub power: Option<String>,
 }
 
 /// One peer slot kind.
@@ -1100,6 +1103,79 @@ pub struct StatusSnapshot {
     /// The latest pressure trips, newest first.
     #[serde(default)]
     pub trips: Vec<TripView>,
+    /// Power source and whether the daemon holds the machine awake; absent from older daemons.
+    #[serde(default)]
+    pub power: Option<PowerView>,
+}
+
+/// This machine's power source and its stay-awake hold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PowerView {
+    /// Running on a battery.
+    pub on_battery: bool,
+    /// Battery charge, when there is a battery.
+    pub battery_pct: Option<u8>,
+    /// Jobs that keep the machine awake now (running or queued, not waiting on battery).
+    pub awake_jobs: u32,
+    /// The hold is taken now.
+    pub holding: bool,
+    /// Seconds until a lingering hold (no jobs left) is released.
+    pub linger_secs: Option<u64>,
+    /// Why the machine cannot be held awake, when it cannot.
+    pub guard_error: Option<String>,
+    /// Jobs from peers held back because this machine is on battery.
+    pub battery_held: u32,
+    /// Whether peer jobs may run on battery (`power.peer_jobs_on_battery`).
+    pub peer_jobs_on_battery: bool,
+}
+
+impl PowerView {
+    /// `keeping awake: 2 jobs`, `keeping awake: no jobs, releases in 1m20s` or `sleep allowed`.
+    pub fn awake_line(&self) -> String {
+        if let Some(e) = &self.guard_error {
+            return format!("sleep guard not available: {e}");
+        }
+        match (self.holding, self.linger_secs) {
+            (true, Some(s)) => format!("keeping awake: no jobs, releases in {}", fmt_dur(s)),
+            (true, None) => format!(
+                "keeping awake: {} job{}",
+                self.awake_jobs,
+                if self.awake_jobs == 1 { "" } else { "s" }
+            ),
+            (false, _) => "sleep allowed".to_string(),
+        }
+    }
+
+    /// `power: on battery 80%`, with the peer jobs held back by it.
+    pub fn source_line(&self) -> String {
+        let mut t = format!(
+            "power: {}",
+            if self.on_battery {
+                "on battery"
+            } else {
+                "on AC"
+            }
+        );
+        if let Some(p) = self.battery_pct {
+            t.push_str(&format!(" {p}%"));
+        }
+        if self.battery_held > 0 {
+            t.push_str(&format!(
+                "; {} job{} from peers wait for AC (power.peer_jobs_on_battery is off)",
+                self.battery_held,
+                if self.battery_held == 1 { "" } else { "s" }
+            ));
+        }
+        t
+    }
+}
+
+fn fmt_dur(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    }
 }
 
 /// Transfer (checkout sync) activity as the status shows it.

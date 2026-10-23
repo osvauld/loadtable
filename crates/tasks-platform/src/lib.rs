@@ -10,8 +10,10 @@ mod fds;
 mod groups;
 #[cfg(target_os = "linux")]
 pub mod linux;
+mod localtime;
 #[cfg(target_os = "macos")]
 pub mod macos;
+mod power;
 // The macOS parsers are pure, so they are also compiled under test on Linux.
 #[cfg(any(test, target_os = "macos"))]
 #[path = "macos/parse.rs"]
@@ -29,13 +31,15 @@ pub use cgroup::{
 };
 pub use error::PlatformError;
 pub use fds::close_on_exec_inherited;
+pub use localtime::local_offset_secs;
+pub use power::{InhibitGuard, PowerReading, Supply, reading_from_supplies};
 pub use sample::{
     OutsideSampler, ProcInfo, ProcessTable, TOP_N, TopOutside, TopProc, TreeMeter,
     clean_program_name, tree_pids,
 };
 pub use service::{render_launchd_plist, render_systemd_unit};
 pub use slots::{FlockSlots, SlotGuard, slot_lock_path};
-pub use traits::{Disk, Memory, Pressure, Processes, Service, SlotLocks};
+pub use traits::{Disk, Memory, PowerSource, Pressure, Processes, Service, SleepGuard, SlotLocks};
 pub use types::{
     Child, GroupId, HostRates, InstallPlan, Level, MemorySnapshot, PLACE_SCRIPT, PressureSnapshot,
     PressureThresholds, ServiceStatus, ServiceUnit, Signal, SpawnSpec, Usage, place_in_cgroup,

@@ -295,6 +295,18 @@ pub struct PeerStatus {
     pub queue: QueueSummary,
     /// Pressure.
     pub pressure: PressureSummary,
+    /// Where its power comes from; absent from older peers.
+    #[serde(default)]
+    pub power: Option<PowerSummary>,
+}
+
+/// A peer's power state, shown next to its link state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PowerSummary {
+    /// Running on a battery.
+    pub on_battery: bool,
+    /// Battery charge, when there is a battery.
+    pub percent: Option<u8>,
 }
 
 /// Run a command on the receiver, in its synced copy of a checkout.

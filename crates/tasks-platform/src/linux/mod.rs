@@ -1,15 +1,17 @@
 //! Linux implementations of the platform traits (`/proc`, PSI, systemd).
 
 mod memory;
+mod power;
 mod pressure;
 mod procs;
 mod service;
 mod table;
 
 use crate::{
-    Child, Disk, GroupId, InstallPlan, Memory, MemorySnapshot, PlatformError, Pressure,
-    PressureSnapshot, PressureThresholds, ProcInfo, ProcessTable, Processes, Service,
-    ServiceStatus, ServiceUnit, Signal, SpawnSpec, Usage, disk, groups,
+    Child, Disk, GroupId, InhibitGuard, InstallPlan, Memory, MemorySnapshot, PlatformError,
+    PowerReading, PowerSource, Pressure, PressureSnapshot, PressureThresholds, ProcInfo,
+    ProcessTable, Processes, Service, ServiceStatus, ServiceUnit, Signal, SleepGuard, SpawnSpec,
+    Usage, disk, groups,
 };
 use std::path::Path;
 
@@ -69,5 +71,15 @@ impl Service for Native {
 impl Disk for Native {
     fn free_bytes(&self, path: &Path) -> Result<u64, PlatformError> {
         disk::free_bytes(path)
+    }
+}
+impl PowerSource for Native {
+    fn power(&self) -> Result<PowerReading, PlatformError> {
+        power::read()
+    }
+}
+impl SleepGuard for Native {
+    fn keep_awake(&self, why: &str) -> Result<InhibitGuard, PlatformError> {
+        power::inhibit(why)
     }
 }

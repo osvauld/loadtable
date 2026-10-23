@@ -561,6 +561,7 @@ impl FakeStatus {
             slots: Vec::new(),
             queue: QueueSummary::default(),
             pressure: PressureSummary::default(),
+            power: None,
         })
     }
 }

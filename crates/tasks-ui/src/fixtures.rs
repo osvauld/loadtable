@@ -145,6 +145,7 @@ fn peer(state: &str, ago: Option<u64>) -> PeerView {
             swap_used: Some(0),
             swap_in_per_s: Some(0),
             swap_out_per_s: Some(0),
+            power: None,
         }),
     }
 }
@@ -185,6 +186,7 @@ pub fn idle() -> Dashboard {
             attribution: "attribution: process tree (no cgroup delegation: fixture)".into(),
             transfer: None,
             trips: vec![],
+            power: None,
         },
         jobs,
         jobs_truncated: false,

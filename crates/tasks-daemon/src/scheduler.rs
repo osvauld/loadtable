@@ -110,6 +110,18 @@ pub(crate) struct TickState {
     /// When each owner last started a job, ms: the queue gives the next turn to the owner that
     /// started least recently. Forgotten on restart (everyone is then "never").
     pub last_started: BTreeMap<String, u64>,
+    /// What a job spent waiting for a sleeping peer, for its log once placed (R-600).
+    pub peer_waited: BTreeMap<JobId, String>,
+    /// When the peer a job waits for was first seen gone, so the wait text stays the same.
+    pub peer_seen: BTreeMap<JobId, Option<i64>>,
+    /// The stay-awake hold (R-607).
+    pub awake: crate::awake::Keeper,
+    /// Jobs that could start this pass (waiting only for a slot or a gate), for the hold.
+    pub awake_demand: u32,
+    /// Jobs from peers held back because the machine is on battery (R-614).
+    pub battery_held: BTreeSet<JobId>,
+    /// The power source at the start of the last tick.
+    pub power: Option<tasks_platform::PowerReading>,
 }
 
 /// What one tick did.
@@ -361,8 +373,10 @@ impl Scheduler {
             rep.cancelled_blocked = ids;
         }
         self.sync_cancels();
+        self.refresh_power();
         self.supervise(&policy, now);
         self.admit(&policy, &mut rep);
+        self.keep_awake(&policy, now, rep.started.len());
         self.psi_trips(&policy);
         self.maintenance(&policy, now);
         self.evaluate_alerts(&policy, now);
@@ -419,6 +433,9 @@ impl Scheduler {
             st.facts.retain(|id, _| keep.contains(id));
             st.placed.retain(|id, _| keep.contains(id));
             st.last_wait.retain(|id, _| keep.contains(id));
+            st.battery_held.retain(|id| keep.contains(id));
+            st.peer_waited.retain(|id, _| keep.contains(id));
+            st.peer_seen.retain(|id, _| keep.contains(id));
             st.no_forward.retain(|id, _| keep.contains(id));
             drop(st);
             // a forward cancelled or finished while it waited must not hold up its checkout
@@ -450,8 +467,19 @@ impl Scheduler {
 
         let mut candidates: BTreeMap<JobId, (JobRecord, Waiter)> = BTreeMap::new();
         let mut probes: Vec<JobRecord> = Vec::new();
+        let battery_hold = self.battery_blocks_peer_jobs(policy);
         for rec in recs {
             let id = rec.id;
+            if rec.origin.is_some() && battery_hold {
+                // a peer's job does not drain this machine's battery (R-614); it holds no slot
+                // and does not keep the machine awake
+                let text = format!("{} is on battery", self.cfg.machine);
+                self.set_wait(id, LedgerWait::Placement(text.clone()), &text);
+                lock(&self.state).battery_held.insert(id);
+                rep.waiting += 1;
+                continue;
+            }
+            lock(&self.state).battery_held.remove(&id);
             if rec.forward.is_some() {
                 // a job already placed on a peer: an offload-client job (R-162, R-230)
                 if let Some(w) = self.forward_waiter(&rec, blocked_hold.as_ref()) {
@@ -513,6 +541,9 @@ impl Scheduler {
             }
             candidates.insert(id, (rec, w));
         }
+
+        lock(&self.state).awake_demand =
+            u32::try_from(candidates.len() + probes.len()).unwrap_or(u32::MAX);
 
         // Probes need no slot and no gate, but still obey drain and the execution intent.
         for rec in probes {

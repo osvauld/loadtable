@@ -361,6 +361,10 @@ impl StatusSource for DaemonStatus {
                 swap_in_per_s: snap.pressure.swap_in_per_s,
                 swap_out_per_s: snap.pressure.swap_out_per_s,
             },
+            power: snap.power.map(|p| tasks_peer::proto::PowerSummary {
+                on_battery: p.on_battery,
+                percent: p.battery_pct,
+            }),
         }
     }
 }

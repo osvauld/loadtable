@@ -410,6 +410,8 @@ pub struct Rig {
     pub cgroups: Arc<tasks_platform::fake::FakeCgroups>,
     /// The process table the rig reports.
     pub table: Arc<tasks_platform::fake::FakePlatform>,
+    /// The scripted power source and sleep guard.
+    pub power: Arc<tasks_platform::fake::FakePower>,
 }
 
 /// The identity the rig signs its audit checkpoints with.
@@ -494,6 +496,7 @@ impl Rig {
         let holders = Arc::new(FakeHolders::default());
         let cgroups = Arc::new(cgroups);
         let table = Arc::new(tasks_platform::fake::FakePlatform::default());
+        let power = Arc::new(tasks_platform::fake::FakePower::default());
         let platform = Platform {
             memory: machine.clone(),
             pressure: machine.clone(),
@@ -507,6 +510,8 @@ impl Rig {
             holders: holders.clone(),
             cgroups: cgroups.clone(),
             table: table.clone(),
+            power: power.clone(),
+            sleep: power.clone(),
         };
         let policy = MachinePolicy::from_text(
             if policy.is_empty() {
@@ -558,6 +563,7 @@ impl Rig {
             audit_store,
             cgroups,
             table,
+            power,
         }
     }
 
@@ -793,6 +799,7 @@ impl PeerWorld {
                 .collect(),
             queue: Default::default(),
             pressure: Default::default(),
+            power: None,
         };
         Receiver::new(
             "nixos",
