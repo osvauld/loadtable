@@ -344,6 +344,10 @@ fn r335_a_running_jobs_figures_show_in_the_status() {
         .get(&id)
         .cloned()
         .unwrap();
+    // the runner's own first sample must land before ours, or it overwrites it
+    r.until("the runner's first sample", || {
+        crate::scheduler::lock(&rj.figures).is_some()
+    });
     *crate::scheduler::lock(&rj.figures) = Some(f.clone());
     let s = r.sch.status();
     assert_eq!(s.running[0].figures, Some(f));

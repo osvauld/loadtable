@@ -161,6 +161,9 @@ impl Cgroups for CgroupTree {
                 None => None,
             },
         };
+        if let Some(t) = get("memory.current")? {
+            fig.mem_now_bytes = parse_single_u64("memory.current", &t)?;
+        }
         if let Some(t) = get("cpu.stat")? {
             fig.cpu_usec = Some(parse_cpu_usage(&t)?);
         }
@@ -379,6 +382,19 @@ mod tests {
         assert_eq!((f.io_read_ops, f.io_write_ops), (Some(4), Some(5)));
         assert_eq!((f.io_some_us, f.io_full_us), (Some(2500), Some(900)));
         assert_eq!(f.mem_peak_bytes, Some(777));
+    }
+
+    // R-574
+    #[test]
+    fn r574_the_current_memory_is_read_apart_from_the_peak() {
+        let (t, own, _) = tree("memnow", "io memory cpu\n");
+        let job = CgroupName::Job(10);
+        t.create(job).unwrap();
+        let dir = own.join("tasks.slice/job-10");
+        put(&dir, "memory.peak", "900\n");
+        put(&dir, "memory.current", "300\n");
+        let f = t.read(job).unwrap();
+        assert_eq!((f.mem_peak_bytes, f.mem_now_bytes), (Some(900), Some(300)));
     }
 
     // R-323

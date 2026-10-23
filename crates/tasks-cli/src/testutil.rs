@@ -287,6 +287,8 @@ pub fn status_snapshot() -> StatusSnapshot {
             eta_secs: Some(200.0),
             log_bytes: 10,
             figures: None,
+            cores: None,
+            mem_bytes: None,
         }],
         pressure: PressureView {
             memory: "ok".into(),
@@ -297,6 +299,7 @@ pub fn status_snapshot() -> StatusSnapshot {
             memory_total: None,
             available_memory: Some(8 << 30),
             cpu_busy_pct: None,
+            cores_in_use: None,
             swap_total: None,
             swap_used: None,
             swap_in_per_s: None,

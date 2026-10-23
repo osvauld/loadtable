@@ -294,6 +294,7 @@ impl Scheduler {
                 let tl = lock(&rj.timeline);
                 let p = progress(&tl, &rj.estimates);
                 drop(tl);
+                let live = lock(&self.metrics).latest(rj.id);
                 RunningView {
                     id: rj.id,
                     owner: rj.owner.clone(),
@@ -311,6 +312,8 @@ impl Scheduler {
                         .map(|m| m.len())
                         .unwrap_or(0),
                     figures: lock(&rj.figures).clone(),
+                    cores: live.and_then(|l| l.cores),
+                    mem_bytes: live.and_then(|l| l.mem_bytes),
                 }
             })
             .collect();
@@ -437,6 +440,9 @@ impl Scheduler {
                 available_memory: Some(r.available_memory),
                 memory_total: mem.map(|m| m.total_bytes),
                 cpu_busy_pct: rates.cpu_pct,
+                cores_in_use: rates
+                    .cpu_pct
+                    .map(|p| f64::from(p) / 100.0 * f64::from(self.cores)),
                 swap_total: mem.map(|m| m.swap_total_bytes),
                 swap_used: mem.map(|m| m.swap_used_bytes),
                 swap_in_per_s: rates.swap_in_per_s,
@@ -462,6 +468,7 @@ impl Scheduler {
                 available_memory: None,
                 memory_total: None,
                 cpu_busy_pct: None,
+                cores_in_use: None,
                 swap_total: None,
                 swap_used: None,
                 swap_in_per_s: None,

@@ -193,6 +193,10 @@ impl Scheduler {
                 reason,
             } => self.prioritize(id, &who, priority, reason.as_deref()),
             Request::Status => Ok(Response::Status(Box::new(self.status()))),
+            Request::JobMetrics { id } => {
+                let rec = self.record(id)?;
+                Ok(Response::JobMetrics(self.job_metrics(&rec)))
+            }
             Request::Estimate { argv, kind } => Ok(self.estimate(&argv, kind)),
             Request::Drain { cancel, who } => {
                 self.set_drain(!cancel, who);

@@ -92,6 +92,7 @@ fn dispatch(ctx: &mut Ctx<'_>, cmd: &Command) -> Result<i32, CliError> {
         Command::Logs(a) => logs(ctx, a),
         Command::LogSearch(a) => log_search(ctx, a),
         Command::Get { id, json } => get(ctx, *id, *json),
+        Command::Metrics { id, json } => metrics(ctx, *id, *json),
         Command::Cancel { id, who, reason } => cancel(ctx, *id, who.as_deref(), reason.as_deref()),
         Command::Prioritize {
             id,
@@ -575,6 +576,21 @@ fn get(ctx: &mut Ctx<'_>, id: i64, json: bool) -> Result<i32, CliError> {
     };
     let text = render::job_detail(&job, (ctx.now_ms)(), w.as_ref());
     ctx.out.write_all(text.as_bytes())?;
+    Ok(EXIT_OK)
+}
+
+fn metrics(ctx: &mut Ctx<'_>, id: i64, json: bool) -> Result<i32, CliError> {
+    let resp = ctx.client.call(&Request::JobMetrics { id: JobId(id) })?;
+    let Response::JobMetrics(m) = resp else {
+        return Err(CliError::Failed(format!(
+            "unexpected reply to metrics: {resp:?}"
+        )));
+    };
+    if json {
+        writeln!(ctx.out, "{}", pretty(&m)?)?;
+    } else {
+        ctx.out.write_all(render::job_metrics(&m).as_bytes())?;
+    }
     Ok(EXIT_OK)
 }
 
