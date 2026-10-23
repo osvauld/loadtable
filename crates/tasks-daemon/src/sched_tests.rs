@@ -582,6 +582,31 @@ fn r348_the_same_peer_gets_the_job_when_its_gate_is_open() {
     assert_eq!(r.tick().forwarded, vec![id]);
 }
 
+fn anywhere_over_cap(r: &Rig) -> tasks_core::JobSpec {
+    let mut s = anywhere(r);
+    s.argv = ["cargo", "test", "-j", "6"].map(String::from).to_vec();
+    s
+}
+
+// R-541
+#[test]
+fn r541_an_anywhere_job_above_the_local_cap_is_forwarded_even_when_the_peer_is_not_faster() {
+    let f = Arc::new(FakeForwarder::new(vec![fast_peer(false)]));
+    let r = Rig::with_forwarder(f);
+    let id = r.submit(&anywhere_over_cap(&r));
+    assert_eq!(r.tick().forwarded, vec![id]);
+}
+
+#[test]
+fn r541_with_no_peer_an_anywhere_job_above_the_cap_is_not_started_and_names_the_cap() {
+    let r = Rig::with_forwarder(Arc::new(FakeForwarder::new(vec![])));
+    let id = r.submit(&anywhere_over_cap(&r));
+    let rep = r.tick();
+    assert_eq!(rep.not_started, vec![id], "{rep:?}");
+    let text = format!("{:?}", r.phase(id));
+    assert!(text.contains("cap of 2"), "{text}");
+}
+
 fn nixos() -> MachineName {
     MachineName("nixos".into())
 }

@@ -20,6 +20,13 @@ pub enum Exclusion {
     NotTransportable(String),
     /// A capability mark (with evidence) rules the machine out.
     Marked(String),
+    /// The command asks for more Cargo parallelism than this machine's cap allows.
+    AboveCargoCap {
+        /// The parallelism asked for.
+        asked: u32,
+        /// The machine's cap.
+        cap: u32,
+    },
     /// Not reachable.
     Unreachable {
         /// Seconds since last seen.
@@ -190,6 +197,18 @@ fn exclusions(input: &Input, v: &MachineView, policy: &Policy) -> Vec<Exclusion>
         out.push(Exclusion::NotRequested);
     } else if input.request == Request::Anywhere && input.kind == Kind::Device && !v.is_local {
         out.push(Exclusion::DeviceLocalOnly);
+    }
+    // only `--anywhere` moves a job away from the local cap; here/pinned/peer jobs are judged
+    // elsewhere (the submit rules, the peer)
+    if v.is_local
+        && input.request == Request::Anywhere
+        && let Some(c) = input.local_cargo_jobs
+        && c.asked > c.cap
+    {
+        out.push(Exclusion::AboveCargoCap {
+            asked: c.asked,
+            cap: c.cap,
+        });
     }
     let mut req = input.requirements.clone();
     req.tools

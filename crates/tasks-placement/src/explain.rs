@@ -31,6 +31,10 @@ impl fmt::Display for Exclusion {
                 let parts: Vec<String> = u.iter().map(unmet_text).collect();
                 write!(f, "unmet: {}", parts.join(", "))
             }
+            Exclusion::AboveCargoCap { asked, cap } => write!(
+                f,
+                "cargo parallelism {asked} is above this machine's cap of {cap}"
+            ),
             Exclusion::NotTransportable(why) => write!(f, "cannot be shipped: {why}"),
             Exclusion::Marked(m) => write!(f, "marked: {m}"),
             Exclusion::Unreachable {

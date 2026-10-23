@@ -12,7 +12,9 @@ pub use decide::{
 };
 pub use error::PlacementError;
 pub use explain::fmt_secs;
-pub use input::{Checkout, Input, Link, MachineView, Policy, Pressure, Request, RunEstimate};
+pub use input::{
+    CargoJobs, Checkout, Input, Link, MachineView, Policy, Pressure, Request, RunEstimate,
+};
 pub use reroute::{Current, JobState, Reroute, StayReason, should_reroute};
 
 use tasks_core::{Machine, MachineName, Requirements, Unmet};

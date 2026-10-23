@@ -145,6 +145,15 @@ pub struct MachineView {
     pub marks: Vec<String>,
 }
 
+/// A Cargo parallelism request above the cap of the machine making the decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CargoJobs {
+    /// What the command asks for.
+    pub asked: u32,
+    /// This machine's cap (`cargo.max_jobs`).
+    pub cap: u32,
+}
+
 /// One placement question.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Input {
@@ -158,6 +167,10 @@ pub struct Input {
     pub request: Request,
     /// `Some(why)` when the job cannot be shipped (a path that exists only here, R-138).
     pub local_only_reason: Option<String>,
+    /// `Some` when the command asks for more Cargo parallelism than the local machine allows:
+    /// the local machine cannot take it as asked. A peer applies its own cap when the job
+    /// arrives, so it is not excluded here.
+    pub local_cargo_jobs: Option<CargoJobs>,
     /// Every machine, the local one included.
     pub machines: Vec<MachineView>,
 }

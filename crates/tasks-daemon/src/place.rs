@@ -411,6 +411,12 @@ impl Scheduler {
             hints: rec.hints.clone(),
             request,
             local_only_reason: None,
+            local_cargo_jobs: tasks_policy::submit_rules::requested_jobs(&rec.spec.argv)
+                .filter(|n| *n > policy.cargo_max_jobs())
+                .map(|asked| tasks_placement::CargoJobs {
+                    asked,
+                    cap: policy.cargo_max_jobs(),
+                }),
             machines,
         };
         let report = match tasks_placement::decide(&input, &placement_policy()) {
