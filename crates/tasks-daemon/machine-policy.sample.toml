@@ -9,6 +9,10 @@
 # transfer = 1   # env TASKS_TRANSFER_SLOTS
 # short_lane = 1   # env TASKS_SHORT_LANE_SLOTS
 # short_job_max_secs = 60   # env TASKS_SHORT_JOB_MAX_SECS
+# short_job_max_memory_mib = 1024   # env TASKS_SHORT_JOB_MAX_MEMORY_MIB
+
+[queue]
+# aging_mins = 20   # env TASKS_QUEUE_AGING_MINS
 
 [pressure.compile]
 # max_cpu = 40   # env TASKS_COMPILE_MAX_CPU

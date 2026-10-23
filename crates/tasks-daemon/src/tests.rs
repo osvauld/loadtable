@@ -285,6 +285,8 @@ fn dependents_of_failed_jobs_are_cancelled_and_plans_submit_in_one_call() {
         env: vec![],
         placement: Placement::Here,
         broad_test: false,
+        priority: Default::default(),
+        priority_reason: None,
     })) else {
         panic!("plan expected");
     };
@@ -775,6 +777,8 @@ fn suites_expand_from_the_repo_policy_and_unknown_ones_are_refused() {
         placement: Placement::Here,
         quick: false,
         broad_test: false,
+        priority: Default::default(),
+        priority_reason: None,
     };
     let Response::PlanSubmitted { jobs, .. } = ok(r.sch.handle(req("s"))) else {
         panic!("plan expected");
@@ -1026,6 +1030,8 @@ fn the_socket_serves_requests_refuses_bad_ones_and_survives_a_closed_client() {
         after: vec![],
         timeout_secs: None,
         broad_test_escape: false,
+        priority: tasks_core::Priority::Normal,
+        priority_reason: None,
     };
     {
         let mut s = UnixStream::connect(&sock).unwrap();
@@ -1071,6 +1077,8 @@ fn startup_reconciles_the_ledger_and_honours_the_persisted_execution_intent() {
             after: vec![],
             timeout_secs: None,
             broad_test_escape: false,
+            priority: tasks_core::Priority::Normal,
+            priority_reason: None,
         };
         let id = store.submit(&spec).unwrap();
         store
@@ -1173,6 +1181,14 @@ impl Store for Flaky {
         remote_key: Option<&str>,
     ) -> tasks_ledger::Result<()> {
         self.inner.set_forward(id, peer, remote_job, remote_key)
+    }
+    fn set_priority(
+        &self,
+        id: JobId,
+        priority: tasks_core::Priority,
+        reason: Option<&str>,
+    ) -> tasks_ledger::Result<tasks_core::Priority> {
+        self.inner.set_priority(id, priority, reason)
     }
     fn clear_forward(&self, id: JobId) -> tasks_ledger::Result<()> {
         self.inner.clear_forward(id)

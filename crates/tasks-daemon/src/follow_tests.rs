@@ -86,6 +86,8 @@ fn submit_plan(r: &Rig, plan: Plan, broad_test: bool) -> Reply {
         env: vec![],
         placement: Placement::Here,
         broad_test,
+        priority: Default::default(),
+        priority_reason: None,
     })
 }
 
@@ -555,6 +557,8 @@ fn r191_suites_get_the_same_answer() {
         placement: Placement::Here,
         quick: false,
         broad_test,
+        priority: Default::default(),
+        priority_reason: None,
     };
     let e = err(r.sch.handle(req(false)));
     assert_eq!(e.code, ErrorCode::Refused);

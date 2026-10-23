@@ -11,7 +11,7 @@ use crate::trust_control::TrustControl;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tasks_core::plan::Plan;
-use tasks_core::{JobId, JobSpec, MachineName, Phase, Placement, WaitReason};
+use tasks_core::{JobId, JobSpec, MachineName, Phase, Placement, Priority, WaitReason};
 use tasks_ledger::{
     AuditEvent, AuditLog, CancelOutcome, ChangeToken, Finish, JobRecord, ListFilter, NewJob,
     PlanContext, PlanSubmitted, PruneReport, Result, RetentionPolicy, StartInfo, Store,
@@ -88,6 +88,25 @@ impl AuditSink {
     pub fn resolve_peer(&self, name_or_did: &str) -> String {
         self.did_of_name(name_or_did)
             .unwrap_or_else(|| name_or_did.to_string())
+    }
+
+    /// Records a queue class other than normal on a job: who asked (the owner), the class and
+    /// the reason a blocking claim carries. `from` is the class before a change; a submit has
+    /// none.
+    pub fn record_priority(&self, id: JobId, spec: &JobSpec, via: &str, from: Option<Priority>) {
+        if spec.priority == Priority::Normal && from.is_none() {
+            return;
+        }
+        self.record(
+            AuditEvent::new(action::JOB_PRIORITY)
+                .job(id.0)
+                .owner(spec.owner.as_str())
+                .target(spec.cwd.display().to_string())
+                .detail("priority", spec.priority.as_str())
+                .detail_opt("from", from.map(Priority::as_str))
+                .detail_opt("reason", spec.priority_reason.clone())
+                .detail("via", via),
+        );
     }
 
     /// An event for `rec`: its job, owner and the peer it came from or went to.
@@ -318,6 +337,7 @@ impl AuditedLedger {
             ev = ev.detail("broad_test_escape", true);
         }
         self.sink.record(ev);
+        self.sink.record_priority(id, spec, "submit", None);
     }
 
     /// Records a start or an end after the ledger accepted the change, from the stored row.
@@ -385,6 +405,9 @@ impl Store for AuditedLedger {
                 ev = ev.detail("broad_test_escape", true);
             }
             self.sink.record(ev);
+            if let Ok(Some(rec)) = self.inner.get(*id) {
+                self.sink.record_priority(*id, &rec.spec, "submit", None);
+            }
         }
         Ok(done)
     }
@@ -497,6 +520,20 @@ impl Store for AuditedLedger {
         self.inner.clear_forward(id)
     }
 
+    fn set_priority(
+        &self,
+        id: JobId,
+        priority: Priority,
+        reason: Option<&str>,
+    ) -> Result<Priority> {
+        let before = self.inner.set_priority(id, priority, reason)?;
+        if let Ok(Some(rec)) = self.inner.get(id) {
+            self.sink
+                .record_priority(id, &rec.spec, "prioritize", Some(before));
+        }
+        Ok(before)
+    }
+
     fn find_origin(&self, peer: &str, key: &str) -> Result<Option<JobId>> {
         self.inner.find_origin(peer, key)
     }
@@ -551,5 +588,9 @@ impl History for AuditedLedger {
 
     fn targets(&self, recipe: &str) -> std::result::Result<Vec<String>, TimingError> {
         self.inner.targets(recipe)
+    }
+
+    fn recent_peaks(&self, key: &SampleKey) -> std::result::Result<Vec<Option<u64>>, TimingError> {
+        self.inner.recent_peaks(key)
     }
 }

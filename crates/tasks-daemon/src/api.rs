@@ -11,7 +11,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tasks_core::plan::Plan;
-use tasks_core::{JobFigures, JobId, JobSpec, Kind, Phase, Placement};
+use tasks_core::{JobFigures, JobId, JobSpec, Kind, Phase, Placement, Priority};
 
 /// The protocol version this build speaks.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -103,6 +103,12 @@ pub enum Request {
         /// The submitter passed the broad-test escape for every step (R-191).
         #[serde(default)]
         broad_test: bool,
+        /// Queue class of every step; normal leaves each step's own hint.
+        #[serde(default)]
+        priority: Priority,
+        /// Why `blocking`.
+        #[serde(default)]
+        priority_reason: Option<String>,
     },
     /// Expand a suite of the repo's run policy and submit it as a plan.
     SubmitSuite {
@@ -124,6 +130,12 @@ pub enum Request {
         /// The submitter passed the broad-test escape for every step (R-191).
         #[serde(default)]
         broad_test: bool,
+        /// Queue class of every step; normal leaves each step's own hint from the run policy.
+        #[serde(default)]
+        priority: Priority,
+        /// Why `blocking`.
+        #[serde(default)]
+        priority_reason: Option<String>,
     },
     /// List jobs, oldest first.
     List {
@@ -164,6 +176,20 @@ pub enum Request {
         /// The asking owner.
         who: String,
         /// Why, kept with the job and shown by `get` and `list`.
+        #[serde(default)]
+        reason: Option<String>,
+    },
+    /// Change the queue class of a job that has not started. Refused unless `who` is the job's
+    /// owner; refused for a running or finished job, because priority orders the queue and
+    /// never preempts. `blocking` needs a reason; the change is audited.
+    Prioritize {
+        /// The job.
+        id: JobId,
+        /// The asking owner.
+        who: String,
+        /// The new class.
+        priority: Priority,
+        /// Why (required for `blocking`).
         #[serde(default)]
         reason: Option<String>,
     },
@@ -471,6 +497,15 @@ pub enum Response {
         /// Step name and job id, in declaration order.
         jobs: Vec<(String, JobId)>,
     },
+    /// A job's queue class was changed.
+    Prioritized {
+        /// The job.
+        id: JobId,
+        /// The class it had.
+        from: Priority,
+        /// The class it has now.
+        to: Priority,
+    },
     /// Jobs.
     Jobs {
         /// The rows.
@@ -687,6 +722,16 @@ pub struct JobView {
     /// What the job cost the machine and how exact that is (design §9).
     #[serde(default)]
     pub figures: Option<JobFigures>,
+    /// The class the job was submitted in or last given (`prioritize`).
+    #[serde(default)]
+    pub priority: Priority,
+    /// The reason a blocking class was given.
+    #[serde(default)]
+    pub priority_reason: Option<String>,
+    /// Set for a forwarded job that the peer holds back on its own gates or slots: the peer's
+    /// reason. Such a job is waiting, not running, though its local row says `Running` (R-015).
+    #[serde(default)]
+    pub remote_wait: Option<String>,
 }
 
 /// One block of grep output.
@@ -823,6 +868,17 @@ pub struct WaiterView {
     pub start_estimate_secs: Option<f64>,
     /// True when the estimate rests on no history.
     pub rough: bool,
+    /// The class the queue orders it by now (`blocking`, `normal` or `background`): its own,
+    /// or the one aging lifted it to.
+    #[serde(default)]
+    pub class: String,
+    /// Why it is in that class, when not simply normal: the reason for `blocking`, or how long
+    /// it waited to rise out of `background`.
+    #[serde(default)]
+    pub class_note: String,
+    /// The peer a forwarded job waits on (its gates or slots), when it is not the queue here.
+    #[serde(default)]
+    pub on_peer: Option<String>,
 }
 
 /// A running job.

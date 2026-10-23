@@ -277,6 +277,30 @@ mod tests {
     }
 
     #[test]
+    fn r339_a_plan_step_may_hint_background_but_not_blocking() {
+        let mut bg = step("a", &[]);
+        bg.hints.priority = Some(crate::Priority::Background);
+        assert_eq!(plan(vec![bg.clone()]).validate(), Ok(()));
+        let mut blocking = step("b", &[]);
+        blocking.hints.priority = Some(crate::Priority::Blocking);
+        assert_eq!(
+            plan(vec![bg, blocking]).validate(),
+            Err(PlanError::StepPriority("b".into()))
+        );
+        // the hint is part of the plan file and stays out of it when unset
+        let p = Plan::parse(
+            r#"{"steps":[{"name":"a","argv":["x"],"hints":{"priority":"background"}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(p.steps[0].hints.priority, Some(crate::Priority::Background));
+        assert!(
+            !serde_json::to_string(&plan(vec![step("c", &[])]))
+                .unwrap()
+                .contains("priority")
+        );
+    }
+
+    #[test]
     fn parse_defaults() {
         let p = Plan::parse(r#"{"steps":[{"name":"a","argv":["x"]}]}"#).unwrap();
         assert_eq!(p.steps[0].kind, Kind::Compile);

@@ -32,8 +32,11 @@ pub mod peers_config;
 mod place;
 pub mod platform;
 pub mod queue_estimate;
+mod queue_view;
 pub mod regex_lite;
 mod runjob;
+#[cfg(test)]
+mod sched_tests;
 pub mod scheduler;
 pub mod server;
 pub mod startup;

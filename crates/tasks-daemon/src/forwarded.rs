@@ -60,6 +60,8 @@ impl Scheduler {
             SlotKind::Offload,
             u64::try_from(rec.submitted_at_ms).unwrap_or(0),
         );
+        w.owner = rec.spec.owner.as_str().to_string();
+        w.priority = rec.spec.priority;
         if let Some(h) = blocked {
             w.holds.push(h.clone());
         } else if !self.forwarder.ready_to_start(id) {

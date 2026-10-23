@@ -5,13 +5,14 @@ use crate::api::{
     SlotView, StatusSnapshot, WaiterView,
 };
 use crate::api::{PeerMachineView, PeerSlotView};
-use crate::queue_estimate::start_offsets;
+use crate::queue_estimate::{Queued, starts_in_queue_order};
+use crate::queue_view::{class_note, remote_wait};
 use crate::scheduler::{RunningJob, Scheduler, lock, shorten};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use tasks_admission::{Lane, check_gates, kind_name};
-use tasks_core::{Phase, SlotKind};
+use tasks_admission::{Lane, Waiter, check_gates, effective, kind_name};
+use tasks_core::{JobId, Phase, SlotKind};
 use tasks_ledger::{JobRecord, ListFilter};
 use tasks_timing::progress;
 
@@ -64,6 +65,9 @@ pub fn job_view(r: &JobRecord) -> JobView {
         plan: r.plan_id.zip(r.step_name.clone()),
         log_path: r.log_path.clone(),
         figures: r.figures.clone(),
+        priority: r.spec.priority,
+        priority_reason: r.spec.priority_reason.clone(),
+        remote_wait: remote_wait(r),
     }
 }
 
@@ -159,7 +163,10 @@ impl Scheduler {
             });
         }
 
-        // waiters, per slot kind in queue order
+        // waiters, per slot kind in the order admission takes them
+        let aging_ms = policy.thresholds().aging_ms;
+        let now_ms = u64::try_from(now).unwrap_or(0);
+        let last_started = lock(&self.state).last_started.clone();
         let mut per_kind: BTreeMap<Option<SlotKind>, Vec<&JobRecord>> = BTreeMap::new();
         for r in active
             .iter()
@@ -184,42 +191,90 @@ impl Scheduler {
                 ),
                 None => (0, Vec::new()),
             };
-            let mut runtimes = Vec::new();
-            let mut rough = Vec::new();
+            let mut queued = Vec::new();
+            let mut by_id: BTreeMap<JobId, (&JobRecord, Waiter, bool)> = BTreeMap::new();
             for r in rows {
-                if computed < MAX_STATUS_WAITERS {
+                let (runtime, rough) = if computed < MAX_STATUS_WAITERS {
                     computed += 1;
                     let f = self.facts(r);
-                    rough.push(f.known_median.is_none());
-                    runtimes.push(f.est.as_ref().map_or(60.0, |e| e.median_secs));
+                    (
+                        f.est.as_ref().map_or(60.0, |e| e.median_secs),
+                        f.known_median.is_none(),
+                    )
                 } else {
-                    rough.push(true);
-                    runtimes.push(60.0);
-                }
+                    (60.0, true)
+                };
+                let mut w = Waiter::new(
+                    r.id,
+                    kind.unwrap_or(SlotKind::Run),
+                    u64::try_from(r.submitted_at_ms).unwrap_or(0),
+                );
+                w.owner = r.spec.owner.as_str().to_string();
+                w.priority = r.spec.priority;
+                queued.push(Queued {
+                    waiter: w.clone(),
+                    runtime_secs: runtime,
+                });
+                by_id.insert(r.id, (r, w, rough));
             }
-            let starts = start_offsets(total, &remaining, &runtimes);
-            for (i, r) in rows.iter().enumerate() {
+            let ordered =
+                starts_in_queue_order(total, &remaining, &queued, now_ms, aging_ms, &last_started);
+            for (i, (id, start)) in ordered.iter().enumerate() {
+                let Some((r, w, rough)) = by_id.get(id) else {
+                    continue;
+                };
+                let eff = effective(w, now_ms, aging_ms);
+                let waited = now_ms.saturating_sub(w.queued_at_ms);
                 waiting.push(WaiterView {
                     id: r.id,
                     owner: r.spec.owner.as_str().to_string(),
                     command: shorten(&r.spec.argv.join(" ")),
                     wait_text: r.wait_text.clone().unwrap_or_else(|| "queued".to_string()),
                     position: i + 1,
-                    start_estimate_secs: if kind.is_some() {
-                        starts.get(i).copied().flatten()
-                    } else {
-                        None
-                    },
-                    rough: rough.get(i).copied().unwrap_or(true),
+                    start_estimate_secs: if kind.is_some() { *start } else { None },
+                    rough: *rough,
+                    class: eff.class.as_str().to_string(),
+                    class_note: class_note(
+                        r.spec.priority,
+                        r.spec.priority_reason.as_deref(),
+                        &eff,
+                        waited,
+                        aging_ms,
+                    ),
+                    on_peer: None,
                 });
             }
         }
-        waiting.sort_by_key(|w| w.id);
+        // a forwarded job the peer holds back on its own gates is waiting there, not running
+        let records: BTreeMap<JobId, &JobRecord> = active.iter().map(|r| (r.id, r)).collect();
+        let mut held_on_peer: std::collections::BTreeSet<JobId> = Default::default();
+        for rj in &running {
+            let Some(r) = records.get(&rj.id) else {
+                continue;
+            };
+            let (Some(text), Some(fw)) = (remote_wait(r), r.forward.as_ref()) else {
+                continue;
+            };
+            held_on_peer.insert(rj.id);
+            waiting.push(WaiterView {
+                id: r.id,
+                owner: r.spec.owner.as_str().to_string(),
+                command: shorten(&r.spec.argv.join(" ")),
+                wait_text: text,
+                position: 0,
+                start_estimate_secs: None,
+                rough: true,
+                class: r.spec.priority.as_str().to_string(),
+                class_note: String::new(),
+                on_peer: Some(fw.peer.0.clone()),
+            });
+        }
         let waiting_more = waiting.len().saturating_sub(MAX_STATUS_WAITERS);
         waiting.truncate(MAX_STATUS_WAITERS);
 
         let running_views = running
             .iter()
+            .filter(|rj| !held_on_peer.contains(&rj.id))
             .map(|rj| {
                 let tl = lock(&rj.timeline);
                 let p = progress(&tl, &rj.estimates);

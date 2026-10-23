@@ -2,7 +2,7 @@
 //! owner. Pure: the clock and the owners' last start times are passed in.
 
 use crate::Waiter;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use tasks_core::{JobId, Priority};
 
 /// A waiter's class after aging, and why.
@@ -77,7 +77,9 @@ pub fn sequence(
     aging_ms: u64,
     last_started: &BTreeMap<String, u64>,
 ) -> Vec<usize> {
-    let mut classes: BTreeMap<Priority, BTreeMap<&str, Vec<(Effective, usize)>>> = BTreeMap::new();
+    // class -> owner -> that owner's waiters in the class, as (effective class, index)
+    type Entry = (Effective, usize);
+    let mut classes: BTreeMap<Priority, BTreeMap<&str, Vec<Entry>>> = BTreeMap::new();
     for (i, w) in waiters.iter().enumerate() {
         let e = effective(w, now_ms, aging_ms);
         classes
@@ -87,48 +89,59 @@ pub fn sequence(
             .or_default()
             .push((e, i));
     }
-    let key = |(e, i): &(Effective, usize)| {
-        let w = &waiters[*i];
-        (e.since_ms, w.queued_at_ms, w.job)
+    let key = |(e, i): &Entry| {
+        let (queued, job) = waiters
+            .get(*i)
+            .map_or((u64::MAX, JobId(i64::MAX)), |w| (w.queued_at_ms, w.job));
+        (e.since_ms, queued, job)
+    };
+    // a queue that is empty sorts last
+    let head = |q: &OwnerQueue| {
+        q.jobs
+            .front()
+            .map_or((u64::MAX, u64::MAX, JobId(i64::MAX)), &key)
     };
     let mut out = Vec::with_capacity(waiters.len());
     for (_, owners) in classes {
-        let mut queues: Vec<(&str, Turn, std::collections::VecDeque<(Effective, usize)>)> = owners
+        let mut queues: Vec<OwnerQueue> = owners
             .into_iter()
             .map(|(owner, mut v)| {
                 v.sort_by_key(key);
-                let turn = last_started
-                    .get(owner)
-                    .map_or(Turn::Never, |t| Turn::Started(*t));
-                (owner, turn, v.into())
+                OwnerQueue {
+                    owner,
+                    turn: last_started
+                        .get(owner)
+                        .map_or(Turn::Never, |t| Turn::Started(*t)),
+                    jobs: v.into(),
+                }
             })
             .collect();
         let mut given = 0u32;
-        loop {
-            let head = |q: &std::collections::VecDeque<(Effective, usize)>| {
-                q.front()
-                    .map(&key)
-                    .unwrap_or((u64::MAX, u64::MAX, JobId(i64::MAX)))
-            };
-            let Some(pick) = queues
-                .iter_mut()
-                .filter(|(_, _, q)| !q.is_empty())
-                .min_by(|a, b| {
-                    a.1.cmp(&b.1)
-                        .then_with(|| head(&a.2).cmp(&head(&b.2)))
-                        .then_with(|| a.0.cmp(b.0))
-                })
-            else {
-                break;
-            };
-            if let Some((_, i)) = pick.2.pop_front() {
+        while let Some(pick) = queues
+            .iter_mut()
+            .filter(|q| !q.jobs.is_empty())
+            .min_by(|a, b| {
+                a.turn
+                    .cmp(&b.turn)
+                    .then_with(|| head(a).cmp(&head(b)))
+                    .then_with(|| a.owner.cmp(b.owner))
+            })
+        {
+            if let Some((_, i)) = pick.jobs.pop_front() {
                 out.push(i);
             }
             given += 1;
-            pick.1 = Turn::Given(given);
+            pick.turn = Turn::Given(given);
         }
     }
     out
+}
+
+/// One owner's waiters in a class, oldest first, and where the owner stands in the rotation.
+struct OwnerQueue<'a> {
+    owner: &'a str,
+    turn: Turn,
+    jobs: VecDeque<(Effective, usize)>,
 }
 
 #[cfg(test)]

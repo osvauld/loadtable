@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 use tasks_admission::{
-    Admitter, Attempt, Hold, Layout, Priority, Verdict, WaitReason as AdmitWait, Waiter,
+    Admitter, Attempt, Hold, Layout, Queue, Verdict, WaitReason as AdmitWait, Waiter,
 };
 use tasks_core::{Arch, JobId, Kind, Os, Phase, SlotKind, WaitReason as LedgerWait};
 use tasks_ledger::{Clock, Finish, JobRecord, LedgerError};
@@ -101,6 +101,9 @@ pub(crate) struct TickState {
     pub peer_bad_since: BTreeMap<String, i64>,
     /// Set once the forwarded jobs left running by a previous daemon were picked up.
     pub reconciled: bool,
+    /// When each owner last started a job, ms: the queue gives the next turn to the owner that
+    /// started least recently. Forgotten on restart (everyone is then "never").
+    pub last_started: BTreeMap<String, u64>,
 }
 
 /// What one tick did.
@@ -403,11 +406,8 @@ impl Scheduler {
 
         let running_snapshot: Vec<Arc<RunningJob>> =
             lock(&self.running).values().cloned().collect();
-        let ctx = self.place_ctx(policy, readings.as_ref().ok(), &running_snapshot, &ready);
-        let blocked_hold = self.global_hold();
-
-        let mut candidates: BTreeMap<JobId, (JobRecord, Waiter)> = BTreeMap::new();
-        let mut probes: Vec<JobRecord> = Vec::new();
+        // every job that could start now, read once: the queue the placement estimates is these
+        let mut recs: Vec<JobRecord> = Vec::new();
         for id in ready {
             if running_snapshot.iter().any(|r| r.id == id) {
                 continue;
@@ -418,6 +418,16 @@ impl Scheduler {
             if rec.phase.is_terminal() || rec.cancel_requested() {
                 continue;
             }
+            recs.push(rec);
+        }
+        let queued = self.queued_by_kind(&recs);
+        let ctx = self.place_ctx(policy, readings.as_ref().ok(), &running_snapshot, queued);
+        let blocked_hold = self.global_hold();
+
+        let mut candidates: BTreeMap<JobId, (JobRecord, Waiter)> = BTreeMap::new();
+        let mut probes: Vec<JobRecord> = Vec::new();
+        for rec in recs {
+            let id = rec.id;
             if rec.forward.is_some() {
                 // a job already placed on a peer: an offload-client job (R-162, R-230)
                 if let Some(w) = self.forward_waiter(&rec, blocked_hold.as_ref()) {
@@ -457,8 +467,10 @@ impl Scheduler {
                 slot_kind,
                 u64::try_from(rec.submitted_at_ms).unwrap_or(0),
             );
-            w.priority = Priority::Normal;
-            w.predicted_secs = facts.known_median;
+            w.owner = rec.spec.owner.as_str().to_string();
+            w.priority = rec.spec.priority;
+            w.predicted_secs = facts.short_secs;
+            w.predicted_peak_memory = facts.peak_memory;
             w.checkout = facts.checkout.clone();
             w.device = rec.spec.requirements.device.clone();
             w.new_output = matches!(rec.spec.kind, Kind::Compile | Kind::Test | Kind::Package);
@@ -491,8 +503,14 @@ impl Scheduler {
         }
         let layout = self.layout(policy);
         let waiters: Vec<Waiter> = candidates.values().map(|(_, w)| w.clone()).collect();
+        let queue = Queue {
+            now_ms: u64::try_from(self.clock.now_ms()).unwrap_or(0),
+            last_started: lock(&self.state).last_started.clone(),
+        };
         let decisions = match &readings {
-            Ok(_) => admitter.plan(waiters, &layout).map_err(|e| e.to_string()),
+            Ok(_) => admitter
+                .plan(waiters, &layout, &queue)
+                .map_err(|e| e.to_string()),
             Err(e) => Err(e.to_string()),
         };
         let decisions = match decisions {
@@ -521,6 +539,9 @@ impl Scheduler {
                         };
                         if ok {
                             rep.started.push(d.job);
+                            lock(&self.state)
+                                .last_started
+                                .insert(w.owner.clone(), queue.now_ms);
                         }
                     }
                     Ok(Attempt::Wait(r)) => {

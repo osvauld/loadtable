@@ -45,7 +45,8 @@ fn ledger_error(e: &LedgerError) -> ApiError {
         | L::Plan(_)
         | L::UnknownDependency(_)
         | L::DependencyNotPassable(_)
-        | L::IllegalTransition { .. } => ErrorCode::Refused,
+        | L::IllegalTransition { .. }
+        | L::NotQueued { .. } => ErrorCode::Refused,
         L::Unavailable { .. } => ErrorCode::LedgerUnavailable,
         _ => ErrorCode::Internal,
     };
@@ -144,8 +145,12 @@ impl Scheduler {
                 env,
                 placement,
                 broad_test,
+                priority,
+                priority_reason,
             } => {
-                let ctx = Self::plan_context(&owner, cwd, env, placement, broad_test)?;
+                let ctx = Self::plan_context(&owner, cwd, env, placement, broad_test)?
+                    .with_priority(priority, priority_reason)
+                    .map_err(|e| ApiError::new(ErrorCode::Refused, format!("invalid plan: {e}")))?;
                 self.submit_plan(&plan, ctx)
             }
             Request::SubmitSuite {
@@ -156,8 +161,14 @@ impl Scheduler {
                 placement,
                 quick,
                 broad_test,
+                priority,
+                priority_reason,
             } => {
-                let ctx = Self::plan_context(&owner, cwd, env, placement, broad_test)?;
+                let ctx = Self::plan_context(&owner, cwd, env, placement, broad_test)?
+                    .with_priority(priority, priority_reason)
+                    .map_err(|e| {
+                        ApiError::new(ErrorCode::Refused, format!("invalid suite: {e}"))
+                    })?;
                 self.submit_suite(&name, ctx, quick)
             }
             Request::List {
@@ -175,6 +186,12 @@ impl Scheduler {
             Request::Logs { id, view } => self.logs(id, view),
             Request::LogSearch { query } => self.log_search(&query),
             Request::Cancel { id, who, reason } => self.cancel(id, &who, reason.as_deref()),
+            Request::Prioritize {
+                id,
+                who,
+                priority,
+                reason,
+            } => self.prioritize(id, &who, priority, reason.as_deref()),
             Request::Status => Ok(Response::Status(Box::new(self.status()))),
             Request::Estimate { argv, kind } => Ok(self.estimate(&argv, kind)),
             Request::Drain { cancel, who } => {
@@ -412,6 +429,8 @@ impl Scheduler {
             env,
             placement,
             broad_test_escape: broad_test,
+            priority: tasks_core::Priority::Normal,
+            priority_reason: None,
         })
     }
 
@@ -467,6 +486,8 @@ impl Scheduler {
                 after: Vec::new(),
                 timeout_secs: step.hints.timeout_secs,
                 broad_test_escape: ctx.broad_test_escape,
+                priority: ctx.step_priority(&step.hints).0,
+                priority_reason: ctx.step_priority(&step.hints).1,
             };
             spec.validate().map_err(|e| {
                 ApiError::new(
@@ -690,6 +711,39 @@ impl Scheduler {
         Ok(Response::Cancelled {
             id,
             result: result.to_string(),
+        })
+    }
+
+    /// Changes the class of a job that has not started. Only its owner may (as for a cancel,
+    /// R-108); a running or finished job is refused (priority never preempts); `blocking` needs
+    /// a reason. The change is an audit row naming who, the old and new class and the reason.
+    fn prioritize(
+        &self,
+        id: JobId,
+        who: &str,
+        priority: tasks_core::Priority,
+        reason: Option<&str>,
+    ) -> Out {
+        let rec = self.record(id)?;
+        if rec.spec.owner.as_str() != who {
+            return Err(ApiError::new(
+                ErrorCode::NotOwner,
+                format!(
+                    "job {} belongs to {}; {who} cannot change its priority",
+                    id.0,
+                    rec.spec.owner.as_str()
+                ),
+            ));
+        }
+        let from = retry_busy(&API_RETRY, &sleep, || {
+            self.ledger.set_priority(id, priority, reason)
+        })
+        .map_err(|e| ledger_error(&e))?;
+        self.wake.notify();
+        Ok(Response::Prioritized {
+            id,
+            from,
+            to: priority,
         })
     }
 

@@ -98,6 +98,18 @@ const FIELDS: &[Field] = &[
         Ty::Float(1.0, 600.0),
         "60",
     ),
+    f(
+        "slots.short_job_max_memory_mib",
+        "TASKS_SHORT_JOB_MAX_MEMORY_MIB",
+        Ty::Uint(16, 1_048_576),
+        "1024",
+    ),
+    f(
+        "queue.aging_mins",
+        "TASKS_QUEUE_AGING_MINS",
+        Ty::OptUint(1, 10_080),
+        "20",
+    ),
     fm(
         "pressure.compile.max_cpu",
         "TASKS_COMPILE_MAX_CPU",
@@ -770,7 +782,9 @@ impl MachinePolicy {
             cache_reserve_bytes: (self.fl("disk.cache_reserve_gib") * GIB as f64) as u64,
             state_reserve_bytes: (self.fl("disk.state_reserve_gib") * GIB as f64) as u64,
             short_job_max_secs: self.fl("slots.short_job_max_secs"),
+            short_job_max_memory_bytes: self.u("slots.short_job_max_memory_mib") * MIB,
             short_job_lane_slots: u32::try_from(self.u("slots.short_lane")).unwrap_or(0),
+            aging_ms: self.ou("queue.aging_mins").map_or(0, |m| m * 60_000),
         }
     }
     /// PSI memory thresholds.

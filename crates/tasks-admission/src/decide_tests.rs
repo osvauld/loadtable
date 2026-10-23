@@ -458,9 +458,7 @@ fn r341_one_owners_backlog_does_not_hold_the_only_slot_against_another_owner() {
     assert!((1..=30).all(|n| !is_admit(&v[&n])));
     // with two slots the second goes to busy's oldest job, not its newest
     let mut i2 = i.clone();
-    for k in [SlotKind::Run] {
-        i2.slots.get_mut(&k).unwrap().free = vec![0, 1];
-    }
+    i2.slots.get_mut(&SlotKind::Run).unwrap().free = vec![0, 1];
     let v = verdicts(&i2);
     assert!(is_admit(&v[&100]) && is_admit(&v[&1]) && !is_admit(&v[&2]));
 }

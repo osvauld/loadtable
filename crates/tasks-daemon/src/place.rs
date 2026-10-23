@@ -3,12 +3,12 @@
 //! decision is handed to the [`Forwarder`](crate::forwarder::Forwarder).
 
 use crate::machine_policy::MachinePolicy;
-use crate::queue_estimate::start_offsets;
+use crate::queue_estimate::{Queued, starts_in_queue_order};
 use crate::scheduler::{RunningJob, Scheduler, lock};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
-use tasks_admission::{Lane, Readings, Thresholds, check_gates};
+use tasks_admission::{Lane, Readings, Thresholds, Waiter, check_gates};
 use tasks_core::{DeviceId, JobId, Kind, Machine, MachineName, Placement, SlotKind, Tool};
 use tasks_ledger::JobRecord;
 use tasks_placement::{
@@ -25,19 +25,57 @@ pub(crate) struct JobFacts {
     pub recipe: String,
     /// The estimate on this machine (built-in default when there is no history).
     pub est: Option<Estimate>,
-    /// The median, only when history backs it (a job with none is never "short").
+    /// The median, only when history backs it (for the "rough" mark on estimates).
     pub known_median: Option<f64>,
+    /// Predicted duration for the short lane: the worst of the latest runs, from history only.
+    /// `None` is unknown, which is never short.
+    pub short_secs: Option<f64>,
+    /// Predicted peak memory for the short lane, bytes, from the latest runs' figures.
+    pub peak_memory: Option<u64>,
     /// The checkout a build job works in; at most one build runs per checkout.
     pub checkout: Option<String>,
+}
+
+/// The queue of one slot kind as a pass sees it, for the wait a job would have in it.
+pub(crate) struct KindQueue {
+    /// Slots of the kind on this machine.
+    pub slots: usize,
+    /// Seconds each running job of the kind still needs.
+    pub remaining: Vec<f64>,
+    /// The jobs waiting for the kind, this pass's candidates included.
+    pub queued: Vec<Queued>,
 }
 
 /// Facts about the machine for one pass.
 pub(crate) struct PlaceCtx {
     pub readings: Option<Readings>,
     pub free: BTreeMap<SlotKind, u32>,
-    pub queue_depth: u32,
-    pub wait_secs: BTreeMap<SlotKind, f64>,
+    pub queues: BTreeMap<SlotKind, KindQueue>,
+    /// The clock the queue order and aging use, ms.
+    pub now_ms: u64,
+    /// When each owner last started a job, ms.
+    pub last_started: BTreeMap<String, u64>,
     pub thresholds: Thresholds,
+}
+
+impl PlaceCtx {
+    /// Where `id` stands in its kind's queue: how many jobs are ahead of it in the order
+    /// admission will take them, and the seconds until it starts. A job not in the queue (a
+    /// probe, which needs no slot) has neither.
+    pub(crate) fn standing(&self, kind: SlotKind, id: JobId) -> Option<(u32, Option<f64>)> {
+        let q = self.queues.get(&kind)?;
+        let order = starts_in_queue_order(
+            q.slots,
+            &q.remaining,
+            &q.queued,
+            self.now_ms,
+            self.thresholds.aging_ms,
+            &self.last_started,
+        );
+        let at = order.iter().position(|(j, _)| *j == id)?;
+        let start = order.get(at).and_then(|(_, s)| *s);
+        Some((u32::try_from(at).unwrap_or(u32::MAX), start))
+    }
 }
 
 /// What placement decided for a job.
@@ -121,14 +159,38 @@ impl Scheduler {
             .map(|e| e.median_secs);
         let checkout = matches!(rec.spec.kind, Kind::Compile | Kind::Test | Kind::Package)
             .then(|| checkout_key(&rec.spec.cwd));
+        let (short_secs, peak_memory) = self.short_facts(&recipe);
         let facts = Arc::new(JobFacts {
             recipe,
             est,
             known_median,
+            short_secs,
+            peak_memory,
             checkout,
         });
         lock(&self.state).facts.insert(rec.id, facts.clone());
         facts
+    }
+
+    /// What history says about how long and how big this recipe is on this machine, for the
+    /// short lane. Nothing the submitter says is consulted; a history that cannot be read is
+    /// unknown.
+    fn short_facts(&self, recipe: &str) -> (Option<f64>, Option<u64>) {
+        let key = SampleKey {
+            recipe: recipe.to_string(),
+            target: None,
+            machine: self.cfg.machine.clone(),
+        };
+        let h = self.history();
+        let secs = h
+            .samples(&key)
+            .ok()
+            .and_then(|s| tasks_timing::short::predicted_secs(&s));
+        let peak = h
+            .recent_peaks(&key)
+            .ok()
+            .and_then(|p| tasks_timing::short::predicted_peak(&p));
+        (secs, peak)
     }
 
     /// Per-target and compile estimates for the progress display of a running job.
@@ -198,22 +260,42 @@ impl Scheduler {
         rj.est_median.map_or(60.0, |m| (m - elapsed).max(0.0))
     }
 
+    /// The jobs waiting for slots, by the kind they wait for, as the queue estimate sees them.
+    pub(crate) fn queued_by_kind(&self, recs: &[JobRecord]) -> BTreeMap<SlotKind, Vec<Queued>> {
+        let mut out: BTreeMap<SlotKind, Vec<Queued>> = BTreeMap::new();
+        for rec in recs {
+            // a job already placed on a peer waits for an offload slot here
+            let kind = if rec.forward.is_some() {
+                Some(SlotKind::Offload)
+            } else {
+                tasks_placement::slot_for(rec.spec.kind)
+            };
+            let Some(kind) = kind else { continue };
+            let facts = self.facts(rec);
+            let mut waiter = Waiter::new(
+                rec.id,
+                kind,
+                u64::try_from(rec.submitted_at_ms).unwrap_or(0),
+            );
+            waiter.owner = rec.spec.owner.as_str().to_string();
+            waiter.priority = rec.spec.priority;
+            out.entry(kind).or_default().push(Queued {
+                waiter,
+                runtime_secs: facts.est.as_ref().map_or(60.0, |e| e.median_secs),
+            });
+        }
+        out
+    }
+
     pub(crate) fn place_ctx(
         &self,
         policy: &MachinePolicy,
         readings: Option<&Readings>,
         running: &[Arc<RunningJob>],
-        ready: &[JobId],
+        mut queued: BTreeMap<SlotKind, Vec<Queued>>,
     ) -> PlaceCtx {
         let mut free = BTreeMap::new();
-        let mut wait_secs = BTreeMap::new();
-        let queue_depth = u32::try_from(
-            ready
-                .iter()
-                .filter(|id| !running.iter().any(|r| r.id == **id))
-                .count(),
-        )
-        .unwrap_or(u32::MAX);
+        let mut queues = BTreeMap::new();
         for kind in [SlotKind::Compile, SlotKind::Run, SlotKind::Offload] {
             let total = policy.slot_count(kind);
             let of_kind: Vec<&Arc<RunningJob>> = running
@@ -221,31 +303,22 @@ impl Scheduler {
                 .filter(|r| r.slot_kind == Some(kind))
                 .collect();
             let used = u32::try_from(of_kind.len()).unwrap_or(u32::MAX);
-            let f = total.saturating_sub(used);
-            free.insert(kind, f);
-            if f == 0 {
-                let remaining: Vec<f64> = of_kind.iter().map(|r| self.remaining_secs(r)).collect();
-                let avg = if remaining.is_empty() {
-                    60.0
-                } else {
-                    remaining.iter().sum::<f64>() / remaining.len() as f64
-                };
-                let queued = vec![avg; queue_depth as usize];
-                let mut with_new = queued;
-                with_new.push(0.0);
-                if let Some(Some(w)) = start_offsets(total as usize, &remaining, &with_new)
-                    .last()
-                    .copied()
-                {
-                    wait_secs.insert(kind, w);
-                }
-            }
+            free.insert(kind, total.saturating_sub(used));
+            queues.insert(
+                kind,
+                KindQueue {
+                    slots: total as usize,
+                    remaining: of_kind.iter().map(|r| self.remaining_secs(r)).collect(),
+                    queued: queued.remove(&kind).unwrap_or_default(),
+                },
+            );
         }
         PlaceCtx {
             readings: readings.copied(),
             free,
-            queue_depth,
-            wait_secs,
+            queues,
+            now_ms: u64::try_from(self.clock.now_ms()).unwrap_or(0),
+            last_started: lock(&self.state).last_started.clone(),
             thresholds: policy.thresholds(),
         }
     }
@@ -296,13 +369,15 @@ impl Scheduler {
                 }
             }
         };
+        // where this job would stand here: how many are ahead of it, and when it would start
+        let standing = slot.and_then(|k| ctx.standing(k, rec.id));
         let local_view = MachineView {
             machine: local,
             is_local: true,
             link: Link::Up { age_secs: 0 },
             free_slots: ctx.free.clone(),
-            queue_depth: ctx.queue_depth,
-            expected_wait_secs: slot.and_then(|k| ctx.wait_secs.get(&k).copied()),
+            queue_depth: standing.map_or(0, |(ahead, _)| ahead),
+            expected_wait_secs: standing.and_then(|(_, start)| start),
             pressure: Pressure { blocked, summary },
             estimate: run_est(self.estimate_for(&facts.recipe, &info, &peer_infos)),
             checkout: Checkout {
