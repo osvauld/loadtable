@@ -392,10 +392,12 @@ fn r194_one_slow_daemon_call_never_blocks_other_requests() {
         }
         Request::Estimate { .. } => Ok(Response::Estimate(tasks_daemon::api::EstimateView {
             recipe: "r".into(),
-            median_secs: 1.0,
-            p90_secs: 2.0,
+            median_secs: Some(1.0),
+            p90_secs: Some(2.0),
             samples: 1,
             text: "quick".into(),
+            why_not: None,
+            rough: false,
         })),
         other => Err(DaemonError::Failed(format!("unexpected {other:?}"))),
     });

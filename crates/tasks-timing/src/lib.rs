@@ -22,7 +22,10 @@ pub mod timeline;
 
 pub use cargo::CargoParser;
 pub use error::TimingError;
-pub use estimate::{Estimate, MachineInfo, Source, estimate, estimate_with_cache};
+pub use estimate::{
+    Basis, Estimate, Eta, Left, MachineInfo, NoEstimate, Planning, Shown, Source, estimate,
+    estimate_with_cache, planning, shown, wanted_cache,
+};
 pub use event::{Event, TargetKind, TaskOutcome};
 pub use exe::{ExeKind, TestExe, parse_test_executables};
 pub use gradle::GradleParser;

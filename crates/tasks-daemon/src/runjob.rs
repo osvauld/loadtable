@@ -17,7 +17,7 @@ use tasks_runner::{
     Runner, RunnerError, SystemClock, TimedLine, cap_log_file,
 };
 use tasks_timing::record::{JobResult, samples_from_timeline, split_piece_sample};
-use tasks_timing::{Cache, CargoParser, Event, GradleParser, Sample, SampleKey};
+use tasks_timing::{CargoParser, Event, GradleParser, Sample, SampleKey};
 
 /// Facts about the job the events adapter needs.
 pub(crate) struct JobMeta {
@@ -303,7 +303,8 @@ impl RunEvents for Events {
                 recipe: self.meta.recipe.clone(),
                 kind: self.meta.kind,
                 machine: self.sch.cfg.machine.clone(),
-                cache: Cache::Unknown,
+                // warm once this machine has a passing run of the command (R-665)
+                cache: self.sch.wanted_cache(&self.meta.recipe),
                 cancelled: phase == Phase::Cancelled,
                 passed: phase == Phase::Passed,
                 secs: o.wall.as_secs_f64(),

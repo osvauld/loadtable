@@ -96,12 +96,12 @@ fn finished(rec: &JobRecord, machine: &str) -> FinishedJob {
             .unwrap_or_else(|| rec.phase.word().to_string()),
     };
     let mut samples = Vec::new();
-    let keys = RecipeKey::from_argv(&rec.spec.argv, &rec.spec.env);
+    let key_text = RecipeKey::history_key(&rec.spec.argv, &rec.spec.env);
     let ran =
         rec.started_at_ms.is_some() && matches!(rec.phase, Phase::Passed | Phase::Failed { .. });
-    if let (Some(k), true) = (keys.first(), ran) {
+    if let (Some(k), true) = (key_text, ran) {
         let key = SampleKey {
-            recipe: k.to_string(),
+            recipe: k,
             target: None,
             machine: machine.to_string(),
         };
@@ -515,6 +515,10 @@ mod tests {
             total_targets: 0,
             current: None,
             eta_secs: None,
+            usual_secs: None,
+            over_by_secs: None,
+            eta_rough_from: None,
+            no_eta_why: None,
             log_bytes: 0,
             figures: None,
             cores: None,
