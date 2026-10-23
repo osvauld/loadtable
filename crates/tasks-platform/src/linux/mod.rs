@@ -4,11 +4,12 @@ mod memory;
 mod pressure;
 mod procs;
 mod service;
+mod table;
 
 use crate::{
     Child, Disk, GroupId, InstallPlan, Memory, MemorySnapshot, PlatformError, Pressure,
-    PressureSnapshot, PressureThresholds, Processes, Service, ServiceStatus, ServiceUnit, Signal,
-    SpawnSpec, Usage, disk, groups,
+    PressureSnapshot, PressureThresholds, ProcInfo, ProcessTable, Processes, Service,
+    ServiceStatus, ServiceUnit, Signal, SpawnSpec, Usage, disk, groups,
 };
 use std::path::Path;
 
@@ -16,6 +17,7 @@ pub use memory::parse_meminfo;
 pub use pressure::{PsiFile, PsiLine, parse_psi};
 pub use procs::{ProcStat, parse_proc_stat};
 pub use service::parse_is_active;
+pub use table::{ProcFsTable, parse_proc_io};
 
 /// The Linux platform implementation.
 #[derive(Debug, Clone, Copy, Default)]
@@ -46,6 +48,14 @@ impl Processes for Native {
     }
     fn try_wait(&self, child: &Child) -> Result<Option<i32>, PlatformError> {
         groups::try_wait(child)
+    }
+}
+impl ProcessTable for Native {
+    fn snapshot(&self) -> Result<Vec<ProcInfo>, PlatformError> {
+        ProcFsTable.snapshot()
+    }
+    fn io_of(&self, pid: i32) -> Option<(u64, u64)> {
+        ProcFsTable.io_of(pid)
     }
 }
 impl Service for Native {

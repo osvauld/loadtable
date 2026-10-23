@@ -88,6 +88,12 @@ pub enum PlatformError {
     /// `HOME` is not set.
     #[error("HOME is not set; cannot locate the user service directory")]
     NoHome,
+    /// Per-job cgroups are not available; the reason says what to change.
+    #[error("cgroups unavailable: {0}")]
+    NoCgroups(String),
+    /// A cgroup still has processes or child cgroups, so it cannot be removed.
+    #[error("cgroup {0} is not empty")]
+    CgroupBusy(PathBuf),
     /// An internal lock was poisoned (fakes).
     #[error("internal lock poisoned: {0}")]
     Poisoned(&'static str),

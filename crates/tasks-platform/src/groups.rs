@@ -1,7 +1,7 @@
 //! Process-group spawning, signalling and reaping shared by Linux and macOS.
 //! Only the leader start-time lookup is OS-specific and is passed in.
 
-use crate::{Child, GroupId, PlatformError, Signal, SpawnSpec};
+use crate::{Child, GroupId, PlatformError, Signal, SpawnSpec, place_in_cgroup};
 use rustix::process::{Pid, WaitId, WaitIdOptions, WaitOptions};
 use std::fs::OpenOptions;
 use std::os::unix::process::CommandExt;
@@ -18,8 +18,18 @@ fn pid_of(raw: i32) -> Result<Pid, PlatformError> {
 /// to the log file. Rust opens every descriptor close-on-exec, so the child
 /// inherits only 0..=2 and never a slot lock (R-087).
 pub(crate) fn spawn(spec: &SpawnSpec, start_time: StartTime) -> Result<Child, PlatformError> {
-    let (program, args) = spec
-        .argv
+    if spec.argv.is_empty() {
+        return Err(PlatformError::InvalidSpawn("empty argv".into()));
+    }
+    let placed;
+    let argv = match &spec.cgroup_procs {
+        Some(procs) => {
+            placed = place_in_cgroup(procs, &spec.argv);
+            &placed
+        }
+        None => &spec.argv,
+    };
+    let (program, args) = argv
         .split_first()
         .ok_or_else(|| PlatformError::InvalidSpawn("empty argv".into()))?;
     let log = OpenOptions::new()
@@ -181,6 +191,7 @@ mod tests {
                 ("PATH".into(), std::env::var("PATH").unwrap_or_default()),
             ],
             log_path: dir.join("log"),
+            cgroup_procs: None,
         }
     }
 
@@ -357,6 +368,43 @@ mod tests {
         assert!(reacquired, "child kept the slot lock");
         p.signal_group(c.group, Signal::Kill).unwrap();
         wait_exit(&p, &c);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // R-323: the child writes its own pid into cgroup.procs before it execs, so the pid, the
+    // group leadership and the start time are the command's own.
+    #[test]
+    fn r323_a_child_joins_its_cgroup_before_it_execs() {
+        let dir = tmpdir("place");
+        let procs = dir.join("cgroup.procs");
+        std::fs::write(&procs, "").unwrap();
+        let p = crate::native();
+        let mut s = spec(&dir, "echo ran $FOO; exit 5");
+        s.cgroup_procs = Some(procs.clone());
+        let c = p.spawn_group(&s).unwrap();
+        assert_eq!(wait_exit(&p, &c), 5);
+        assert_eq!(
+            std::fs::read_to_string(&procs).unwrap().trim(),
+            c.pid.to_string()
+        );
+        assert_eq!(c.group.pgid, c.pid);
+        let log = std::fs::read_to_string(dir.join("log")).unwrap();
+        assert!(log.contains("ran bar"), "{log}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // R-323: an unwritable cgroup.procs does not stop the command; it is reported by the
+    // missing membership, not by a failed job.
+    #[test]
+    fn r323_a_failed_placement_still_runs_the_command_quietly() {
+        let dir = tmpdir("noplace");
+        let p = crate::native();
+        let mut s = spec(&dir, "echo still-ran");
+        s.cgroup_procs = Some(dir.join("missing/cgroup.procs"));
+        let c = p.spawn_group(&s).unwrap();
+        assert_eq!(wait_exit(&p, &c), 0);
+        let log = std::fs::read_to_string(dir.join("log")).unwrap();
+        assert_eq!(log, "still-ran\n");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

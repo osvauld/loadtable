@@ -40,7 +40,8 @@ pub fn render_systemd_unit(unit: &ServiceUnit) -> String {
     let exec: Vec<String> = unit.argv.iter().map(|a| systemd_quote(a)).collect();
     format!(
         "[Unit]\nDescription=tasks workload coordinator ({name})\n\n\
-         [Service]\nType=simple\nExecStart={exec}\nRestart=on-failure\nRestartSec=2\n\n\
+         [Service]\nType=simple\nExecStart={exec}\nRestart=on-failure\nRestartSec=2\n\
+         Delegate=yes\nDelegateSubgroup=daemon\n\n\
          [Install]\nWantedBy=default.target\n",
         name = unit.name,
         exec = exec.join(" "),
@@ -146,6 +147,25 @@ mod tests {
         let text = render_systemd_unit(&unit());
         assert!(text.contains("ExecStart=\"/usr/bin/tasks\" \"daemon\" \"a b\\\"%%\"\n"));
         assert!(text.contains("WantedBy=default.target"));
+    }
+
+    // R-333
+    #[test]
+    fn r333_the_systemd_unit_delegates_a_cgroup_subtree() {
+        let text = render_systemd_unit(&unit());
+        let service: Vec<&str> = text
+            .split("[Service]\n")
+            .nth(1)
+            .unwrap()
+            .split("\n\n")
+            .next()
+            .unwrap()
+            .lines()
+            .collect();
+        assert!(service.contains(&"Delegate=yes"), "{text}");
+        assert!(service.contains(&"DelegateSubgroup=daemon"), "{text}");
+        // the launchd agent has no such concept
+        assert!(!render_launchd_plist(&unit()).contains("Delegate"));
     }
 
     #[test]

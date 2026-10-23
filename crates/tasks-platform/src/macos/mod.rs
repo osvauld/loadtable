@@ -5,11 +5,12 @@ mod memory;
 mod pressure;
 mod procs;
 mod service;
+mod table;
 
 use crate::{
     Child, Disk, GroupId, InstallPlan, Memory, MemorySnapshot, PlatformError, Pressure,
-    PressureSnapshot, PressureThresholds, Processes, Service, ServiceStatus, ServiceUnit, Signal,
-    SpawnSpec, Usage, disk, groups,
+    PressureSnapshot, PressureThresholds, ProcInfo, ProcessTable, Processes, Service,
+    ServiceStatus, ServiceUnit, Signal, SpawnSpec, Usage, disk, groups,
 };
 use std::path::Path;
 use std::process::Command;
@@ -67,6 +68,11 @@ impl Processes for Native {
     }
     fn try_wait(&self, child: &Child) -> Result<Option<i32>, PlatformError> {
         groups::try_wait(child)
+    }
+}
+impl ProcessTable for Native {
+    fn snapshot(&self) -> Result<Vec<ProcInfo>, PlatformError> {
+        table::snapshot()
     }
 }
 impl Service for Native {

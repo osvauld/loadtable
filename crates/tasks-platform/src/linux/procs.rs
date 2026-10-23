@@ -10,6 +10,8 @@ pub struct ProcStat {
     pub pid: i32,
     /// State letter (`R`, `S`, `Z`, ...).
     pub state: char,
+    /// Parent process id.
+    pub ppid: i32,
     /// Process group id.
     pub pgrp: i32,
     /// User CPU time in clock ticks.
@@ -53,6 +55,10 @@ pub fn parse_proc_stat(text: &str) -> Result<ProcStat, PlatformError> {
             .first()
             .and_then(|s| s.chars().next())
             .ok_or_else(|| bad("missing state"))?,
+        ppid: f
+            .get(1)
+            .and_then(|v| v.parse().ok())
+            .ok_or_else(|| bad("bad ppid"))?,
         pgrp: f
             .get(2)
             .and_then(|v| v.parse().ok())
@@ -72,7 +78,7 @@ fn vanished(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(3)
 }
 
-fn read_stat(pid: i32) -> Result<Option<ProcStat>, PlatformError> {
+pub(super) fn read_stat(pid: i32) -> Result<Option<ProcStat>, PlatformError> {
     let path = format!("/proc/{pid}/stat");
     match std::fs::read_to_string(&path) {
         Ok(text) => parse_proc_stat(&text).map(Some),

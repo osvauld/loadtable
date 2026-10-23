@@ -14,6 +14,9 @@ pub enum SlotKind {
     Offload,
     /// Device slot.
     Device,
+    /// Transfer slot: checkout sync work (snapshot, pack, apply). Unlike offload it obeys the
+    /// I/O gate, because a sync is local disk work.
+    Transfer,
 }
 
 /// Why a job is waiting.

@@ -127,6 +127,34 @@ pub struct SpawnSpec {
     pub env: Vec<(String, String)>,
     /// File receiving stdout and stderr.
     pub log_path: PathBuf,
+    /// A cgroup's `cgroup.procs` file: the child writes its own pid into it before it execs,
+    /// so it and everything it starts are in the cgroup from the first instruction. `None`
+    /// spawns directly.
+    pub cgroup_procs: Option<PathBuf>,
+}
+
+/// The shell script that places a child in a cgroup and then becomes the real command. `$0` is
+/// the `cgroup.procs` file and `"$@"` the command. The write may fail (the cgroup vanished, the
+/// file is not writable); the command still runs and the caller notices the missing placement.
+pub const PLACE_SCRIPT: &str = "{ echo $$ >\"$0\"; } 2>/dev/null; exec \"$@\"";
+
+/// Wraps `argv` so that the process joins the cgroup behind `procs` before it execs `argv`.
+///
+/// Why a shell and not `pre_exec`: `CommandExt::pre_exec` is `unsafe` (the closure runs between
+/// fork and exec in a possibly multi-threaded process) and the workspace denies `unsafe`. Writing
+/// the pid from the parent after the spawn would leave a window in which the child could fork
+/// children that stay outside the cgroup. `clone3` with `CLONE_INTO_CGROUP` needs `unsafe` too.
+/// The shell writes its own pid and then `exec`s, so pid, process-group leadership and start time
+/// are the command's, and nothing the command starts is ever outside the cgroup.
+pub fn place_in_cgroup(procs: &std::path::Path, argv: &[String]) -> Vec<String> {
+    let mut out = vec![
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        PLACE_SCRIPT.to_string(),
+        procs.display().to_string(),
+    ];
+    out.extend(argv.iter().cloned());
+    out
 }
 
 /// A spawned process group leader.
