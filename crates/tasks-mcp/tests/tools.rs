@@ -1021,6 +1021,8 @@ fn snapshot() -> tasks_daemon::api::StatusSnapshot {
             eta_secs: Some(30.0),
             log_bytes: 10,
             figures: None,
+            cores: None,
+            mem_bytes: None,
         }],
         pressure: PressureView {
             memory: "ok".into(),
@@ -1031,6 +1033,7 @@ fn snapshot() -> tasks_daemon::api::StatusSnapshot {
             available_memory: Some(8 << 30),
             memory_total: None,
             cpu_busy_pct: None,
+            cores_in_use: None,
             swap_total: None,
             swap_used: None,
             swap_in_per_s: None,

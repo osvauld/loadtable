@@ -104,6 +104,7 @@ pub fn is_read_only(req: &Request) -> bool {
             | Request::LogSearch { .. }
             | Request::Status
             | Request::Estimate { .. }
+            | Request::JobMetrics { .. }
             | Request::History { .. }
             | Request::Audit { .. }
             | Request::AuditVerify

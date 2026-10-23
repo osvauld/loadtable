@@ -99,6 +99,8 @@ pub fn tree_pids(table: &[ProcInfo], leader: i32, pgid: i32) -> BTreeSet<i32> {
 pub struct TreeMeter {
     seen: BTreeMap<(i32, u64), (u64, u64)>,
     peak_rss: u64,
+    /// Summed RSS of the latest sample.
+    last_rss: u64,
     any_io: bool,
 }
 
@@ -121,6 +123,7 @@ impl TreeMeter {
             e.1 = e.1.max(p.io_write.unwrap_or(0));
         }
         self.peak_rss = self.peak_rss.max(rss);
+        self.last_rss = rss;
     }
 
     /// The figures so far. CPU comes from the caller (the runner's usage sample), because exited
@@ -133,6 +136,9 @@ impl TreeMeter {
         }
         if self.peak_rss > 0 {
             f.mem_peak_bytes = Some(self.peak_rss);
+        }
+        if self.last_rss > 0 {
+            f.mem_now_bytes = Some(self.last_rss);
         }
         f.cpu_usec = cpu_usec;
         f
@@ -293,6 +299,8 @@ mod tests {
         assert_eq!(f.io_read_bytes, Some(1015));
         assert_eq!(f.io_write_bytes, Some(5025));
         assert_eq!(f.mem_peak_bytes, Some(400));
+        // the level now is the latest sample's, not the peak
+        assert_eq!(f.mem_now_bytes, Some(150));
         assert_eq!(f.cpu_usec, Some(2_000_000));
         // never an exact-looking number for what the OS did not give
         assert_eq!(f.io_some_us, None);

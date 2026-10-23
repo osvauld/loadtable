@@ -1151,6 +1151,52 @@ fn estimate_sends_the_command() {
     );
 }
 
+// R-573
+#[test]
+fn r573_metrics_prints_cores_memory_disk_and_the_top_five_groups() {
+    use tasks_core::metrics::{JobMetricsView, MetricSample, ProcGroup};
+    let sample = |t_ms, cpu, rd| MetricSample {
+        t_ms,
+        cpu_usec: Some(cpu),
+        mem_bytes: Some(3 << 30),
+        io_read_bytes: Some(rd),
+        io_write_bytes: Some(0),
+        io_some_us: Some(0),
+    };
+    let procs = (0..7)
+        .map(|i| ProcGroup {
+            name: format!("prog{i}"),
+            count: 2,
+            cpu_cores: Some(1.0),
+            rss_bytes: 1 << 30,
+            others: false,
+        })
+        .collect();
+    let view = JobMetricsView {
+        quality: Some(tasks_core::Attribution::Cgroup),
+        samples: vec![sample(0, 0, 0), sample(2_000, 4_000_000, 20 << 20)],
+        procs,
+        usual_peak_mem_bytes: Some(4 << 30),
+        note: None,
+    };
+    let c = Arc::new(FakeClient::from_fn(move |_| {
+        Ok(Response::JobMetrics(view.clone()))
+    }));
+    let r = Harness::default().run(&c, &["metrics", "7"]);
+    assert!(r.out.contains("cpu 2.0 cores"), "{}", r.out);
+    assert!(r.out.contains("usual peak"), "{}", r.out);
+    assert!(r.out.contains("disk read 10"), "{}", r.out);
+    assert_eq!(r.out.matches("prog").count(), 5, "{}", r.out);
+    assert_eq!(
+        c.requests(),
+        [Request::JobMetrics {
+            id: tasks_core::JobId(7)
+        }]
+    );
+    let j = Harness::default().run(&c, &["metrics", "7", "--json"]);
+    assert!(j.out.contains("\"samples\""), "{}", j.out);
+}
+
 #[test]
 fn daemon_refusals_map_to_exit_codes() {
     for (code, want) in [

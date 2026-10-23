@@ -193,6 +193,19 @@ impl Scheduler {
         (secs, peak)
     }
 
+    /// The median peak memory of this command's past runs on this machine, when history keeps
+    /// peaks for it.
+    pub(crate) fn usual_peak_mem(&self, rec: &JobRecord) -> Option<u64> {
+        let facts = self.facts(rec);
+        let key = SampleKey {
+            recipe: facts.recipe.clone(),
+            target: None,
+            machine: self.cfg.machine.clone(),
+        };
+        let peaks = self.history().recent_peaks(&key).ok()?;
+        tasks_core::metrics::median_peak(&peaks)
+    }
+
     /// Per-target and compile estimates for the progress display of a running job.
     pub(crate) fn build_estimates(&self, facts: &JobFacts) -> Estimates {
         let h = self.history();

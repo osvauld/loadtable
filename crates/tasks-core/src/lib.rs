@@ -6,6 +6,7 @@ mod fetch;
 mod ids;
 mod job;
 mod machine;
+pub mod metrics;
 mod phase;
 pub mod plan;
 mod priority;

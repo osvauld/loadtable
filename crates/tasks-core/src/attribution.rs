@@ -50,6 +50,9 @@ pub struct JobFigures {
     /// Peak memory in bytes: `memory.peak` for a cgroup, the highest summed RSS seen otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mem_peak_bytes: Option<u64>,
+    /// Memory in use at the moment of the sample (`memory.current`, or the summed RSS).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_now_bytes: Option<u64>,
     /// CPU time (user + system) in microseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_usec: Option<u64>,
@@ -80,6 +83,7 @@ impl JobFigures {
             io_read_ops: None,
             io_write_ops: None,
             mem_peak_bytes: None,
+            mem_now_bytes: None,
             cpu_usec: None,
             io_some_us: None,
             io_full_us: None,

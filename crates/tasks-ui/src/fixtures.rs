@@ -90,6 +90,7 @@ fn pressure() -> PressureView {
         available_memory: Some(8 << 30),
         memory_total: Some(16 << 30),
         cpu_busy_pct: Some(23.0),
+        cores_in_use: Some(3.7),
         swap_total: Some(8 << 30),
         swap_used: Some(1 << 30),
         swap_in_per_s: Some(0),
@@ -276,6 +277,8 @@ pub fn busy() -> Dashboard {
             eta_secs: Some(80.0),
             log_bytes: 20_480,
             figures: None,
+            cores: Some(2.0),
+            mem_bytes: None,
         },
         RunningView {
             id: JobId(102),
@@ -289,6 +292,8 @@ pub fn busy() -> Dashboard {
             eta_secs: None,
             log_bytes: 512,
             figures: None,
+            cores: None,
+            mem_bytes: None,
         },
     ];
     st.waiting = vec![

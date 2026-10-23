@@ -462,6 +462,50 @@ pub fn estimate(e: &EstimateView) -> String {
     )
 }
 
+/// A running job's current resource use and its busiest program groups.
+pub fn job_metrics(m: &tasks_core::metrics::JobMetricsView) -> String {
+    use tasks_core::metrics::rates;
+    let mut out = String::new();
+    let last_two = match m.samples.as_slice() {
+        [.., a, b] => Some((a, b)),
+        _ => None,
+    };
+    let r = last_two.map(|(a, b)| rates(a, b)).unwrap_or_default();
+    let na = || "n/a".to_string();
+    let cores = r.cores.map_or_else(na, |c| format!("{c:.1} cores"));
+    let mem = m
+        .samples
+        .last()
+        .and_then(|s| s.mem_bytes)
+        .map_or_else(na, fmt_bytes);
+    let usual = m
+        .usual_peak_mem_bytes
+        .map(|b| format!(" (usual peak {})", fmt_bytes(b)))
+        .unwrap_or_default();
+    let rate = |b: Option<f64>| b.map_or_else(na, |v| format!("{}/s", fmt_bytes(v as u64)));
+    let stall = r.io_stall_pct.map_or_else(na, |p| format!("{p:.0}%"));
+    let quality = m.quality.map_or("unknown", |q| q.label());
+    out.push_str(&format!(
+        "cpu {cores}, memory {mem}{usual}\ndisk read {}, write {}, io stall {stall}\n({} samples, {quality})\n",
+        rate(r.read_bps),
+        rate(r.write_bps),
+        m.samples.len()
+    ));
+    if let Some(n) = &m.note {
+        out.push_str(&format!("note: {n}\n"));
+    }
+    for g in m.procs.iter().take(5) {
+        let cpu = g.cpu_cores.map_or_else(na, |c| format!("{c:.1} cores"));
+        let name = if g.others {
+            g.name.clone()
+        } else {
+            format!("{} x{}", g.name, g.count)
+        };
+        out.push_str(&format!("  {name}: {cpu}, {}\n", fmt_bytes(g.rss_bytes)));
+    }
+    out
+}
+
 /// Bytes as GiB or MiB.
 pub fn fmt_bytes(b: u64) -> String {
     const GIB: f64 = (1u64 << 30) as f64;

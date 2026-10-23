@@ -96,6 +96,7 @@ pub(crate) fn run_job(
         ev.runner_failed(&e);
     }
     drop(guard);
+    sch.end_metrics(rj.id);
     lock(&sch.running).remove(&rj.id);
     sch.wake.notify();
 }
@@ -224,6 +225,7 @@ impl RunEvents for Events {
 
     fn figures(&mut self, f: &JobFigures) {
         *lock(&self.rj.figures) = Some(f.clone());
+        self.sch.record_metrics(&self.rj, f);
         if self.started_ok
             && self
                 .figures_saved

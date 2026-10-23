@@ -30,6 +30,9 @@ mod history;
 pub mod holders;
 pub mod logs;
 pub mod machine_policy;
+mod metrics;
+#[cfg(test)]
+mod metrics_tests;
 pub mod peer_link;
 pub mod peers_config;
 mod place;

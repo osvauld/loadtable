@@ -186,6 +186,8 @@ pub struct Scheduler {
     pub(crate) runner_poll: Duration,
     /// This machine's build caches (compiler cache, output links, Gradle home).
     pub(crate) build_cache: Mutex<Arc<crate::build_cache::BuildCache>>,
+    /// Sample histories of running (and just ended) jobs, in memory only.
+    pub(crate) metrics: Mutex<crate::metrics::MetricsStore>,
 }
 
 impl Scheduler {
@@ -229,6 +231,7 @@ impl Scheduler {
             parent_env: parts.parent_env,
             runner_poll: parts.runner_poll,
             build_cache: Mutex::new(build_cache),
+            metrics: Mutex::default(),
         });
         if let Some(g) = gate {
             g.bind(&sch);
