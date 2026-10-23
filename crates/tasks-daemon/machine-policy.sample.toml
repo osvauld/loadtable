@@ -47,6 +47,10 @@
 # cache_reserve_gib = 20   # env TASKS_CACHE_RESERVE_GIB
 # state_reserve_gib = 1   # env TASKS_STATE_RESERVE_GIB
 
+[cache]
+# sccache = "auto"   # env TASKS_SCCACHE
+# sccache_size_gib = 30   # env TASKS_SCCACHE_SIZE_GIB
+
 [runner]
 # cancel_grace_ms = 300   # env TASKS_CANCEL_GRACE_MS
 # wall_timeout_secs = "off"   # env TASKS_WALL_TIMEOUT_SECS

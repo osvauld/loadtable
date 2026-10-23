@@ -576,6 +576,11 @@ impl Snapshot for GixSnapshot {
                 continue;
             }
             match entry.disk_kind {
+                // a coordinator-made output link (`target`) is the worker's own business: it
+                // points into the origin's cache and never travels, whatever .gitignore says
+                // (`target/` does not match a symlink)
+                Some(gix::dir::entry::Kind::Symlink)
+                    if super::paths::is_output_link(&entry.rela_path.to_str_lossy()) => {}
                 Some(gix::dir::entry::Kind::File | gix::dir::entry::Kind::Symlink) => {
                     untracked.push(entry.rela_path)
                 }

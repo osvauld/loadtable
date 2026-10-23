@@ -232,6 +232,18 @@ const FIELDS: &[Field] = &[
         "1",
     ),
     f(
+        "cache.sccache",
+        "TASKS_SCCACHE",
+        Ty::Choice(&["auto", "off"]),
+        "auto",
+    ),
+    f(
+        "cache.sccache_size_gib",
+        "TASKS_SCCACHE_SIZE_GIB",
+        Ty::Uint(1, 100_000),
+        "30",
+    ),
+    f(
         "runner.cancel_grace_ms",
         "TASKS_CANCEL_GRACE_MS",
         Ty::Uint(100, 30_000),
@@ -899,6 +911,14 @@ impl MachinePolicy {
     /// Disk reserve in bytes for the cache filesystem.
     pub fn cache_reserve_bytes(&self) -> u64 {
         (self.fl("disk.cache_reserve_gib") * GIB as f64) as u64
+    }
+    /// Whether the machine wraps rustc in sccache when it finds one (`cache.sccache`).
+    pub fn sccache_enabled(&self) -> bool {
+        !matches!(self.vals.get("cache.sccache"), Some(Val::Choice(w)) if w == "off")
+    }
+    /// The sccache size limit, as sccache spells it (`30G`).
+    pub fn sccache_size(&self) -> String {
+        format!("{}G", self.u("cache.sccache_size_gib"))
     }
     /// Disk reserve in bytes for the state filesystem.
     pub fn state_reserve_bytes(&self) -> u64 {

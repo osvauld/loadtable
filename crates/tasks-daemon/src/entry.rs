@@ -22,7 +22,7 @@ OPTIONS\n\
   --state-dir DIR   ledger, socket, logs (default: $XDG_STATE_HOME/tasks2)\n\
   --config-dir DIR  holds machine-policy.toml (default: $XDG_CONFIG_HOME/tasks2)\n\
   --lock-dir DIR    slot lock files (default: STATE_DIR/slots; never TMPDIR)\n\
-  --cache-dir DIR   where cache output lands (checked against the disk reserve)\n\
+  --cache-dir DIR   cache root: sccache, gradle, outputs (default: ~/build-cache; its disk is\n                    checked against the reserve)\n\
   --machine NAME    this machine's name in placement";
 
 /// What the command line asked for.

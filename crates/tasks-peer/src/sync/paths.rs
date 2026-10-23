@@ -31,6 +31,13 @@ pub fn check_rel_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// True for the path of a coordinator-made output link (`target`, also nested; the Android
+/// output directories). Such an untracked symlink points into the origin machine's cache, so it
+/// never travels (R-406).
+pub fn is_output_link(rel: &str) -> bool {
+    rel.rsplit('/').next() == Some("target") || rel == "android/build" || rel == "android/app/build"
+}
+
 /// Hashes a file by streaming it. Returns the hash and the bytes read.
 pub fn hash_file(path: &Path) -> std::io::Result<(Hash, u64)> {
     let mut f = std::fs::File::open(path)?;

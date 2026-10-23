@@ -25,6 +25,7 @@ tasks-policy.workspace = true
 tasks-peer.workspace = true
 tasks-identity.workspace = true
 serde.workspace = true
+sha2.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 toml.workspace = true

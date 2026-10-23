@@ -235,3 +235,46 @@ fn fetching_from_an_unsynced_checkout_is_a_named_refusal() {
         ))
     ));
 }
+
+// R-405: the Android output directories are links two levels down; a policy that names them
+// serves an APK through them, and one that names only `target` does not.
+#[test]
+fn r405_an_android_output_link_below_the_top_level_is_followed_only_when_named() {
+    let s = synced();
+    let cache = s.w.tmp.path().join("cache-disk/android-app-build");
+    write(&cache, "outputs/apk/app.apk", "apk bytes");
+    fs::create_dir_all(s.tree.join("android/app")).unwrap();
+    std::os::unix::fs::symlink(&cache, s.tree.join("android/app/build")).unwrap();
+    let path = "android/app/build/outputs/apk/app.apk";
+    for links in [vec![], vec!["target".to_string()]] {
+        let rcv = s.w.receiver_with(
+            Arc::new(FakeRunner::new()),
+            Arc::new(tasks_peer::receiver::AllowAll),
+            FetchPolicy {
+                allowed_links: links,
+                ..FetchPolicy::default()
+            },
+        );
+        s.w.net.serve(&s.w.nixos, rcv as Arc<dyn Handler>);
+        let r = run_fetch(&s, &[path], u64::MAX);
+        assert!(
+            r.fetched.is_empty() && r.refused[0].1.contains("symlink"),
+            "{r:?}"
+        );
+    }
+    let rcv = s.w.receiver_with(
+        Arc::new(FakeRunner::new()),
+        Arc::new(tasks_peer::receiver::AllowAll),
+        FetchPolicy {
+            allowed_links: vec!["android/app/build".into()],
+            ..FetchPolicy::default()
+        },
+    );
+    s.w.net.serve(&s.w.nixos, rcv as Arc<dyn Handler>);
+    let r = run_fetch(&s, &[path], u64::MAX);
+    assert_eq!(r.fetched.len(), 1, "{r:?}");
+    // a link elsewhere in the path is still refused
+    std::os::unix::fs::symlink(&cache, s.tree.join("other")).unwrap();
+    let r = run_fetch(&s, &["other/outputs/apk/app.apk"], u64::MAX);
+    assert!(r.fetched.is_empty(), "{r:?}");
+}

@@ -14,6 +14,7 @@ mod attrib_tests;
 #[cfg(test)]
 mod audit_tests;
 pub mod audited;
+pub mod build_cache;
 pub mod cargo_jobs;
 pub mod config;
 pub mod entry;

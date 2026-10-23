@@ -25,7 +25,7 @@ use tasks_admission::{
 use tasks_core::{Arch, JobId, Kind, Os, Phase, SlotKind, WaitReason as LedgerWait};
 use tasks_ledger::{Clock, Finish, JobRecord, LedgerError};
 use tasks_platform::{GroupId, SlotGuard};
-use tasks_runner::{CancelToken, EnvPolicy, JobStart, LogNotes, Policy as RunPolicy};
+use tasks_runner::{CancelToken, JobStart, LogNotes, Policy as RunPolicy};
 use tasks_timing::{Estimates, Timeline};
 
 /// Locks a mutex, carrying on after a panic elsewhere (the data is plain bookkeeping).
@@ -178,6 +178,8 @@ pub struct Scheduler {
     pub(crate) started_ms: i64,
     pub(crate) parent_env: Vec<(String, String)>,
     pub(crate) runner_poll: Duration,
+    /// This machine's build caches (compiler cache, output links, Gradle home).
+    pub(crate) build_cache: Mutex<Arc<crate::build_cache::BuildCache>>,
 }
 
 impl Scheduler {
@@ -187,6 +189,11 @@ impl Scheduler {
         let trip_window_ms =
             i64::try_from(parts.policy.trip_interval_secs().saturating_mul(1000)).unwrap_or(60_000);
         let gate = parts.transfer_gate;
+        let build_cache = Arc::new(crate::build_cache::BuildCache::discover(
+            &parts.cfg.cache_dir,
+            &parts.cfg.state_dir.join("peer-store"),
+            &parts.parent_env,
+        ));
         let sch = Arc::new(Scheduler {
             cfg: parts.cfg,
             policy: RwLock::new(Arc::new(parts.policy)),
@@ -215,11 +222,22 @@ impl Scheduler {
             started_ms,
             parent_env: parts.parent_env,
             runner_poll: parts.runner_poll,
+            build_cache: Mutex::new(build_cache),
         });
         if let Some(g) = gate {
             g.bind(&sch);
         }
         sch
+    }
+
+    /// The build caches in force.
+    pub fn build_cache(&self) -> Arc<crate::build_cache::BuildCache> {
+        lock(&self.build_cache).clone()
+    }
+
+    /// Replaces the build caches (an explicit sccache, or none); for embedding and tests.
+    pub fn set_build_cache(&self, cache: crate::build_cache::BuildCache) {
+        *lock(&self.build_cache) = Arc::new(cache);
     }
 
     /// The gate that makes sync work wait for a transfer slot and the I/O gate.
@@ -473,7 +491,10 @@ impl Scheduler {
             w.predicted_peak_memory = facts.peak_memory;
             w.checkout = facts.checkout.clone();
             w.device = rec.spec.requirements.device.clone();
-            w.new_output = matches!(rec.spec.kind, Kind::Compile | Kind::Test | Kind::Package);
+            // only a job that would write NEW output on the cache disk waits for its reserve;
+            // one whose output links all exist proceeds (R-061, R-404)
+            w.new_output = matches!(rec.spec.kind, Kind::Compile | Kind::Test | Kind::Package)
+                && self.plan_outputs(&rec.spec).needs_new_output();
             if let Some(h) = &blocked_hold {
                 w.holds.push(h.clone());
             }
@@ -659,6 +680,43 @@ impl Scheduler {
             self.end_unstarted(id, &reason);
             return false;
         }
+        let settings = crate::build_cache::Settings::of(policy);
+        let cache = self.build_cache();
+        let lookup = |name: &str| {
+            rec.spec
+                .env
+                .iter()
+                .chain(self.parent_env.iter())
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone())
+        };
+        if crate::build_cache::outputs::is_gradle(&rec.spec.argv)
+            && lookup("CARGO_TARGET_DIR").is_some()
+        {
+            self.end_unstarted(
+                id,
+                &crate::build_cache::CacheError::TargetOverride.to_string(),
+            );
+            return false;
+        }
+        let props = crate::build_cache::outputs::ensure_android_local_properties(
+            &rec.spec.argv,
+            &rec.spec.cwd,
+            lookup,
+        );
+        let props_line = match props {
+            Ok(l) => l,
+            Err(e) => {
+                self.end_unstarted(id, &e.to_string());
+                return false;
+            }
+        };
+        let placed = self.plan_outputs(&rec.spec).apply();
+        // the cache line comes first in the job's output (R-405)
+        let _ = notes.note(&log_path, "cache", &cache.header(&settings, &placed));
+        for (i, n) in placed.notes.iter().chain(props_line.iter()).enumerate() {
+            let _ = notes.note(&log_path, &format!("cache-note-{i}"), n);
+        }
         if let Some(l) = line {
             let _ = notes.note(&log_path, "placement", &format!("placement: {l}"));
         }
@@ -733,9 +791,7 @@ impl Scheduler {
         };
         lock(&self.running).insert(id, rj.clone());
         lock(&self.state).last_wait.remove(&id);
-        let env_policy = EnvPolicy {
-            default_cargo_jobs: Some(cj.default),
-        };
+        let env_policy = cache.env_policy(&settings, Some(cj.default));
         let sch = self.clone();
         let spawned = std::thread::Builder::new()
             .name(format!("job-{}", id.0))
@@ -746,6 +802,15 @@ impl Scheduler {
             return false;
         }
         true
+    }
+
+    /// The output links a job would get, planned without creating anything.
+    pub(crate) fn plan_outputs(
+        &self,
+        spec: &tasks_core::JobSpec,
+    ) -> crate::build_cache::outputs::OutputPlan {
+        let cache = self.build_cache();
+        crate::build_cache::outputs::plan(cache.root(), cache.peer_store(), &spec.cwd, &spec.argv)
     }
 
     pub(crate) fn end_unstarted(&self, id: JobId, reason: &str) {

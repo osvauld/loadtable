@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 pub struct FetchPolicy {
     /// Largest file served (R-159: 2 GiB).
     pub max_file_bytes: u64,
-    /// Top-level names that may be coordinator-made output links (`target`,
-    /// `build`) pointing outside the tree. Every other symlink is refused.
+    /// Paths from the tree root (`target`, `android/app/build`) that may be
+    /// coordinator-made output links pointing outside the tree. Every other symlink is refused.
     pub allowed_links: Vec<String>,
 }
 
@@ -41,8 +41,14 @@ fn resolve(tree: &Path, rel: &str, policy: &FetchPolicy) -> Result<PathBuf, Stri
             return Ok(tree.join(rel));
         };
         if m.file_type().is_symlink() {
+            let prefix = comps
+                .iter()
+                .take(i + 1)
+                .copied()
+                .collect::<Vec<_>>()
+                .join("/");
             let output_link =
-                i == 0 && comps.len() > 1 && policy.allowed_links.iter().any(|l| l == c);
+                comps.len() > i + 1 && policy.allowed_links.iter().any(|l| *l == prefix);
             if !output_link {
                 return Err(format!("{c} is a symlink"));
             }

@@ -123,9 +123,9 @@ fn dispatch(ctx: &mut Ctx<'_>, cmd: &Command) -> Result<i32, CliError> {
         Command::Identity { .. } => Err(CliError::Failed(
             "internal: identity is read from the state directory, not from the daemon".into(),
         )),
-        Command::Daemon { .. } | Command::Ui { .. } | Command::Mcp { .. } => Err(CliError::Failed(
-            "internal: this command is handled before the client is built".into(),
-        )),
+        Command::Daemon { .. } | Command::Cache | Command::Ui { .. } | Command::Mcp { .. } => Err(
+            CliError::Failed("internal: this command is handled before the client is built".into()),
+        ),
     }
 }
 

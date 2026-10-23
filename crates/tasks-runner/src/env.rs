@@ -33,11 +33,18 @@ pub const ENV_ALLOWLIST: &[&str] = &[
 pub const ENV_PREFIX_ALLOWLIST: &[&str] = &["NIX_LD", "SCCACHE_"];
 
 /// Environment policy values supplied by the caller.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EnvPolicy {
     /// Default `CARGO_BUILD_JOBS` when neither the job nor the daemon sets it
     /// (R-091: 2, not the CPU count). `None` leaves it unset.
     pub default_cargo_jobs: Option<u32>,
+    /// Names removed from the finished environment whoever supplied them (a job's own
+    /// compiler wrapper must not override the machine's, R-400).
+    pub scrub: Vec<String>,
+    /// Prefixes removed likewise (`SCCACHE_`).
+    pub scrub_prefixes: Vec<String>,
+    /// Variables the machine sets last; they win over the job and the daemon's environment.
+    pub force: Vec<(String, String)>,
 }
 
 fn allowed(name: &str) -> bool {
@@ -61,6 +68,17 @@ pub fn build_env(
     if let Some(n) = policy.default_cargo_jobs {
         map.entry("CARGO_BUILD_JOBS".to_string())
             .or_insert_with(|| n.to_string());
+    }
+    // the machine's own settings are applied after everything a job could have supplied
+    map.retain(|k, _| {
+        !policy.scrub.iter().any(|s| s == k)
+            && !policy
+                .scrub_prefixes
+                .iter()
+                .any(|p| k.starts_with(p.as_str()))
+    });
+    for (k, v) in &policy.force {
+        map.insert(k.clone(), v.clone());
     }
     map.insert("TASKS_JOB_ID".to_string(), job.0.to_string());
     map.into_iter().collect()
@@ -86,14 +104,7 @@ mod tests {
             kv("TASKS_JOB_ID", "999"),
             kv("SSH_AUTH_SOCK", "/s"),
         ];
-        let env = build_env(
-            JobId(7),
-            parent,
-            &[],
-            &EnvPolicy {
-                default_cargo_jobs: None,
-            },
-        );
+        let env = build_env(JobId(7), parent, &[], &EnvPolicy::default());
         let names: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(
             names,
@@ -113,6 +124,7 @@ mod tests {
     fn r091_cargo_jobs_default_is_a_default_not_an_override() {
         let p = EnvPolicy {
             default_cargo_jobs: Some(2),
+            ..EnvPolicy::default()
         };
         let env = build_env(JobId(1), vec![], &[], &p);
         assert!(env.contains(&kv("CARGO_BUILD_JOBS", "2")));
@@ -126,11 +138,60 @@ mod tests {
             JobId(1),
             vec![kv("PATH", "/a")],
             &[kv("PATH", "/b"), kv("FOO", "1")],
-            &EnvPolicy {
-                default_cargo_jobs: None,
-            },
+            &EnvPolicy::default(),
         );
         assert!(env.contains(&kv("PATH", "/b")));
         assert!(env.contains(&kv("FOO", "1")));
+    }
+
+    // R-400: the machine's compiler-cache settings are applied after the job's environment and
+    // beat any wrapper or sccache variable the job (or the daemon's own environment) supplied.
+    #[test]
+    fn r400_forced_variables_beat_the_job_and_scrubbed_ones_vanish() {
+        let policy = EnvPolicy {
+            scrub: vec!["RUSTC_WRAPPER".into()],
+            scrub_prefixes: vec!["SCCACHE_".into()],
+            force: vec![
+                kv("RUSTC_WRAPPER", "/machine/sccache"),
+                kv("SCCACHE_DIR", "/machine/dir"),
+            ],
+            ..EnvPolicy::default()
+        };
+        let env = build_env(
+            JobId(1),
+            vec![kv("RUSTC_WRAPPER", "/parent/w"), kv("SCCACHE_BUCKET", "b")],
+            &[
+                kv("RUSTC_WRAPPER", "/job/evil"),
+                kv("SCCACHE_DIR", "/job/dir"),
+                kv("SCCACHE_CACHE_SIZE", "1T"),
+            ],
+            &policy,
+        );
+        assert!(env.contains(&kv("RUSTC_WRAPPER", "/machine/sccache")));
+        assert!(env.contains(&kv("SCCACHE_DIR", "/machine/dir")));
+        assert!(
+            !env.iter()
+                .any(|(k, _)| k == "SCCACHE_BUCKET" || k == "SCCACHE_CACHE_SIZE")
+        );
+        // without a forced value a scrubbed name is simply gone: an explicit uncached build
+        let bare = EnvPolicy {
+            scrub: vec!["RUSTC_WRAPPER".into()],
+            ..EnvPolicy::default()
+        };
+        let env = build_env(JobId(1), vec![], &[kv("RUSTC_WRAPPER", "/job/evil")], &bare);
+        assert!(!env.iter().any(|(k, _)| k == "RUSTC_WRAPPER"));
+    }
+
+    // R-405: the SDK variables Gradle needs on a sanitized environment are allowlisted.
+    #[test]
+    fn r405_the_android_sdk_variables_are_allowlisted() {
+        for name in [
+            "ANDROID_HOME",
+            "ANDROID_SDK_ROOT",
+            "JAVA_HOME",
+            "GRADLE_USER_HOME",
+        ] {
+            assert!(ENV_ALLOWLIST.contains(&name), "{name}");
+        }
     }
 }

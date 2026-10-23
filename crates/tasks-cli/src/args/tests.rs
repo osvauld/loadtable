@@ -248,6 +248,9 @@ fn list_log_search_and_control_commands_parse() {
         parse(&["policy", "suggest"]).unwrap().command,
         Command::Policy { .. }
     ));
+    // R-407: `tasks2 cache` takes no arguments
+    assert!(matches!(parse(&["cache"]).unwrap().command, Command::Cache));
+    assert!(parse(&["cache", "--bogus"]).is_err());
     assert!(matches!(
         parse(&["--state-dir", "/s", "status"]).unwrap().command,
         Command::Status { .. }

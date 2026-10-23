@@ -22,6 +22,7 @@ fn policy() -> Policy {
 fn env_policy() -> EnvPolicy {
     EnvPolicy {
         default_cargo_jobs: Some(2),
+        ..EnvPolicy::default()
     }
 }
 

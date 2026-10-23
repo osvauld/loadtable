@@ -554,6 +554,9 @@ pub enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Build caches: the compiler wrapper in use, the cache root and its disk against the
+    /// reserve. Reads the machine's files; needs no daemon.
+    Cache,
     /// This machine's identity.
     Identity {
         /// What to do.

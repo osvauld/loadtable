@@ -12,7 +12,6 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tasks_core::{JobId, JobSpec, Phase};
 use tasks_ledger::{CancelOutcome, JobRecord, LedgerError, NewJob, Origin, TimeoutReason};
-use tasks_peer::outputs::FetchPolicy;
 use tasks_peer::proto::{
     CancelState, PeerStatus, PressureSummary, QueueSummary, SlotStatus, WireEnd, WireOutcome,
     WireSample,
@@ -259,7 +258,7 @@ pub fn build_receiver_with(sch: &Arc<Scheduler>, store: Arc<SyncStore>) -> Arc<R
         Arc::new(DaemonStatus::new(sch.clone())),
         // the receiving peer applies the same rules as the local API (R-153)
         Arc::new(DaemonRules::new(sch.clone())),
-        FetchPolicy::default(),
+        crate::build_cache::BuildCache::fetch_policy(),
     ))
 }
 

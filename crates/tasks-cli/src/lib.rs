@@ -135,6 +135,36 @@ fn run_ui(_cli: &Cli, _deps: &Deps<'_>) -> i32 {
     error::EXIT_USAGE
 }
 
+/// `tasks2 cache`: what the daemon of this shell would use, read from its configuration and the
+/// machine, without starting it.
+fn cache_report(
+    state_dir: Option<&Path>,
+    env: &dyn Fn(&str) -> Option<String>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> i32 {
+    let args = ConfigArgs {
+        state_dir: state_dir.map(Path::to_path_buf),
+        ..ConfigArgs::default()
+    };
+    let cfg = match DaemonConfig::resolve(&args, &|k| env(k)) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = writeln!(err, "tasks2: cannot work out the cache directory ({e})");
+            return error::EXIT_USAGE;
+        }
+    };
+    let policy = tasks_daemon::machine_policy::MachinePolicy::load(&cfg.policy_path(), &|k| env(k));
+    let vars: Vec<(String, String)> = ["PATH", "HOME"]
+        .iter()
+        .filter_map(|k| env(k).map(|v| ((*k).to_string(), v)))
+        .collect();
+    let text =
+        tasks_daemon::build_cache::report::report(&cfg, &policy, &vars, &tasks_platform::native());
+    let _ = write!(out, "{text}");
+    error::EXIT_OK
+}
+
 /// Parses and runs one command line, writing to `out` and `err`, and returns the exit code.
 pub fn run_cli(args: &[String], out: &mut dyn Write, err: &mut dyn Write, deps: &Deps<'_>) -> i32 {
     let cli = match Cli::try_parse_from(args) {
@@ -160,6 +190,7 @@ pub fn run_cli(args: &[String], out: &mut dyn Write, err: &mut dyn Write, deps: 
                 }
             };
         }
+        Command::Cache => return cache_report(cli.state_dir.as_deref(), deps.env, out, err),
         Command::Identity { action } => {
             let tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
             return trust::identity(action, cli.state_dir.as_deref(), deps.env, tty, out, err);

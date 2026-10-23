@@ -10,6 +10,9 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+/// The cache root under `$HOME` when nothing else says.
+pub const DEFAULT_CACHE_DIR: &str = "build-cache";
+
 /// Directories and names, fixed for the daemon's lifetime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonConfig {
@@ -19,7 +22,8 @@ pub struct DaemonConfig {
     pub config_dir: PathBuf,
     /// Holds the slot lock files; the same for every client (R-231).
     pub lock_dir: PathBuf,
-    /// Where cache output lands; its filesystem is checked against the disk reserve.
+    /// The cache root (default `~/build-cache`): compiler cache, Gradle home and checkout
+    /// outputs live here; its filesystem is checked against the disk reserve.
     pub cache_dir: PathBuf,
     /// This machine's name in placement.
     pub machine: String,
@@ -71,7 +75,8 @@ impl DaemonConfig {
             .cache_dir
             .clone()
             .or_else(|| env("TASKS_CACHE_DIR").map(PathBuf::from))
-            .or_else(|| xdg("XDG_CACHE_HOME", ".cache").map(|p| p.join("tasks2")))
+            // the earlier release's cache root, so its warm caches are reused (R-401)
+            .or_else(|| home.as_ref().map(|h| h.join(DEFAULT_CACHE_DIR)))
             .unwrap_or_else(|| state_dir.clone());
         let lock_dir = args
             .lock_dir
