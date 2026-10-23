@@ -119,8 +119,15 @@ fn the_client_talks_to_a_real_daemon() {
     assert!(err.starts_with("tasks: submitted job "), "{err}");
     let id: i64 = out.trim().parse().unwrap();
 
-    // list and get
-    let (code, out, _) = rig.tasks(&["list", "--active"]);
+    // list and get; the hold reason appears on the scheduler's next tick, so wait for it
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let (code, out) = loop {
+        let (code, out, _) = rig.tasks(&["list", "--active"]);
+        if out.contains("execution is stopped") || std::time::Instant::now() > deadline {
+            break (code, out);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
     assert_eq!(code, 0);
     assert!(
         out.contains("execution is stopped") && out.contains("echo 'hello world'"),
