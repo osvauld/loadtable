@@ -267,6 +267,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // R-521
+    #[test]
+    fn r521_a_zombie_leader_still_pins_its_group_and_is_not_counted() {
+        let dir = tmpdir("zombie");
+        let p = crate::native();
+        let c = p.spawn_group(&spec(&dir, "sleep 30 & exit 0")).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while p.peek_exit(&c).unwrap().is_none() {
+            assert!(Instant::now() < deadline, "leader never exited");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // the leader is a zombie now: the group is found, with only the stray counted
+        let u = p.usage(c.group).unwrap();
+        assert_eq!(u.processes, 1, "{u:?}");
+        p.signal_group(c.group, Signal::Kill).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while p.usage(c.group).unwrap().processes > 0 {
+            assert!(Instant::now() < deadline, "stray survived Kill");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(p.try_wait(&c).unwrap(), Some(0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // R-076, R-074
     #[test]
     fn special_and_own_groups_are_never_signalled() {

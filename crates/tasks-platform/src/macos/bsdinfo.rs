@@ -4,6 +4,7 @@
 #![allow(unsafe_code)]
 
 use crate::PlatformError;
+use crate::macos_parse::skip_unreadable;
 
 /// The `proc_bsdinfo` fields `tasks` uses.
 #[derive(Debug, Clone, Copy)]
@@ -27,7 +28,8 @@ pub(super) fn bsd_info(pid: i32) -> Result<Option<Bsd>, PlatformError> {
         libc::proc_pidinfo(
             pid,
             libc::PROC_PIDTBSDINFO,
-            0,
+            // arg 1 asks for zombies too: an unreaped leader must still pin its group
+            1,
             info.as_mut_ptr().cast(),
             size_i32,
         )
@@ -58,4 +60,9 @@ pub(super) fn bsd_info(pid: i32) -> Result<Option<Bsd>, PlatformError> {
         start_sec: info.pbi_start_tvsec,
         start_usec: info.pbi_start_tvusec,
     }))
+}
+
+/// [`bsd_info`] for scans over every process: unreadable ones drop out (R-520).
+pub(super) fn bsd_info_for_scan(pid: i32) -> Result<Option<Bsd>, PlatformError> {
+    skip_unreadable(bsd_info(pid))
 }

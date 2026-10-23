@@ -1054,6 +1054,9 @@ pub struct PeerMachineView {
     pub cpu_pct: Option<u8>,
     /// Memory pressure percent, when known.
     pub memory_pct: Option<u8>,
+    /// Memory pressure level, when the peer has one (macOS has no percentage).
+    #[serde(default)]
+    pub memory_level: Option<String>,
     /// I/O pressure percent, when known.
     pub io_pct: Option<u8>,
     /// What blocks a new compile job there, or empty.
