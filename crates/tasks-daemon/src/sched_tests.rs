@@ -396,7 +396,8 @@ fn seed_history(r: &Rig, argv: &[&str], runs: u64, secs: f64, peak: Option<u64>)
 
 /// A rig whose CPU gate is shut, so that only the short lane can start a compile job.
 fn gated_rig() -> Rig {
-    let r = Rig::with_policy("[slots]\ncompile = 1\n");
+    // the CPU limit is stated: macOS defaults it to off (no PSI there),
+    let r = Rig::with_policy("[slots]\ncompile = 1\n[pressure.compile]\nmax_cpu = 40\n");
     r.machine.state.lock().unwrap().pressure.cpu = Some(95.0);
     r
 }
@@ -471,7 +472,9 @@ fn r342_a_job_is_not_short_when_history_says_it_is_big_or_slow() {
         "120 s is over the 60 s limit"
     );
     // the cap is machine policy
-    let roomy = Rig::with_policy("[slots]\ncompile = 1\nshort_job_max_memory_mib = 4096\n");
+    let roomy = Rig::with_policy(
+        "[slots]\ncompile = 1\nshort_job_max_memory_mib = 4096\n[pressure.compile]\nmax_cpu = 40\n",
+    );
     roomy.machine.state.lock().unwrap().pressure.cpu = Some(95.0);
     seed_history(&roomy, &CHECK, 3, 8.0, Some(2 << 30));
     assert!(

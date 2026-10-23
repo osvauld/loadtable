@@ -549,3 +549,12 @@ New in v2 (the earlier release's `--fetch REL` ported onto the peer link). A job
 - **SSH `tasks-offload` / `status-watch-ssh` / sidecar reconcile path** (`only_interrupted_ssh_offloads_are_candidates`): retired in favour of the iroh peer link (per the project's iroh-then-MCP direction). Keep the invariant (R-173: never mark an unknown remote half as success) for forwards.
 - **Historical text pins**: `default_cargo_jobs_cap_rejects_three_with_the_historical_text`, `historical_identity_json_is_unchanged`, `thresholds_default_exactly_to_the_previous_constants`. Keep the values, not the exact wording.
 - **`contracts.rs` `only_queued_jobs_can_be_cancelled_in_control_plane_milestone`**: a milestone restriction that running-job cancel supersedes.
+
+## 23. v2-macos-fixes
+
+| ID | Behaviour | Test | OS |
+|---|---|---|---|
+| R-520 | A process-table or group scan on macOS skips a process it may not read (EPERM) or that exited meanwhile (ESRCH) instead of failing the whole scan; any other error still fails it. | `r520_unreadable_and_vanished_processes_are_skipped_other_errors_propagate` (platform) | any |
+| R-521 | On macOS an unreaped (zombie) group leader still reads as present (BSD info is asked for zombies), so the group stays found, the zombie is not counted and a stray member is counted and killable, as on Linux. The short-lane tests state their CPU limit, which macOS defaults to off. | `r521_a_zombie_leader_still_pins_its_group_and_is_not_counted` (platform); `r342_*`, `r345_*` (daemon, now portable) | unix |
+| R-522 | The forwarded-job cache link test compares the link target and the expected path after resolving symlinks (macOS `/var` is `/private/var`); the daemon keeps writing the cache dir as configured. | `r402_a_forwarded_job_gets_the_peers_key` (daemon) | unix |
+| R-523 | A peer without PSI percentages (macOS) reports its native memory level in the status report, and `tasks2 status` shows `memory normal` instead of `memory ?`. | `r523_a_peers_report_carries_its_memory_level` (daemon), `r523_a_peer_without_psi_shows_its_memory_level_not_a_question_mark` (cli) | any |

@@ -1,7 +1,7 @@
 //! macOS process-group accounting: `proc_pidinfo` for membership and start
 //! time, `sysinfo` for CPU and RSS.
 
-use super::bsdinfo::bsd_info;
+use super::bsdinfo::{bsd_info, bsd_info_for_scan};
 use crate::macos_parse::start_token;
 use crate::{GroupId, PlatformError, Usage, groups};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
@@ -37,7 +37,9 @@ pub(super) fn usage(group: GroupId) -> Result<Usage, PlatformError> {
         let Ok(raw) = i32::try_from(pid.as_u32()) else {
             continue;
         };
-        let Some(info) = bsd_info(raw)? else { continue };
+        let Some(info) = bsd_info_for_scan(raw)? else {
+            continue;
+        };
         if info.pgid == pgid && !info.zombie {
             u.cpu_user_s += p.accumulated_cpu_time() as f64 / 1000.0;
             u.rss_bytes = u.rss_bytes.saturating_add(p.memory());

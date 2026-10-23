@@ -263,6 +263,10 @@ pub struct PressureSummary {
     pub cpu_pct: Option<u8>,
     /// Memory pressure percent, when known.
     pub memory_pct: Option<u8>,
+    /// Memory pressure level (`normal`, `warn`, `critical`) for hosts without PSI percentages,
+    /// such as macOS.
+    #[serde(default)]
+    pub memory_level: Option<String>,
     /// I/O pressure percent, when known.
     pub io_pct: Option<u8>,
     /// One line for humans.

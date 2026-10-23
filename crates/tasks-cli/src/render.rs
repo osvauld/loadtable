@@ -680,6 +680,16 @@ pub fn status(s: &StatusSnapshot) -> String {
     out
 }
 
+/// A peer's memory pressure: the PSI percentage where it has one, else its native level
+/// (macOS), else `?` (R-523).
+fn peer_memory_text(pct: Option<u8>, level: Option<&str>) -> String {
+    match (pct, level) {
+        (Some(p), _) => format!("{p}%"),
+        (None, Some(l)) => l.to_string(),
+        (None, None) => "?".to_string(),
+    }
+}
+
 /// `cpu busy 23%, swap 1.0 GiB of 8.0 GiB used (in 0 B/s, out 0 B/s)`; `None` when the machine
 /// reported none of it (an older daemon).
 fn load_line(p: &tasks_daemon::api::PressureView) -> Option<String> {
@@ -781,7 +791,7 @@ fn peers_section(out: &mut String, peers: &[tasks_daemon::api::PeerView]) {
             let mut load = format!(
                 "    pressure: cpu {}, memory {}, io {}",
                 pc(m.cpu_pct),
-                pc(m.memory_pct),
+                peer_memory_text(m.memory_pct, m.memory_level.as_deref()),
                 pc(m.io_pct)
             );
             if let Some(c) = m.cpu_busy_pct {

@@ -584,6 +584,7 @@ fn r356_status_lists_each_peer_with_state_path_latencies_roles_and_its_last_repo
                 running: 1,
                 cpu_pct: Some(35),
                 memory_pct: None,
+                memory_level: None,
                 io_pct: Some(1),
                 pressure_summary: String::new(),
                 cpu_busy_pct: Some(41),
@@ -691,4 +692,12 @@ fn r504_get_lists_each_fetch_result_and_a_passed_job_with_a_failed_one_exits_one
     );
     j.fetch.truncate(1);
     assert_eq!(job_exit_code(&j), 0);
+}
+
+// R-523
+#[test]
+fn r523_a_peer_without_psi_shows_its_memory_level_not_a_question_mark() {
+    assert_eq!(peer_memory_text(Some(4), Some("normal")), "4%");
+    assert_eq!(peer_memory_text(None, Some("warn")), "warn");
+    assert_eq!(peer_memory_text(None, None), "?");
 }

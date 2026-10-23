@@ -203,13 +203,16 @@ fn r402_a_forwarded_job_gets_the_peers_key() {
     r.tick();
     r.until_running(id);
     let real = fs::read_link(tree.join("target")).unwrap();
+    // the link target is built from the configured cache dir as given; where that dir
+    // sits behind a symlink (macOS /var -> /private/var) both spellings are the same place.
+    let want = r
+        .cfg
+        .cache_dir
+        .join("tasks2/checkouts/peer/laptop-node/aa11bb/target");
+    assert!(real.is_absolute(), "{real:?}");
     assert_eq!(
-        real,
-        fs::canonicalize(&r.cfg.cache_dir)
-            .unwrap_or(r.cfg.cache_dir.clone())
-            .join("tasks2/checkouts/peer/laptop-node/aa11bb/target")
-            .components()
-            .collect::<PathBuf>()
+        fs::canonicalize(&real).unwrap(),
+        fs::canonicalize(&want).unwrap()
     );
 }
 

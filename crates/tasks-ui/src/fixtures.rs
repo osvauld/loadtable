@@ -138,6 +138,7 @@ fn peer(state: &str, ago: Option<u64>) -> PeerView {
             running: 1,
             cpu_pct: Some(35),
             memory_pct: Some(4),
+            memory_level: None,
             io_pct: Some(1),
             pressure_summary: String::new(),
             cpu_busy_pct: Some(30),

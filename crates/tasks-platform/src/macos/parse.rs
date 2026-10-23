@@ -155,6 +155,26 @@ pub(crate) fn snapshot(total: u64, vm: &VmStat) -> Result<crate::MemorySnapshot,
     })
 }
 
+/// Scan rule for per-process reads: a process we may not inspect (EPERM, another
+/// user's) or that exited between listing and reading (ESRCH) drops out of the
+/// scan; any other error fails it.
+pub(crate) fn skip_unreadable<T>(
+    read: Result<Option<T>, PlatformError>,
+) -> Result<Option<T>, PlatformError> {
+    use rustix::io::Errno;
+    match read {
+        Err(PlatformError::Io { source, .. })
+            if matches!(
+                source.raw_os_error().map(Errno::from_raw_os_error),
+                Some(Errno::PERM | Errno::SRCH)
+            ) =>
+        {
+            Ok(None)
+        }
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,5 +276,30 @@ mod tests {
         assert_eq!(start_token(10, 5).unwrap(), 10_000_005);
         assert!(start_token(1, 1_000_000).is_err());
         assert!(start_token(u64::MAX, 0).is_err());
+    }
+
+    fn io(errno: rustix::io::Errno) -> Result<Option<u8>, PlatformError> {
+        Err(PlatformError::io(
+            "proc_pidinfo(1)",
+            std::io::Error::from_raw_os_error(errno.raw_os_error()),
+        ))
+    }
+
+    // R-520
+    #[test]
+    fn r520_unreadable_and_vanished_processes_are_skipped_other_errors_propagate() {
+        use rustix::io::Errno;
+        assert!(matches!(skip_unreadable(io(Errno::PERM)), Ok(None)));
+        assert!(matches!(skip_unreadable(io(Errno::SRCH)), Ok(None)));
+        assert!(matches!(skip_unreadable(Ok(Some(7u8))), Ok(Some(7))));
+        assert!(matches!(
+            skip_unreadable(io(Errno::IO)),
+            Err(PlatformError::Io { .. })
+        ));
+        let parse = Err(PlatformError::parse("proc_pidinfo", "pid mismatch"));
+        assert!(matches!(
+            skip_unreadable::<u8>(parse),
+            Err(PlatformError::Parse { .. })
+        ));
     }
 }

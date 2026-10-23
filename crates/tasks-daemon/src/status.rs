@@ -34,6 +34,7 @@ fn peer_machine_view(s: &tasks_peer::proto::PeerStatus) -> PeerMachineView {
         running: s.queue.running,
         cpu_pct: s.pressure.cpu_pct,
         memory_pct: s.pressure.memory_pct,
+        memory_level: s.pressure.memory_level.clone(),
         io_pct: s.pressure.io_pct,
         pressure_summary: s.pressure.summary.clone(),
         cpu_busy_pct: s.pressure.cpu_busy_pct,
@@ -505,6 +506,7 @@ mod peer_view_tests {
             pressure: PressureSummary {
                 cpu_pct: Some(40),
                 memory_pct: None,
+                memory_level: None,
                 io_pct: Some(0),
                 summary: "memory stalls".into(),
                 cpu_busy_pct: Some(61),
