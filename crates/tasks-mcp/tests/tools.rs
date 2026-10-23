@@ -1072,6 +1072,7 @@ fn snapshot() -> tasks_daemon::api::StatusSnapshot {
         attribution: "attribution: process tree (no cgroup delegation: test)".into(),
         transfer: None,
         trips: vec![],
+        power: None,
     }
 }
 

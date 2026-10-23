@@ -581,6 +581,7 @@ impl FakeStatus {
             pressure: PressureSummary::default(),
             jobs: Vec::new(),
             cores_in_use_milli: None,
+            power: None,
         })
     }
 }

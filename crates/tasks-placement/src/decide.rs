@@ -129,6 +129,9 @@ pub enum Refusal {
     UnknownPeer(MachineName),
     /// The pinned, local or named machine cannot run it (see the machine's exclusions).
     RequestedMachineCannot(MachineName),
+    /// A named peer has never answered, so there is no reason to think it will come back (a
+    /// peer that was seen and is asleep or away is waited for instead, R-600).
+    PeerNeverSeen(MachineName),
     /// No machine can ever run it as asked.
     NoCapableMachine,
 }
@@ -360,10 +363,27 @@ fn refusal_or_wait(input: &Input, machines: &[MachineReport]) -> Decision {
             .map(|m| Decision::Refuse(Refusal::RequestedMachineCannot(m.name.clone())))
             .unwrap_or(Decision::Refuse(Refusal::NoCapableMachine)),
         Request::Peer(n) => {
-            if machines.iter().any(|m| &m.name == n) {
-                Decision::Refuse(Refusal::RequestedMachineCannot(n.clone()))
-            } else {
-                Decision::Refuse(Refusal::UnknownPeer(n.clone()))
+            let Some(m) = machines.iter().find(|m| &m.name == n) else {
+                return Decision::Refuse(Refusal::UnknownPeer(n.clone()));
+            };
+            // A peer that was seen and is out of reach now (asleep, away) is waited for; the
+            // daemon ends the wait after its grace period. One never seen is refused at once.
+            match &m.verdict {
+                Verdict::Excluded(ex) if ex.iter().all(Exclusion::is_transient) => {
+                    if ex.iter().any(|e| {
+                        matches!(
+                            e,
+                            Exclusion::Unreachable {
+                                last_seen_ago_secs: None
+                            }
+                        )
+                    }) {
+                        Decision::Refuse(Refusal::PeerNeverSeen(n.clone()))
+                    } else {
+                        Decision::Wait
+                    }
+                }
+                _ => Decision::Refuse(Refusal::RequestedMachineCannot(n.clone())),
             }
         }
         Request::Anywhere => {

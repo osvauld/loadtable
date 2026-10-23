@@ -53,7 +53,17 @@ fn peer_machine_view(s: &tasks_peer::proto::PeerStatus) -> PeerMachineView {
             })
             .collect(),
         cores_in_use_milli: s.cores_in_use_milli,
+        power: s.power.map(|p| power_text(p.on_battery, p.percent)),
     }
+}
+
+/// `on battery 80%` / `on AC`.
+pub(crate) fn power_text(on_battery: bool, percent: Option<u8>) -> String {
+    tasks_platform::PowerReading {
+        on_battery,
+        percent,
+    }
+    .to_string()
 }
 
 /// A job row for the API. The environment is left out on purpose.
@@ -358,6 +368,7 @@ impl Scheduler {
             attribution: self.attribution_line(),
             transfer: self.transfer_view(),
             trips: self.trip_views(crate::attrib::STATUS_TRIPS),
+            power: Some(self.power_view()),
         }
     }
 
@@ -535,6 +546,7 @@ mod peer_view_tests {
             },
             jobs: vec![],
             cores_in_use_milli: None,
+            power: None,
         });
         assert_eq!(
             (v.cores, v.memory_bytes, v.waiting, v.running),
@@ -573,6 +585,7 @@ mod peer_view_tests {
                 pressure: PressureSummary::default(),
                 jobs: vec![],
                 cores_in_use_milli: None,
+                power: None,
             }
         });
         assert_eq!(

@@ -370,6 +370,10 @@ impl StatusSource for DaemonStatus {
             },
             jobs: running_use(&snap.running),
             cores_in_use_milli: snap.pressure.cores_in_use.map(milli),
+            power: snap.power.map(|p| tasks_peer::proto::PowerSummary {
+                on_battery: p.on_battery,
+                percent: p.battery_pct,
+            }),
         }
     }
 }

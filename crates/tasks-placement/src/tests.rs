@@ -177,7 +177,7 @@ fn r133_a_snapshot_exactly_at_the_limit_is_not_stale() {
 }
 
 #[test]
-fn r133_a_named_peer_that_is_down_is_a_clean_refusal_with_the_reason() {
+fn r133_a_named_peer_never_seen_is_a_clean_refusal_with_the_reason() {
     let mut p = view("nixos", false);
     p.link = Link::Down {
         last_seen_ago_secs: None,
@@ -188,12 +188,51 @@ fn r133_a_named_peer_that_is_down_is_a_clean_refusal_with_the_reason() {
     ));
     assert_eq!(
         r.decision,
-        Decision::Refuse(Refusal::RequestedMachineCannot(n("nixos")))
+        Decision::Refuse(Refusal::PeerNeverSeen(n("nixos")))
     );
     assert!(matches!(
         exclusions_of(&r, "nixos"),
         [Exclusion::Unreachable { .. }]
     ));
+    // the refusal names the real problem, not "nixos cannot run it"
+    assert!(
+        r.one_line().contains("has not answered"),
+        "{}",
+        r.one_line()
+    );
+    assert!(!r.one_line().contains("cannot run it"));
+}
+
+#[test]
+fn r600_a_named_peer_seen_before_and_out_of_reach_is_waited_for() {
+    for link in [
+        Link::Down {
+            last_seen_ago_secs: Some(78),
+        },
+        Link::Up { age_secs: 600 },
+    ] {
+        let mut p = view("mac", false);
+        p.link = link;
+        let r = run(&input(
+            Request::Peer(n("mac")),
+            vec![view("laptop", true), p],
+        ));
+        assert_eq!(r.decision, Decision::Wait, "{link:?}");
+    }
+}
+
+#[test]
+fn r600_a_named_peer_that_also_fails_a_requirement_is_still_refused() {
+    let mut p = view("mac", false);
+    p.link = Link::Down {
+        last_seen_ago_secs: Some(78),
+    };
+    let mut i = input(Request::Peer(n("mac")), vec![view("laptop", true), p]);
+    i.requirements.tools.insert(Tool("nonesuch".into()));
+    assert_eq!(
+        run(&i).decision,
+        Decision::Refuse(Refusal::RequestedMachineCannot(n("mac")))
+    );
 }
 
 #[test]
@@ -558,7 +597,8 @@ fn a_named_peer_never_silently_moves_to_local() {
         Request::Peer(n("nixos")),
         vec![view("laptop", true), p],
     ));
-    assert!(matches!(r.decision, Decision::Refuse(_)));
+    // it waits for the peer (R-600); it is never run on the local machine instead
+    assert_eq!(r.decision, Decision::Wait);
 }
 
 #[test]

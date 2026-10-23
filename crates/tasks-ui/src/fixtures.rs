@@ -153,6 +153,7 @@ fn named_peer(name: &str, state: &str, ago: Option<u64>) -> PeerView {
             swap_out_per_s: Some(0),
             jobs: Vec::new(),
             cores_in_use_milli: None,
+            power: None,
         }),
     }
 }
@@ -193,6 +194,7 @@ pub fn idle() -> Dashboard {
             attribution: "attribution: process tree (no cgroup delegation: fixture)".into(),
             transfer: None,
             trips: vec![],
+            power: None,
         },
         jobs,
         jobs_truncated: false,

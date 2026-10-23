@@ -376,6 +376,30 @@ const FIELDS: &[Field] = &[
         Ty::Choice(&["refuse", "warn"]),
         "refuse",
     ),
+    f(
+        "placement.peer_wait_secs",
+        "TASKS_PEER_WAIT_SECS",
+        Ty::Uint(0, 86_400),
+        "600",
+    ),
+    f(
+        "power.keep_awake",
+        "TASKS_KEEP_AWAKE",
+        Ty::Choice(&["on", "off"]),
+        "on",
+    ),
+    f(
+        "power.keep_awake_linger_secs",
+        "TASKS_KEEP_AWAKE_LINGER_SECS",
+        Ty::Uint(0, 3600),
+        "120",
+    ),
+    f(
+        "power.peer_jobs_on_battery",
+        "TASKS_PEER_JOBS_ON_BATTERY",
+        Ty::Choice(&["false", "true"]),
+        "false",
+    ),
     f("machine.devices", "TASKS_DEVICES", Ty::List, ""),
     f("machine.tools", "TASKS_TOOLS", Ty::List, ""),
 ];
@@ -511,6 +535,7 @@ fn flatten(prefix: &str, table: &toml::Table, out: &mut Vec<(String, Result<Stri
             toml::Value::Integer(i) => out.push((key, Ok(i.to_string()))),
             toml::Value::Float(x) => out.push((key, Ok(x.to_string()))),
             toml::Value::String(s) => out.push((key, Ok(s.clone()))),
+            toml::Value::Boolean(b) => out.push((key, Ok(b.to_string()))),
             toml::Value::Array(a) => {
                 let items: Option<Vec<&str>> = a.iter().map(toml::Value::as_str).collect();
                 match items {
@@ -875,6 +900,22 @@ impl MachinePolicy {
     /// The `cargo -j` a new job gets while another compile job runs (R-093).
     pub fn cargo_jobs_when_busy(&self) -> u32 {
         u32::try_from(self.u("cargo.jobs_when_busy")).unwrap_or(1)
+    }
+    /// How long a job placed on a sleeping or unreachable peer waits for it (R-600).
+    pub fn peer_wait_secs(&self) -> u64 {
+        self.u("placement.peer_wait_secs")
+    }
+    /// Whether the daemon holds the machine awake while it has work (R-607).
+    pub fn keep_awake(&self) -> bool {
+        !matches!(self.vals.get("power.keep_awake"), Some(Val::Choice(w)) if w == "off")
+    }
+    /// How long the hold outlasts the last job, so back-to-back jobs do not flap (R-607).
+    pub fn keep_awake_linger_secs(&self) -> u64 {
+        self.u("power.keep_awake_linger_secs")
+    }
+    /// Whether jobs received from peers run while this machine is on battery (R-614).
+    pub fn peer_jobs_on_battery(&self) -> bool {
+        matches!(self.vals.get("power.peer_jobs_on_battery"), Some(Val::Choice(w)) if w == "true")
     }
     /// The stuck-job window in seconds (R-095).
     pub fn stuck_window_secs(&self) -> u64 {
