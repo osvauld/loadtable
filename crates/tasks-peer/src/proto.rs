@@ -1112,6 +1112,7 @@ mod tests {
                         pgid: 1,
                         start_time: 1,
                     }),
+                    figures: None,
                 };
                 let w = WireOutcome::from(&o);
                 assert_eq!(w.phase(), o.phase(), "{end:?} {code:?}");

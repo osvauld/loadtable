@@ -30,6 +30,9 @@ use std::process::{Command, Stdio};
 #[derive(Debug, Clone)]
 pub struct GixTransfer {
     git: PathBuf,
+    /// A cgroup's `cgroup.procs`: every `git` child joins it before it execs, so the work counts
+    /// in the transfer cgroup (design §9).
+    cgroup_procs: Option<PathBuf>,
 }
 
 impl Default for GixTransfer {
@@ -73,16 +76,39 @@ pub fn empty_tree_id(like: &GitId) -> GitId {
 impl GixTransfer {
     /// Uses `git` from `PATH`.
     pub fn new() -> GixTransfer {
-        GixTransfer { git: "git".into() }
+        GixTransfer {
+            git: "git".into(),
+            cgroup_procs: None,
+        }
+    }
+
+    /// Runs every `git` child inside the cgroup behind this `cgroup.procs` file.
+    pub fn with_cgroup_procs(mut self, procs: Option<PathBuf>) -> GixTransfer {
+        self.cgroup_procs = procs;
+        self
     }
 
     /// Uses this git binary.
     pub fn with_git(git: impl Into<PathBuf>) -> GixTransfer {
-        GixTransfer { git: git.into() }
+        GixTransfer {
+            git: git.into(),
+            cgroup_procs: None,
+        }
     }
 
     fn cmd(&self, git_dir: &Path) -> Command {
-        let mut c = Command::new(&self.git);
+        let mut c = match &self.cgroup_procs {
+            Some(procs) => {
+                // a shell writes its pid into the cgroup, then becomes git
+                let argv =
+                    tasks_platform::place_in_cgroup(procs, &[self.git.display().to_string()]);
+                let mut it = argv.into_iter();
+                let mut c = Command::new(it.next().unwrap_or_default());
+                c.args(it);
+                c
+            }
+            None => Command::new(&self.git),
+        };
         for k in [
             "GIT_DIR",
             "GIT_WORK_TREE",
@@ -383,5 +409,34 @@ impl PackTransfer for GixTransfer {
         c.args(["-c", "gc.autoDetach=false", "gc", "-q"])
             .arg(format!("--prune={prune_age}"));
         self.run("gc", c).map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod placement_tests {
+    use super::*;
+
+    // R-337: transfer work counts in the transfer cgroup, so `git` joins it before it execs.
+    #[test]
+    fn r337_git_children_join_the_transfer_cgroup_before_they_exec() {
+        let dir = tempfile::tempdir().unwrap();
+        let procs = dir.path().join("cgroup.procs");
+        std::fs::write(&procs, "").unwrap();
+        let t = GixTransfer::new().with_cgroup_procs(Some(procs.clone()));
+        let mut c = t.cmd(dir.path());
+        c.arg("--version");
+        let out = t.run("version", c).unwrap();
+        assert!(String::from_utf8_lossy(&out).starts_with("git version"));
+        let pid: i32 = std::fs::read_to_string(&procs)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(pid > 1);
+        // without a cgroup nothing is written anywhere
+        let plain = GixTransfer::new();
+        let mut c = plain.cmd(dir.path());
+        c.arg("--version");
+        assert!(plain.run("version", c).is_ok());
     }
 }
