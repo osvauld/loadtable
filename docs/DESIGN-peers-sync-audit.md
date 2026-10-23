@@ -332,6 +332,53 @@ Queue order: `(class, effective wait, submit time)`.
   A short job that overruns is not killed; its history updates, so the next run of that
   recipe is not short. No flag lets an agent claim "short".
 
+### As built (step 5)
+
+`tasks-core` (`priority.rs`), `tasks-admission` (`order.rs`), `tasks-timing` (`short.rs`),
+`tasks-ledger` (schema v8), `tasks-placement`, `tasks-daemon` (`queue_estimate.rs`, `queue_view.rs`,
+`place.rs`, `status.rs`), CLI, MCP and UI. Where the build differs from or fills in the text:
+
+- **The order, exactly.** `tasks_admission::sequence` takes the waiters, the clock and when each
+  owner last started a job, and returns the order `decide` walks (and status, list positions and
+  the estimates use). Each waiter's class is its *effective* class: after every `queue.aging_mins`
+  (20) of waiting it rises one class, background to normal only, never to blocking (that class is a
+  person's claim with a reason, not a reward for waiting). It enters the higher class at its submit
+  time plus one aging period per step, and "effective wait" is the time since it entered its
+  class. Classes go strictly in the order blocking, normal, background. Inside a class the owners
+  take turns: among owners that still have waiters, the one that started a job least recently
+  (never started comes first) gets its oldest waiter (by when it entered the class, then submit
+  time, then job id); that owner then goes to the back of the rotation; ties between owners go to
+  the one whose next waiter is older, then the owner name. A held waiter (checkout busy, drain)
+  keeps its place and its owner's turn, so the checkout-ownership rule of R-230 is unchanged.
+  Last-start times live in daemon memory; after a restart every owner is "never started".
+- **Storage.** `JobSpec.priority` and `priority_reason` (serde defaults, left out when normal)
+  carry the class through the API, plans, peers and the ledger's spec column; `Store::set_priority`
+  rewrites that column for a queued or waiting job and refuses any other with `NotQueued`.
+  `StepHints.priority` is the run policy's per-step hint (`priority = "background"` in a step;
+  `blocking` is refused in policy and in plans). Plans and suites take a class for every step
+  (`--priority` on `steps` and `suite run`); a step with none keeps its hint.
+- **Audit.** `job.priority`: owner, job, `priority`, `from` (changes only), `reason`, `via`
+  (`submit` or `prioritize`). Recorded by the audited ledger wrapper, so every path is covered.
+  Only the owner may `prioritize`, as for cancel.
+- **Short lane.** The waiter's prediction comes from history only: duration is the worst of the
+  latest three non-cancelled runs of the recipe on this machine, and needs at least two passed
+  runs; peak memory is the worst known `figures.memory_peak` of the latest three runs, the
+  latest run having measured one (a new `mem_peak` column on whole-job samples, schema v8, filled
+  when the job finishes from its final figures). Either unknown means not short. The limits are
+  `slots.short_job_max_secs` (60) and `slots.short_job_max_memory_mib` (1024). Using the worst of
+  three rather than the median is what makes one overrun enough to end short-lane use.
+- **Placement.** A machine whose admission gate for the job is closed never wins over one that
+  could start the job at once (`Score::ready_now`); with no such machine, or with the peer named,
+  the old arithmetic (extra wait for pressure) applies. A peer reports only its compile gate, so
+  its pressure counts for compile-slot jobs. The local wait for a new job now follows the queue
+  order and counts only the jobs ahead of it (before, the job counted itself, which charged an
+  idle local machine the "unknown wait" and favoured peers).
+- **Forwarded jobs the peer holds back.** The local row stays `Running` (R-015); `JobView.
+  remote_wait` and a `WaiterView` with `on_peer` say it waits, with the peer's reason from its
+  last reported phase. Status lists it under waiting, not running.
+- **Not done.** The class is not sent to a peer's queue (a forwarded job is ordered by the
+  peer's own rules); `prioritize` on a job already forwarded changes only the local record.
+
 ## 11. Workloads and test parallelism (decided)
 
 1. Split `cargo test` by target across machines: build the feature (a plan runs `--lib`
