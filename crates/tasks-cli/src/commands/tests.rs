@@ -25,7 +25,10 @@ fn daemon(id: i64, chunks: Vec<Response>, final_job: JobView) -> Arc<FakeClient>
             .collect::<std::collections::VecDeque<_>>(),
     );
     Arc::new(FakeClient::from_fn(move |req| match req {
-        Request::Submit { .. } => Ok(Response::Submitted { id: JobId(id) }),
+        Request::Submit { .. } => Ok(Response::Submitted {
+            id: JobId(id),
+            warnings: vec![],
+        }),
         Request::List { .. } => Ok(Response::Jobs {
             jobs: vec![],
             truncated: false,
@@ -168,7 +171,10 @@ fn a_queued_job_prints_what_it_waits_for_while_following() {
     waiting.wait_text = Some("compile slot held by job 2".into());
     let polls = Mutex::new(0);
     let c = Arc::new(FakeClient::from_fn(move |req| match req {
-        Request::Submit { .. } => Ok(Response::Submitted { id: JobId(4) }),
+        Request::Submit { .. } => Ok(Response::Submitted {
+            id: JobId(4),
+            warnings: vec![],
+        }),
         Request::List { .. } => Ok(Response::Jobs {
             jobs: vec![],
             truncated: false,
@@ -252,7 +258,10 @@ fn r104_a_signal_detaches_without_cancelling_and_says_not_to_resubmit() {
 #[test]
 fn r104_a_client_error_mid_follow_detaches_and_names_the_job() {
     let c = Arc::new(FakeClient::from_fn(|req| match req {
-        Request::Submit { .. } => Ok(Response::Submitted { id: JobId(9) }),
+        Request::Submit { .. } => Ok(Response::Submitted {
+            id: JobId(9),
+            warnings: vec![],
+        }),
         Request::List { .. } => Ok(Response::Jobs {
             jobs: vec![],
             truncated: false,
@@ -279,7 +288,10 @@ fn r104_a_client_error_mid_follow_detaches_and_names_the_job() {
 #[test]
 fn a_final_state_that_cannot_be_read_is_not_called_live() {
     let c = Arc::new(FakeClient::from_fn(|req| match req {
-        Request::Submit { .. } => Ok(Response::Submitted { id: JobId(9) }),
+        Request::Submit { .. } => Ok(Response::Submitted {
+            id: JobId(9),
+            warnings: vec![],
+        }),
         Request::List { .. } => Ok(Response::Jobs {
             jobs: vec![],
             truncated: false,
@@ -490,7 +502,10 @@ fn r187_run_warns_but_still_submits() {
             jobs: vec![job(1, "other", "/w/repo", Phase::Running, "x")],
             truncated: false,
         }),
-        Request::Submit { .. } => Ok(Response::Submitted { id: JobId(2) }),
+        Request::Submit { .. } => Ok(Response::Submitted {
+            id: JobId(2),
+            warnings: vec![],
+        }),
         other => Err(ClientError::BadReply(format!("{other:?}"))),
     }));
     let r = Harness::default().run(&c, &["enqueue", "--", "x"]);
@@ -847,6 +862,7 @@ fn logs_tail_grep_and_follow() {
         } => Ok(Response::LogTail {
             lines: vec![format!("last {lines}"), "end".into()],
             running: true,
+            end_offset: None,
         }),
         Request::Logs {
             view:
@@ -1529,6 +1545,22 @@ fn r199_ui_and_mcp_fail_with_built_without_and_exit_2() {
     assert!(crate::not_built("ui").contains("built without ui"));
 }
 
+// R-352
+#[test]
+fn r352_ui_and_mcp_help_tell_the_truth_for_this_build() {
+    use clap::CommandFactory;
+    let cmd = crate::args::Cli::command();
+    for (name, built) in [("ui", crate::UI_BUILT), ("mcp", crate::MCP_BUILT)] {
+        let about = cmd
+            .find_subcommand(name)
+            .and_then(|c| c.get_about())
+            .map(|a| a.to_string())
+            .unwrap_or_default();
+        assert_eq!(about.contains("not built"), !built, "{name}: {about}");
+        assert_eq!(about.contains("(built in)"), built, "{name}: {about}");
+    }
+}
+
 #[test]
 fn r199_the_headless_build_keeps_the_command_line() {
     assert_eq!(
@@ -1738,4 +1770,38 @@ fn r349_the_status_and_the_table_show_a_job_held_by_a_peer_as_waiting() {
     );
     let d = crate::render::job_detail(&j, crate::testutil::NOW, None);
     assert!(d.starts_with("job 5: waiting"), "{d}");
+}
+
+// R-368
+#[test]
+fn r368_submit_warnings_from_the_daemon_are_printed_by_the_cli() {
+    let c = Arc::new(FakeClient::from_fn(|req| match req {
+        Request::Submit { .. } => Ok(Response::Submitted {
+            id: JobId(6),
+            warnings: vec!["this builds every test target (policy: warn)".into()],
+        }),
+        Request::List { .. } => Ok(Response::Jobs {
+            jobs: vec![],
+            truncated: false,
+        }),
+        Request::Logs { .. } => Ok(chunk("ok\n", 3, true)),
+        Request::Get { .. } => Ok(Response::Job {
+            job: Box::new(finished(6, Phase::Passed)),
+        }),
+        other => Err(ClientError::BadReply(format!("unexpected {other:?}"))),
+    }));
+    let r = Harness::default().run(&c, &["run", "--", "cargo", "test"]);
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(
+        r.err
+            .contains("tasks: warning: this builds every test target (policy: warn)"),
+        "{}",
+        r.err
+    );
+    // no warning, no line
+    let quiet = Harness::default().run(
+        &daemon(7, vec![], finished(7, Phase::Passed)),
+        &["run", "--", "x"],
+    );
+    assert!(!quiet.err.contains("warning"), "{}", quiet.err);
 }

@@ -489,6 +489,10 @@ pub enum Response {
     Submitted {
         /// Its id.
         id: JobId,
+        /// What the submit rules allowed with a warning (a broad test in `warn` mode, one
+        /// deliberately escaped); empty for an older daemon.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        warnings: Vec<String>,
     },
     /// A plan was submitted.
     PlanSubmitted {
@@ -524,6 +528,10 @@ pub enum Response {
         lines: Vec<String>,
         /// True while the job still runs (the last line may grow).
         running: bool,
+        /// The log offset just after the last byte the lines cover: follow from here and no
+        /// byte is read twice or skipped. `None` from an older daemon.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_offset: Option<u64>,
     },
     /// Grep result.
     LogGrep {
@@ -927,6 +935,21 @@ pub struct PressureView {
     /// Total memory in bytes, when the machine reported it.
     #[serde(default)]
     pub memory_total: Option<u64>,
+    /// CPU busy percent over the last interval (not CPU pressure), when two readings exist.
+    #[serde(default)]
+    pub cpu_busy_pct: Option<f32>,
+    /// Swap size in bytes (0 without swap), when the platform reports it.
+    #[serde(default)]
+    pub swap_total: Option<u64>,
+    /// Swap in use in bytes.
+    #[serde(default)]
+    pub swap_used: Option<u64>,
+    /// Bytes per second read back from swap over the last interval.
+    #[serde(default)]
+    pub swap_in_per_s: Option<u64>,
+    /// Bytes per second written out to swap over the last interval.
+    #[serde(default)]
+    pub swap_out_per_s: Option<u64>,
     /// Free bytes where cache output lands.
     pub cache_free: Option<u64>,
     /// Free bytes where state lives.
@@ -978,9 +1001,13 @@ pub struct PeerView {
     /// `direct`, `relay` or `unknown`.
     #[serde(default)]
     pub path: String,
-    /// Round-trip time of the link, milliseconds.
+    /// The transport's round-trip time of the selected path ("path RTT"), milliseconds.
     #[serde(default)]
     pub rtt_ms: Option<u64>,
+    /// How long the last status request took to be answered ("reply time"), milliseconds. It
+    /// includes the peer's handling, so it is not a measure of the network alone.
+    #[serde(default)]
+    pub reply_ms: Option<u64>,
     /// What the peer last said about itself, when it ever answered. It can be old: read it
     /// with `state` and `last_seen_ago_secs`.
     #[serde(default)]
@@ -1008,6 +1035,21 @@ pub struct PeerMachineView {
     pub io_pct: Option<u8>,
     /// What blocks a new compile job there, or empty.
     pub pressure_summary: String,
+    /// CPU busy percent (not pressure), when the peer reports it.
+    #[serde(default)]
+    pub cpu_busy_pct: Option<u8>,
+    /// Swap size in bytes, when reported.
+    #[serde(default)]
+    pub swap_total: Option<u64>,
+    /// Swap in use in bytes.
+    #[serde(default)]
+    pub swap_used: Option<u64>,
+    /// Swap read-back rate, bytes per second.
+    #[serde(default)]
+    pub swap_in_per_s: Option<u64>,
+    /// Swap write-out rate, bytes per second.
+    #[serde(default)]
+    pub swap_out_per_s: Option<u64>,
 }
 
 /// One peer slot kind.

@@ -81,13 +81,18 @@ pub fn check_context(context: usize) -> Result<(), LogError> {
 
 /// The last `lines` lines of a log, never a torn one.
 pub fn tail(path: &Path, lines: usize, complete: bool) -> Result<Vec<String>, LogError> {
+    tail_at(path, lines, complete).map(|(l, _)| l)
+}
+
+/// [`tail`] and the offset just after the last byte it covers, for a follower to resume at.
+pub fn tail_at(path: &Path, lines: usize, complete: bool) -> Result<(Vec<String>, u64), LogError> {
     if lines == 0 || lines > MAX_TAIL_LINES {
         return Err(LogError::Bad(format!(
             "lines must be between 1 and {MAX_TAIL_LINES}"
         )));
     }
     let window = (lines as u64).saturating_mul(400).clamp(64 * 1024, 8 << 20);
-    tasks_runner::tail_lines(path, lines, window, complete).map_err(|e| match e {
+    tasks_runner::tail_lines_at(path, lines, window, complete).map_err(|e| match e {
         tasks_runner::RunnerError::Log { path, source } => LogError::Io { path, source },
         other => LogError::Bad(other.to_string()),
     })

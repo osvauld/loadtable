@@ -50,7 +50,7 @@ fn r116_a_job_runs_and_the_placement_line_is_written_once_at_the_top_of_its_log(
     assert_eq!(r.until_done(id), Phase::Passed);
     let log = r.log_text(id);
     assert!(
-        log.starts_with("[tasks] placement: testbox (local)"),
+        log.starts_with("[tasks] placement: testbox (default: stays on this machine)"),
         "{log}"
     );
     assert_eq!(log.matches("[tasks] placement:").count(), 1);
@@ -663,7 +663,7 @@ fn r112_log_requests_grep_tail_and_follow() {
         },
     }));
     assert_eq!(e.code, ErrorCode::BadRequest);
-    let Response::LogTail { lines, running } = ok(r.sch.handle(Request::Logs {
+    let Response::LogTail { lines, running, .. } = ok(r.sch.handle(Request::Logs {
         id: a,
         view: LogView::Tail { lines: 2 },
     })) else {

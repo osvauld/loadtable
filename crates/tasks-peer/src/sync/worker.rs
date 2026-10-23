@@ -255,6 +255,42 @@ impl SyncStore {
         Ok(now)
     }
 
+    /// Receives a whole pack from a raw stream into the session's spool file, replacing anything
+    /// an earlier session left. At most `max_pack_bytes` are accepted; a longer stream is cut
+    /// and refused, and the partial file is removed. Returns the bytes held. The length and
+    /// SHA-256 are checked against `SyncApply` when it arrives, as for chunked packs.
+    pub fn put_stream(
+        &self,
+        peer: &PeerId,
+        checkout: &CheckoutId,
+        session: u64,
+        data: &mut dyn std::io::Read,
+    ) -> Result<u64, Refusal> {
+        let dir = self.checkout_dir(peer, checkout).join("incoming");
+        fs::create_dir_all(&dir).map_err(|e| internal("creating incoming", e))?;
+        if let Ok(rd) = fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                let _ = fs::remove_file(e.path());
+            }
+        }
+        let part = dir.join(format!("{session}.pack"));
+        let mut f = fs::File::create(&part).map_err(|e| internal("opening pack", e))?;
+        let limit = self.limits.max_pack_bytes;
+        // one byte over the limit is read so that "exactly the limit" is accepted
+        let mut limited = std::io::Read::take(&mut *data, limit.saturating_add(1));
+        let got = std::io::copy(&mut limited, &mut f).map_err(|e| {
+            let _ = fs::remove_file(&part);
+            internal("receiving pack", e)
+        })?;
+        if got > limit {
+            let _ = fs::remove_file(&part);
+            return Err(Refusal::LimitExceeded {
+                detail: format!("pack is over the {limit} byte limit"),
+            });
+        }
+        Ok(got)
+    }
+
     /// Indexes the pack, checks the objects, and makes the working copy match the tree.
     pub fn apply(&self, peer: &PeerId, a: &SyncApply) -> Result<SyncSummary, Refusal> {
         let lock = self.lock_for(peer, &a.checkout);

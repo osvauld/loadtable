@@ -6,8 +6,8 @@ use super::snapshot::{Snapshot, SnapshotError, SnapshotIo, SnapshotRequest};
 use super::transfer::{PackRequest, PackTransfer};
 use super::{NoObserver, OpenGate, SyncError, SyncEvent, SyncGate, SyncObserver, SyncPhase};
 use crate::ids::{CheckoutId, GitId, Hash, PeerId};
-use crate::proto::{Body, MAX_CHUNK_BYTES, SyncApply, SyncSummary};
-use crate::transport::{Connection, PeerError};
+use crate::proto::{Body, MAX_CHUNK_BYTES, Refusal, SyncApply, SyncSummary};
+use crate::transport::{Connection, PeerError, Upload};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -221,6 +221,9 @@ struct ChunkSink<'a> {
     checkout: &'a CheckoutId,
     session: u64,
     sent: u64,
+    /// The raw stream the pack goes through; `None` sends it as chunked requests (the fallback
+    /// for a peer that does not know streams).
+    upload: Option<Box<dyn Upload>>,
     buf: Vec<u8>,
     sha: Sha256,
     err: Option<SyncError>,
@@ -230,6 +233,11 @@ impl ChunkSink<'_> {
     fn send(&mut self, data: Vec<u8>) -> Result<(), SyncError> {
         let len = data.len() as u64;
         self.sha.update(&data);
+        if let Some(up) = self.upload.as_mut() {
+            up.write(&data)?;
+            self.sent += len;
+            return Ok(());
+        }
         let reply = self.conn.request(Body::SyncPackChunk {
             checkout: self.checkout.clone(),
             session: self.session,
@@ -254,6 +262,20 @@ impl ChunkSink<'_> {
         }
         let data = std::mem::take(&mut self.buf);
         self.send(data)
+    }
+
+    /// Ends a raw stream and checks the receiver holds every byte sent.
+    fn finish_stream(&mut self) -> Result<(), SyncError> {
+        let Some(up) = self.upload.take() else {
+            return Ok(());
+        };
+        match up.finish()? {
+            Body::SyncPackAck { received } if received == self.sent => Ok(()),
+            Body::SyncPackAck { .. } => Err(SyncError::Peer(PeerError::Protocol(
+                "the worker acknowledged a different pack length".to_string(),
+            ))),
+            _ => Err(SyncError::Unexpected("sync_pack_stream")),
+        }
     }
 }
 
@@ -343,11 +365,26 @@ impl SyncDriver for OriginSync {
             if let Some(x) = &snap.extras_tree {
                 want.push(x.clone());
             }
+            // one raw stream for the whole pack: no round trip per chunk. A peer that refuses
+            // the stream (an older build) gets the chunked requests, as before.
+            let upload = match conn.open_upload(Body::SyncPackStream {
+                checkout: job.checkout.clone(),
+                session: job.session,
+            }) {
+                Ok(u) => Some(u),
+                Err(PeerError::Refused(Refusal::Busy { checkout })) => {
+                    return Err(SyncError::Peer(PeerError::Refused(Refusal::Busy {
+                        checkout,
+                    })));
+                }
+                Err(_) => None,
+            };
             let mut sink = ChunkSink {
                 conn: &mut *conn,
                 checkout: job.checkout,
                 session: job.session,
                 sent: 0,
+                upload,
                 buf: Vec::new(),
                 sha: Sha256::new(),
                 err: None,
@@ -366,6 +403,7 @@ impl SyncDriver for OriginSync {
             }
             built?;
             sink.flush()?;
+            sink.finish_stream()?;
             (Some(commit), sink.sent, Some(Hash::from_digest(sink.sha)))
         };
 

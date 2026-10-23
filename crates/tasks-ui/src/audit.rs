@@ -9,7 +9,7 @@ use tasks_daemon::logs::format_utc;
 pub const ROWS: usize = 300;
 
 /// Action families the filter offers; an empty string means every action.
-pub const FAMILIES: [&str; 7] = ["", "job", "pair", "grant", "conn", "queue", "audit"];
+pub const FAMILIES: [&str; 8] = ["", "job", "pair", "grant", "conn", "queue", "audit", "data"];
 
 /// What the person typed into the filter row.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -254,5 +254,27 @@ mod tests {
             truncated: false,
         };
         assert_eq!(summary(&empty), "No audit rows match.");
+    }
+}
+
+#[cfg(test)]
+mod family_tests {
+    use super::*;
+
+    // R-371
+    #[test]
+    fn r371_the_filter_offers_every_action_family_including_data() {
+        assert!(FAMILIES.contains(&"data"));
+        // each family the audit log writes has a button
+        for f in ["job", "pair", "grant", "conn", "queue", "audit", "data"] {
+            assert!(FAMILIES.contains(&f), "{f}");
+        }
+        let req = AuditFilter {
+            action: "data".into(),
+            ..AuditFilter::default()
+        }
+        .request()
+        .unwrap();
+        assert!(matches!(req, Request::Audit { action: Some(a), .. } if a == "data"));
     }
 }

@@ -406,6 +406,7 @@ mod tests {
             } => Ok(Response::LogTail {
                 lines: vec!["one".into()],
                 running: true,
+                end_offset: None,
             }),
             Request::Logs {
                 view: LogView::Follow { offset, .. },

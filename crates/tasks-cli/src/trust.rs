@@ -218,9 +218,9 @@ pub fn peers(
         return Ok(EXIT_OK);
     }
     let now = (ctx.now_ms)() / 1000;
-    let rows: Vec<[String; 7]> = peers.iter().map(|p| peer_row(p, now)).collect();
+    let rows: Vec<[String; 8]> = peers.iter().map(|p| peer_row(p, now)).collect();
     let head = [
-        "NAME", "DID", "WE MAY", "THEY MAY", "EXPIRES", "PATH", "RTT",
+        "NAME", "DID", "WE MAY", "THEY MAY", "EXPIRES", "PATH", "PATH RTT", "REPLY",
     ];
     let mut widths = head.map(str::len);
     for r in &rows {
@@ -245,7 +245,7 @@ pub fn peers(
     Ok(EXIT_OK)
 }
 
-fn peer_row(p: &PeerTrustView, now: i64) -> [String; 7] {
+fn peer_row(p: &PeerTrustView, now: i64) -> [String; 8] {
     let roles = |v: &[tasks_daemon::trust_control::RoleView]| {
         if v.is_empty() {
             "-".to_string()
@@ -279,6 +279,8 @@ fn peer_row(p: &PeerTrustView, now: i64) -> [String; 7] {
         expires,
         p.path.clone(),
         p.rtt_ms
+            .map_or_else(|| "-".to_string(), |r| format!("{r} ms")),
+        p.reply_ms
             .map_or_else(|| "-".to_string(), |r| format!("{r} ms")),
     ]
 }
@@ -342,6 +344,7 @@ mod tests {
             revoked,
             path: "direct".into(),
             rtt_ms: Some(3),
+            reply_ms: Some(9),
         }
     }
 

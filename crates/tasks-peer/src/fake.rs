@@ -4,7 +4,8 @@
 use crate::ids::{PeerId, RemoteJobId};
 use crate::proto::{self, Body, Refusal};
 use crate::transport::{
-    Closer, Connection, DialHints, EventStream, Handler, LinkInfo, PeerError, StreamPoll, Transport,
+    Closer, Connection, DialHints, EventStream, Handler, LinkInfo, PeerError, StreamPoll,
+    Transport, Upload,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -23,6 +24,10 @@ struct NetState {
     log: Vec<(PeerId, String)>,
     cut_epoch: u64,
     link: Option<LinkInfo>,
+    /// Real time every round trip takes (a request and its reply; an upload's open and end).
+    latency: Duration,
+    /// Round trips taken so far (requests, upload openings, upload endings).
+    round_trips: u64,
 }
 
 /// A set of fake peers that can be taken down, stalled and cut.
@@ -44,6 +49,7 @@ pub fn kind(b: &Body) -> &'static str {
         Body::Cancel { .. } => "cancel",
         Body::SyncOffer { .. } => "sync_offer",
         Body::SyncPackChunk { .. } => "sync_pack_chunk",
+        Body::SyncPackStream { .. } => "sync_pack_stream",
         Body::SyncApply(_) => "sync_apply",
         Body::FetchList { .. } => "fetch_list",
         Body::FetchChunk { .. } => "fetch_chunk",
@@ -94,6 +100,17 @@ impl FakeNet {
     /// What every connection reports as its path and round-trip time.
     pub fn set_link_info(&self, info: Option<LinkInfo>) {
         lock(&self.inner).link = info;
+    }
+    /// Makes every round trip take `latency` of real time: a request, an upload's opening
+    /// handshake and its closing answer. Bytes written to an open upload cost nothing, which is
+    /// what a stream is for.
+    pub fn set_latency(&self, latency: Duration) {
+        lock(&self.inner).latency = latency;
+    }
+    /// How many round trips have been taken: one per request, and two per upload (its opening
+    /// handshake and its closing answer), however many bytes the upload carried.
+    pub fn round_trips(&self) -> u64 {
+        lock(&self.inner).round_trips
     }
     /// The requests seen so far as `(to, kind)`.
     pub fn requests(&self) -> Vec<(PeerId, String)> {
@@ -199,14 +216,40 @@ fn wire(b: &Body) -> Result<Body, PeerError> {
 }
 
 impl Connection for FakeConnection {
+    fn open_upload(&mut self, head: Body) -> Result<Box<dyn Upload>, PeerError> {
+        let handler = self.handler()?;
+        let head = wire(&head)?;
+        let k = kind(&head);
+        let latency = {
+            let mut s = lock(&self.net.inner);
+            s.log.push((self.to.clone(), k.to_string()));
+            s.round_trips += 1;
+            s.latency
+        };
+        std::thread::sleep(latency);
+        handler
+            .accept_upload(&self.me, &head)
+            .map_err(PeerError::Refused)?;
+        Ok(Box::new(FakeUpload {
+            me: self.me.clone(),
+            handler,
+            net: self.net.clone(),
+            head,
+            buf: Vec::new(),
+        }))
+    }
+
     fn request(&mut self, msg: Body) -> Result<Body, PeerError> {
         let handler = self.handler()?;
         let msg = wire(&msg)?;
         let k = kind(&msg);
-        {
+        let latency = {
             let mut s = lock(&self.net.inner);
             s.log.push((self.to.clone(), k.to_string()));
-        }
+            s.round_trips += 1;
+            s.latency
+        };
+        std::thread::sleep(latency);
         let reply = wire(&handler.handle(&self.me, msg))?;
         if lock(&self.net.inner).drop_replies.contains(k) {
             return Err(PeerError::LinkLost("reply lost".to_string()));
@@ -243,6 +286,36 @@ impl Connection for FakeConnection {
 
     fn link_info(&self) -> LinkInfo {
         lock(&self.net.inner).link.unwrap_or(LinkInfo::UNKNOWN)
+    }
+}
+
+struct FakeUpload {
+    me: PeerId,
+    handler: Arc<dyn Handler>,
+    net: FakeNet,
+    head: Body,
+    buf: Vec<u8>,
+}
+
+impl Upload for FakeUpload {
+    fn write(&mut self, data: &[u8]) -> Result<(), PeerError> {
+        self.buf.extend_from_slice(data);
+        Ok(())
+    }
+
+    fn finish(self: Box<Self>) -> Result<Body, PeerError> {
+        let this = *self;
+        let latency = {
+            let mut s = lock(&this.net.inner);
+            s.round_trips += 1;
+            s.latency
+        };
+        std::thread::sleep(latency);
+        let mut data = std::io::Cursor::new(this.buf);
+        match wire(&this.handler.upload(&this.me, this.head, &mut data))? {
+            Body::Refuse(r) => Err(PeerError::Refused(r)),
+            other => Ok(other),
+        }
     }
 }
 

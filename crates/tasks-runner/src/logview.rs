@@ -223,6 +223,18 @@ pub fn tail_lines(
     window: u64,
     complete: bool,
 ) -> Result<Vec<String>, RunnerError> {
+    tail_lines_at(path, n, window, complete).map(|(lines, _)| lines)
+}
+
+/// [`tail_lines`] and the byte offset just after the last byte it covers: where a follower
+/// resumes so that no byte is read twice or skipped. An unterminated last line that was left out
+/// is not covered, so the follower sees it whole once it is finished.
+pub fn tail_lines_at(
+    path: &Path,
+    n: usize,
+    window: u64,
+    complete: bool,
+) -> Result<(Vec<String>, u64), RunnerError> {
     let mut file = File::open(path).map_err(|e| RunnerError::log(path, e))?;
     let len = file
         .metadata()
@@ -235,6 +247,13 @@ pub fn tail_lines(
     file.take(window)
         .read_to_end(&mut bytes)
         .map_err(|e| RunnerError::log(path, e))?;
+    let mut end = start + bytes.len() as u64;
+    if !complete && bytes.last() != Some(&b'\n') {
+        end = bytes
+            .iter()
+            .rposition(|b| *b == b'\n')
+            .map_or(start, |i| start + i as u64 + 1);
+    }
     let mut text = String::from_utf8_lossy(&bytes).into_owned();
     if start > 0 {
         match text.find('\n') {
@@ -250,12 +269,15 @@ pub fn tail_lines(
     }
     let lines: Vec<&str> = text.lines().collect();
     let from = lines.len().saturating_sub(n);
-    Ok(lines
-        .get(from..)
-        .unwrap_or(&[])
-        .iter()
-        .map(|s| s.to_string())
-        .collect())
+    Ok((
+        lines
+            .get(from..)
+            .unwrap_or(&[])
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        end,
+    ))
 }
 
 /// Appends coordinator notes (placement decision, reroute move) to a job log,

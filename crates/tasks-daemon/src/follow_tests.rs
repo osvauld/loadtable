@@ -379,7 +379,7 @@ fn r191_a_broad_cargo_test_is_refused_by_the_daemon_unless_escaped() {
     assert!(r.store.list(&Default::default()).unwrap().is_empty());
     // the escape on the spec lets it through and is recorded on the job
     s.broad_test_escape = true;
-    let Response::Submitted { id } = ok(submit(&r, s)) else {
+    let Response::Submitted { id, .. } = ok(submit(&r, s)) else {
         panic!("submitted expected");
     };
     assert!(r.record(id).spec.broad_test_escape);
@@ -397,7 +397,7 @@ fn r191_a_broad_cargo_test_is_refused_by_the_daemon_unless_escaped() {
 fn r191_the_machine_policy_downgrades_the_refusal_to_a_warning_with_its_source() {
     let r = Rig::with_policy("[submit]\nbroad_test = \"warn\"\n");
     let s = r.spec("o", &["cargo", "test", "-p", "x", "video_call"], Kind::Test);
-    let Response::Submitted { id } = ok(submit(&r, s)) else {
+    let Response::Submitted { id, .. } = ok(submit(&r, s)) else {
         panic!("submitted expected");
     };
     r.tick();
@@ -789,4 +789,86 @@ fn r101_the_connection_limit_has_its_own_code_and_says_nothing_was_processed() {
     let r = crate::tests::call(&sock, &Request::Shutdown);
     assert!(matches!(r, Reply::Ok(Response::Ack)));
     handle.join().unwrap().unwrap();
+}
+
+// R-368
+#[test]
+fn r368_the_submitted_reply_carries_the_submit_rule_warnings_and_is_silent_without_any() {
+    let r = Rig::with_policy("[submit]\nbroad_test = \"warn\"\n");
+    let broad = r.spec("o", &["cargo", "test", "-p", "x", "video_call"], Kind::Test);
+    let Response::Submitted { warnings, .. } = ok(submit(&r, broad)) else {
+        panic!("submitted expected");
+    };
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].contains("this builds every test target"),
+        "{warnings:?}"
+    );
+    let fine = r.spec("o", &["cargo", "check"], Kind::Compile);
+    let Response::Submitted { warnings, .. } = ok(submit(&r, fine)) else {
+        panic!("submitted expected");
+    };
+    assert!(warnings.is_empty());
+    // an older client sees the same reply it always did: no `warnings` key when there are none
+    let plain = serde_json::to_string(&Response::Submitted {
+        id: JobId(1),
+        warnings: vec![],
+    })
+    .unwrap();
+    assert!(!plain.contains("warnings"), "{plain}");
+    let old: Response = serde_json::from_str(&plain).unwrap();
+    assert_eq!(
+        old,
+        Response::Submitted {
+            id: JobId(1),
+            warnings: vec![]
+        }
+    );
+}
+
+// R-369
+#[test]
+fn r369_a_tail_returns_the_offset_a_follower_resumes_from_without_gaps_or_repeats() {
+    let r = Rig::new();
+    let id = r.submit(&r.spec("o", &["make"], Kind::Run));
+    r.tick();
+    r.until_running(id);
+    let rec = r.record(id);
+    let log = rec.log_path.clone().unwrap();
+    std::fs::write(&log, "one\ntwo\nthr").unwrap();
+    let tail = |r: &Rig| {
+        let Response::LogTail {
+            lines, end_offset, ..
+        } = ok(r.sch.handle(Request::Logs {
+            id,
+            view: LogView::Tail { lines: 10 },
+        }))
+        else {
+            panic!("tail expected");
+        };
+        (lines, end_offset)
+    };
+    // the unterminated last line is not in the tail, and the offset stops before it
+    let (lines, end) = tail(&r);
+    assert_eq!(lines, ["one", "two"]);
+    assert_eq!(end, Some(8));
+    // appending and following from that offset gives the line whole, once
+    std::fs::write(&log, "one\ntwo\nthree\nfour\n").unwrap();
+    let Response::LogChunk {
+        data, next_offset, ..
+    } = ok(r.sch.handle(Request::Logs {
+        id,
+        view: LogView::Follow {
+            offset: 8,
+            max_bytes: Some(4096),
+        },
+    }))
+    else {
+        panic!("chunk expected");
+    };
+    assert_eq!(data, "three\nfour\n");
+    assert_eq!(next_offset, 19);
+    // a complete tail ends at the file's end
+    let (lines, end) = tail(&r);
+    assert_eq!((lines.len(), end), (4, Some(19)));
 }

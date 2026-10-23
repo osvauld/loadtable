@@ -479,12 +479,20 @@ fn local_card(
         status_text: "online (this machine)".into(),
         greyed: false,
         cpu: format!(
-            "CPU pressure {} ({})",
+            "{}CPU pressure {} ({})",
+            busy_prefix(p.cpu_busy_pct),
             format::percent(p.cpu),
             format::pressure_word(p.cpu)
         ),
         ram,
-        swap: format!("swap {UNKNOWN} (not reported by the daemon)"),
+        swap: swap_text(
+            "",
+            p.swap_total,
+            p.swap_used,
+            p.swap_in_per_s,
+            p.swap_out_per_s,
+            "not reported by the daemon",
+        ),
         pressure: format!(
             "memory {} (some {}, full {}), io {}",
             p.memory,
@@ -530,6 +538,42 @@ fn local_card(
     }
 }
 
+/// `CPU 23% busy, ` before the pressure text, or nothing when the busy figure is unknown.
+fn busy_prefix(busy: Option<f32>) -> String {
+    busy.map_or_else(String::new, |b| format!("CPU {b:.0}% busy, "))
+}
+
+/// The card's swap line: use against size, and the rates when known; `missing` says why when
+/// the machine reported nothing.
+fn swap_text(
+    old: &str,
+    total: Option<u64>,
+    used: Option<u64>,
+    in_s: Option<u64>,
+    out_s: Option<u64>,
+    missing: &str,
+) -> String {
+    match total {
+        None => format!("swap {UNKNOWN} ({missing})"),
+        Some(0) => format!("{old}no swap"),
+        Some(t) => {
+            let mut s = format!(
+                "{old}swap {} of {} used",
+                format::bytes(used.unwrap_or(0)),
+                format::bytes(t)
+            );
+            if in_s.is_some() || out_s.is_some() {
+                s.push_str(&format!(
+                    " (in {}/s, out {}/s)",
+                    format::bytes(in_s.unwrap_or(0)),
+                    format::bytes(out_s.unwrap_or(0))
+                ));
+            }
+            s
+        }
+    }
+}
+
 fn peer_card(peer: &PeerView, rows: &[JobRow]) -> MachineCard {
     let online = match peer.state.as_str() {
         "up" => Online::Online,
@@ -559,7 +603,8 @@ fn peer_card(peer: &PeerView, rows: &[JobRow]) -> MachineCard {
     let (cpu, ram, pressure, blocker, slots, waiting) = match &peer.machine {
         Some(m) => (
             format!(
-                "{old}CPU pressure {} ({}), {} cores",
+                "{old}{}CPU pressure {} ({}), {} cores",
+                busy_prefix(m.cpu_busy_pct.map(f32::from)),
                 format::percent(m.cpu_pct.map(f32::from)),
                 format::pressure_word(m.cpu_pct.map(f32::from)),
                 m.cores
@@ -609,7 +654,14 @@ fn peer_card(peer: &PeerView, rows: &[JobRow]) -> MachineCard {
         greyed,
         cpu,
         ram,
-        swap: format!("swap {UNKNOWN} (not reported)"),
+        swap: swap_text(
+            old,
+            peer.machine.as_ref().and_then(|m| m.swap_total),
+            peer.machine.as_ref().and_then(|m| m.swap_used),
+            peer.machine.as_ref().and_then(|m| m.swap_in_per_s),
+            peer.machine.as_ref().and_then(|m| m.swap_out_per_s),
+            "not reported",
+        ),
         pressure,
         blocker,
         slots,
@@ -854,6 +906,7 @@ mod tests {
             grant_expires_at: None,
             path: "unknown".into(),
             rtt_ms: None,
+            reply_ms: None,
             machine: None,
         };
         let c = peer_card(&p, &[]);
@@ -863,6 +916,39 @@ mod tests {
         assert_eq!(phase_text(&Phase::Interrupted).1, PhaseClass::Neutral);
     }
 
+    // R-359
+    #[test]
+    fn r359_machine_cards_show_cpu_busy_and_swap_for_this_machine_and_for_peers() {
+        let vm = build(&fixtures::idle(), 0);
+        let local = &vm.machines[0];
+        assert!(
+            local.cpu.starts_with("CPU 23% busy, CPU pressure"),
+            "{}",
+            local.cpu
+        );
+        assert_eq!(
+            local.swap,
+            "swap 1.0 GiB of 8.0 GiB used (in 0 B/s, out 0 B/s)"
+        );
+        let mut d = fixtures::idle();
+        d.status.pressure.swap_total = Some(0);
+        assert_eq!(build(&d, 0).machines[0].swap, "no swap");
+        // a peer shows what it reported
+        let peer = vm
+            .machines
+            .iter()
+            .find(|m| !m.local)
+            .map(|m| (m.cpu.clone(), m.swap.clone()));
+        if let Some((cpu, swap)) = peer {
+            assert!(cpu.contains("CPU 30% busy"), "{cpu}");
+            assert!(swap.contains("swap 0 B of 4.0 GiB used"), "{swap}");
+        }
+        // unknown stays unknown, with the reason
+        let mut d = fixtures::idle();
+        d.status.pressure.swap_total = None;
+        assert!(build(&d, 0).machines[0].swap.starts_with("swap -"));
+    }
+
     #[test]
     fn r128_a_machine_without_readings_shows_dashes_not_zeros() {
         let mut d = fixtures::idle();
@@ -870,6 +956,8 @@ mod tests {
         d.status.pressure.available_memory = None;
         d.status.pressure.memory_total = None;
         d.status.pressure.memory_some = None;
+        d.status.pressure.swap_total = None;
+        d.status.pressure.cpu_busy_pct = None;
         let vm = build(&d, 0);
         let m = &vm.machines[0];
         assert_eq!(m.cpu, "CPU pressure - (unknown)");

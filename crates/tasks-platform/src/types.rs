@@ -2,13 +2,77 @@
 
 use std::path::PathBuf;
 
-/// Memory totals in bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Memory totals in bytes, with the swap and CPU counters read alongside.
+///
+/// The counters are cumulative since boot (or since the first read on macOS), so a rate needs two
+/// readings: see [`HostRates::between`]. They default to zero where the host does not report them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MemorySnapshot {
     /// Total memory.
     pub total_bytes: u64,
     /// Memory available to new work.
     pub available_bytes: u64,
+    /// Swap size (0 when there is none).
+    pub swap_total_bytes: u64,
+    /// Swap in use.
+    pub swap_used_bytes: u64,
+    /// Bytes read back from swap since boot.
+    pub swap_in_bytes: u64,
+    /// Bytes written out to swap since boot.
+    pub swap_out_bytes: u64,
+    /// CPU time spent working (all cores, any unit as long as `cpu_total` uses the same).
+    pub cpu_busy: u64,
+    /// CPU time in total, idle included.
+    pub cpu_total: u64,
+}
+
+/// Rates between two [`MemorySnapshot`] readings.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct HostRates {
+    /// CPU busy percent over the interval, when the counters moved.
+    pub cpu_pct: Option<f32>,
+    /// Bytes per second read back from swap.
+    pub swap_in_per_s: Option<u64>,
+    /// Bytes per second written out to swap.
+    pub swap_out_per_s: Option<u64>,
+}
+
+impl HostRates {
+    /// Rates from `prev` to `now`, `elapsed_ms` apart. A counter that went backwards (reboot,
+    /// wrap) or an empty interval gives `None` for that figure.
+    pub fn between(prev: &MemorySnapshot, now: &MemorySnapshot, elapsed_ms: u64) -> HostRates {
+        let per_s = |a: u64, b: u64| {
+            if elapsed_ms == 0 || b < a {
+                None
+            } else {
+                Some((b - a).saturating_mul(1000) / elapsed_ms)
+            }
+        };
+        let cpu_pct = match (
+            now.cpu_total.checked_sub(prev.cpu_total),
+            now.cpu_busy.checked_sub(prev.cpu_busy),
+        ) {
+            (Some(total), Some(busy)) if total > 0 => {
+                Some((busy.min(total) as f64 * 100.0 / total as f64) as f32)
+            }
+            _ => None,
+        };
+        HostRates {
+            cpu_pct,
+            swap_in_per_s: per_s(prev.swap_in_bytes, now.swap_in_bytes),
+            swap_out_per_s: per_s(prev.swap_out_bytes, now.swap_out_bytes),
+        }
+    }
+}
+
+impl std::fmt::Display for Level {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Level::Normal => "normal",
+            Level::Warn => "warn",
+            Level::Critical => "critical",
+        })
+    }
 }
 
 /// Coarse pressure level.
@@ -208,4 +272,45 @@ pub enum ServiceStatus {
     Stopped,
     /// Running.
     Running,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snap(busy: u64, total: u64, swin: u64, swout: u64) -> MemorySnapshot {
+        MemorySnapshot {
+            cpu_busy: busy,
+            cpu_total: total,
+            swap_in_bytes: swin,
+            swap_out_bytes: swout,
+            ..MemorySnapshot::default()
+        }
+    }
+
+    // R-357
+    #[test]
+    fn r357_rates_come_from_two_readings_and_a_counter_that_went_back_gives_none() {
+        let r = HostRates::between(&snap(100, 1000, 0, 0), &snap(400, 2000, 8192, 4096), 2000);
+        assert_eq!(r.cpu_pct, Some(30.0));
+        assert_eq!(
+            (r.swap_in_per_s, r.swap_out_per_s),
+            (Some(4096), Some(2048))
+        );
+        // nothing moved: zero swap traffic, but the CPU interval is empty so no percentage
+        let r = HostRates::between(&snap(5, 50, 7, 7), &snap(5, 50, 7, 7), 1000);
+        assert_eq!(r.cpu_pct, None);
+        assert_eq!((r.swap_in_per_s, r.swap_out_per_s), (Some(0), Some(0)));
+        // a reboot or wrap: the counters went backwards
+        let r = HostRates::between(&snap(900, 9000, 99, 99), &snap(1, 10, 1, 1), 1000);
+        assert_eq!(r, HostRates::default());
+        // no time passed
+        assert_eq!(
+            HostRates::between(&snap(0, 0, 0, 0), &snap(5, 10, 5, 5), 0).swap_in_per_s,
+            None
+        );
+        // busy never exceeds total
+        let r = HostRates::between(&snap(0, 0, 0, 0), &snap(50, 10, 0, 0), 1000);
+        assert_eq!(r.cpu_pct, Some(100.0));
+    }
 }

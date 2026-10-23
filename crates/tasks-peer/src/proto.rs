@@ -142,7 +142,7 @@ pub enum Refusal {
         reason: String,
     },
     /// The peer's grants do not allow this request.
-    #[error("role denied: this request needs {need}; the peer holds {have:?}")]
+    #[error("role denied: this request needs {need}; the peer holds {}", .have.join(", "))]
     RoleDenied {
         /// The role the request needs.
         need: String,
@@ -267,6 +267,21 @@ pub struct PressureSummary {
     pub io_pct: Option<u8>,
     /// One line for humans.
     pub summary: String,
+    /// CPU busy percent (not pressure), when the peer measures it.
+    #[serde(default)]
+    pub cpu_busy_pct: Option<u8>,
+    /// Swap size in bytes (0 without swap), when the peer reports it.
+    #[serde(default)]
+    pub swap_total_bytes: Option<u64>,
+    /// Swap in use in bytes.
+    #[serde(default)]
+    pub swap_used_bytes: Option<u64>,
+    /// Bytes per second read back from swap, when two readings exist.
+    #[serde(default)]
+    pub swap_in_per_s: Option<u64>,
+    /// Bytes per second written out to swap.
+    #[serde(default)]
+    pub swap_out_per_s: Option<u64>,
 }
 
 /// What a peer reports about itself.
@@ -665,6 +680,16 @@ pub enum Body {
         #[serde(with = "hexbytes")]
         data: Vec<u8>,
     },
+    /// Opens a raw pack stream: after the receiver's `Ok` the sender writes the thin pack as plain
+    /// bytes on the same stream and finishes it; the receiver answers `SyncPackAck` with the
+    /// length it holds. An older receiver answers `Refuse` at the first frame, and the sender
+    /// falls back to `SyncPackChunk` frames.
+    SyncPackStream {
+        /// The checkout.
+        checkout: CheckoutId,
+        /// Sender-chosen session id (names the spool file, as for chunks).
+        session: u64,
+    },
     /// Bytes of the pack received so far.
     SyncPackAck {
         /// Received length.
@@ -839,6 +864,22 @@ pub fn decode(bytes: &[u8]) -> Result<Body, Refusal> {
 mod tests {
     use super::*;
 
+    // R-372: a message this build does not know is a named refusal, which is what a newer sender
+    // (a stream head to an older receiver) relies on to fall back
+    #[test]
+    fn r372_an_unknown_message_kind_is_refused_as_malformed_not_dropped() {
+        let junk = format!(r#"{{"v":{PROTOCOL_VERSION},"body":{{"from_the_future":{{"x":1}}}}}}"#);
+        assert!(matches!(
+            decode(junk.as_bytes()),
+            Err(Refusal::Malformed { .. })
+        ));
+        let b = Body::SyncPackStream {
+            checkout: CheckoutId::derive("h", std::path::Path::new("/p")),
+            session: 4,
+        };
+        assert_eq!(decode(&encode(&b).unwrap()).unwrap(), b);
+    }
+
     fn every_body() -> Vec<Body> {
         let h = Hash::of(b"x");
         let c = CheckoutId::derive("h", std::path::Path::new("/p"));
@@ -877,6 +918,10 @@ mod tests {
                 session: 1,
                 offset: 0,
                 data: vec![1],
+            },
+            Body::SyncPackStream {
+                checkout: c.clone(),
+                session: 1,
             },
             Body::SyncApply(SyncApply {
                 checkout: c.clone(),

@@ -83,6 +83,12 @@ pub(crate) struct RunningJob {
 #[derive(Default)]
 pub(crate) struct TickState {
     pub placed: BTreeMap<JobId, String>,
+    /// The last host counters and the rates computed from them (status).
+    pub host_prev: Option<(
+        std::time::Instant,
+        tasks_platform::MemorySnapshot,
+        tasks_platform::HostRates,
+    )>,
     pub facts: BTreeMap<JobId, Arc<crate::place::JobFacts>>,
     pub last_wait: BTreeMap<JobId, (LedgerWait, String)>,
     pub mem_pressure_since: Option<i64>,

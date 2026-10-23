@@ -36,6 +36,11 @@ fn peer_machine_view(s: &tasks_peer::proto::PeerStatus) -> PeerMachineView {
         memory_pct: s.pressure.memory_pct,
         io_pct: s.pressure.io_pct,
         pressure_summary: s.pressure.summary.clone(),
+        cpu_busy_pct: s.pressure.cpu_busy_pct,
+        swap_total: s.pressure.swap_total_bytes,
+        swap_used: s.pressure.swap_used_bytes,
+        swap_in_per_s: s.pressure.swap_in_per_s,
+        swap_out_per_s: s.pressure.swap_out_per_s,
     }
 }
 
@@ -357,6 +362,7 @@ impl Scheduler {
                 grant_expires_at: t.and_then(|p| p.expires_at),
                 path: q.map_or_else(|| "unknown".to_string(), |q| q.path.clone()),
                 rtt_ms: q.and_then(|q| q.rtt_ms),
+                reply_ms: q.and_then(|q| q.reply_ms),
                 machine: l.status.map(|s| peer_machine_view(&s)),
                 name: l.peer,
                 node_id: l.node_id,
@@ -376,6 +382,7 @@ impl Scheduler {
                 grant_expires_at: p.expires_at,
                 path: p.path,
                 rtt_ms: p.rtt_ms,
+                reply_ms: p.reply_ms,
                 machine: None,
                 name: p.name,
                 node_id: p.node_id,
@@ -384,8 +391,32 @@ impl Scheduler {
         out
     }
 
+    /// CPU and swap rates between the previous status reading and this one. The base reading is
+    /// replaced only after two seconds, so a UI refreshing faster still sees a smooth figure.
+    fn host_rates(&self, now: &tasks_platform::MemorySnapshot) -> tasks_platform::HostRates {
+        let mut st = lock(&self.state);
+        let at = std::time::Instant::now();
+        match st.host_prev {
+            None => {
+                st.host_prev = Some((at, *now, Default::default()));
+                Default::default()
+            }
+            Some((then, prev, last)) => {
+                let ms = at.duration_since(then).as_millis() as u64;
+                if ms < 2000 {
+                    return last;
+                }
+                let rates = tasks_platform::HostRates::between(&prev, now, ms);
+                st.host_prev = Some((at, *now, rates));
+                rates
+            }
+        }
+    }
+
     fn pressure_view(&self, policy: &crate::machine_policy::MachinePolicy) -> PressureView {
         let admitter = self.admitter(policy);
+        let mem = admitter.memory.snapshot().ok();
+        let rates = mem.map(|m| self.host_rates(&m)).unwrap_or_default();
         match admitter.readings() {
             Ok(r) => PressureView {
                 memory: level_name(r.pressure.memory).to_string(),
@@ -394,7 +425,12 @@ impl Scheduler {
                 cpu: r.pressure.cpu,
                 io: r.pressure.io,
                 available_memory: Some(r.available_memory),
-                memory_total: admitter.memory.snapshot().ok().map(|m| m.total_bytes),
+                memory_total: mem.map(|m| m.total_bytes),
+                cpu_busy_pct: rates.cpu_pct,
+                swap_total: mem.map(|m| m.swap_total_bytes),
+                swap_used: mem.map(|m| m.swap_used_bytes),
+                swap_in_per_s: rates.swap_in_per_s,
+                swap_out_per_s: rates.swap_out_per_s,
                 cache_free: Some(r.cache_free),
                 state_free: Some(r.state_free),
                 compile_blocker: check_gates(
@@ -415,6 +451,11 @@ impl Scheduler {
                 io: None,
                 available_memory: None,
                 memory_total: None,
+                cpu_busy_pct: None,
+                swap_total: None,
+                swap_used: None,
+                swap_in_per_s: None,
+                swap_out_per_s: None,
                 cache_free: None,
                 state_free: None,
                 compile_blocker: Some(format!("cannot measure the machine: {e}")),
@@ -456,6 +497,11 @@ mod peer_view_tests {
                 memory_pct: None,
                 io_pct: Some(0),
                 summary: "memory stalls".into(),
+                cpu_busy_pct: Some(61),
+                swap_total_bytes: Some(4 << 30),
+                swap_used_bytes: Some(1 << 30),
+                swap_in_per_s: Some(0),
+                swap_out_per_s: Some(512),
             },
         });
         assert_eq!(
@@ -472,5 +518,47 @@ mod peer_view_tests {
             (Some(40), None, Some(0))
         );
         assert_eq!(v.pressure_summary, "memory stalls");
+        // R-360: what the peer says about CPU and swap reaches the view, unknown stays unknown
+        assert_eq!(v.cpu_busy_pct, Some(61));
+        assert_eq!(
+            (v.swap_total, v.swap_used, v.swap_in_per_s, v.swap_out_per_s),
+            (Some(4 << 30), Some(1 << 30), Some(0), Some(512))
+        );
+        let old = peer_machine_view(&PeerStatus {
+            pressure: PressureSummary::default(),
+            ..PeerStatus {
+                machine: tasks_core::Machine {
+                    name: tasks_core::MachineName("old".into()),
+                    os: tasks_core::Os::Linux,
+                    arch: tasks_core::Arch::current(),
+                    cores: 2,
+                    memory_bytes: 1 << 30,
+                    tools: Default::default(),
+                    devices: Default::default(),
+                },
+                slots: vec![],
+                queue: QueueSummary::default(),
+                pressure: PressureSummary::default(),
+            }
+        });
+        assert_eq!(
+            (old.cpu_busy_pct, old.swap_total, old.swap_used),
+            (None, None, None)
+        );
+    }
+
+    // R-360: a peer of the previous build sends none of the new fields and still parses
+    #[test]
+    fn r360_a_pressure_report_from_an_older_peer_parses_with_the_new_fields_unknown() {
+        let old = r#"{"cpu_pct":3,"memory_pct":null,"io_pct":0,"summary":""}"#;
+        let p: PressureSummary = serde_json::from_str(old).unwrap();
+        assert_eq!(p.cpu_pct, Some(3));
+        assert_eq!((p.cpu_busy_pct, p.swap_total_bytes), (None, None));
+        // and the daemon's own view of an older daemon's status parses too
+        let v: crate::api::PeerMachineView = serde_json::from_str(
+            r#"{"cores":4,"memory_bytes":1,"slots":[],"waiting":0,"running":0,"cpu_pct":null,"memory_pct":null,"io_pct":null,"pressure_summary":""}"#,
+        )
+        .unwrap();
+        assert_eq!((v.cpu_busy_pct, v.swap_total), (None, None));
     }
 }

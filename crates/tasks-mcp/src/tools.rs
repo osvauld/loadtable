@@ -588,7 +588,10 @@ impl Tools {
     ) -> Result<JobId, ToolError> {
         let before = self.now();
         match self.daemon.call(&Request::Submit { spec: spec.clone() }) {
-            Ok(Response::Submitted { id }) => Ok(id),
+            Ok(Response::Submitted { id, warnings }) => {
+                notes.extend(warnings.iter().map(|w| format!("warning: {w}")));
+                Ok(id)
+            }
             Ok(other) => Err(ToolError::Daemon(DaemonError::Failed(format!(
                 "unexpected reply to submit: {other:?}; do not resubmit, look in list with who {}",
                 spec.owner.as_str()
@@ -825,6 +828,7 @@ impl Tools {
         let Response::LogTail {
             lines: got,
             running,
+            ..
         } = resp
         else {
             return Err(unexpected("a log read", &resp));
@@ -1340,6 +1344,20 @@ fn status_text(s: &StatusSnapshot) -> String {
         gib(p.cache_free),
         gib(p.state_free)
     ));
+    if let Some(c) = p.cpu_busy_pct {
+        t.push_str(&format!("cpu busy {c:.0}%\n"));
+    }
+    match p.swap_total {
+        Some(0) => t.push_str("no swap\n"),
+        Some(total) => t.push_str(&format!(
+            "swap {} of {} used (in {}/s, out {}/s)\n",
+            gib(p.swap_used),
+            gib(Some(total)),
+            gib(p.swap_in_per_s),
+            gib(p.swap_out_per_s)
+        )),
+        None => {}
+    }
     match &p.compile_blocker {
         Some(b) => t.push_str(&format!("a new compile job would wait: {b}\n")),
         None => t.push_str("nothing blocks a new compile job\n"),
@@ -1362,16 +1380,44 @@ fn status_text(s: &StatusSnapshot) -> String {
         t.push_str(&format!("pressure trip: {}\n", trip.summary));
     }
     for p in &s.peers {
+        let ms = |v: Option<u64>| v.map_or("-".to_string(), |r| format!("{r} ms"));
         t.push_str(&format!(
-            "peer {}: {}{}\n",
+            "peer {}: {} ({}; path RTT {}, reply time {}){}\n",
             p.name,
             p.state,
+            if p.path.is_empty() {
+                "unknown"
+            } else {
+                &p.path
+            },
+            ms(p.rtt_ms),
+            ms(p.reply_ms),
             if p.detail.is_empty() {
                 String::new()
             } else {
                 format!(" ({})", p.detail)
             }
         ));
+        if let Some(m) = &p.machine {
+            let slots = m
+                .slots
+                .iter()
+                .map(|x| format!("{} {}/{}", x.kind, x.used, x.total))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let swap = match m.swap_total {
+                Some(0) => ", no swap".to_string(),
+                Some(total) => format!(", swap {} of {} used", gib(m.swap_used), gib(Some(total))),
+                None => String::new(),
+            };
+            let busy = m
+                .cpu_busy_pct
+                .map_or(String::new(), |c| format!(", cpu busy {c}%"));
+            t.push_str(&format!(
+                "  {} cores, slots {slots}, {} waiting, {} running{busy}{swap}\n",
+                m.cores, m.waiting, m.running
+            ));
+        }
     }
     t.trim_end().to_string()
 }

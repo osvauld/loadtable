@@ -416,3 +416,50 @@ Queue order: `(class, effective wait, submit time)`.
 
 Each step lands with regression tests named after the R-ids it covers; new behaviours get
 new R-ids in `docs/REGRESSIONS.md`.
+
+### As built (first real trial, after step 5)
+
+Regressions R-352 to R-372 (`docs/REGRESSIONS.md` section 20).
+
+- **Pack stream.** `Connection::open_upload(head)` / `Upload::write` / `Upload::finish` and
+  `Handler::accept_upload` / `Handler::upload` (all with refusing defaults) carry the sync pack on
+  one stream. Wire: `Body::SyncPackStream { checkout, session }` as the first frame; the receiver
+  answers `Ok` (or `Refuse`) before any data, the sender then writes the pack as raw bytes and
+  finishes, and the receiver answers `SyncPackAck { received }` after reading to the end. The
+  receiving side applies `max_pack_bytes` (`SyncStore::put_stream`, reading one byte past the limit
+  to refuse an overlong stream and removing the partial file), idle reads time out after 120 s, and
+  `SyncApply` still checks length and SHA-256 against the spool. The origin hashes while writing.
+  An abandoned upload resets the stream, so it can not look like a complete shorter pack. **Older
+  peer:** a receiver without the variant answers `Refuse(Malformed)` at the head (R-372), the origin
+  then sends `SyncPackChunk` frames exactly as before (that path is kept for this reason only;
+  `Busy` is not a fallback). The origin does not cache the peer's ability: it asks once per sync.
+- **Path RTT and reply time.** `rtt_ms` was always the transport's number (iroh `Path::rtt` of the
+  selected path, read after the status request), a QUIC estimate that moves with load and path
+  switches (hence 199 ms then 87 ms on one LAN link). It is now labelled *path RTT*. New
+  `reply_ms` is the wall time of the status request itself (handler and scheduler included), shown
+  as *reply time*. Both are in `PeerView`, `peers`, status and MCP status.
+- **Swap and CPU.** `MemorySnapshot` carries swap size/use, cumulative swap-in/out bytes and CPU
+  busy/total counters; `HostRates::between` turns two readings into percent and bytes per second
+  (a counter that went back gives none). Linux reads `/proc/meminfo`, `/proc/vmstat`,
+  `/proc/stat`. macOS reads `sysctl vm.swapusage`, `vm_stat` (Swapins/Swapouts) and, for CPU, a
+  process-wide `sysinfo` reading integrated into counters (sysinfo needs two readings 200 ms apart;
+  the first has none). The daemon keeps the base reading and replaces it every two seconds.
+  `PressureView`, `PeerMachineView` and `PressureSummary` (what peers report) gained optional
+  fields with serde defaults.
+- **Placement line.** `Request::reason()` (default, `--pin`, `--peer X`, `--anywhere`); the
+  estimate shows only with run history and a known queue, else "no estimate (...)". A job received
+  from a peer logs "sent here by a peer" instead of a placement choice it did not make.
+- **Submit warnings, tail offset, class.** `Response::Submitted.warnings`,
+  `Response::LogTail.end_offset` (both skipped when empty/unknown), and
+  `Forwarder::set_class` before `start` (the `prioritize` of a job that waits for its offload slot
+  now reaches the peer's queue; the class itself already travelled inside `JobSpec`).
+- **gix 0.90** (was 0.73, features now `sha1 index dirwalk excludes attributes`; no C toolchain, no
+  network client). The upgrade cost one changed call. In process now (`sync/gix_objects.rs`):
+  `list_refs`, `update_refs` (one `edit_references` transaction), `tree_files`, `tree_contains`,
+  `diff_tree` (equal subtrees skipped by id). Still on the `git` CLI: `pack-objects --thin`
+  (gix writes packs but has no thin-pack generation against excluded bases), `index-pack
+  --fix-thin` (gix-pack can do it only behind `streaming-input`, which gix enables only with its
+  network clients; a direct `gix-pack` dependency plus progress types for no change in
+  behaviour), `read-tree --reset -u` (the two-way update that keeps untracked outputs) and `gc`
+  (no repack/prune in gix). Git children still join the transfer cgroup; the in-process work counts
+  in the daemon's own read/write figures.

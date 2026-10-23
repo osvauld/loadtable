@@ -37,7 +37,7 @@ pub use service::{render_launchd_plist, render_systemd_unit};
 pub use slots::{FlockSlots, SlotGuard, slot_lock_path};
 pub use traits::{Disk, Memory, Pressure, Processes, Service, SlotLocks};
 pub use types::{
-    Child, GroupId, InstallPlan, Level, MemorySnapshot, PLACE_SCRIPT, PressureSnapshot,
+    Child, GroupId, HostRates, InstallPlan, Level, MemorySnapshot, PLACE_SCRIPT, PressureSnapshot,
     PressureThresholds, ServiceStatus, ServiceUnit, Signal, SpawnSpec, Usage, place_in_cgroup,
 };
 

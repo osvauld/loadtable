@@ -28,6 +28,18 @@ pub enum Kind {
 }
 
 impl Kind {
+    /// The kind as a lowercase word, as shown to people.
+    pub fn word(&self) -> &'static str {
+        match self {
+            Kind::Compile => "compile",
+            Kind::Test => "test",
+            Kind::Run => "run",
+            Kind::Package => "package",
+            Kind::Device => "device",
+            Kind::Probe => "probe",
+        }
+    }
+
     /// Whether jobs of this kind feed ETA estimates (false for probes).
     pub fn counts_for_eta(&self) -> bool {
         !matches!(self, Kind::Probe)
@@ -45,6 +57,24 @@ pub enum Placement {
     Peer(crate::MachineName),
     /// On any capable machine.
     Anywhere,
+}
+
+impl std::fmt::Display for Kind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.word())
+    }
+}
+
+impl std::fmt::Display for Placement {
+    /// Words for people: `here`, `here (pinned)`, `peer nixos (asked)`, `anywhere`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Placement::Here => f.write_str("here"),
+            Placement::Pin => f.write_str("here (pinned)"),
+            Placement::Peer(m) => write!(f, "peer {} (asked)", m.0),
+            Placement::Anywhere => f.write_str("anywhere (chosen by the scheduler)"),
+        }
+    }
 }
 
 /// A request to run a command.

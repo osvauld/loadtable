@@ -226,7 +226,10 @@ fn only_read_only_requests_are_classified_as_safe_to_resend() {
 fn r101_a_connection_limit_reply_is_safely_resent_but_a_busy_reply_is_not() {
     let dir = temp("busy");
     let sock = dir.join("s");
-    let submitted = ok_line(Response::Submitted { id: JobId(9) });
+    let submitted = ok_line(Response::Submitted {
+        id: JobId(9),
+        warnings: vec![],
+    });
     let count = serve(&sock, move |n, line| {
         if line.contains("\"op\":\"shutdown\"") {
             Act::Reply(err_line(ErrorCode::Busy, "2 job(s) are running"))
@@ -255,7 +258,13 @@ fn r101_a_connection_limit_reply_is_safely_resent_but_a_busy_reply_is_not() {
         priority_reason: None,
     };
     let r = c.call(&Request::Submit { spec }).unwrap();
-    assert_eq!(r, Response::Submitted { id: JobId(9) });
+    assert_eq!(
+        r,
+        Response::Submitted {
+            id: JobId(9),
+            warnings: vec![]
+        }
+    );
     assert_eq!(count.load(Ordering::SeqCst), 2);
     // `shutdown` answers busy because jobs run: a real answer, shown, not retried
     let e = c.call(&Request::Shutdown).unwrap_err();

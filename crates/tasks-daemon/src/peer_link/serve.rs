@@ -92,7 +92,7 @@ fn finished(rec: &JobRecord, machine: &str) -> FinishedJob {
         description: rec
             .summary
             .clone()
-            .unwrap_or_else(|| format!("{:?}", rec.phase)),
+            .unwrap_or_else(|| rec.phase.word().to_string()),
     };
     let mut samples = Vec::new();
     let keys = RecipeKey::from_argv(&rec.spec.argv, &rec.spec.env);
@@ -355,6 +355,11 @@ impl StatusSource for DaemonStatus {
                 memory_pct: snap.pressure.memory_some.map(pct),
                 io_pct: snap.pressure.io.map(pct),
                 summary: snap.pressure.compile_blocker.clone().unwrap_or_default(),
+                cpu_busy_pct: snap.pressure.cpu_busy_pct.map(pct),
+                swap_total_bytes: snap.pressure.swap_total,
+                swap_used_bytes: snap.pressure.swap_used,
+                swap_in_per_s: snap.pressure.swap_in_per_s,
+                swap_out_per_s: snap.pressure.swap_out_per_s,
             },
         }
     }

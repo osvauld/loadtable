@@ -170,7 +170,11 @@ fn drive_forward<T: Transport>(inner: &Inner<T>, job: &Job, log_path: &Path) {
         drop(guard);
         match done {
             Some(end) => {
-                log.note(&format!("forward ended: {:?}: {}", end.phase, end.reason));
+                log.note(&format!(
+                    "forward ended: {}: {}",
+                    end.phase.word(),
+                    end.reason
+                ));
                 // the Forward released the checkout lock when it finished
                 finish(job, end);
                 return;

@@ -1,26 +1,27 @@
 //! [`GixTransfer`]: the [`PackTransfer`] used in production.
 //!
-//! Object lookups (`init_mirror`, `has_object`, `commit_tree`) go through `gix`. These steps
-//! use the `git` command, because gix has a real gap for each:
+//! In process with gix 0.90: `init_mirror`, `has_object`, `commit_tree`, and (in `gix_objects`)
+//! `list_refs`, `update_refs` (one ref transaction), `tree_files`, `tree_contains` and
+//! `diff_tree`. The remaining steps use the `git` command, because gix has a real gap for each:
 //!
 //! - `build_pack`: `git pack-objects --revs --thin`. gix-pack writes packs from an object
 //!   list and reuses existing deltas, but has no thin-pack generation against excluded base
 //!   objects, which is what makes a re-sync send only the changed bytes.
-//! - `receive_pack`: `git index-pack --fix-thin`. gix-pack can index a thin pack but only
-//!   behind its `streaming-input` feature, which the pure object API of `gix` does not
-//!   expose; pulling it in would add a second dependency tree for no gain in behaviour.
+//! - `receive_pack`: `git index-pack --fix-thin`. gix-pack can complete a thin pack
+//!   (`Bundle::write_to_directory` with a base lookup) but only behind its `streaming-input`
+//!   feature, which `gix` enables only together with its network clients. Using it means a
+//!   direct `gix-pack` dependency pinned to gix's version plus its progress types, for the same
+//!   behaviour as the command.
 //! - `checkout_tree`: `git read-tree --reset -u`. gix can check out a whole index, but not
 //!   the two-way "update to this tree, remove what the old index listed, restore files a job
 //!   modified, leave untracked build outputs" operation sync needs.
-//! - refs, `ls-tree`, `diff-tree` and `gc`: small and exact in git; refs are written in one
-//!   `update-ref --stdin` transaction.
+//! - `gc`: gix has no repack or prune.
 //!
 //! Every command runs with a clean environment (no inherited `GIT_*`, no system or global
 //! config, no prompts) and a fixed `GIT_DIR`.
 
-use super::transfer::{
-    ChangeKind, CheckoutRequest, PackRequest, PackTransfer, TransferError, TreeChange,
-};
+use super::gix_objects;
+use super::transfer::{CheckoutRequest, PackRequest, PackTransfer, TransferError, TreeChange};
 use crate::ids::GitId;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -143,13 +144,6 @@ impl GixTransfer {
     }
 }
 
-fn parse_z(raw: &[u8]) -> Vec<String> {
-    raw.split(|b| *b == 0)
-        .filter(|p| !p.is_empty())
-        .map(|p| String::from_utf8_lossy(p).into_owned())
-        .collect()
-}
-
 impl PackTransfer for GixTransfer {
     fn init_mirror(&self, dir: &Path) -> Result<(), TransferError> {
         if dir.join("HEAD").is_file() {
@@ -190,16 +184,7 @@ impl PackTransfer for GixTransfer {
         git_dir: &Path,
         prefix: &str,
     ) -> Result<Vec<(String, GitId)>, TransferError> {
-        let mut c = self.cmd(git_dir);
-        c.args(["for-each-ref", "--format=%(objectname) %(refname)", prefix]);
-        let out = self.run("list refs", c)?;
-        Ok(String::from_utf8_lossy(&out)
-            .lines()
-            .filter_map(|l| {
-                let (id, name) = l.split_once(' ')?;
-                Some((name.to_string(), GitId::parse(id).ok()?))
-            })
-            .collect())
+        gix_objects::list_refs(git_dir, prefix)
     }
 
     fn update_refs(
@@ -208,33 +193,7 @@ impl PackTransfer for GixTransfer {
         set: &[(String, GitId)],
         delete: &[String],
     ) -> Result<(), TransferError> {
-        if set.is_empty() && delete.is_empty() {
-            return Ok(());
-        }
-        let mut input = String::new();
-        for (name, id) in set {
-            input.push_str(&format!("update {name} {id}\n"));
-        }
-        for name in delete {
-            input.push_str(&format!("delete {name}\n"));
-        }
-        let mut c = self.cmd(git_dir);
-        c.args(["update-ref", "--stdin"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
-        let mut child = c
-            .spawn()
-            .map_err(|e| git_err("update refs", e.to_string()))?;
-        if let Some(mut si) = child.stdin.take() {
-            si.write_all(input.as_bytes())?;
-        }
-        let out = child.wait_with_output()?;
-        if out.status.success() {
-            Ok(())
-        } else {
-            Err(git_err("update refs", tail(&out.stderr)))
-        }
+        gix_objects::update_refs(git_dir, set, delete)
     }
 
     fn build_pack(&self, req: &PackRequest<'_>, out: &mut dyn Write) -> Result<u64, TransferError> {
@@ -355,23 +314,11 @@ impl PackTransfer for GixTransfer {
         tree: &GitId,
         paths: &[String],
     ) -> Result<Vec<String>, TransferError> {
-        let mut found = Vec::new();
-        for chunk in paths.chunks(100) {
-            let mut c = self.cmd(git_dir);
-            c.args(["ls-tree", "--name-only", "-z"])
-                .arg(tree.as_str())
-                .arg("--")
-                .args(chunk);
-            found.extend(parse_z(&self.run("ls-tree", c)?));
-        }
-        Ok(found)
+        gix_objects::tree_contains(git_dir, tree, paths)
     }
 
     fn tree_files(&self, git_dir: &Path, tree: &GitId) -> Result<Vec<String>, TransferError> {
-        let mut c = self.cmd(git_dir);
-        c.args(["ls-tree", "-r", "--name-only", "-z"])
-            .arg(tree.as_str());
-        Ok(parse_z(&self.run("ls-tree", c)?))
+        gix_objects::tree_files(git_dir, tree)
     }
 
     fn diff_tree(
@@ -380,28 +327,7 @@ impl PackTransfer for GixTransfer {
         old: Option<&GitId>,
         new: &GitId,
     ) -> Result<Vec<TreeChange>, TransferError> {
-        let empty = empty_tree_id(new);
-        let old = old.unwrap_or(&empty);
-        let mut c = self.cmd(git_dir);
-        c.args(["diff-tree", "-r", "--no-renames", "--name-status", "-z"])
-            .arg(old.as_str())
-            .arg(new.as_str());
-        let out = self.run("diff-tree", c)?;
-        let parts = parse_z(&out);
-        Ok(parts
-            .chunks(2)
-            .filter_map(|pair| {
-                let kind = match pair.first().map(String::as_str)? {
-                    "A" => ChangeKind::Added,
-                    "D" => ChangeKind::Deleted,
-                    _ => ChangeKind::Modified,
-                };
-                Some(TreeChange {
-                    kind,
-                    path: pair.get(1)?.clone(),
-                })
-            })
-            .collect())
+        gix_objects::diff_tree(git_dir, old, new)
     }
 
     fn gc(&self, git_dir: &Path, prune_age: &str) -> Result<(), TransferError> {

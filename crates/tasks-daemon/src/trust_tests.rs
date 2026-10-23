@@ -265,6 +265,7 @@ fn r258_status_shows_each_peer_with_did_roles_expiry_path_and_round_trip() {
         peer: "nixos".into(),
         path: "relay".into(),
         rtt_ms: Some(48),
+        reply_ms: Some(120),
     }];
     let peers = status_peers(&r);
     let n = peers.iter().find(|p| p.name == "nixos").unwrap();

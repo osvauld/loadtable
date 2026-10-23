@@ -27,16 +27,58 @@ pub fn parse_meminfo(text: &str) -> Result<MemorySnapshot, PlatformError> {
     if total_bytes == 0 || available_bytes > total_bytes {
         return Err(PlatformError::parse(PATH, "inconsistent totals"));
     }
+    // swap is best effort: a kernel without it reports no SwapTotal, which is "no swap"
+    let swap_total_bytes = field("SwapTotal:").unwrap_or(0);
+    let swap_free = field("SwapFree:").unwrap_or(0);
     Ok(MemorySnapshot {
         total_bytes,
         available_bytes,
+        swap_total_bytes,
+        swap_used_bytes: swap_total_bytes.saturating_sub(swap_free),
+        ..MemorySnapshot::default()
     })
 }
 
-/// Reads and parses the host's `/proc/meminfo`.
+/// `pswpin` and `pswpout` (pages) from `/proc/vmstat`, as bytes of `page_size`.
+pub fn parse_vmstat_swap(text: &str, page_size: u64) -> (u64, u64) {
+    let get = |name: &str| -> u64 {
+        text.lines()
+            .find_map(|l| l.strip_prefix(name))
+            .and_then(|r| r.trim().parse::<u64>().ok())
+            .map_or(0, |p| p.saturating_mul(page_size))
+    };
+    (get("pswpin "), get("pswpout "))
+}
+
+/// Busy and total CPU jiffies from the aggregate `cpu` line of `/proc/stat`. Busy is everything
+/// but idle and iowait. `None` when the line is missing or malformed.
+pub fn parse_stat_cpu(text: &str) -> Option<(u64, u64)> {
+    let line = text.lines().find(|l| l.starts_with("cpu "))?;
+    let v: Vec<u64> = line
+        .split_whitespace()
+        .skip(1)
+        .map(|w| w.parse::<u64>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    // guest time is already inside user/nice, so only the first eight columns are summed
+    let total: u64 = v.iter().take(8).sum();
+    let idle = v.get(3)?.saturating_add(v.get(4).copied().unwrap_or(0));
+    Some((total.saturating_sub(idle), total))
+}
+
+/// Reads and parses the host's `/proc/meminfo`, `/proc/vmstat` and `/proc/stat`.
 pub(super) fn read() -> Result<MemorySnapshot, PlatformError> {
     let text = std::fs::read_to_string(PATH).map_err(|e| PlatformError::io(PATH, e))?;
-    parse_meminfo(&text)
+    let mut m = parse_meminfo(&text)?;
+    if let Ok(vm) = std::fs::read_to_string("/proc/vmstat") {
+        let page = rustix::param::page_size() as u64;
+        (m.swap_in_bytes, m.swap_out_bytes) = parse_vmstat_swap(&vm, page);
+    }
+    if let Ok(st) = std::fs::read_to_string("/proc/stat")
+        && let Some((busy, total)) = parse_stat_cpu(&st)
+    {
+        (m.cpu_busy, m.cpu_total) = (busy, total);
+    }
+    Ok(m)
 }
 
 #[cfg(test)]
@@ -54,6 +96,34 @@ mod tests {
         assert_eq!(m.available_bytes, 8_000_000 * 1024);
     }
 
+    // R-357
+    #[test]
+    fn swap_is_read_from_meminfo_and_vmstat_and_cpu_from_stat() {
+        let m = parse_meminfo(
+            "MemTotal: 10 kB\nMemAvailable: 5 kB\nSwapTotal: 100 kB\nSwapFree: 40 kB\n",
+        )
+        .unwrap();
+        assert_eq!(
+            (m.swap_total_bytes, m.swap_used_bytes),
+            (100 * 1024, 60 * 1024)
+        );
+        // no swap lines at all: no swap, not an error
+        let m = parse_meminfo("MemTotal: 10 kB\nMemAvailable: 5 kB\n").unwrap();
+        assert_eq!((m.swap_total_bytes, m.swap_used_bytes), (0, 0));
+        assert_eq!(
+            parse_vmstat_swap("pswpin 10\npswpout 3\npswpout_x 9\n", 4096),
+            (40_960, 12_288)
+        );
+        assert_eq!(parse_vmstat_swap("nr_free 1\n", 4096), (0, 0));
+        // user nice system idle iowait irq softirq steal guest guest_nice
+        assert_eq!(
+            parse_stat_cpu("cpu  100 0 50 800 40 5 5 0 7 0\ncpu0 1 2 3 4\n"),
+            Some((160, 1000))
+        );
+        assert_eq!(parse_stat_cpu("cpu0 1 2 3 4\n"), None);
+        assert_eq!(parse_stat_cpu("cpu  1 x 3 4\n"), None);
+    }
+
     #[test]
     fn missing_or_bad_fields_are_errors() {
         assert!(parse_meminfo("MemTotal: 10 kB\n").is_err());
@@ -65,6 +135,8 @@ mod tests {
 
     #[test]
     fn host_meminfo_parses() {
-        assert!(read().unwrap().total_bytes > 0);
+        let m = read().unwrap();
+        assert!(m.total_bytes > 0);
+        assert!(m.cpu_total > 0);
     }
 }

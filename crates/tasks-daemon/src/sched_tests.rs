@@ -136,7 +136,7 @@ fn r339_blocking_needs_a_reason_and_is_audited_with_who_and_why() {
         "a refused claim is not a grant"
     );
     s.priority_reason = Some("release build blocks the user".into());
-    let Response::Submitted { id } = ok(r.sch.handle(Request::Submit { spec: s })) else {
+    let Response::Submitted { id, .. } = ok(r.sch.handle(Request::Submit { spec: s })) else {
         panic!("submitted expected");
     };
     let rows = priority_rows(&r);
@@ -158,7 +158,7 @@ fn r339_background_at_submit_is_audited_and_shown() {
     let r = Rig::new();
     let mut s = r.spec("agent-7", &["make", "sweep"], Kind::Run);
     s.priority = Priority::Background;
-    let Response::Submitted { id } = ok(r.sch.handle(Request::Submit { spec: s })) else {
+    let Response::Submitted { id, .. } = ok(r.sch.handle(Request::Submit { spec: s })) else {
         panic!("submitted expected");
     };
     let rows = priority_rows(&r);
@@ -650,4 +650,60 @@ fn r349_a_forwarded_job_the_peer_holds_back_is_listed_as_waiting_with_the_peers_
         panic!("job expected");
     };
     assert_eq!(job.remote_wait, None);
+}
+
+// R-353
+#[test]
+fn r353_a_forwarded_job_that_passed_stores_the_peers_final_phase_not_the_last_one_mirrored() {
+    use crate::forwarder::ForwardEnd;
+    let f = Arc::new(FakeForwarder::new(vec![]));
+    let r = Rig::with_forwarder(f.clone());
+    let id = r.submit(&anywhere(&r));
+    r.store.set_forward(id, &nixos(), None, Some("k1")).unwrap();
+    // the last phase mirrored while the job lived was `queued`
+    f.script(id, accepted(Phase::Queued));
+    r.until("accepted", || {
+        r.tick();
+        r.record(id).remote_phase == Some(Phase::Queued)
+    });
+    f.script(
+        id,
+        ForwardPoll::Done(ForwardEnd {
+            phase: Phase::Passed,
+            reason: "passed on nixos".into(),
+            exit_code: Some(0),
+            signal: None,
+            remote_job: Some(1),
+            nothing_submitted: false,
+            samples: vec![],
+        }),
+    );
+    assert_eq!(r.until_done(id), Phase::Passed);
+    assert_eq!(r.record(id).remote_phase, Some(Phase::Passed));
+    // and the view the CLI and UI read says so
+    let Response::Job { job } = ok(r.sch.handle(Request::Get { id })) else {
+        panic!("job expected");
+    };
+    assert_eq!(job.remote_phase, Some(Phase::Passed));
+}
+
+// R-370
+#[test]
+fn r370_a_class_changed_while_the_job_waits_is_what_the_peer_is_sent() {
+    let f = Arc::new(FakeForwarder::new(vec![]));
+    let r = Rig::with_forwarder(f.clone());
+    let id = r.submit(&anywhere(&r));
+    r.store.set_forward(id, &nixos(), None, Some("k1")).unwrap();
+    r.store
+        .set_priority(id, tasks_core::Priority::Background, None)
+        .unwrap();
+    f.script(id, accepted(Phase::Running));
+    r.until("started", || {
+        r.tick();
+        r.phase(id) == Phase::Running
+    });
+    assert_eq!(
+        f.classes.lock().unwrap().last().cloned(),
+        Some((id, tasks_core::Priority::Background, None))
+    );
 }

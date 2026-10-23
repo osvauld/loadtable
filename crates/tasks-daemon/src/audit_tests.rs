@@ -66,7 +66,7 @@ fn r290_a_job_leaves_submitted_started_and_ended_rows_without_its_arguments() {
     let r = Rig::new();
     r.procs.auto_exit(0);
     let spec = r.spec("agent-1", &["make", "--password=hunter2", "all"], Kind::Run);
-    let Response::Submitted { id } = ok(r.sch.handle(Request::Submit { spec })) else {
+    let Response::Submitted { id, .. } = ok(r.sch.handle(Request::Submit { spec })) else {
         panic!("not submitted");
     };
     r.tick();
@@ -785,7 +785,7 @@ fn r294_a_real_daemon_audits_to_the_ledger_signs_checkpoints_and_keeps_rows_acro
     let first_rows = {
         let d = Daemon::start(crate::tests::daemon_options(&dir, &procs)).unwrap();
         let sch = d.scheduler().clone();
-        let Response::Submitted { id } = ok(sch.handle(Request::Submit { spec: spec_of(&d) }))
+        let Response::Submitted { id, .. } = ok(sch.handle(Request::Submit { spec: spec_of(&d) }))
         else {
             panic!()
         };
