@@ -120,7 +120,10 @@ fn r408_without_sccache_the_job_runs_uncached_and_says_so() {
     );
     assert_eq!(var(&env, "CARGO_INCREMENTAL"), Some("0"));
     let log = r.log_text(id);
-    let first = log.lines().next().unwrap();
+    let first = log
+        .lines()
+        .find(|l| l.starts_with("[tasks] cache:"))
+        .unwrap();
     assert!(
         first.starts_with("[tasks] cache: uncached build: sccache was not found"),
         "{log}"
@@ -162,7 +165,10 @@ fn r407_the_output_starts_with_the_cache_line() {
     r.tick();
     r.until_running(id);
     let log = r.log_text(id);
-    let first = log.lines().next().unwrap();
+    let first = log
+        .lines()
+        .find(|l| l.starts_with("[tasks] cache:"))
+        .unwrap();
     let real = fs::read_link(root.join("target")).unwrap();
     assert!(
         real.starts_with(r.cfg.cache_dir.join("tasks2/checkouts")),

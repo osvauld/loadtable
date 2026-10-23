@@ -717,14 +717,14 @@ impl Scheduler {
                 return false;
             }
         };
+        if let Some(l) = line {
+            let _ = notes.note(&log_path, "placement", &format!("placement: {l}"));
+        }
         let placed = self.plan_outputs(&rec.spec).apply();
-        // the cache line comes first in the job's output (R-405)
+        // the cache line follows the placement line, ahead of everything the job prints (R-407)
         let _ = notes.note(&log_path, "cache", &cache.header(&settings, &placed));
         for (i, n) in placed.notes.iter().chain(props_line.iter()).enumerate() {
             let _ = notes.note(&log_path, &format!("cache-note-{i}"), n);
-        }
-        if let Some(l) = line {
-            let _ = notes.note(&log_path, "placement", &format!("placement: {l}"));
         }
         if let Some(n) = &rewritten.note {
             let _ = notes.note(&log_path, "cargo-jobs", n);
