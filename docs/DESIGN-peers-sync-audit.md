@@ -254,6 +254,64 @@ That answers "what caused this stall" even when no job ran. The UI shows the las
 Sync and fetch run in the `transfer` cgroup and take a transfer slot. Unlike today's
 offload slot, the transfer slot respects the I/O gate, because a sync is local disk work.
 
+### As built (step 4)
+
+`tasks-platform` (`cgroup/`, `sample.rs`), `tasks-runner` (`meter.rs`), `tasks-daemon`
+(`attrib.rs`), `tasks-ledger` (schema v7). Where the build differs from or fills in the text:
+
+- **Cgroup layout.** The daemon finds its cgroup in `/proc/self/cgroup` (the parent when
+  `DelegateSubgroup=daemon` already put it in a `daemon` leaf), creates `tasks.slice`, moves itself
+  into `daemon` (no-internal-processes rule) and enables `+io +memory +cpu` as far as the cgroup
+  offers them, first in the delegated cgroup, then in `tasks.slice`. A controller that is
+  missing or refused leaves its figures `None`; nothing else changes. Setup fails before anything
+  moves when the first `mkdir` is refused, and the reason becomes the status line
+  `attribution: process tree (no cgroup delegation: ...)`.
+- **Placing a job: a shell, not `unsafe`.** `Command::pre_exec` and `clone3(CLONE_INTO_CGROUP)`
+  need `unsafe`; writing the child's pid from the parent leaves a window in which the child can
+  fork children that stay outside. The child is therefore started as `/bin/sh -c 'echo $$ >
+  cgroup.procs; exec "$@"'`: it joins first and then becomes the command (same pid, group
+  leadership and start time, so leases and the PID-reuse guard are unchanged). A failed write is
+  silent and the command still runs; the missing membership shows as figures of quality
+  `process_tree`. A program that does not exist now ends as exit 127 from the shell instead of a
+  spawn error, for jobs that are placed in a cgroup.
+- **Figures.** `JobFigures` (`tasks-core`): read/write bytes and ops from `io.stat`, `memory.peak`
+  (or `memory.current` before kernel 5.19), `cpu.stat` usage, and the PSI `total=` stall times of
+  `io`, `memory` and `cpu` (cumulative microseconds, so they are integers and exact). The runner
+  samples every 2 s, the daemon writes them to the ledger at most every 10 s and always at the
+  end, read after the last process is gone and before the cgroup is removed. The quality
+  (`cgroup` or `process_tree`) is part of the stored value. Without a cgroup the figures are the
+  sum over the job's process tree from the process table (Linux `/proc/PID/io`; macOS
+  `sysinfo`, whose per-process disk bytes come from `proc_pid_rusage`): a process that exits
+  between two samples loses what it did after the last sample, and stall times are not available.
+- **Kill order.** Cancel, timeout and cleanup still Term then Kill the process group first. Only if
+  something remains in the job's cgroup (other than the unreaped leader) does `cgroup.kill` run,
+  then the same grace. A leader that survives the group kill is also finished with `cgroup.kill`.
+  Empty job cgroups are removed after the job; at start the daemon kills and removes the ones a
+  previous daemon left.
+- **Trips.** `pressure.trip` audit rows, at most one per resource (`io`, `cpu`, `memory`) per
+  `attribution.trip_interval_secs` (60); the next row says how many it dropped. Sources: `gate`
+  (admission refused a waiting job), `psi` (machine pressure at or over
+  `attribution.trip_io_pct` 10 / `trip_cpu_pct` 60, or memory level warn), `transfer` (a sync phase
+  waited). The row holds the machine pressure, every running job's figures, the transfer
+  figures and the top 10 outside processes by disk bytes in the last window
+  (`attribution.sample_secs`, 5) and by RSS. A process is recorded as pid and program base name
+  only; the process table type has no field for arguments or environment.
+  `tasks2 stalls` is `tasks2 audit --action pressure.trip` with the evidence laid out; the UI
+  has a Pressure events tab. A process whose I/O the OS hides (another user's, on Linux) is
+  counted as unreadable, not listed.
+- **Transfers.** `SyncGate` is implemented by `TransferGate` on top of admission: new slot kind
+  `transfer` (`slots.transfer`, default 1) with the memory floor, the state reserve and the I/O
+  gate (`pressure.transfer.max_io`, default 40) but no CPU gate. It waits without a time limit
+  (a sync during a stall should not add to it) and ends the wait at shutdown. `git` children
+  join `tasks.slice/transfer`; the in-process work (gix snapshot, apply) cannot be moved into a
+  cgroup, so the daemon's own `/proc/self/io` delta while a slot is held is counted as
+  `inproc_read_bytes`/`inproc_write_bytes` (approximate: it includes anything else the daemon does
+  at the same time).
+- **Not done: a sync stream.** The pack still crosses as `SyncPackChunk` request/reply frames. A
+  stream needs a new method on the `Connection` trait and implementations in the fake and the
+  iroh adapter with their own tests, and nothing in attribution depends on it; it is the next
+  step for transfer speed, not for accounting.
+
 ## 10. Scheduling: priority and the short lane
 
 Queue order: `(class, effective wait, submit time)`.
