@@ -217,6 +217,20 @@ pub trait Forwarder: Send + Sync {
     /// off an unreachable peer must call this first (or confirm the job gone), so a job never
     /// runs twice (R-166).
     fn cancel_remote(&self, peer: &MachineName, remote_job: i64) -> Result<(), ForwardError>;
+    /// The live metrics of remote job `remote_job` on `peer`, within a short bound. Unreachable
+    /// or older peers come back as an empty view with a note; `Err` only when there is no way
+    /// to ask at all.
+    fn remote_metrics(
+        &self,
+        peer: &MachineName,
+        remote_job: i64,
+    ) -> Result<tasks_core::metrics::JobMetricsView, ForwardError> {
+        let _ = remote_job;
+        Err(ForwardError::Unavailable(format!(
+            "no peer support in this daemon, cannot reach {}",
+            peer.0
+        )))
+    }
     /// Drops everything held for the job (its place in the checkout queue).
     fn forget(&self, job: JobId) {
         let _ = job;

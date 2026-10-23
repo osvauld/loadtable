@@ -578,3 +578,17 @@ New in v2 (the earlier release's `--fetch REL` ported onto the peer link). A job
 | R-572 | The usual peak memory is the median peak of this command's past runs on this machine. | `r572_the_usual_peak_is_the_median_of_past_runs_on_this_machine` (daemon); `the_median_peak_skips_unmeasured_runs` (core) | any |
 | R-573 | `tasks2 metrics ID [--json]` prints cores, memory, disk rate and the top five groups. | `r573_metrics_prints_cores_memory_disk_and_the_top_five_groups` (cli) | any |
 | R-574 | The cgroup read and the tree meter report the memory in use now apart from the peak. | `r574_the_current_memory_is_read_apart_from_the_peak` (platform); `r327_the_tree_meter_keeps_what_exited_processes_had_done` (platform) | any |
+
+## v2-peer-metrics
+
+| ID | Rule | Test | OS |
+|---|---|---|---|
+| R-620 | `JobMetrics` on a forwarded job is answered by the peer that runs it (remote id from `forwarded_to`) and says so in `source`; a job the peer has not accepted yet asks nobody. | `r620_a_forwarded_jobs_metrics_come_from_its_peer_and_say_where`, `r620_a_forwarded_job_the_peer_has_not_accepted_asks_nobody` (daemon) | any |
+| R-621 | The origin gets a remote job's metrics over the peer protocol (`JobMetricsRequest` / `JobMetrics`); an answer is reused for a second. | `r621_the_origin_gets_a_forwarded_jobs_metrics_from_the_peer_that_runs_it` (daemon peer_link) | any |
+| R-622 | A peer serves metrics only for jobs the requester submitted (an unknown id and another peer's job both read as unknown), and the request needs any valid grant (observe is enough). | `r622_metrics_are_served_for_the_requesters_own_jobs_only` (peer), `r622_a_peer_gets_metrics_only_for_jobs_it_sent`, `r622_a_job_the_origin_did_not_submit_is_unknown_to_it` (daemon), `need_of` assert in the trust role test (peer) | any |
+| R-623 | A forwarder that cannot ask gives an empty view with the reason, not an error. | `r623_a_forwarder_that_cannot_ask_gives_an_empty_view_with_the_reason` (daemon) | any |
+| R-624 | A peer that does not know the request gives the note "peer NAME does not serve job metrics; upgrade it". | `r624_an_older_peer_gets_a_clear_upgrade_note` (daemon peer_link) | any |
+| R-625 | An unreachable or stalled peer gives an empty view with "NAME unreachable" within the metrics timeout (2 s); a link already known down answers at once. | `r625_an_unreachable_or_stalled_peer_gives_an_empty_view_within_the_bound` (daemon peer_link) | any |
+| R-626 | A peer's status lists its running jobs (busiest first, at most 32) with cores and memory, and the machine's cores in use, in thousandths of a core. | `r626_status_lists_running_jobs_busiest_first_and_capped` (daemon serve) | any |
+| R-627 | Status and metrics JSON from before these fields still parse; an oversize metrics reply drops its oldest samples to fit the frame. | `r627_status_json_from_an_older_peer_parses_and_a_big_metrics_reply_is_trimmed` (peer), `older_status_json_without_the_ui_fields_still_parses` (daemon api) | any |
+| R-628 | `tasks2 metrics ID` prints where the numbers were measured. | `r628_metrics_of_a_forwarded_job_says_where_the_numbers_come_from` (cli) | any |

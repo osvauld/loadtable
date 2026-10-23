@@ -146,6 +146,8 @@ fn peer(state: &str, ago: Option<u64>) -> PeerView {
             swap_used: Some(0),
             swap_in_per_s: Some(0),
             swap_out_per_s: Some(0),
+            jobs: Vec::new(),
+            cores_in_use_milli: None,
         }),
     }
 }

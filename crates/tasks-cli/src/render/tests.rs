@@ -619,6 +619,8 @@ fn r356_status_lists_each_peer_with_state_path_latencies_roles_and_its_last_repo
                 swap_used: Some(1 << 30),
                 swap_in_per_s: Some(0),
                 swap_out_per_s: Some(2048),
+                jobs: Vec::new(),
+                cores_in_use_milli: None,
             }),
         },
         PeerView {

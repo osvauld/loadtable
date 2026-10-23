@@ -84,7 +84,10 @@ impl Need {
 /// What `body` needs. Unknown or reply-shaped messages need `submit`, the strictest.
 pub fn need_of(body: &Body) -> Need {
     match body {
-        Body::Hello(_) | Body::StatusRequest | Body::Subscribe { .. } => Need::Any,
+        Body::Hello(_)
+        | Body::StatusRequest
+        | Body::Subscribe { .. }
+        | Body::JobMetricsRequest { .. } => Need::Any,
         _ => Need::Submit,
     }
 }

@@ -433,3 +433,151 @@ fn r363_path_rtt_is_the_transports_and_reply_time_is_the_status_request_taking_i
     assert_eq!(n.rtt_ms, None);
     assert!(n.reply_ms.unwrap() < 60);
 }
+
+// ---------------------------------------------------------------- forwarded job metrics
+
+fn metrics_view() -> tasks_core::metrics::JobMetricsView {
+    tasks_core::metrics::JobMetricsView {
+        quality: Some(tasks_core::Attribution::Cgroup),
+        samples: vec![tasks_core::metrics::MetricSample {
+            t_ms: 5,
+            cpu_usec: Some(7),
+            mem_bytes: Some(1 << 20),
+            io_read_bytes: None,
+            io_write_bytes: None,
+            io_some_us: None,
+        }],
+        procs: vec![tasks_core::metrics::ProcGroup {
+            name: "rustc".into(),
+            count: 2,
+            cpu_cores: Some(3.5),
+            rss_bytes: 1 << 30,
+            others: false,
+        }],
+        usual_peak_mem_bytes: None,
+        note: None,
+        source: None,
+    }
+}
+
+/// A remote job on the worker that `w.origin` submitted, with metrics set.
+fn remote_with_metrics(w: &PeerWorld) -> tasks_peer::RemoteJobId {
+    use tasks_peer::receiver::JobRunner;
+    let spec = record(&MemoryStore::new(), &w.root_a).spec;
+    let key = tasks_peer::SubmitKey::new("laptop:m1").unwrap();
+    let (id, _) = w.runner.submit(&w.origin, &key, spec).unwrap();
+    w.runner.set_metrics(id, metrics_view());
+    id
+}
+
+// R-621
+#[test]
+fn r621_the_origin_gets_a_forwarded_jobs_metrics_from_the_peer_that_runs_it() {
+    let w = PeerWorld::new();
+    let id = remote_with_metrics(&w);
+    let link = w.link();
+    link.probe_all();
+    let v = link.remote_metrics(&nixos(), id.0 as i64).unwrap();
+    assert_eq!(v.samples.len(), 1);
+    assert_eq!(v.procs[0].name, "rustc");
+    assert_eq!(v.source.as_deref(), Some("on nixos, remote job #1"));
+    assert_eq!(v.note, None);
+    assert_eq!(w.requests("job_metrics"), 1);
+    // a second ask within the second is answered from the cache
+    link.remote_metrics(&nixos(), 1).unwrap();
+    assert_eq!(w.requests("job_metrics"), 1);
+}
+
+// R-622
+#[test]
+fn r622_a_job_the_origin_did_not_submit_is_unknown_to_it() {
+    let w = PeerWorld::new();
+    let link = w.link();
+    link.probe_all();
+    // the worker holds a job of another peer under id 1
+    {
+        use tasks_peer::receiver::JobRunner;
+        let spec = record(&MemoryStore::new(), &w.root_a).spec;
+        let key = tasks_peer::SubmitKey::new("mac:1").unwrap();
+        let other = tasks_peer::PeerId::new("mac-node").unwrap();
+        let (id, _) = w.runner.submit(&other, &key, spec).unwrap();
+        w.runner.set_metrics(id, metrics_view());
+    }
+    let v = link.remote_metrics(&nixos(), 1).unwrap();
+    assert!(v.samples.is_empty());
+    assert!(
+        v.note
+            .as_deref()
+            .unwrap()
+            .contains("no longer has remote job #1"),
+        "{v:?}"
+    );
+}
+
+// R-624
+#[test]
+fn r624_an_older_peer_gets_a_clear_upgrade_note() {
+    struct Old(Arc<dyn tasks_peer::Handler>);
+    impl tasks_peer::Handler for Old {
+        fn handle(
+            &self,
+            from: &tasks_peer::PeerId,
+            msg: tasks_peer::proto::Body,
+        ) -> tasks_peer::proto::Body {
+            if matches!(msg, tasks_peer::proto::Body::JobMetricsRequest { .. }) {
+                return tasks_peer::proto::Body::Refuse(Refusal::UnknownMessage {
+                    name: "job_metrics_request".into(),
+                });
+            }
+            self.0.handle(from, msg)
+        }
+        fn events(
+            &self,
+            from: &tasks_peer::PeerId,
+            remote: tasks_peer::RemoteJobId,
+            off: u64,
+        ) -> Result<Box<dyn tasks_peer::transport::EventStream>, Refusal> {
+            self.0.events(from, remote, off)
+        }
+    }
+    let w = PeerWorld::new();
+    remote_with_metrics(&w);
+    w.net.serve(
+        &w.nixos,
+        Arc::new(Old(Arc::new(w.receiver_for_test()))) as Arc<dyn tasks_peer::Handler>,
+    );
+    let link = w.link();
+    link.probe_all();
+    let v = link.remote_metrics(&nixos(), 1).unwrap();
+    assert!(v.samples.is_empty());
+    assert_eq!(
+        v.note.as_deref(),
+        Some("peer nixos does not serve job metrics; upgrade it")
+    );
+}
+
+// R-625
+#[test]
+fn r625_an_unreachable_or_stalled_peer_gives_an_empty_view_within_the_bound() {
+    let w = PeerWorld::new();
+    remote_with_metrics(&w);
+    let mut o = w.options();
+    o.metrics_timeout = Duration::from_millis(150);
+    let link = PeerLink::new(w.net.transport(&w.origin), o);
+    link.probe_all();
+    // stalled: the worker answers after far longer than the bound
+    w.net.set_latency(Duration::from_secs(3));
+    let t0 = Instant::now();
+    let v = link.remote_metrics(&nixos(), 1).unwrap();
+    assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
+    assert!(v.samples.is_empty());
+    assert_eq!(v.note.as_deref(), Some("nixos unreachable"));
+    // down: the next probe knows, and the ask returns at once
+    w.net.set_latency(Duration::ZERO);
+    w.net.set_down(&w.nixos, true);
+    link.probe_all();
+    let t0 = Instant::now();
+    let v = link.remote_metrics(&nixos(), 2).unwrap();
+    assert!(t0.elapsed() < Duration::from_millis(100));
+    assert_eq!(v.note.as_deref(), Some("nixos unreachable"));
+}

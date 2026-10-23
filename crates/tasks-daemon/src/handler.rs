@@ -195,7 +195,7 @@ impl Scheduler {
             Request::Status => Ok(Response::Status(Box::new(self.status()))),
             Request::JobMetrics { id } => {
                 let rec = self.record(id)?;
-                Ok(Response::JobMetrics(self.job_metrics(&rec)))
+                Ok(Response::JobMetrics(self.api_job_metrics(&rec)))
             }
             Request::Estimate { argv, kind } => Ok(self.estimate(&argv, kind)),
             Request::Drain { cancel, who } => {

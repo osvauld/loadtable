@@ -244,3 +244,40 @@ fn r308_a_resync_of_a_checkout_with_a_live_remote_job_is_refused_busy_until_it_e
         Err(PeerError::Refused(Refusal::Busy { .. }))
     ));
 }
+
+// R-622
+#[test]
+fn r622_metrics_are_served_for_the_requesters_own_jobs_only() {
+    use tasks_core::metrics::JobMetricsView;
+    use tasks_peer::receiver::JobRunner;
+    let w = synced_world();
+    let view = JobMetricsView {
+        quality: None,
+        samples: Vec::new(),
+        procs: Vec::new(),
+        usual_peak_mem_bytes: None,
+        note: Some("hello".into()),
+        source: None,
+    };
+    w.runner
+        .set_metrics(tasks_peer::RemoteJobId(1), view.clone());
+    let ask = |id: u64| {
+        conn(&w).request(Body::JobMetricsRequest {
+            remote: tasks_peer::RemoteJobId(id),
+        })
+    };
+    assert_eq!(ask(1).unwrap(), Body::JobMetrics(view.clone()));
+    // an unknown id and a job of another peer both read as unknown
+    assert!(matches!(
+        ask(99),
+        Err(PeerError::Refused(Refusal::UnknownJob { .. }))
+    ));
+    let other = PeerId::new("mac-node").unwrap();
+    let key = SubmitKey::new("mac:1").unwrap();
+    let (id, _) = w.runner.submit(&other, &key, w.spec("")).unwrap();
+    w.runner.set_metrics(id, view);
+    assert!(matches!(
+        ask(id.0),
+        Err(PeerError::Refused(Refusal::UnknownJob { .. }))
+    ));
+}
