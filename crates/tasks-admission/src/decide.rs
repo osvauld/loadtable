@@ -1,16 +1,26 @@
 //! The pure decision core: one ordered walk over the waiters, no I/O and no clock.
 
 use crate::gates::{Readings, check_gates};
-use crate::{AdmissionInput, Decision, Lane, SHORT_LANE_BASE, Verdict, WaitReason, Waiter};
+use crate::{
+    AdmissionInput, Decision, Lane, SHORT_LANE_BASE, Verdict, WaitReason, Waiter, sequence,
+};
 use std::collections::BTreeMap;
 use tasks_core::{DeviceId, JobId, SlotKind};
 
-/// Decides every waiter. Waiters are walked in (priority, queued_at_ms, job id) order, the
-/// single order used for slots, checkouts and positions (R-230). A waiter with holds is
-/// skipped without consuming anything, so it never blocks the ones behind it.
+/// Decides every waiter. Waiters are walked in [`sequence`] order (class, effective wait,
+/// submit time, owners in turn), the single order used for slots, checkouts and positions
+/// (R-230). A waiter with holds is skipped without consuming anything, so it never blocks the
+/// ones behind it.
 pub fn decide(input: &AdmissionInput) -> Vec<Decision> {
-    let mut order: Vec<&Waiter> = input.waiters.iter().collect();
-    order.sort_by_key(|w| w.sort_key());
+    let order: Vec<&Waiter> = sequence(
+        &input.waiters,
+        input.now_ms,
+        input.thresholds.aging_ms,
+        &input.last_started,
+    )
+    .into_iter()
+    .filter_map(|i| input.waiters.get(i))
+    .collect();
     let mut walk = Walk::new(input);
     order
         .into_iter()

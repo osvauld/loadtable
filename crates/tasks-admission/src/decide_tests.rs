@@ -1,6 +1,6 @@
 //! Tests of the pure decision core, including the R-230 deadlock and a property test.
 
-use crate::testkit::{input, waiter};
+use crate::testkit::{input, short_waiter, waiter};
 use crate::*;
 use std::collections::{BTreeMap, BTreeSet};
 use tasks_core::{DeviceId, JobId, SlotKind};
@@ -82,9 +82,9 @@ fn property_free_slot_and_eligible_waiter_means_someone_is_admitted() {
         for n in 0..rng.next(9) {
             let kind = kinds[rng.next(3) as usize % kinds.len()];
             let mut w = waiter(100 + n as i64, kind, rng.next(5));
-            if rng.next(4) == 0 {
-                w.priority = Priority::Urgent;
-            }
+            w.priority =
+                [Priority::Blocking, Priority::Normal, Priority::Background][rng.next(3) as usize];
+            w.owner = format!("o{}", rng.next(3));
             if rng.next(2) == 0 {
                 w.checkout = Some(format!("c{}", rng.next(3)));
             }
@@ -115,8 +115,11 @@ fn property_free_slot_and_eligible_waiter_means_someone_is_admitted() {
         }
         // liveness: the first unheld waiter of a kind with a free slot, with nobody ahead of it
         // on its checkout, forces an admission of that kind
-        let mut sorted = waiters.clone();
-        sorted.sort_by_key(Waiter::sort_key);
+        let sorted: Vec<Waiter> =
+            sequence(&waiters, i.now_ms, i.thresholds.aging_ms, &i.last_started)
+                .into_iter()
+                .map(|k| waiters[k].clone())
+                .collect();
         for k in kinds {
             let free = !i.slots[&k].free.is_empty();
             let eligible = sorted.iter().enumerate().any(|(pos, w)| {
@@ -187,11 +190,11 @@ fn held_waiters_are_skipped_and_not_counted_in_position() {
 }
 
 #[test]
-fn urgent_goes_first_and_keeps_order_among_urgent_r040() {
+fn r338_blocking_goes_first_and_keeps_order_among_blocking_r040() {
     let mut u1 = waiter(30, SlotKind::Run, 50);
     let mut u2 = waiter(31, SlotKind::Run, 40);
-    u1.priority = Priority::Urgent;
-    u2.priority = Priority::Urgent;
+    u1.priority = Priority::Blocking;
+    u2.priority = Priority::Blocking;
     let old = waiter(1, SlotKind::Run, 1);
     let out = decide(&input(1, vec![old, u1, u2]));
     assert_eq!(out.iter().map(|d| d.job.0).collect::<Vec<_>>(), [31, 30, 1]);
@@ -266,16 +269,19 @@ fn offload_admits_while_compile_and_run_are_full_and_cpu_saturated_r031() {
 }
 
 #[test]
-fn short_lane_admits_through_the_cpu_gate_and_is_audited() {
+fn r342_short_lane_admits_through_the_cpu_gate_and_is_audited() {
     let mut i = input(1, vec![]);
     i.pressure.cpu = Some(63.0);
     let mut short = waiter(1, SlotKind::Compile, 1);
     short.predicted_secs = Some(30.0);
+    short.predicted_peak_memory = Some(200 << 20);
     let mut long = waiter(2, SlotKind::Compile, 2);
     long.predicted_secs = Some(600.0);
+    long.predicted_peak_memory = Some(200 << 20);
     let none = waiter(3, SlotKind::Compile, 3);
     let mut short2 = waiter(4, SlotKind::Compile, 4);
     short2.predicted_secs = Some(5.0);
+    short2.predicted_peak_memory = Some(200 << 20);
     i.waiters = vec![short, long, none, short2];
     let v = verdicts(&i);
     assert_eq!(
@@ -301,11 +307,10 @@ fn short_lane_admits_through_the_cpu_gate_and_is_audited() {
 }
 
 #[test]
-fn short_lane_keeps_memory_floor_and_disk_reserve() {
+fn r344_short_lane_keeps_memory_floor_and_disk_reserve() {
     let mut base = input(1, vec![]);
     base.pressure.cpu = Some(99.0);
-    let mut w = waiter(1, SlotKind::Compile, 1);
-    w.predicted_secs = Some(1.0);
+    let mut w = short_waiter(1, SlotKind::Compile, 1);
     w.new_output = true;
     base.waiters = vec![w];
     assert!(is_admit(&verdicts(&base)[&1]));
@@ -324,8 +329,7 @@ fn short_lane_keeps_memory_floor_and_disk_reserve() {
 fn short_lane_works_when_normal_slots_are_full() {
     let mut i = input(0, vec![]);
     i.slots.get_mut(&SlotKind::Run).unwrap().busy = vec![(0, Some(JobId(5)))];
-    let mut w = waiter(1, SlotKind::Run, 1);
-    w.predicted_secs = Some(2.0);
+    let w = short_waiter(1, SlotKind::Run, 1);
     i.waiters = vec![w];
     assert!(matches!(
         verdicts(&i)[&1],
@@ -352,11 +356,11 @@ fn disk_wait_ends_by_itself_when_space_returns_r062() {
 }
 
 #[test]
-fn urgent_waiter_cannot_bypass_gates() {
+fn r338_a_blocking_waiter_cannot_bypass_gates() {
     let mut i = input(1, vec![]);
     i.pressure.cpu = Some(99.0);
     let mut w = waiter(1, SlotKind::Compile, 1);
-    w.priority = Priority::Urgent;
+    w.priority = Priority::Blocking;
     i.waiters = vec![w];
     assert!(!is_admit(&verdicts(&i)[&1]));
 }
@@ -364,4 +368,99 @@ fn urgent_waiter_cannot_bypass_gates() {
 #[test]
 fn empty_queue_has_no_decisions() {
     assert!(decide(&input(1, vec![])).is_empty());
+}
+
+#[test]
+fn r342_the_short_lane_needs_history_for_both_duration_and_peak_memory() {
+    let mut i = input(0, vec![]);
+    i.slots.get_mut(&SlotKind::Compile).unwrap().busy = vec![(0, Some(JobId(9)))];
+    i.pressure.cpu = Some(95.0);
+    let ok = short_waiter(1, SlotKind::Compile, 1);
+    let mut no_memory = ok.clone();
+    no_memory.job = JobId(2);
+    no_memory.queued_at_ms = 2;
+    no_memory.predicted_peak_memory = None;
+    let mut big = ok.clone();
+    big.job = JobId(3);
+    big.queued_at_ms = 3;
+    big.predicted_peak_memory = Some(i.thresholds.short_job_max_memory_bytes + 1);
+    let mut no_time = ok.clone();
+    no_time.job = JobId(4);
+    no_time.queued_at_ms = 4;
+    no_time.predicted_secs = None;
+    // one waiter at a time, so they do not compete for the lane's single slot
+    let lane = |w: &Waiter| {
+        let mut i = i.clone();
+        i.waiters = vec![w.clone()];
+        matches!(
+            verdicts(&i)[&w.job.0],
+            Verdict::Admit {
+                lane: Lane::Short,
+                ..
+            }
+        )
+    };
+    assert!(lane(&ok));
+    assert!(!lane(&no_memory), "memory unknown");
+    assert!(!lane(&big), "over the memory cap");
+    assert!(!lane(&no_time), "duration unknown");
+}
+
+#[test]
+fn r338_class_decides_who_gets_the_only_slot() {
+    let mut bg = waiter(1, SlotKind::Run, 1);
+    bg.priority = Priority::Background;
+    let normal = waiter(2, SlotKind::Run, 50);
+    let mut blocking = waiter(3, SlotKind::Run, 90);
+    blocking.priority = Priority::Blocking;
+    let mut i = input(1, vec![bg, normal, blocking]);
+    i.now_ms = 100;
+    let v = verdicts(&i);
+    assert!(is_admit(&v[&3]) && !is_admit(&v[&2]) && !is_admit(&v[&1]));
+}
+
+#[test]
+fn r340_a_background_job_that_waited_long_enough_beats_a_newer_normal_one() {
+    let mut bg = waiter(1, SlotKind::Run, 0);
+    bg.priority = Priority::Background;
+    let normal = waiter(2, SlotKind::Run, 30 * 60_000);
+    let mut i = input(1, vec![bg, normal]);
+    // not aged yet: background waits behind the newer normal job
+    i.now_ms = 19 * 60_000;
+    i.waiters[1].queued_at_ms = 18 * 60_000;
+    assert!(is_admit(&verdicts(&i)[&2]));
+    // 21 minutes in it has risen to normal at minute 20, and a normal job submitted after that
+    // queues behind it
+    i.waiters[1].queued_at_ms = 21 * 60_000 - 1000;
+    i.now_ms = 21 * 60_000;
+    let v = verdicts(&i);
+    assert!(is_admit(&v[&1]) && !is_admit(&v[&2]));
+}
+
+#[test]
+fn r341_one_owners_backlog_does_not_hold_the_only_slot_against_another_owner() {
+    let mut ws: Vec<Waiter> = (1..=30)
+        .map(|n| {
+            let mut w = waiter(n, SlotKind::Run, n as u64);
+            w.owner = "busy".into();
+            w
+        })
+        .collect();
+    let mut other = waiter(100, SlotKind::Run, 5000);
+    other.owner = "quiet".into();
+    ws.push(other);
+    // busy just started a job; quiet has not
+    let mut i = input(1, ws);
+    i.last_started.insert("busy".into(), 4000);
+    i.now_ms = 6000;
+    let v = verdicts(&i);
+    assert!(is_admit(&v[&100]));
+    assert!((1..=30).all(|n| !is_admit(&v[&n])));
+    // with two slots the second goes to busy's oldest job, not its newest
+    let mut i2 = i.clone();
+    for k in [SlotKind::Run] {
+        i2.slots.get_mut(&k).unwrap().free = vec![0, 1];
+    }
+    let v = verdicts(&i2);
+    assert!(is_admit(&v[&100]) && is_admit(&v[&1]) && !is_admit(&v[&2]));
 }

@@ -41,8 +41,12 @@ pub struct Thresholds {
     pub state_reserve_bytes: u64,
     /// A waiter predicted to take at most this many seconds may use the short lane.
     pub short_job_max_secs: f64,
+    /// ...and whose predicted peak memory is at most this many bytes.
+    pub short_job_max_memory_bytes: u64,
     /// Size of the short lane.
     pub short_job_lane_slots: u32,
+    /// A waiting job rises one class after this long, ms; 0 turns aging off.
+    pub aging_ms: u64,
 }
 
 impl Thresholds {
@@ -96,7 +100,11 @@ pub struct AdmissionInput {
     pub state_free: u64,
     /// Machine policy.
     pub thresholds: Thresholds,
-    /// Waiting jobs, in any order; `decide` sorts them.
+    /// The clock, ms since the epoch: aging is measured against it.
+    pub now_ms: u64,
+    /// When each owner last started a job, ms; owners with none are served first.
+    pub last_started: BTreeMap<String, u64>,
+    /// Waiting jobs, in any order; `decide` orders them ([`crate::sequence`]).
     pub waiters: Vec<Waiter>,
 }
 

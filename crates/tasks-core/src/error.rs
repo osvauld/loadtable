@@ -32,4 +32,10 @@ pub enum CoreError {
     /// argv names a denied device.
     #[error("argv mentions denied device {0}")]
     DeniedDevice(String),
+    /// A `blocking` job names no reason.
+    #[error("priority blocking needs a reason (--reason TEXT)")]
+    BlockingNeedsReason,
+    /// The priority reason is longer than [`crate::MAX_PRIORITY_REASON`] characters.
+    #[error("the priority reason is longer than {max} characters", max = crate::MAX_PRIORITY_REASON)]
+    PriorityReasonTooLong,
 }

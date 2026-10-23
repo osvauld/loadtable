@@ -54,6 +54,9 @@ pub enum PlanError {
     /// A step has a NUL byte in argv.
     #[error("step {0:?} contains a NUL byte")]
     Nul(String),
+    /// A step hints `blocking`, which a plan cannot claim.
+    #[error("step {0:?} hints priority blocking; only a submit with --reason can claim it")]
+    StepPriority(String),
 }
 
 /// One named step of a plan.
@@ -97,6 +100,10 @@ pub struct StepHints {
     /// Tools the step needs on the machine.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
+    /// Queue class hint from the repo run policy. A plan can lower a step to `background`; it
+    /// cannot claim `blocking`, which needs a person's reason ([`PlanError::StepPriority`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<crate::Priority>,
     /// Set when the step is one piece of a command split by test target: the history key its
     /// run time belongs under.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -167,6 +174,9 @@ impl Plan {
             }
             if s.argv.iter().any(|a| a.contains('\0')) {
                 return Err(PlanError::Nul(s.name.clone()));
+            }
+            if s.hints.priority == Some(crate::Priority::Blocking) {
+                return Err(PlanError::StepPriority(s.name.clone()));
             }
             let mut seen = BTreeSet::new();
             for d in &s.after {

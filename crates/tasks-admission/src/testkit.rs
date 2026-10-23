@@ -31,7 +31,9 @@ pub fn thresholds() -> Thresholds {
         cache_reserve_bytes: 20 * GIB,
         state_reserve_bytes: GIB,
         short_job_max_secs: 60.0,
+        short_job_max_memory_bytes: GIB,
         short_job_lane_slots: 1,
+        aging_ms: 20 * 60_000,
     }
 }
 
@@ -84,12 +86,22 @@ pub fn input(free: u32, waiters: Vec<Waiter>) -> AdmissionInput {
         cache_free: r.cache_free,
         state_free: r.state_free,
         thresholds: thresholds(),
+        now_ms: 0,
+        last_started: BTreeMap::new(),
         waiters,
     }
 }
 
 pub fn waiter(job: i64, kind: SlotKind, queued: u64) -> Waiter {
     Waiter::new(JobId(job), kind, queued)
+}
+
+/// A waiter that history says is short and small.
+pub fn short_waiter(job: i64, kind: SlotKind, queued: u64) -> Waiter {
+    let mut w = waiter(job, kind, queued);
+    w.predicted_secs = Some(5.0);
+    w.predicted_peak_memory = Some(100 << 20);
+    w
 }
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);

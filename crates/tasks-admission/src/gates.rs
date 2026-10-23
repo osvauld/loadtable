@@ -24,7 +24,9 @@ pub struct Readings {
 /// - Offload skips CPU and I/O, keeps the memory floor min(reserve, 2 GiB), the memory
 ///   level and the state reserve; with `new_output` it also needs the 2 GiB fetch floor on
 ///   the cache disk, never the full cache reserve (R-060, R-065).
-/// - The short lane skips only the CPU gate.
+/// - The short lane skips only the CPU gate: it keeps the memory floor, the memory level, the
+///   I/O gate and the disk reserve. Whether a job gets the lane at all is decided by history
+///   (`Waiter::is_short`), never here.
 /// - Compile and run need the cache reserve only when `new_output` (R-061).
 pub fn check_gates(
     kind: SlotKind,

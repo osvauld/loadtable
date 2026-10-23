@@ -1,6 +1,6 @@
 //! Job specification and validation.
 
-use crate::{CoreError, JobId, Owner, Requirements};
+use crate::{CoreError, JobId, Owner, Priority, Requirements};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -74,6 +74,12 @@ pub struct JobSpec {
     /// so every receiver of the job (a peer, a replayed plan) gives the same answer.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub broad_test_escape: bool,
+    /// Queue class. `blocking` needs `priority_reason`; a plan step's `hints.priority` fills it.
+    #[serde(default, skip_serializing_if = "Priority::is_normal")]
+    pub priority: Priority,
+    /// Why the job is `blocking`, kept with the job and in the audit log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority_reason: Option<String>,
 }
 
 fn valid_env_name(n: &str) -> bool {
@@ -107,6 +113,7 @@ impl JobSpec {
         {
             return Err(CoreError::BadTimeout(t));
         }
+        crate::check_reason(self.priority, self.priority_reason.as_deref())?;
         for d in DENIED_DEVICES {
             if self.argv.iter().any(|a| a.contains(d)) {
                 return Err(CoreError::DeniedDevice((*d).to_string()));
@@ -133,6 +140,8 @@ pub(crate) mod tests {
             after: vec![],
             timeout_secs: None,
             broad_test_escape: false,
+            priority: Priority::Normal,
+            priority_reason: None,
         }
     }
 
@@ -220,6 +229,39 @@ pub(crate) mod tests {
         t.broad_test_escape = true;
         let back: JobSpec = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
         assert_eq!(back, t);
+    }
+
+    #[test]
+    fn r339_a_blocking_spec_needs_a_reason_and_the_default_stays_off_the_wire() {
+        let mut s = spec();
+        assert!(!serde_json::to_string(&s).unwrap().contains("priority"));
+        s.priority = Priority::Blocking;
+        assert_eq!(s.validate(), Err(CoreError::BlockingNeedsReason));
+        s.priority_reason = Some("release is waiting".into());
+        assert_eq!(s.validate(), Ok(()));
+        let back: JobSpec = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back, s);
+        let mut bg = spec();
+        bg.priority = Priority::Background;
+        assert_eq!(bg.validate(), Ok(()));
+    }
+
+    #[test]
+    fn r343_a_spec_has_no_field_that_claims_the_short_lane() {
+        let mut s = spec();
+        s.timeout_secs = Some(5);
+        s.broad_test_escape = true;
+        s.priority = Priority::Blocking;
+        s.priority_reason = Some("why".into());
+        let v = serde_json::to_value(&s).unwrap();
+        let keys: Vec<&String> = v.as_object().unwrap().keys().collect();
+        assert!(keys.iter().all(|k| !k.contains("short")), "{keys:?}");
+        // a client that sends one anyway is not believed: the field is simply not read
+        let mut with = v;
+        with["short"] = serde_json::json!(true);
+        with["lane"] = serde_json::json!("short");
+        let back: JobSpec = serde_json::from_value(with).unwrap();
+        assert_eq!(back, s);
     }
 
     #[test]

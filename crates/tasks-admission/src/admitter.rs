@@ -36,6 +36,15 @@ impl Layout {
     }
 }
 
+/// The clock and the owners' history that the queue order needs; passed in, never read here.
+#[derive(Debug, Clone, Default)]
+pub struct Queue {
+    /// Now, ms since the epoch: waiting jobs age against it.
+    pub now_ms: u64,
+    /// When each owner last started a job, ms; owners with none go first.
+    pub last_started: BTreeMap<String, u64>,
+}
+
 /// Result of trying to start a job.
 #[derive(Debug)]
 pub enum Attempt {
@@ -98,6 +107,7 @@ impl Admitter<'_> {
         &self,
         waiters: Vec<Waiter>,
         layout: &Layout,
+        queue: &Queue,
     ) -> Result<Vec<Decision>, AdmissionError> {
         let r = self.readings()?;
         let mut slots = BTreeMap::new();
@@ -134,6 +144,8 @@ impl Admitter<'_> {
             cache_free: r.cache_free,
             state_free: r.state_free,
             thresholds: self.thresholds.clone(),
+            now_ms: queue.now_ms,
+            last_started: queue.last_started.clone(),
             waiters,
         }))
     }
@@ -234,12 +246,20 @@ mod tests {
         layout.holders.insert((SlotKind::Compile, 0), JobId(4278));
         let held = fake.try_acquire(SlotKind::Compile, 0).unwrap();
         let d = a
-            .plan(vec![waiter(1, SlotKind::Compile, 0)], &layout)
+            .plan(
+                vec![waiter(1, SlotKind::Compile, 0)],
+                &layout,
+                &Queue::default(),
+            )
             .unwrap();
         assert!(matches!(&d[0].verdict, Verdict::Wait(r) if r.to_string().contains("#4278")));
         drop(held);
         let d = a
-            .plan(vec![waiter(1, SlotKind::Compile, 0)], &layout)
+            .plan(
+                vec![waiter(1, SlotKind::Compile, 0)],
+                &layout,
+                &Queue::default(),
+            )
             .unwrap();
         assert!(matches!(
             d[0].verdict,
@@ -260,7 +280,9 @@ mod tests {
         let script = Script(Mutex::new(vec![calm(), hot, calm()]));
         let a = admitter(&fake, &script);
         let w = waiter(1, SlotKind::Compile, 0);
-        let plan = a.plan(vec![w.clone()], &Layout::standard(1)).unwrap();
+        let plan = a
+            .plan(vec![w.clone()], &Layout::standard(1), &Queue::default())
+            .unwrap();
         let Verdict::Admit { slot, lane } = plan[0].verdict.clone() else {
             panic!("expected admit");
         };
@@ -353,7 +375,10 @@ mod tests {
         let a = admitter(&fake, &fake);
         let mut w = waiter(1, SlotKind::Compile, 0);
         w.predicted_secs = Some(10.0);
-        let d = a.plan(vec![w.clone()], &Layout::standard(1)).unwrap();
+        w.predicted_peak_memory = Some(100 << 20);
+        let d = a
+            .plan(vec![w.clone()], &Layout::standard(1), &Queue::default())
+            .unwrap();
         assert_eq!(
             d[0].verdict,
             Verdict::Admit {

@@ -7,6 +7,7 @@ mod job;
 mod machine;
 mod phase;
 pub mod plan;
+mod priority;
 mod requirements;
 
 pub use attribution::{Attribution, JobFigures, human_bytes};
@@ -16,4 +17,5 @@ pub use job::{DENIED_DEVICES, JobSpec, Kind, MAX_TIMEOUT_SECS, Placement};
 pub use machine::{Arch, Machine, Os};
 pub use phase::{Phase, SlotKind, WaitReason};
 pub use plan::{SplitOrigin, StepHints};
+pub use priority::{MAX_PRIORITY_REASON, Priority, UnknownPriority, check_reason};
 pub use requirements::{Requirements, Unmet};
