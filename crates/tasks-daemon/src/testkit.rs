@@ -67,6 +67,7 @@ impl FakeMachine {
                 memory: MemorySnapshot {
                     total_bytes: 16 << 30,
                     available_bytes: 8 << 30,
+                    ..MemorySnapshot::default()
                 },
                 pressure: PressureSnapshot {
                     memory: Level::Normal,
@@ -287,6 +288,8 @@ pub struct FakeForwarder {
     pub cancel_remote_fails: Mutex<bool>,
     pub links: Mutex<Vec<LinkReport>>,
     pub quality: Mutex<Vec<crate::forwarder::LinkQuality>>,
+    /// The classes the scheduler told the forwarder before starting a job.
+    pub classes: Mutex<Vec<(JobId, tasks_core::Priority, Option<String>)>>,
 }
 
 impl FakeForwarder {
@@ -305,6 +308,7 @@ impl FakeForwarder {
             cancel_remote_fails: Mutex::new(false),
             links: Mutex::new(Vec::new()),
             quality: Mutex::new(Vec::new()),
+            classes: Mutex::new(Vec::new()),
         }
     }
     pub fn script(&self, id: JobId, p: ForwardPoll) {
@@ -340,6 +344,9 @@ impl Forwarder for FakeForwarder {
     }
     fn registered(&self, job: JobId) -> bool {
         lock(&self.registered).contains(&job)
+    }
+    fn set_class(&self, job: JobId, priority: tasks_core::Priority, reason: Option<String>) {
+        lock(&self.classes).push((job, priority, reason));
     }
     fn ready_to_start(&self, job: JobId) -> bool {
         !lock(&self.not_ready).contains(&job)
@@ -809,6 +816,7 @@ pub fn peer_view(
         revoked: false,
         path: "unknown".into(),
         rtt_ms: None,
+        reply_ms: None,
     }
 }
 

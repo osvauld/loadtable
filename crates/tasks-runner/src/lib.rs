@@ -23,7 +23,9 @@ pub use error::RunnerError;
 pub use events::{RunEvents, TimedLine};
 pub use lease::Lease;
 pub use linebuf::{LineSplitter, SplitLimits};
-pub use logview::{Elider, ElisionCaps, LogNotes, cap_log_file, is_important, tail_lines};
+pub use logview::{
+    Elider, ElisionCaps, LogNotes, cap_log_file, is_important, tail_lines, tail_lines_at,
+};
 pub use meter::Attrib;
 pub use outcome::{End, Outcome};
 pub use policy::{CancelState, CancelToken, Policy, parse_grace_ms};

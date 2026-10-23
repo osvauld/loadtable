@@ -137,8 +137,12 @@ pub struct LinkQuality {
     pub peer: String,
     /// `direct`, `relay` or `unknown`.
     pub path: String,
-    /// Round-trip time of the selected path, in milliseconds.
+    /// The transport's round-trip time of the selected path (QUIC, from the connection's path
+    /// statistics), in milliseconds: the "path RTT".
     pub rtt_ms: Option<u64>,
+    /// How long the last status request took to be answered, in milliseconds: the "reply time".
+    /// It includes the peer's handler, so it is larger than the path RTT on a busy peer.
+    pub reply_ms: Option<u64>,
 }
 
 /// The daemon's view of its peers.
@@ -176,6 +180,12 @@ pub trait Forwarder: Send + Sync {
     fn wait_reason(&self, job: JobId) -> Option<String> {
         let _ = job;
         None
+    }
+    /// Tells the adapter the job's current queue class, which `prioritize` may have changed since
+    /// the job was registered. Called just before [`Forwarder::start`]; the class is sent with
+    /// the submission to the peer's queue. The default ignores it.
+    fn set_class(&self, job: JobId, priority: tasks_core::Priority, reason: Option<String>) {
+        let _ = (job, priority, reason);
     }
     /// Begins driving the registered job: the adapter's own thread locks the checkout, syncs,
     /// submits and follows the peer, appending its output to `log`.

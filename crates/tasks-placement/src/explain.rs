@@ -102,6 +102,18 @@ impl fmt::Display for Score {
     }
 }
 
+/// The chosen machine's expected finish with its basis, or why there is none: a fallback
+/// assumption (no run history, unknown queue wait) is never shown as an estimate.
+pub fn estimate_text(s: &Score) -> String {
+    if !s.run_known {
+        return "no estimate (no run history for this command)".to_string();
+    }
+    if s.wait_basis == WaitBasis::Unknown {
+        return "no estimate (the queue ahead is unknown)".to_string();
+    }
+    format!("estimate {} ({})", fmt_secs(s.total_secs()), basis_text(s))
+}
+
 fn exclusions_text(ex: &[Exclusion]) -> String {
     ex.iter()
         .map(ToString::to_string)
@@ -147,16 +159,19 @@ impl Report {
     pub fn one_line(&self) -> String {
         let chosen = self.chosen().map(|m| m.name.0.clone());
         let head = match &self.decision {
-            Decision::Run(n) => format!("{} ({})", n.0, self.request),
-            Decision::Wait => format!("wait ({}): no usable machine now", self.request),
-            Decision::Refuse(r) => format!("refused ({}): {r}", self.request),
+            Decision::Run(n) => format!("{} ({})", n.0, self.request.reason()),
+            Decision::Wait => format!("wait ({}): no usable machine now", self.request.reason()),
+            Decision::Refuse(r) => format!("refused ({}): {r}", self.request.reason()),
         };
         let rest: Vec<String> = self
             .machines
             .iter()
             .filter(|m| Some(&m.name.0) != chosen.as_ref())
             .map(|m| match &m.verdict {
-                Verdict::Eligible(s) => format!("{} {}", m.name.0, fmt_secs(s.total_secs())),
+                Verdict::Eligible(s) if s.run_known => {
+                    format!("{} {}", m.name.0, fmt_secs(s.total_secs()))
+                }
+                Verdict::Eligible(_) => format!("{} no estimate", m.name.0),
                 Verdict::Excluded(ex) => format!("{} excluded: {}", m.name.0, exclusions_text(ex)),
             })
             .collect();
@@ -164,7 +179,7 @@ impl Report {
         if let Some(c) = self.chosen()
             && let Verdict::Eligible(s) = &c.verdict
         {
-            out.push_str(&format!(": {}", fmt_secs(s.total_secs())));
+            out.push_str(&format!(": {}", estimate_text(s)));
         }
         if !rest.is_empty() {
             out.push_str("; ");
@@ -177,9 +192,14 @@ impl Report {
     pub fn multi_line(&self) -> String {
         let chosen = self.chosen().map(|m| m.name.clone());
         let head = match &self.decision {
-            Decision::Run(n) => format!("placement: {} ({})", n.0, self.request),
-            Decision::Wait => format!("placement: wait ({}), no usable machine now", self.request),
-            Decision::Refuse(r) => format!("placement: refused ({}), {r}", self.request),
+            Decision::Run(n) => format!("placement: {} ({})", n.0, self.request.reason()),
+            Decision::Wait => format!(
+                "placement: wait ({}), no usable machine now",
+                self.request.reason()
+            ),
+            Decision::Refuse(r) => {
+                format!("placement: refused ({}), {r}", self.request.reason())
+            }
         };
         let mut lines = vec![head];
         lines.extend(

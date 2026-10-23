@@ -300,9 +300,10 @@ impl Scheduler {
 
     /// The shared submit rules for a spec (R-191, R-210, R-091); a refusal is `Refused` and is
     /// written to the audit log with the rule that refused it.
-    fn rules(&self, spec: &JobSpec, what: &str) -> Result<(), ApiError> {
+    /// Applies the submit rules; the warnings of a passing spec come back for the reply.
+    fn rules(&self, spec: &JobSpec, what: &str) -> Result<Vec<String>, ApiError> {
         match self.spec_verdict(spec, Via::Local) {
-            Ok(_) => Ok(()),
+            Ok(v) => Ok(v.warnings),
             Err(refusals) => {
                 self.audit_refusal(spec, &refusals, Via::Local, None);
                 let text = refusals
@@ -408,11 +409,11 @@ impl Scheduler {
         Self::owner(spec.owner.as_str())?;
         spec.validate()
             .map_err(|e| ApiError::new(ErrorCode::Refused, format!("invalid job: {e}")))?;
-        self.rules(&spec, "")?;
+        let warnings = self.rules(&spec, "")?;
         let id = retry_busy(&API_RETRY, &sleep, || self.ledger.submit(&spec))
             .map_err(|e| ledger_error(&e))?;
         self.wake.notify();
-        Ok(Response::Submitted { id })
+        Ok(Response::Submitted { id, warnings })
     }
 
     /// What a plan's or suite's steps share, with the owner validated.
@@ -548,6 +549,7 @@ impl Scheduler {
                     LogView::Tail { .. } => Response::LogTail {
                         lines: Vec::new(),
                         running: true,
+                        end_offset: Some(0),
                     },
                     LogView::Grep { .. } => Response::LogGrep {
                         groups: Vec::new(),
@@ -569,10 +571,11 @@ impl Scheduler {
         }
         match view {
             LogView::Tail { lines } => {
-                let lines = logs::tail(&path, lines, !live).map_err(|e| log_error(&e))?;
+                let (lines, end) = logs::tail_at(&path, lines, !live).map_err(|e| log_error(&e))?;
                 Ok(Response::LogTail {
                     lines,
                     running: live,
+                    end_offset: Some(end),
                 })
             }
             LogView::Grep {

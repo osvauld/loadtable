@@ -268,7 +268,7 @@ impl Scheduler {
                             AlertLevel::Warn
                         },
                         format!(
-                            "memory pressure has stayed at {level:?} for {} s",
+                            "memory pressure has stayed at {level} for {} s",
                             (now_ms - since) / 1000
                         ),
                     ));

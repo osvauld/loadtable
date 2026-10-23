@@ -41,6 +41,18 @@ impl Request {
     }
 }
 
+impl Request {
+    /// Why the job was placed the way it was, in words: what the submitter asked for.
+    pub fn reason(&self) -> String {
+        match self {
+            Request::Local => "default: stays on this machine".to_string(),
+            Request::Pin => "pinned here with --pin".to_string(),
+            Request::Peer(n) => format!("asked with --peer {}", n.0),
+            Request::Anywhere => "chosen by --anywhere".to_string(),
+        }
+    }
+}
+
 impl fmt::Display for Request {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

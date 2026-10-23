@@ -20,7 +20,7 @@ use tasks_peer::sync::{
     SyncGate, SyncJob, SyncLimits, SyncObserver, SyncPhase, SyncReport, SyncStore,
 };
 use tasks_peer::transport::{PeerError, Transport};
-use tasks_peer::{CheckoutId, GitId, Hash};
+use tasks_peer::{CheckoutId, GitId, Handler, Hash, PeerId};
 
 fn checkout(w: &World) -> CheckoutId {
     CheckoutId::derive("laptop", &w.root)
@@ -99,8 +99,30 @@ fn pack_requests(w: &World) -> usize {
     w.net
         .requests()
         .iter()
-        .filter(|(_, k)| k == "sync_pack_chunk")
+        .filter(|(_, k)| k == "sync_pack_chunk" || k == "sync_pack_stream")
         .count()
+}
+
+fn kind_count(w: &World, kind: &str) -> usize {
+    w.net.requests().iter().filter(|(_, k)| k == kind).count()
+}
+
+/// A daemon of the previous build: everything the receiver does except raw streams, which it
+/// has never heard of (the trait defaults refuse them).
+struct OldPeer(Arc<dyn Handler>);
+
+impl Handler for OldPeer {
+    fn handle(&self, from: &PeerId, msg: Body) -> Body {
+        self.0.handle(from, msg)
+    }
+    fn events(
+        &self,
+        from: &PeerId,
+        remote: tasks_peer::RemoteJobId,
+        offset: u64,
+    ) -> Result<Box<dyn tasks_peer::transport::EventStream>, Refusal> {
+        self.0.events(from, remote, offset)
+    }
 }
 
 #[test]
@@ -342,8 +364,121 @@ fn r156_a_big_checkout_and_a_multi_chunk_pack_sync_without_frame_errors() {
     write(&w.root, "empty.txt", "");
     let r = sync(&w, 1).unwrap();
     assert_eq!(r.files, 3000 + 4 + 2);
-    assert!(pack_requests(&w) >= 3, "the pack is sent in bounded chunks");
+    // a new peer takes the pack as one raw stream: no chunk requests at all
+    assert_eq!(kind_count(&w, "sync_pack_stream"), 1);
+    assert_eq!(kind_count(&w, "sync_pack_chunk"), 0);
+    assert!(r.pack_bytes_sent > (MAX_CHUNK_BYTES * 3) as u64);
     assert_same(&w, &[]);
+}
+
+// R-365
+#[test]
+fn r365_a_peer_that_does_not_know_streams_gets_the_pack_in_chunks_as_before() {
+    let w = World::new();
+    write(&w.root, "assets/big.txt", &noise(MAX_CHUNK_BYTES * 12));
+    // the daemon behind nixos is the previous build
+    let new = w.receiver_with(
+        Arc::clone(&w.runner),
+        Arc::new(tasks_peer::receiver::AllowAll),
+        tasks_peer::outputs::FetchPolicy::default(),
+    );
+    w.net.serve(&w.nixos, Arc::new(OldPeer(new)));
+    let r = sync(&w, 1).unwrap();
+    assert!(r.pack_bytes_sent > MAX_CHUNK_BYTES as u64);
+    assert!(kind_count(&w, "sync_pack_chunk") >= 2);
+    // the stream was tried once, refused at its head, and nothing was sent on it
+    assert_eq!(kind_count(&w, "sync_pack_stream"), 1);
+    assert_same(&w, &[]);
+}
+
+// R-364
+#[test]
+fn r364_a_large_pack_over_a_slow_link_does_not_cost_a_round_trip_per_chunk() {
+    let latency = std::time::Duration::from_millis(30);
+    // one sync of a big pack on a slow link; (time, round trips, chunk requests)
+    let run = |old_peer: bool| {
+        let w = World::new();
+        write(&w.root, "assets/big.txt", &noise(MAX_CHUNK_BYTES * 40));
+        if old_peer {
+            let new = w.receiver_with(
+                Arc::clone(&w.runner),
+                Arc::new(tasks_peer::receiver::AllowAll),
+                tasks_peer::outputs::FetchPolicy::default(),
+            );
+            w.net.serve(&w.nixos, Arc::new(OldPeer(new)));
+        }
+        w.net.set_latency(latency);
+        let before = w.net.round_trips();
+        let t0 = std::time::Instant::now();
+        sync(&w, 1).unwrap();
+        (
+            t0.elapsed(),
+            w.net.round_trips() - before,
+            kind_count(&w, "sync_pack_chunk"),
+        )
+    };
+    let (streamed_time, streamed_trips, streamed_chunks) = run(false);
+    let (chunked_time, chunked_trips, chunks) = run(true);
+    assert_eq!(streamed_chunks, 0);
+    assert!(chunks >= 6, "{chunks} chunks");
+    // offer, stream open, stream end, apply: the same few round trips whatever the pack size
+    assert!(streamed_trips <= 5, "{streamed_trips} round trips");
+    // the chunked path pays one more per chunk
+    assert!(
+        chunked_trips >= streamed_trips + chunks as u64 - 1,
+        "{chunked_trips} vs {streamed_trips} with {chunks} chunks"
+    );
+    // and it shows in the time: the chunk round trips alone are `chunks` x latency
+    assert!(
+        chunked_time >= latency * chunks as u32,
+        "chunked took {chunked_time:?}"
+    );
+    assert!(
+        streamed_time < chunked_time,
+        "{streamed_time:?} vs {chunked_time:?}"
+    );
+}
+
+// R-366
+#[test]
+fn r366_a_streamed_pack_over_the_workers_limit_is_cut_refused_and_leaves_no_file() {
+    let w = World::new();
+    let id = checkout(&w);
+    let small = SyncStore::new(
+        w.tmp.path().join("small-store"),
+        SyncLimits {
+            max_pack_bytes: 1000,
+            ..SyncLimits::default()
+        },
+        Arc::new(GixTransfer::new()),
+    );
+    // exactly the limit is accepted, one more byte is not
+    let ok = small.put_stream(
+        &w.origin,
+        &id,
+        1,
+        &mut std::io::Cursor::new(vec![7u8; 1000]),
+    );
+    assert_eq!(ok.unwrap(), 1000);
+    let over = small.put_stream(
+        &w.origin,
+        &id,
+        2,
+        &mut std::io::Cursor::new(vec![7u8; 1001]),
+    );
+    assert!(
+        matches!(over, Err(Refusal::LimitExceeded { .. })),
+        "{over:?}"
+    );
+    let incoming = w
+        .tmp
+        .path()
+        .join("small-store")
+        .join(format!("laptop-node/{}/incoming", id));
+    let left: Vec<_> = fs::read_dir(incoming)
+        .map(|d| d.flatten().collect())
+        .unwrap_or_default();
+    assert!(left.is_empty(), "{left:?}");
 }
 
 #[test]

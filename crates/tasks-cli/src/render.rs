@@ -108,6 +108,14 @@ pub fn phase_tag(p: &Phase) -> &'static str {
     }
 }
 
+/// The peer's phase to show: a job that has ended here never shows an unfinished remote phase
+/// (rows written before the final phase was stored still carry the last one mirrored).
+fn shown_remote_phase(j: &JobView) -> Option<&Phase> {
+    j.remote_phase
+        .as_ref()
+        .filter(|rp| !j.phase.is_terminal() || rp.is_terminal())
+}
+
 /// Phase plus where a forward runs and its remote job (R-186).
 pub fn phase_label(j: &JobView) -> String {
     // a forwarded job the peer holds back on its own gates is waiting, not running
@@ -128,7 +136,7 @@ pub fn phase_label(j: &JobView) -> String {
         }
         // what the peer says about the job, beside the local phase (R-015, R-186)
         let mut notes = Vec::new();
-        if let Some(rp) = &j.remote_phase {
+        if let Some(rp) = shown_remote_phase(j) {
             notes.push(format!("remote {}", phase_tag(rp)));
         }
         if !j.phase.is_terminal()
@@ -332,7 +340,7 @@ pub fn job_detail(j: &JobView, now_ms: i64, waiter: Option<&WaiterView>) -> Stri
     let _ = writeln!(out, "  owner:     {}", j.owner);
     let _ = writeln!(out, "  cwd:       {}", j.cwd.display());
     let _ = writeln!(out, "  command:   {}", command_display(&j.argv));
-    let _ = writeln!(out, "  placement: {:?}; kind {:?}", j.placement, j.kind);
+    let _ = writeln!(out, "  placement: {}, kind {}", j.placement, j.kind);
     let _ = writeln!(out, "  exit:      {}", exit_label(j));
     if let Some(s) = &j.summary {
         let _ = writeln!(out, "  summary:   {s}");
@@ -379,7 +387,7 @@ pub fn job_detail(j: &JobView, now_ms: i64, waiter: Option<&WaiterView>) -> Stri
             }
         }
     }
-    if let Some(rp) = &j.remote_phase {
+    if let Some(rp) = shown_remote_phase(j) {
         let _ = writeln!(out, "  remote:    {}", phase_tag(rp));
     }
     if let Some(n) = wait_note(j, waiter) {
@@ -453,6 +461,23 @@ pub fn fmt_bytes(b: u64) -> String {
         format!("{:.1} GiB", f / GIB)
     } else {
         format!("{:.0} MiB", f / MIB)
+    }
+}
+
+/// Any size from bytes to TiB with one decimal (`0 B`, `4.0 KiB`, `1.0 GiB`): swap figures and
+/// rates are often small.
+fn fmt_size(b: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = b as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u + 1 < UNITS.len() {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{b} B")
+    } else {
+        format!("{v:.1} {}", UNITS.get(u).copied().unwrap_or("B"))
     }
 }
 
@@ -597,12 +622,16 @@ pub fn status(s: &StatusSnapshot) -> String {
         pct(p.cpu),
         pct(p.io)
     );
+    if let Some(l) = load_line(p) {
+        let _ = writeln!(out, "{l}");
+    }
     if let Some(b) = &p.compile_blocker {
         let _ = writeln!(out, "a new compile job would wait: {b}");
     }
     if let Some(w) = &p.warning {
         let _ = writeln!(out, "warning: {w}");
     }
+    peers_section(&mut out, &s.peers);
     for a in &s.alerts {
         let _ = writeln!(out, "alert [{}] {}", a.level, a.message);
     }
@@ -639,6 +668,126 @@ pub fn status(s: &StatusSnapshot) -> String {
         }
     }
     out
+}
+
+/// `cpu busy 23%, swap 1.0 GiB of 8.0 GiB used (in 0 B/s, out 0 B/s)`; `None` when the machine
+/// reported none of it (an older daemon).
+fn load_line(p: &tasks_daemon::api::PressureView) -> Option<String> {
+    let cpu = p.cpu_busy_pct.map(|c| format!("cpu busy {c:.0}%"));
+    let swap = swap_text(p.swap_total, p.swap_used, p.swap_in_per_s, p.swap_out_per_s);
+    match (cpu, swap) {
+        (None, None) => None,
+        (Some(c), None) => Some(c),
+        (None, Some(s)) => Some(s),
+        (Some(c), Some(s)) => Some(format!("{c}, {s}")),
+    }
+}
+
+/// Swap size, use and rates in words; `None` when swap was not reported.
+fn swap_text(
+    total: Option<u64>,
+    used: Option<u64>,
+    in_s: Option<u64>,
+    out_s: Option<u64>,
+) -> Option<String> {
+    let total = total?;
+    if total == 0 {
+        return Some("no swap".to_string());
+    }
+    let mut s = format!(
+        "swap {} of {} used",
+        fmt_size(used.unwrap_or(0)),
+        fmt_size(total)
+    );
+    if in_s.is_some() || out_s.is_some() {
+        let _ = write!(
+            s,
+            " (in {}/s, out {}/s)",
+            fmt_size(in_s.unwrap_or(0)),
+            fmt_size(out_s.unwrap_or(0))
+        );
+    }
+    Some(s)
+}
+
+/// One block per peer: name, state, path, the two latencies, roles, and what it last reported.
+fn peers_section(out: &mut String, peers: &[tasks_daemon::api::PeerView]) {
+    if peers.is_empty() {
+        return;
+    }
+    out.push_str("peers:\n");
+    for p in peers {
+        let ms = |v: Option<u64>| v.map_or("-".to_string(), |r| format!("{r} ms"));
+        let seen = p.last_seen_ago_secs.map_or(String::new(), |s| {
+            format!(", last seen {} ago", fmt_precise(s as f64))
+        });
+        let _ = writeln!(
+            out,
+            "  {} {} ({}; path RTT {}, reply time {}{seen})",
+            p.name,
+            p.state,
+            if p.path.is_empty() {
+                "unknown"
+            } else {
+                &p.path
+            },
+            ms(p.rtt_ms),
+            ms(p.reply_ms)
+        );
+        if !p.detail.is_empty() {
+            let _ = writeln!(out, "    {}", p.detail);
+        }
+        if !p.roles_out.is_empty() || !p.roles_in.is_empty() {
+            let list = |v: &[String]| {
+                if v.is_empty() {
+                    "none".to_string()
+                } else {
+                    v.join(", ")
+                }
+            };
+            let _ = writeln!(
+                out,
+                "    roles: we may {}; it may {}",
+                list(&p.roles_out),
+                list(&p.roles_in)
+            );
+        }
+        if let Some(m) = &p.machine {
+            let slots = m
+                .slots
+                .iter()
+                .map(|x| format!("{} {}/{}", x.kind, x.used, x.total))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(
+                out,
+                "    {} cores, {}; slots {slots}; {} waiting, {} running",
+                m.cores,
+                fmt_size(m.memory_bytes),
+                m.waiting,
+                m.running
+            );
+            let pc = |v: Option<u8>| v.map_or("?".to_string(), |x| format!("{x}%"));
+            let mut load = format!(
+                "    pressure: cpu {}, memory {}, io {}",
+                pc(m.cpu_pct),
+                pc(m.memory_pct),
+                pc(m.io_pct)
+            );
+            if let Some(c) = m.cpu_busy_pct {
+                let _ = write!(load, "; cpu busy {c}%");
+            }
+            if let Some(sw) =
+                swap_text(m.swap_total, m.swap_used, m.swap_in_per_s, m.swap_out_per_s)
+            {
+                let _ = write!(load, "; {sw}");
+            }
+            if !m.pressure_summary.is_empty() {
+                let _ = write!(load, " ({})", m.pressure_summary);
+            }
+            let _ = writeln!(out, "{load}");
+        }
+    }
 }
 
 /// `tasks2 admission`: the lock directory, thresholds, slot holders and the source of every

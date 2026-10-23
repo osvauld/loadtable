@@ -580,13 +580,23 @@ pub enum Command {
     /// Stalls explained: each recorded pressure trip with the busiest job, transfer and
     /// outside process at that moment.
     Stalls(StallsArgs),
-    /// The desktop window (not built in this binary).
+    /// The desktop window (this build says whether it is built in).
+    #[cfg_attr(feature = "ui", command(about = "The desktop window (built in)"))]
+    #[cfg_attr(
+        not(feature = "ui"),
+        command(about = "The desktop window (not built in this binary)")
+    )]
     Ui {
         /// Ignored.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
         args: Vec<String>,
     },
-    /// The MCP server (not built in this binary).
+    /// The MCP server (this build says whether it is built in).
+    #[cfg_attr(feature = "mcp", command(about = "The MCP server (built in)"))]
+    #[cfg_attr(
+        not(feature = "mcp"),
+        command(about = "The MCP server (not built in this binary)")
+    )]
     Mcp {
         /// Ignored.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]

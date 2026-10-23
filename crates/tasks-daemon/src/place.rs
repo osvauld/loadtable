@@ -417,7 +417,15 @@ impl Scheduler {
             Ok(r) => r,
             Err(e) => return Placed::Waiting(format!("placement failed: {e}")),
         };
-        let line = report.one_line();
+        let mut line = report.one_line();
+        if rec.origin.is_some() {
+            // a job another machine sent here runs here because it was sent: this machine did
+            // not choose it, so no placement estimate is claimed
+            line = format!(
+                "{} (sent here by a peer, which chose this machine; the job runs where it was sent)",
+                self.cfg.machine
+            );
+        }
         match &report.decision {
             Decision::Run(name) if name.0 == self.cfg.machine => {
                 lock(&self.state).placed.insert(rec.id, line.clone());

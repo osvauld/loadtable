@@ -70,6 +70,21 @@ pub enum Phase {
 }
 
 impl Phase {
+    /// The phase as one lowercase word, for messages people read.
+    pub fn word(&self) -> &'static str {
+        match self {
+            Phase::Queued => "queued",
+            Phase::Waiting(_) => "waiting",
+            Phase::Running => "running",
+            Phase::Passed => "passed",
+            Phase::Failed { .. } => "failed",
+            Phase::TimedOut { .. } => "timed_out",
+            Phase::NotStarted { .. } => "not_started",
+            Phase::Cancelled => "cancelled",
+            Phase::Interrupted => "interrupted",
+        }
+    }
+
     /// True when no further transition is possible.
     pub fn is_terminal(&self) -> bool {
         matches!(

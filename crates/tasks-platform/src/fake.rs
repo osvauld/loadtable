@@ -42,6 +42,7 @@ impl Default for FakePlatform {
             memory: MemorySnapshot {
                 total_bytes: 16 << 30,
                 available_bytes: 8 << 30,
+                ..MemorySnapshot::default()
             },
             pressure: PressureSnapshot {
                 memory: Level::Normal,

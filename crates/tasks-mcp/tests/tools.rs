@@ -22,7 +22,10 @@ use tasks_mcp::{DaemonError, FakeDaemon};
 
 fn submitted(id: i64) -> Arc<FakeDaemon> {
     fake(move |r| match r {
-        Request::Submit { .. } => Ok(Response::Submitted { id: JobId(id) }),
+        Request::Submit { .. } => Ok(Response::Submitted {
+            id: JobId(id),
+            warnings: vec![],
+        }),
         Request::List { .. } => Ok(Response::Jobs {
             jobs: vec![],
             truncated: false,
@@ -75,7 +78,10 @@ fn r193_the_daemons_refusal_of_a_broad_test_reaches_the_agent() {
                 "refused: this cargo test builds every target; use --lib or --test NAME",
             )))
         }
-        Request::Submit { .. } => Ok(Response::Submitted { id: JobId(1) }),
+        Request::Submit { .. } => Ok(Response::Submitted {
+            id: JobId(1),
+            warnings: vec![],
+        }),
         _ => Ok(Response::Jobs {
             jobs: vec![],
             truncated: false,
@@ -232,7 +238,10 @@ fn r187_other_owners_in_the_same_cwd_are_a_warning_not_a_block() {
             jobs: vec![job(4, "someone", Phase::Running, "cargo build")],
             truncated: false,
         }),
-        Request::Submit { .. } => Ok(Response::Submitted { id: JobId(5) }),
+        Request::Submit { .. } => Ok(Response::Submitted {
+            id: JobId(5),
+            warnings: vec![],
+        }),
         _ => Err(DaemonError::Failed("unexpected".into())),
     });
     let r = call(&tools_with(&d), "submit", json!({"argv": ["true"]}));
@@ -582,6 +591,7 @@ fn logs_default_to_the_last_hundred_lines() {
             Ok(Response::LogTail {
                 lines: vec!["a".into(), "b".into()],
                 running: true,
+                end_offset: None,
             })
         }
         _ => Err(DaemonError::Failed("unexpected".into())),
@@ -602,6 +612,7 @@ fn a_huge_tail_is_bounded_with_a_note() {
                 .map(|i| format!("line {i} {}", "x".repeat(40)))
                 .collect(),
             running: false,
+            end_offset: None,
         })
     });
     let r = call(&tools_with(&d), "logs", json!({"id": 1, "tail": 5000}));
@@ -800,6 +811,7 @@ fn wait_returns_the_state_and_log_tail_once_the_job_is_over() {
             Ok(Response::LogTail {
                 lines: vec!["a".into(), "test result: FAILED".into()],
                 running: false,
+                end_offset: None,
             })
         }
         _ => Err(DaemonError::Failed("unexpected".into())),
@@ -1018,6 +1030,11 @@ fn snapshot() -> tasks_daemon::api::StatusSnapshot {
             io: None,
             available_memory: Some(8 << 30),
             memory_total: None,
+            cpu_busy_pct: None,
+            swap_total: None,
+            swap_used: None,
+            swap_in_per_s: None,
+            swap_out_per_s: None,
             cache_free: Some(50 << 30),
             state_free: None,
             compile_blocker: Some("cpu pressure 40%".into()),
@@ -1040,6 +1057,7 @@ fn snapshot() -> tasks_daemon::api::StatusSnapshot {
             state: "up".into(),
             last_seen_ago_secs: Some(1),
             detail: String::new(),
+            reply_ms: None,
             machine: None,
             did: String::new(),
             roles_out: vec![],
@@ -1372,4 +1390,60 @@ fn r349_a_forwarded_job_the_peer_holds_back_reads_as_waiting() {
         r.structured["remote_wait"],
         "waiting on nixos: CPU contended"
     );
+}
+
+// R-368
+#[test]
+fn r368_submit_rule_warnings_from_the_daemon_reach_the_agent_as_notes() {
+    let d = fake(|r| match r {
+        Request::Submit { .. } => Ok(Response::Submitted {
+            id: JobId(3),
+            warnings: vec!["this builds every test target".into()],
+        }),
+        _ => Ok(Response::Jobs {
+            jobs: vec![],
+            truncated: false,
+        }),
+    });
+    let r = call(
+        &tools_with(&d),
+        "submit",
+        json!({"argv": ["cargo", "test", "-p", "x"]}),
+    );
+    assert!(!r.is_error, "{}", r.text);
+    assert!(
+        r.text.contains("warning: this builds every test target"),
+        "{}",
+        r.text
+    );
+    assert_eq!(
+        r.structured["notes"][0],
+        "warning: this builds every test target"
+    );
+}
+
+// R-358
+#[test]
+fn r358_status_reports_cpu_busy_swap_and_the_peers_path_and_reply_time() {
+    let d = fake(|_| {
+        let mut s = snapshot();
+        s.pressure.cpu_busy_pct = Some(37.0);
+        s.pressure.swap_total = Some(4 << 30);
+        s.pressure.swap_used = Some(1 << 30);
+        s.pressure.swap_in_per_s = Some(0);
+        s.pressure.swap_out_per_s = Some(0);
+        s.peers[0].path = "direct".into();
+        s.peers[0].rtt_ms = Some(3);
+        s.peers[0].reply_ms = Some(87);
+        Ok(Response::Status(Box::new(s)))
+    });
+    let r = call(&tools_with(&d), "status", json!({}));
+    assert!(!r.is_error, "{}", r.text);
+    for want in [
+        "cpu busy 37%",
+        "swap 1.0 GiB of 4.0 GiB used",
+        "peer nixos: up (direct; path RTT 3 ms, reply time 87 ms)",
+    ] {
+        assert!(r.text.contains(want), "missing {want:?} in:\n{}", r.text);
+    }
 }

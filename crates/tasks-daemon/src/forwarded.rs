@@ -122,6 +122,8 @@ impl Scheduler {
         if let Some(dir) = rj.log_path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
+        self.forwarder
+            .set_class(id, rec.spec.priority, rec.spec.priority_reason.clone());
         if let Err(e) = self.forwarder.start(id, &rj.log_path) {
             let text = format!("cannot start forwarding to {}: {e}", fw.peer.0);
             self.set_wait(id, LedgerWait::Placement(text.clone()), &text);
@@ -297,6 +299,14 @@ impl Scheduler {
             timeout: None,
             summary: Some(summary),
         };
+        // The peer's last word replaces the last phase mirrored while it ran (a job that passed
+        // must not keep showing `remote queued`). Only when the peer held the job at all.
+        if end.remote_job.is_some() && !end.nothing_submitted {
+            let _ = self.guard(
+                "set_remote_phase",
+                self.ledger.set_remote_phase(id, &end.phase),
+            );
+        }
         let retry = RetryPolicy::default();
         match retry_busy(&retry, &sleep, || self.ledger.finish(id, &fin)) {
             Ok(()) | Err(LedgerError::IllegalTransition { .. } | LedgerError::NotFound(_)) => {}

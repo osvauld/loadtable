@@ -11,7 +11,7 @@ use crate::ids::{PeerId, RemoteJobId};
 use crate::proto::{self, ALPN, Body, MAX_CONTROL_BYTES, MAX_FRAME_BYTES, Refusal};
 use crate::transport::{
     Closer, Connection, DialHints, EventStream, Handler, LinkInfo, PathKind, PeerError, StreamPoll,
-    Transport,
+    Transport, Upload,
 };
 use crate::trust::{AddrSource, AddressBook, SelfAddr};
 use iroh::endpoint::{NetReportConfig, PortmapperConfig, RecvStream, SendStream, presets};
@@ -24,6 +24,8 @@ use tokio::runtime::Handle;
 
 /// Idle time after which the serving side sends a heartbeat on a subscription.
 pub const HEARTBEAT: Duration = Duration::from_secs(15);
+/// A raw upload that makes no progress this long is abandoned by the receiving side.
+pub const UPLOAD_IDLE: Duration = Duration::from_secs(120);
 /// A connection that has not presented a valid grant this long after its last stream is closed.
 pub const PRE_ADMISSION: Duration = Duration::from_secs(10);
 
@@ -246,6 +248,29 @@ impl Connection for IrohConnection {
         }
     }
 
+    fn open_upload(&mut self, head: Body) -> Result<Box<dyn Upload>, PeerError> {
+        let conn = self.conn.clone();
+        let (send, recv) = self.rt.block_on(async move {
+            let (mut send, mut recv) = conn
+                .open_bi()
+                .await
+                .map_err(|e| PeerError::LinkLost(e.to_string()))?;
+            write_frame(&mut send, &head).await?;
+            // the receiver accepts or refuses the head before a byte of data is sent; an older
+            // build refuses an unknown message here
+            match read_frame(&mut recv).await? {
+                Body::Ok => Ok((send, recv)),
+                Body::Refuse(r) => Err(PeerError::Refused(r)),
+                _ => Err(PeerError::Protocol("unexpected answer to an upload".into())),
+            }
+        })?;
+        Ok(Box::new(IrohUpload {
+            send: Some(send),
+            recv,
+            rt: self.rt.clone(),
+        }))
+    }
+
     fn request(&mut self, msg: Body) -> Result<Body, PeerError> {
         let conn = self.conn.clone();
         let reply = self.rt.block_on(async move {
@@ -332,6 +357,52 @@ impl Connection for IrohConnection {
             Err(_) => return Err(PeerError::LinkLost("subscription task ended".into())),
         }
         Ok(Box::new(IrohEvents { rx }))
+    }
+}
+
+struct IrohUpload {
+    /// Taken when the upload ends; still there on drop means it was abandoned.
+    send: Option<SendStream>,
+    recv: RecvStream,
+    rt: Handle,
+}
+
+impl Drop for IrohUpload {
+    fn drop(&mut self) {
+        if let Some(mut s) = self.send.take() {
+            // an abandoned upload must not look like a complete (shorter) one
+            let _ = s.reset(0u32.into());
+        }
+    }
+}
+
+impl Upload for IrohUpload {
+    fn write(&mut self, data: &[u8]) -> Result<(), PeerError> {
+        let Some(send) = self.send.as_mut() else {
+            return Err(PeerError::LinkLost("the upload already ended".into()));
+        };
+        self.rt.block_on(async move {
+            send.write_all(data)
+                .await
+                .map_err(|e| PeerError::LinkLost(e.to_string()))
+        })
+    }
+
+    fn finish(mut self: Box<Self>) -> Result<Body, PeerError> {
+        let Some(mut send) = self.send.take() else {
+            return Err(PeerError::LinkLost("the upload already ended".into()));
+        };
+        let rt = self.rt.clone();
+        let recv = &mut self.recv;
+        let reply = rt.block_on(async move {
+            send.finish()
+                .map_err(|e| PeerError::LinkLost(e.to_string()))?;
+            read_frame(recv).await
+        })?;
+        match reply {
+            Body::Refuse(r) => Err(PeerError::Refused(r)),
+            other => Ok(other),
+        }
     }
 }
 
@@ -422,6 +493,9 @@ async fn serve_stream(
         }
         Err(e) => return Err(e),
     };
+    if matches!(msg, Body::SyncPackStream { .. }) {
+        return serve_upload(handler, peer, send, recv, msg).await;
+    }
     if let Body::Subscribe {
         remote,
         from_offset,
@@ -479,6 +553,61 @@ async fn serve_stream(
     let reply = tokio::task::spawn_blocking(move || handler.handle(&peer, msg))
         .await
         .map_err(|e| PeerError::Protocol(e.to_string()))?;
+    write_frame(&mut send, &reply).await?;
+    let _ = send.finish();
+    Ok(())
+}
+
+/// Bridges the blocking [`std::io::Read`] a handler consumes to a QUIC receive stream. Runs on a
+/// blocking thread; each read waits at most [`UPLOAD_IDLE`].
+struct StreamReader {
+    recv: RecvStream,
+    rt: Handle,
+}
+
+impl std::io::Read for StreamReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let recv = &mut self.recv;
+        let got = self
+            .rt
+            .block_on(async move { tokio::time::timeout(UPLOAD_IDLE, recv.read(buf)).await });
+        match got {
+            Ok(Ok(n)) => Ok(n.unwrap_or(0)),
+            Ok(Err(e)) => Err(std::io::Error::other(e.to_string())),
+            Err(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the upload stalled",
+            )),
+        }
+    }
+}
+
+/// A raw upload: the head was read; accept or refuse it, then hand the rest of the stream to the
+/// handler and answer with its reply.
+async fn serve_upload(
+    handler: Arc<dyn Handler>,
+    peer: PeerId,
+    mut send: SendStream,
+    recv: RecvStream,
+    head: Body,
+) -> Result<(), PeerError> {
+    let (h, p, hd) = (Arc::clone(&handler), peer.clone(), head.clone());
+    let accepted = tokio::task::spawn_blocking(move || h.accept_upload(&p, &hd))
+        .await
+        .map_err(|e| PeerError::Protocol(e.to_string()))?;
+    if let Err(r) = accepted {
+        write_frame(&mut send, &Body::Refuse(r)).await?;
+        let _ = send.finish();
+        return Ok(());
+    }
+    write_frame(&mut send, &Body::Ok).await?;
+    let rt = Handle::current();
+    let reply = tokio::task::spawn_blocking(move || {
+        let mut reader = StreamReader { recv, rt };
+        handler.upload(&peer, head, &mut reader)
+    })
+    .await
+    .map_err(|e| PeerError::Protocol(e.to_string()))?;
     write_frame(&mut send, &reply).await?;
     let _ = send.finish();
     Ok(())

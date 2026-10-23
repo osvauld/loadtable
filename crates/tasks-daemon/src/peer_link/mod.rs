@@ -177,6 +177,8 @@ struct LinkInfo {
     ok: bool,
     error: String,
     status: Option<PeerStatus>,
+    /// How long the last status request took to be answered.
+    reply: Option<Duration>,
 }
 
 pub(crate) struct Inner<T: Transport> {
@@ -221,6 +223,7 @@ impl<T: Transport + 'static> PeerLink<T> {
                         ok: false,
                         error: String::new(),
                         status: None,
+                        reply: None,
                     },
                 )
             })
@@ -330,6 +333,7 @@ fn sync_peers<T: Transport>(inner: &Inner<T>) {
                         ok: false,
                         error: String::new(),
                         status: None,
+                        reply: None,
                     },
                 );
             }
@@ -362,7 +366,7 @@ fn probe_all<T: Transport>(inner: &Inner<T>) {
             let old_path = l.path.path.name();
             l.probed = true;
             match result {
-                Ok((status, path)) => {
+                Ok((status, path, reply)) => {
                     let new_path = path.path.name();
                     change = if was_up != Some(true) {
                         Some(LinkChange::Up {
@@ -382,6 +386,7 @@ fn probe_all<T: Transport>(inner: &Inner<T>) {
                     l.error.clear();
                     l.status = Some(status);
                     l.path = path;
+                    l.reply = Some(reply);
                 }
                 Err(e) => {
                     if was_up != Some(false) {
@@ -404,10 +409,14 @@ fn probe_all<T: Transport>(inner: &Inner<T>) {
 fn probe<T: Transport>(
     inner: &Inner<T>,
     node: &PeerId,
-) -> Result<(PeerStatus, PathInfo), PeerError> {
+) -> Result<(PeerStatus, PathInfo, Duration), PeerError> {
     let mut conn = inner.transport.connect(node, inner.opts.probe_timeout)?;
-    match conn.request(Body::StatusRequest)? {
-        Body::Status(s) => Ok((s, conn.link_info())),
+    // wall time on purpose: the adapter's clock may be a test clock, and this measures the wire
+    let sent = std::time::Instant::now();
+    let body = conn.request(Body::StatusRequest)?;
+    let reply = sent.elapsed();
+    match body {
+        Body::Status(s) => Ok((s, conn.link_info(), reply)),
         other => Err(PeerError::Protocol(format!(
             "answered a status request with {}",
             tasks_peer::fake::kind(&other)
@@ -525,6 +534,9 @@ impl<T: Transport + 'static> Forwarder for PeerLink<T> {
                     .path
                     .rtt
                     .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+                reply_ms: l
+                    .reply
+                    .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
             })
             .collect()
     }
@@ -623,6 +635,15 @@ impl<T: Transport + 'static> Forwarder for PeerLink<T> {
                 let g = j.fwd.try_lock().ok()?;
                 g.as_ref().map(Forward::mirror)
             }
+        }
+    }
+
+    fn set_class(&self, job: JobId, priority: tasks_core::Priority, reason: Option<String>) {
+        if let Some(j) = self.job(job)
+            && let Ok(mut g) = j.fwd.try_lock()
+            && let Some(f) = g.as_mut()
+        {
+            f.set_class(priority, reason);
         }
     }
 

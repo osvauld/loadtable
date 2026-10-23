@@ -496,3 +496,166 @@ fn r326_status_says_how_exact_the_costs_are_and_shows_cost_and_trips() {
     j.figures = Some(f);
     assert!(job_detail(&j, 0, None).contains("cost:      wrote 3 GiB (process tree)"));
 }
+
+// R-353
+#[test]
+fn r353_a_finished_forwarded_job_does_not_show_an_unfinished_remote_phase() {
+    let mut j = job(1, "o", "/w", Phase::Passed, "uname -a");
+    j.forwarded_to = Some(("nixos".into(), Some(1)));
+    // a row written before the final phase was stored: the last one mirrored was `queued`
+    j.remote_phase = Some(Phase::Queued);
+    let detail = job_detail(&j, NOW, None);
+    assert!(!detail.contains("remote:"), "{detail}");
+    assert!(
+        !phase_label(&j).contains("remote queued"),
+        "{}",
+        phase_label(&j)
+    );
+    // the peer's own final word is shown
+    j.remote_phase = Some(Phase::Passed);
+    assert!(job_detail(&j, NOW, None).contains("remote:    passed"));
+    assert!(
+        phase_label(&j).contains("remote passed"),
+        "{}",
+        phase_label(&j)
+    );
+    // while the job lives, what the peer says is what is shown
+    let mut live = job(2, "o", "/w", Phase::Running, "cargo test");
+    live.forwarded_to = Some(("nixos".into(), Some(2)));
+    live.remote_phase = Some(Phase::Queued);
+    assert!(job_detail(&live, NOW, None).contains("remote:    queued"));
+}
+
+// R-354
+#[test]
+fn r354_placement_and_kind_are_words_not_debug_text() {
+    let mut j = job(1, "o", "/w", Phase::Passed, "uname -a");
+    j.placement = tasks_core::Placement::Peer(tasks_core::MachineName("nixos".into()));
+    j.kind = tasks_core::Kind::Run;
+    let d = job_detail(&j, NOW, None);
+    assert!(d.contains("placement: peer nixos (asked), kind run"), "{d}");
+    for leak in ["Peer(", "MachineName", "Kind::", "Run\n"] {
+        assert!(!d.contains(leak), "{leak} leaked: {d}");
+    }
+    for (p, want) in [
+        (tasks_core::Placement::Here, "placement: here,"),
+        (tasks_core::Placement::Pin, "placement: here (pinned),"),
+        (
+            tasks_core::Placement::Anywhere,
+            "placement: anywhere (chosen by the scheduler),",
+        ),
+    ] {
+        j.placement = p;
+        assert!(job_detail(&j, NOW, None).contains(want));
+    }
+    // the words other renderers use for phases and kinds carry no braces either
+    assert_eq!(tasks_core::Phase::Failed { exit: Some(2) }.word(), "failed");
+    assert_eq!(tasks_core::Kind::Compile.to_string(), "compile");
+}
+
+// R-356
+#[test]
+fn r356_status_lists_each_peer_with_state_path_latencies_roles_and_its_last_report() {
+    use tasks_daemon::api::{PeerMachineView, PeerSlotView, PeerView};
+    let mut s = crate::testutil::status_snapshot();
+    s.peers = vec![
+        PeerView {
+            name: "nixos".into(),
+            node_id: "n".into(),
+            state: "up".into(),
+            last_seen_ago_secs: Some(2),
+            detail: String::new(),
+            did: "did:key:z".into(),
+            roles_out: vec!["submit".into(), "observe".into()],
+            roles_in: vec!["observe".into()],
+            grant_expires_at: None,
+            path: "direct".into(),
+            rtt_ms: Some(3),
+            reply_ms: Some(87),
+            machine: Some(PeerMachineView {
+                cores: 16,
+                memory_bytes: 64 << 30,
+                slots: vec![PeerSlotView {
+                    kind: "compile".into(),
+                    total: 4,
+                    used: 1,
+                }],
+                waiting: 2,
+                running: 1,
+                cpu_pct: Some(35),
+                memory_pct: None,
+                io_pct: Some(1),
+                pressure_summary: String::new(),
+                cpu_busy_pct: Some(41),
+                swap_total: Some(8 << 30),
+                swap_used: Some(1 << 30),
+                swap_in_per_s: Some(0),
+                swap_out_per_s: Some(2048),
+            }),
+        },
+        PeerView {
+            name: "mini".into(),
+            node_id: "m".into(),
+            state: "offline".into(),
+            last_seen_ago_secs: None,
+            detail: "connect timed out".into(),
+            did: String::new(),
+            roles_out: vec![],
+            roles_in: vec![],
+            grant_expires_at: None,
+            path: String::new(),
+            rtt_ms: None,
+            reply_ms: None,
+            machine: None,
+        },
+    ];
+    let t = status(&s);
+    assert!(t.contains("peers:\n"), "{t}");
+    assert!(
+        t.contains("nixos up (direct; path RTT 3 ms, reply time 87 ms, last seen"),
+        "{t}"
+    );
+    assert!(
+        t.contains("roles: we may submit, observe; it may observe"),
+        "{t}"
+    );
+    assert!(t.contains("16 cores") && t.contains("compile 1/4"), "{t}");
+    assert!(t.contains("2 waiting, 1 running"), "{t}");
+    assert!(t.contains("cpu busy 41%"), "{t}");
+    assert!(
+        t.contains("swap 1.0 GiB of 8.0 GiB used (in 0 B/s, out 2.0 KiB/s)"),
+        "{t}"
+    );
+    // a peer that never answered is listed with why, and no invented figures
+    assert!(
+        t.contains("mini offline (unknown; path RTT -, reply time -)"),
+        "{t}"
+    );
+    assert!(t.contains("connect timed out"), "{t}");
+    // no peers, no section
+    s.peers.clear();
+    assert!(!status(&s).contains("peers:"));
+}
+
+// R-358
+#[test]
+fn r358_status_shows_cpu_busy_and_swap_with_rates_and_says_so_when_there_is_no_swap() {
+    let mut s = crate::testutil::status_snapshot();
+    s.pressure.cpu_busy_pct = Some(23.4);
+    s.pressure.swap_total = Some(8 << 30);
+    s.pressure.swap_used = Some(512 << 20);
+    s.pressure.swap_in_per_s = Some(4096);
+    s.pressure.swap_out_per_s = Some(0);
+    let t = status(&s);
+    assert!(
+        t.contains("cpu busy 23%, swap 512.0 MiB of 8.0 GiB used (in 4.0 KiB/s, out 0 B/s)"),
+        "{t}"
+    );
+    s.pressure.swap_total = Some(0);
+    assert!(status(&s).contains("cpu busy 23%, no swap"));
+    // an older daemon reports none of it: no line, no zeros
+    s.pressure.swap_total = None;
+    s.pressure.cpu_busy_pct = None;
+    let t = status(&s);
+    assert!(!t.contains("swap") && !t.contains("cpu busy"), "{t}");
+}

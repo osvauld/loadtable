@@ -399,3 +399,36 @@ fn r322_the_repo_run_policy_names_the_ignored_files_that_travel() {
         "{bad}"
     );
 }
+
+// R-363
+#[test]
+fn r363_path_rtt_is_the_transports_and_reply_time_is_the_status_request_taking_its_course() {
+    use tasks_peer::transport::{LinkInfo as Info, PathKind};
+    let w = PeerWorld::new();
+    let link = w.link();
+    // the transport reports 3 ms on a direct path; answering a request takes 60 ms (the peer's
+    // handler, the scheduler in front of it): the two must not be mistaken for each other
+    w.net.set_link_info(Some(Info {
+        path: PathKind::Direct,
+        rtt: Some(Duration::from_millis(3)),
+    }));
+    w.net.set_latency(Duration::from_millis(60));
+    link.probe_all();
+    let q = link.link_quality();
+    let n = q.iter().find(|q| q.peer == "nixos").unwrap();
+    assert_eq!(n.path, "direct");
+    assert_eq!(n.rtt_ms, Some(3), "path RTT is the transport's figure");
+    let reply = n.reply_ms.unwrap();
+    assert!(
+        (60..1000).contains(&reply),
+        "reply time covers the whole request: {reply} ms"
+    );
+    // a transport that reports no path RTT leaves it unknown; the reply time is still measured
+    w.net.set_link_info(None);
+    w.net.set_latency(Duration::ZERO);
+    link.probe_all();
+    let q = link.link_quality();
+    let n = q.iter().find(|q| q.peer == "nixos").unwrap();
+    assert_eq!(n.rtt_ms, None);
+    assert!(n.reply_ms.unwrap() < 60);
+}

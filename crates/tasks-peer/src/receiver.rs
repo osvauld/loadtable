@@ -303,6 +303,47 @@ impl Handler for Receiver {
         self.dispatch(from, msg)
     }
 
+    fn accept_upload(&self, from: &PeerId, head: &Body) -> Result<(), Refusal> {
+        if !self.allow.admits(from) {
+            return Err(Refusal::NotAllowed {
+                peer: from.to_string(),
+            });
+        }
+        match head {
+            Body::SyncPackStream { checkout, .. } => {
+                if self
+                    .runner
+                    .checkout_busy(from, &self.store.tree_root(from, checkout))
+                {
+                    return Err(Refusal::Busy {
+                        checkout: checkout.clone(),
+                    });
+                }
+                Ok(())
+            }
+            _ => Err(Refusal::Malformed {
+                detail: "not an upload".to_string(),
+            }),
+        }
+    }
+
+    fn upload(&self, from: &PeerId, head: Body, data: &mut dyn std::io::Read) -> Body {
+        if let Err(r) = self.accept_upload(from, &head) {
+            return Body::Refuse(r);
+        }
+        match head {
+            Body::SyncPackStream { checkout, session } => {
+                match self.store.put_stream(from, &checkout, session, data) {
+                    Ok(received) => Body::SyncPackAck { received },
+                    Err(r) => Body::Refuse(r),
+                }
+            }
+            _ => Body::Refuse(Refusal::Malformed {
+                detail: "not an upload".to_string(),
+            }),
+        }
+    }
+
     fn events(
         &self,
         from: &PeerId,

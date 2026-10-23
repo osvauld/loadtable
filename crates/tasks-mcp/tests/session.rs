@@ -209,7 +209,10 @@ fn a_scripted_session_submits_waits_and_reads_logs() {
         }),
         Request::Submit { spec } => {
             assert_eq!(spec.owner.as_str(), "me");
-            Ok(Response::Submitted { id: JobId(12) })
+            Ok(Response::Submitted {
+                id: JobId(12),
+                warnings: vec![],
+            })
         }
         Request::Get { id } => {
             assert_eq!(id.0, 12);
@@ -227,6 +230,7 @@ fn a_scripted_session_submits_waits_and_reads_logs() {
         Request::Logs { .. } => Ok(Response::LogTail {
             lines: vec!["test result: ok. 3 passed".into()],
             running: false,
+            end_offset: None,
         }),
         other => Err(DaemonError::Failed(format!("unexpected {other:?}"))),
     });
@@ -311,6 +315,7 @@ fn r194_waits_are_concurrent_and_client_cancellable() {
         Request::Logs { .. } => Ok(Response::LogTail {
             lines: vec![],
             running: false,
+            end_offset: None,
         }),
         other => Err(DaemonError::Failed(format!("unexpected {other:?}"))),
     });

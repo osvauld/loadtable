@@ -222,7 +222,12 @@ pub fn shared_cwd_warning(jobs: &[JobView], owner: &str, cwd: &Path) -> Option<S
 pub fn submit_reconciled(ctx: &mut Ctx<'_>, spec: &JobSpec) -> Result<JobId, CliError> {
     let before = (ctx.now_ms)();
     match ctx.client.call(&Request::Submit { spec: spec.clone() }) {
-        Ok(Response::Submitted { id }) => Ok(id),
+        Ok(Response::Submitted { id, warnings }) => {
+            for w in &warnings {
+                ctx.note(&format!("tasks: warning: {w}"));
+            }
+            Ok(id)
+        }
         Ok(other) => Err(CliError::Failed(format!(
             "unexpected reply to submit: {other:?}; do not resubmit, look in `tasks2 list --who {}`",
             spec.owner.as_str()
@@ -612,7 +617,7 @@ fn logs(ctx: &mut Ctx<'_>, a: &LogsArgs) -> Result<i32, CliError> {
         id,
         view: LogView::Tail { lines },
     })?;
-    let Response::LogTail { lines, running } = resp else {
+    let Response::LogTail { lines, running, .. } = resp else {
         return Err(CliError::Failed(format!(
             "unexpected reply to a log read: {resp:?}"
         )));

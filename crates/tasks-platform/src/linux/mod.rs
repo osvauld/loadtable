@@ -13,7 +13,7 @@ use crate::{
 };
 use std::path::Path;
 
-pub use memory::parse_meminfo;
+pub use memory::{parse_meminfo, parse_stat_cpu, parse_vmstat_swap};
 pub use pressure::{PsiFile, PsiLine, parse_psi};
 pub use procs::{ProcStat, parse_proc_stat};
 pub use service::parse_is_active;

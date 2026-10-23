@@ -132,6 +132,7 @@ impl Memory for Fake {
         Ok(MemorySnapshot {
             total_bytes: 16 << 30,
             available_bytes: self.available,
+            ..MemorySnapshot::default()
         })
     }
 }

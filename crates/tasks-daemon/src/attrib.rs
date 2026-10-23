@@ -318,14 +318,15 @@ impl Scheduler {
                     }
                     Err(e) => {
                         lock(&self.attrib).transfer.waiting = Some(format!(
-                            "{phase:?}: admission cannot measure the machine: {e}"
+                            "{}: admission cannot measure the machine: {e}",
+                            phase.word()
                         ));
                         break;
                     }
                 }
             }
             if let Some(r) = &why {
-                lock(&self.attrib).transfer.waiting = Some(format!("{phase:?}: {r}"));
+                lock(&self.attrib).transfer.waiting = Some(format!("{}: {r}", phase.word()));
                 if let Some(res) = gate_resource(r) {
                     self.record_trip(res, "transfer", &r.to_string());
                 }

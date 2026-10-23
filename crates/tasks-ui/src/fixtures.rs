@@ -87,6 +87,11 @@ fn pressure() -> PressureView {
         io: Some(3.0),
         available_memory: Some(8 << 30),
         memory_total: Some(16 << 30),
+        cpu_busy_pct: Some(23.0),
+        swap_total: Some(8 << 30),
+        swap_used: Some(1 << 30),
+        swap_in_per_s: Some(0),
+        swap_out_per_s: Some(0),
         cache_free: Some(120 << 30),
         state_free: Some(300 << 30),
         compile_blocker: None,
@@ -111,6 +116,7 @@ fn peer(state: &str, ago: Option<u64>) -> PeerView {
         grant_expires_at: None,
         path: "unknown".into(),
         rtt_ms: None,
+        reply_ms: None,
         machine: Some(PeerMachineView {
             cores: 16,
             memory_bytes: 64 << 30,
@@ -132,6 +138,11 @@ fn peer(state: &str, ago: Option<u64>) -> PeerView {
             memory_pct: Some(4),
             io_pct: Some(1),
             pressure_summary: String::new(),
+            cpu_busy_pct: Some(30),
+            swap_total: Some(4 << 30),
+            swap_used: Some(0),
+            swap_in_per_s: Some(0),
+            swap_out_per_s: Some(0),
         }),
     }
 }

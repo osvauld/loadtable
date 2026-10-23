@@ -289,6 +289,17 @@ impl Forward {
         !self.is_done() && self.locks.would_grant(&self.checkout, self.owner)
     }
 
+    /// Sets the queue class the peer will see. Honoured only until the job is submitted: after
+    /// that the peer's own queue holds the class. Returns whether it was applied.
+    pub fn set_class(&mut self, priority: tasks_core::Priority, reason: Option<String>) -> bool {
+        if self.remote.is_some() {
+            return false;
+        }
+        self.job.spec.priority = priority;
+        self.job.spec.priority_reason = reason;
+        true
+    }
+
     /// The remote id, once the peer has accepted the job.
     pub fn remote(&self) -> Option<RemoteJobId> {
         self.remote
@@ -334,7 +345,7 @@ impl Forward {
                 Some(r) => format!("{r} link lost, reattaching: {reason}"),
                 None => format!("link lost before the peer answered: {reason}"),
             },
-            ForwardState::Done(r) => format!("{:?}: {}", r.phase, r.reason),
+            ForwardState::Done(r) => format!("{}: {}", r.phase.word(), r.reason),
         }
     }
 

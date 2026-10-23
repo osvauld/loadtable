@@ -11,6 +11,10 @@ pub(crate) struct VmStat {
     pub free: u64,
     pub inactive: u64,
     pub purgeable: u64,
+    /// Pages read back from swap since boot (0 when `vm_stat` does not print it).
+    pub swapins: u64,
+    /// Pages written to swap since boot.
+    pub swapouts: u64,
 }
 
 fn bad(what: &str, detail: impl Into<String>) -> PlatformError {
@@ -40,6 +44,8 @@ pub(crate) fn parse_vm_stat(text: &str) -> Result<VmStat, PlatformError> {
         free: pages("Pages free:")?,
         inactive: pages("Pages inactive:")?,
         purgeable: pages("Pages purgeable:")?,
+        swapins: pages("Swapins:").unwrap_or(0),
+        swapouts: pages("Swapouts:").unwrap_or(0),
     })
 }
 
@@ -103,6 +109,37 @@ pub(crate) fn start_token(seconds: u64, micros: u64) -> Result<u64, PlatformErro
         .ok_or_else(|| bad("proc_bsdinfo", "start time overflow"))
 }
 
+/// Parses `sysctl -n vm.swapusage`: `total = 2048.00M  used = 1024.50M  free = 1023.50M  (encrypted)`.
+/// Returns (total, used) in bytes. Units are K, M or G (binary, as the tool prints them).
+pub(crate) fn parse_swapusage(text: &str) -> Result<(u64, u64), PlatformError> {
+    let value = |name: &str| -> Result<u64, PlatformError> {
+        let rest = text
+            .split(name)
+            .nth(1)
+            .and_then(|r| r.trim_start().strip_prefix('='))
+            .map(str::trim_start)
+            .ok_or_else(|| bad("vm.swapusage", format!("missing {name}")))?;
+        let word = rest.split_whitespace().next().unwrap_or("");
+        let (num, unit) = word.split_at(word.len().saturating_sub(1));
+        let mult: f64 = match unit {
+            "K" => 1024.0,
+            "M" => 1024.0 * 1024.0,
+            "G" => 1024.0 * 1024.0 * 1024.0,
+            _ => return Err(bad("vm.swapusage", format!("bad unit in {word:?}"))),
+        };
+        let n: f64 = num
+            .parse()
+            .map_err(|_| bad("vm.swapusage", format!("bad number in {word:?}")))?;
+        if !n.is_finite() || n < 0.0 {
+            return Err(bad("vm.swapusage", format!("bad number in {word:?}")));
+        }
+        Ok((n * mult) as u64)
+    };
+    let total = value("total")?;
+    let used = value("used")?.min(total);
+    Ok((total, used))
+}
+
 /// Memory snapshot from raw values; inconsistent totals fail closed.
 pub(crate) fn snapshot(total: u64, vm: &VmStat) -> Result<crate::MemorySnapshot, PlatformError> {
     let available = available_bytes(vm)?;
@@ -112,6 +149,9 @@ pub(crate) fn snapshot(total: u64, vm: &VmStat) -> Result<crate::MemorySnapshot,
     Ok(crate::MemorySnapshot {
         total_bytes: total,
         available_bytes: available,
+        swap_in_bytes: vm.swapins.saturating_mul(vm.page_size),
+        swap_out_bytes: vm.swapouts.saturating_mul(vm.page_size),
+        ..crate::MemorySnapshot::default()
     })
 }
 
@@ -125,6 +165,34 @@ mod tests {
         Pages inactive:                           2000.\n\
         Pages speculative:                         300.\n\
         Pages purgeable:                           500.\n";
+
+    // R-357
+    #[test]
+    fn swap_usage_and_swap_counters_parse() {
+        assert_eq!(
+            parse_swapusage("total = 2048.00M  used = 1024.50M  free = 1023.50M  (encrypted)\n")
+                .unwrap(),
+            (2048 << 20, 1_074_266_112)
+        );
+        assert_eq!(
+            parse_swapusage("total = 0.00M  used = 0.00M  free = 0.00M  (encrypted)").unwrap(),
+            (0, 0)
+        );
+        assert!(parse_swapusage("junk").is_err());
+        assert!(parse_swapusage("total = 1X used = 1M").is_err());
+        let vm = format!(
+            "{VM}Swapins:                                    10.\nSwapouts:                                   20.\n"
+        );
+        let v = parse_vm_stat(&vm).unwrap();
+        assert_eq!((v.swapins, v.swapouts), (10, 20));
+        let m = snapshot(1 << 40, &v).unwrap();
+        assert_eq!(
+            (m.swap_in_bytes, m.swap_out_bytes),
+            (10 * 16384, 20 * 16384)
+        );
+        // a vm_stat without the lines gives zero counters
+        assert_eq!(parse_vm_stat(VM).unwrap().swapins, 0);
+    }
 
     // R-070
     #[test]

@@ -109,8 +109,29 @@ pub trait EventStream: Send {
     fn poll(&mut self) -> Result<StreamPoll, PeerError>;
 }
 
+/// A raw byte stream to the peer, opened with [`Connection::open_upload`]. Bytes are delivered in
+/// order without a round trip each; the only wait is at the end. Dropping it without
+/// [`Upload::finish`] abandons the upload.
+pub trait Upload: Send {
+    /// Appends bytes to the stream. May block while the link applies back-pressure.
+    fn write(&mut self, data: &[u8]) -> Result<(), PeerError>;
+    /// Ends the stream and returns the peer's answer. A [`Body::Refuse`] becomes
+    /// `Err(Refused)`.
+    fn finish(self: Box<Self>) -> Result<Body, PeerError>;
+}
+
 /// A live link to one peer.
 pub trait Connection: Send {
+    /// Opens a raw byte stream introduced by `head` (see [`Body::SyncPackStream`]). The peer
+    /// accepts or refuses `head` before any byte is sent; a peer that does not know uploads
+    /// refuses, which is how a sender finds out to fall back to chunked requests. The default
+    /// refuses.
+    fn open_upload(&mut self, head: Body) -> Result<Box<dyn Upload>, PeerError> {
+        let _ = head;
+        Err(PeerError::Refused(Refusal::Malformed {
+            detail: "this link has no raw streams".to_string(),
+        }))
+    }
     /// One request, one reply. A [`Body::Refuse`] reply becomes `Err(Refused)`.
     fn request(&mut self, msg: Body) -> Result<Body, PeerError>;
     /// Attaches to a job's events from log offset `from_offset`.
@@ -153,6 +174,21 @@ pub trait Handler: Send + Sync {
         remote: RemoteJobId,
         from_offset: u64,
     ) -> Result<Box<dyn EventStream>, Refusal>;
+    /// Decides, before any byte is read, whether the upload introduced by `head` may proceed.
+    /// The default refuses (an older build: the sender falls back to chunked requests).
+    fn accept_upload(&self, from: &PeerId, head: &Body) -> Result<(), Refusal> {
+        let _ = (from, head);
+        Err(Refusal::Malformed {
+            detail: "raw streams are not supported".to_string(),
+        })
+    }
+    /// Consumes an upload accepted by [`Handler::accept_upload`] up to its end and answers it.
+    fn upload(&self, from: &PeerId, head: Body, data: &mut dyn std::io::Read) -> Body {
+        let _ = (from, head, data);
+        Body::Refuse(Refusal::Malformed {
+            detail: "raw streams are not supported".to_string(),
+        })
+    }
     /// A connection from `peer` opened; `closer` shuts it. Returns an id for
     /// [`Handler::connection_closed`].
     fn connection_opened(&self, peer: &PeerId, closer: Closer) -> u64 {

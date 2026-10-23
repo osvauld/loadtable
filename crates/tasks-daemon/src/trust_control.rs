@@ -62,8 +62,11 @@ pub struct PeerTrustView {
     pub revoked: bool,
     /// `direct`, `relay` or `unknown`.
     pub path: String,
-    /// Round-trip time, milliseconds.
+    /// The transport's round-trip time of the selected path (path RTT), milliseconds.
     pub rtt_ms: Option<u64>,
+    /// How long the last status request took to be answered (reply time), milliseconds.
+    #[serde(default)]
+    pub reply_ms: Option<u64>,
 }
 
 /// A paired peer, as reported by a successful `pair accept`.
@@ -242,6 +245,7 @@ impl TrustControl for NodeTrust {
                     revoked: p.revoked,
                     path: q.map_or_else(|| "unknown".to_string(), |q| q.path.clone()),
                     rtt_ms: q.and_then(|q| q.rtt_ms),
+                    reply_ms: q.and_then(|q| q.reply_ms),
                 }
             })
             .collect()

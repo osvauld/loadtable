@@ -66,6 +66,18 @@ impl Handler for TrustedHandler {
         self.inner.events(from, remote, from_offset)
     }
 
+    fn accept_upload(&self, from: &PeerId, head: &Body) -> Result<(), Refusal> {
+        self.node.authorize(from.as_str(), need_of(head))?;
+        self.inner.accept_upload(from, head)
+    }
+
+    fn upload(&self, from: &PeerId, head: Body, data: &mut dyn std::io::Read) -> Body {
+        if let Err(r) = self.node.authorize(from.as_str(), need_of(&head)) {
+            return Body::Refuse(r);
+        }
+        self.inner.upload(from, head, data)
+    }
+
     fn connection_opened(&self, peer: &PeerId, closer: Closer) -> u64 {
         self.node.connection_opened(peer.as_str(), closer)
     }

@@ -629,7 +629,7 @@ fn r116_multi_line_explanation_is_stable_and_sorted_by_name() {
     let r = run(&explain_input());
     assert_eq!(
         r.multi_line(),
-        "placement: laptop (anywhere)\n\
+        "placement: laptop (chosen by --anywhere)\n\
          \x20 laptop (local): wait 0s (slot free) + run 2m00s + sync 0s - local bonus 30s = 1m30s <- chosen\n\
          \x20 mac: excluded: unreachable, last seen 5m00s ago\n\
          \x20 nixos: wait 45s (expected) + run 1m40s + sync 20s = 2m45s"
@@ -640,8 +640,76 @@ fn r116_multi_line_explanation_is_stable_and_sorted_by_name() {
 fn r116_one_line_explanation_is_stable() {
     assert_eq!(
         run(&explain_input()).one_line(),
-        "laptop (anywhere): 1m30s; mac excluded: unreachable, last seen 5m00s ago, nixos 2m45s"
+        "laptop (chosen by --anywhere): estimate 1m30s (slot free); mac excluded: unreachable, last seen 5m00s ago, nixos 2m45s"
     );
+}
+
+// R-355
+#[test]
+fn r355_the_line_says_where_why_and_never_presents_a_fallback_as_an_estimate() {
+    // asked for a peer, with no run history anywhere: the reason is the ask, and there is no
+    // number (the 6m30s of the first trial was the policy's assumed run time)
+    let mut local = view("laptop", true);
+    let mut peer = view("nixos", false);
+    local.estimate = None;
+    peer.estimate = None;
+    let r = run(&input(
+        Request::Peer(MachineName("nixos".into())),
+        vec![local.clone(), peer.clone()],
+    ));
+    let line = r.one_line();
+    assert!(
+        line.starts_with(
+            "nixos (asked with --peer nixos): no estimate (no run history for this command)"
+        ),
+        "{line}"
+    );
+    assert!(!line.contains("(local)"), "{line}");
+    assert!(
+        !line.contains("6m30s") && !line.contains("assumed"),
+        "{line}"
+    );
+    assert!(
+        r.multi_line()
+            .starts_with("placement: nixos (asked with --peer nixos)\n")
+    );
+    // the machine that is this one says so on its own line, and only there
+    assert!(r.multi_line().contains("laptop (local):"));
+    assert!(!r.multi_line().contains("nixos (local)"));
+
+    // history, but the queue ahead is unknown: still no number
+    let mut busy_peer = peer.clone();
+    busy_peer.estimate = est(100.0);
+    busy(&mut busy_peer, None);
+    let r = run(&input(
+        Request::Peer(MachineName("nixos".into())),
+        vec![local.clone(), busy_peer],
+    ));
+    assert!(
+        r.one_line()
+            .contains("no estimate (the queue ahead is unknown)"),
+        "{}",
+        r.one_line()
+    );
+
+    // history and a free slot: a number, with its basis
+    let mut known = peer;
+    known.estimate = est(100.0);
+    let r = run(&input(
+        Request::Peer(MachineName("nixos".into())),
+        vec![local, known],
+    ));
+    assert!(
+        r.one_line()
+            .starts_with("nixos (asked with --peer nixos): estimate 1m40s (slot free)"),
+        "{}",
+        r.one_line()
+    );
+    // the other machines are listed without invented numbers too
+    let mut other = view("mac", false);
+    other.estimate = None;
+    let r = run(&input(Request::Anywhere, vec![view("laptop", true), other]));
+    assert!(r.one_line().contains("no estimate"), "{}", r.one_line());
 }
 
 #[test]
@@ -651,7 +719,7 @@ fn r116_wait_and_refusal_render_with_their_reasons() {
     let r = run(&i);
     assert!(
         r.one_line()
-            .starts_with("refused (pin): laptop cannot run it")
+            .starts_with("refused (pinned here with --pin): laptop cannot run it")
     );
     assert!(r.multi_line().contains("unmet: os Macos wanted, has Linux"));
 }

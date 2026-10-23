@@ -190,10 +190,21 @@ impl LogSession {
             (Stage::Probe, Response::LogChunk { next_offset, .. }) => {
                 self.stage = Stage::Tail { start: next_offset };
             }
-            (Stage::Tail { start }, Response::LogTail { lines, running }) => {
+            (
+                Stage::Tail { start },
+                Response::LogTail {
+                    lines,
+                    running,
+                    end_offset,
+                },
+            ) => {
                 self.buffer.replace(lines);
                 self.stage = if running {
-                    Stage::Follow { offset: start }
+                    // the tail's own end offset when the daemon sends it; the probed one is
+                    // read at another moment, so a line written between them is lost or doubled
+                    Stage::Follow {
+                        offset: end_offset.unwrap_or(start),
+                    }
                 } else {
                     Stage::Finished
                 };
@@ -350,6 +361,7 @@ mod tests {
         s.apply(Ok(Response::LogTail {
             lines: vec!["a".into(), "b".into()],
             running: true,
+            end_offset: None,
         }));
         assert_eq!(s.buffer.len(), 2);
         assert!(matches!(
@@ -388,6 +400,7 @@ mod tests {
         s.apply(Ok(Response::LogTail {
             lines: vec!["only".into()],
             running: false,
+            end_offset: None,
         }));
         assert!(s.is_finished());
         let mut s2 = LogSession::new(JobId(1), false);
