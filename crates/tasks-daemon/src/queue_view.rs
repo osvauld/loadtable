@@ -63,17 +63,37 @@ pub fn remote_wait(r: &JobRecord) -> Option<String> {
     let peer = &fw.peer.0;
     match r.remote_phase.as_ref()? {
         Phase::Queued => Some(format!("queued on {peer}")),
-        Phase::Waiting(w) => Some(match w {
-            WaitReason::Slot(k) => format!("waiting on {peer}: no free {} slot", kind_name(*k)),
-            WaitReason::Pressure(t) | WaitReason::Placement(t) => {
-                format!("waiting on {peer}: {t}")
-            }
-            WaitReason::Dependency(j) => format!("waiting on {peer}: after job #{}", j.0),
-            WaitReason::Disk => format!("waiting on {peer}: low disk space"),
-            WaitReason::Device(d) => format!("waiting on {peer}: device {} busy", d.0),
-        }),
+        Phase::Waiting(w) => Some(peer_waiting(peer, w)),
         _ => None,
     }
+}
+
+fn peer_waiting(peer: &str, w: &WaitReason) -> String {
+    match w {
+        WaitReason::Slot(k) => format!("waiting on {peer}: no free {} slot", kind_name(*k)),
+        WaitReason::Pressure(t) | WaitReason::Placement(t) => {
+            format!("waiting on {peer}: {t}")
+        }
+        WaitReason::Dependency(j) => format!("waiting on {peer}: after job #{}", j.0),
+        WaitReason::Disk => format!("waiting on {peer}: low disk space"),
+        WaitReason::Device(d) => format!("waiting on {peer}: device {} busy", d.0),
+    }
+}
+
+/// Why a forwarded job that is still queued or waiting HERE is not running on its peer yet: the
+/// peer's own hold when it told us (`remote_phase`), else the gate the peer's status reports
+/// (`peer_blocker`, only for jobs that gate applies to). `None` when the job is not forwarded
+/// or nothing says why. Without this the laptop shows the local "starting" and a start time
+/// of about now for a job the peer is holding back (R-670).
+pub fn peer_hold(r: &JobRecord, peer_blocker: Option<&str>) -> Option<String> {
+    let fw = r.forward.as_ref()?;
+    let peer = &fw.peer.0;
+    if let Some(Phase::Waiting(w)) = r.remote_phase.as_ref() {
+        return Some(peer_waiting(peer, w));
+    }
+    peer_blocker
+        .filter(|b| !b.is_empty())
+        .map(|b| format!("waiting on {peer}: {b}"))
 }
 
 #[cfg(test)]

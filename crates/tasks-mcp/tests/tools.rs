@@ -1019,6 +1019,10 @@ fn snapshot() -> tasks_daemon::api::StatusSnapshot {
             total_targets: 4,
             current: None,
             eta_secs: Some(30.0),
+            usual_secs: None,
+            over_by_secs: None,
+            eta_rough_from: None,
+            no_eta_why: None,
             log_bytes: 10,
             figures: None,
             cores: None,
@@ -1028,11 +1032,13 @@ fn snapshot() -> tasks_daemon::api::StatusSnapshot {
             memory: "ok".into(),
             memory_some: Some(1.0),
             memory_full: Some(0.0),
+            memory_stall_limit: None,
             cpu: Some(40.0),
             io: None,
             available_memory: Some(8 << 30),
             memory_total: None,
             cpu_busy_pct: None,
+            cpu_cores: None,
             cores_in_use: None,
             swap_total: None,
             swap_used: None,
@@ -1105,10 +1111,12 @@ fn estimate_reports_median_and_p90() {
             assert_eq!(argv, &argv_of("cargo test"));
             Ok(Response::Estimate(tasks_daemon::api::EstimateView {
                 recipe: "cargo test".into(),
-                median_secs: 90.0,
-                p90_secs: 200.0,
+                median_secs: Some(90.0),
+                p90_secs: Some(200.0),
                 samples: 4,
                 text: "from 4 runs".into(),
+                why_not: None,
+                rough: false,
             }))
         }
         _ => Err(DaemonError::Failed("unexpected".into())),
@@ -1118,7 +1126,10 @@ fn estimate_reports_median_and_p90() {
         "estimate",
         json!({"argv": ["cargo", "test"]}),
     );
-    assert_eq!(r.text, "from 4 runs (median 1m30s, p90 3m20s, 4 sample(s))");
+    assert_eq!(
+        r.text,
+        "from 4 runs (median 1m30s, p90 3m20s, 4 passing run(s))"
+    );
     assert!(call(&tools_with(&d), "estimate", json!({"argv": []})).is_error);
 }
 

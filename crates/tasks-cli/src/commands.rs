@@ -754,9 +754,7 @@ pub fn stat_rows(jobs: &[JobView]) -> Vec<render::StatRow> {
         ) {
             continue;
         }
-        let recipe = RecipeKey::from_argv(&j.argv, &[])
-            .first()
-            .map(ToString::to_string)
+        let recipe = RecipeKey::history_key(&j.argv, &[])
             .or_else(|| j.argv.first().cloned())
             .unwrap_or_default();
         let e = groups.entry(recipe).or_default();
@@ -1153,11 +1151,7 @@ fn policy_suggest(ctx: &mut Ctx<'_>) -> Result<i32, CliError> {
                 .suites
                 .values()
                 .flat_map(|s| s.steps.iter())
-                .filter_map(|d| {
-                    RecipeKey::from_argv(&d.command, &[])
-                        .first()
-                        .map(ToString::to_string)
-                })
+                .filter_map(|d| RecipeKey::history_key(&d.command, &[]))
                 .collect();
             recipes.sort();
             recipes.dedup();

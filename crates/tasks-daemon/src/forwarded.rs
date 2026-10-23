@@ -95,6 +95,7 @@ impl Scheduler {
             kill_reason: Mutex::new(None),
             stuck: Mutex::new(StuckDetector::new(policy.stuck_window_secs())),
             est_median: None,
+            shown: tasks_timing::Shown::Absent(tasks_timing::NoEstimate::OnPeer),
             figures: Mutex::new(None),
         })
     }

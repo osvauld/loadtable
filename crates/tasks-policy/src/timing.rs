@@ -25,9 +25,9 @@ pub fn candidate_key(suite: &str, step: &str) -> String {
 
 /// The recipe string history is stored under, and the kind it implies, for a command.
 pub fn recipe_of(argv: &[String]) -> Option<(String, Kind)> {
-    RecipeKey::from_argv(argv, &[])
-        .first()
-        .map(|k| (k.to_string(), k.kind()))
+    let keys = RecipeKey::from_argv(argv, &[]);
+    let kind = keys.first()?.kind();
+    RecipeKey::history_key(argv, &[]).map(|k| (k, kind))
 }
 
 /// Estimates with real samples behind them, one per machine that has any. Cancelled samples and

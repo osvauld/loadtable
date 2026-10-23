@@ -1135,10 +1135,12 @@ fn estimate_sends_the_command() {
     let c = Arc::new(FakeClient::from_fn(|_| {
         Ok(Response::Estimate(tasks_daemon::api::EstimateView {
             recipe: "r".into(),
-            median_secs: 60.0,
-            p90_secs: 90.0,
+            median_secs: Some(60.0),
+            p90_secs: Some(90.0),
             samples: 3,
             text: "about a minute".into(),
+            why_not: None,
+            rough: false,
         }))
     }));
     let r = Harness::default().run(&c, &["estimate", "--", "cargo", "check"]);

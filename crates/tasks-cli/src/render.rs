@@ -473,16 +473,44 @@ pub fn log_search(results: &[JobGrep], matches: usize, truncated: bool) -> Strin
     out
 }
 
-/// An estimate.
+/// An estimate, or plainly why there is none (R-662, R-663).
 pub fn estimate(e: &EstimateView) -> String {
-    format!(
-        "estimate: median {}, p90 {}, {} sample(s)\n  {}\n  recipe: {}\n",
-        fmt_precise(e.median_secs),
-        fmt_precise(e.p90_secs),
-        e.samples,
-        e.text,
-        e.recipe
-    )
+    match (e.median_secs, e.p90_secs) {
+        (Some(median), Some(p90)) => format!(
+            "estimate: median {}, p90 {}, {} passing run(s){}\n  {}\n  recipe: {}\n",
+            fmt_precise(median),
+            fmt_precise(p90),
+            e.samples,
+            if e.rough { " (rough)" } else { "" },
+            e.text,
+            e.recipe
+        ),
+        _ => format!(
+            "no estimate: {}\n  recipe: {}\n",
+            e.why_not.as_deref().unwrap_or("no passing run"),
+            e.recipe
+        ),
+    }
+}
+
+/// What a running job says about its time: time left (with `rough` when it rests on another
+/// machine's runs), "over the usual", or why there is no estimate. Never a bare `0s left`.
+pub fn running_eta_text(r: &tasks_daemon::api::RunningView) -> String {
+    if let (Some(usual), Some(by)) = (r.usual_secs, r.over_by_secs) {
+        return format!(
+            ", over the usual by {} (usual {})",
+            fmt_precise(by),
+            fmt_precise(usual)
+        );
+    }
+    match (r.eta_secs, &r.eta_rough_from, &r.no_eta_why) {
+        (Some(e), Some(from), _) => {
+            format!(", ~{} left (rough, from {from}'s runs)", fmt_eta(e))
+        }
+        (Some(e), None, _) => format!(", ~{} left", fmt_eta(e)),
+        (None, _, Some(why)) => format!(", no estimate: {why}"),
+        (None, _, None) => String::new(),
+    }
 }
 
 /// A running job's current resource use and its busiest program groups.
@@ -640,9 +668,7 @@ pub fn status(s: &StatusSnapshot) -> String {
             } else {
                 String::new()
             };
-            let eta = r
-                .eta_secs
-                .map_or(String::new(), |e| format!(", ~{} left", fmt_eta(e)));
+            let eta = running_eta_text(r);
             let _ = writeln!(
                 out,
                 "  job {} {}{slot} {} for {}{progress}{eta}: {}",
@@ -695,10 +721,8 @@ pub fn status(s: &StatusSnapshot) -> String {
     let p = &s.pressure;
     let _ = writeln!(
         out,
-        "pressure: memory {} (some {}, full {}), cpu {}, io {}",
-        p.memory,
-        pct(p.memory_some),
-        pct(p.memory_full),
+        "pressure: {}, cpu {}, io {}",
+        memory_line(p),
         pct(p.cpu),
         pct(p.io)
     );
@@ -755,12 +779,31 @@ pub fn status(s: &StatusSnapshot) -> String {
     out
 }
 
-/// A peer's memory pressure: the PSI percentage where it has one, else its native level
-/// (macOS), else `?` (R-523).
+/// This machine's memory in words: the level as `ok`, `tight` or `critical`, with the stall
+/// figures behind it when the machine measures them (R-641).
+pub fn memory_line(p: &tasks_daemon::api::PressureView) -> String {
+    let word = tasks_daemon::api::memory_word(&p.memory);
+    let Some(some) = p.memory_some else {
+        return format!("memory {word}");
+    };
+    let limit = p
+        .memory_stall_limit
+        .map_or(String::new(), |l| format!(", tight from {l:.0}%"));
+    format!(
+        "memory {word} (stalled {some:.0}%, fully stalled {}{limit})",
+        p.memory_full
+            .map_or("?".to_string(), |f| format!("{f:.0}%"))
+    )
+}
+
+/// A peer's memory in words: its level as `ok`, `tight` or `critical` (the peer's own level,
+/// which macOS has and Linux derives from PSI), with the stall percentage when it has one;
+/// `?` only when it sent neither (R-523, R-641).
 fn peer_memory_text(pct: Option<u8>, level: Option<&str>) -> String {
     match (pct, level) {
-        (Some(p), _) => format!("{p}%"),
-        (None, Some(l)) => l.to_string(),
+        (Some(p), Some(l)) => format!("{} (stalled {p}%)", tasks_daemon::api::memory_word(l)),
+        (Some(p), None) => format!("stalled {p}%"),
+        (None, Some(l)) => tasks_daemon::api::memory_word(l).to_string(),
         (None, None) => "?".to_string(),
     }
 }

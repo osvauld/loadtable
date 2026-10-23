@@ -15,18 +15,24 @@ use tasks_placement::{
     Checkout, Decision, Input, Link, MachineView, Policy as PlacePolicy, Pressure, Request,
     RunEstimate,
 };
-use tasks_timing::estimate::{Estimate, MachineInfo, estimate};
-use tasks_timing::{Estimates, History, RecipeKey, SampleKey, progress};
+use tasks_timing::estimate::{Estimate, MachineInfo, NoEstimate, Planning, Shown, planning, shown};
+use tasks_timing::{Cache, Estimates, History, RecipeKey, SampleKey, progress, wanted_cache};
+
+/// Planning figure for a run nothing is known about, seconds.
+pub(crate) const UNKNOWN_RUN_SECS: f64 = 60.0;
 
 /// What the daemon knows about a job's cost, computed once per job.
 #[derive(Debug)]
 pub(crate) struct JobFacts {
     /// The recipe history is keyed by.
     pub recipe: String,
-    /// The estimate on this machine (built-in default when there is no history).
-    pub est: Option<Estimate>,
-    /// The median, only when history backs it (for the "rough" mark on estimates).
-    pub known_median: Option<f64>,
+    /// The number the queue and placement plan with; a guess when nothing was measured. Never
+    /// shown as an ETA.
+    pub plan: Planning,
+    /// What may be shown as this job's duration: passing runs only, or the reason there is none.
+    pub shown: Shown,
+    /// The build state the run starts from (see [`Scheduler::wanted_cache`]).
+    pub want: Cache,
     /// Predicted duration for the short lane: the worst of the latest runs, from history only.
     /// `None` is unknown, which is never short.
     pub short_secs: Option<f64>,
@@ -128,18 +134,51 @@ impl Scheduler {
         &*self.ledger
     }
 
-    pub(crate) fn estimate_for(
+    /// The number to plan with for `recipe` on `machine`. Not for display.
+    pub(crate) fn planning_for(
         &self,
         recipe: &str,
         machine: &MachineInfo,
         others: &[MachineInfo],
-    ) -> Option<Estimate> {
+    ) -> Option<Planning> {
         let key = SampleKey {
             recipe: recipe.to_string(),
             target: None,
             machine: machine.name.clone(),
         };
-        estimate(self.history(), &key, machine, others).ok()
+        planning(self.history(), &key, machine, others).ok()
+    }
+
+    /// What may be shown as the duration of `recipe` on `machine` starting from `want`.
+    pub(crate) fn shown_for(
+        &self,
+        recipe: &str,
+        machine: &MachineInfo,
+        others: &[MachineInfo],
+        want: Cache,
+    ) -> Shown {
+        let key = SampleKey {
+            recipe: recipe.to_string(),
+            target: None,
+            machine: machine.name.clone(),
+        };
+        shown(self.history(), &key, machine, others, want)
+            .unwrap_or(Shown::Absent(NoEstimate::HistoryUnreadable))
+    }
+
+    /// The build state a run of `recipe` starts from on this machine: warm once this machine
+    /// has a passing run of the command, cold before. The same rule stamps the run's sample
+    /// when it finishes, so later estimates can tell a first build from a repeat. An unreadable
+    /// history reads as cold, the cautious side (it hides an ETA rather than inventing one).
+    pub(crate) fn wanted_cache(&self, recipe: &str) -> Cache {
+        let key = SampleKey {
+            recipe: recipe.to_string(),
+            target: None,
+            machine: self.cfg.machine.clone(),
+        };
+        self.history()
+            .samples(&key)
+            .map_or(Cache::Cold, |s| wanted_cache(&s))
     }
 
     /// Cost facts of a job, cached until the job leaves the queue.
@@ -147,23 +186,34 @@ impl Scheduler {
         if let Some(f) = lock(&self.state).facts.get(&rec.id) {
             return f.clone();
         }
-        let keys = RecipeKey::from_argv(&rec.spec.argv, &rec.spec.env);
-        let recipe = keys.first().map_or_else(
-            || rec.spec.argv.first().cloned().unwrap_or_default(),
-            ToString::to_string,
-        );
-        let est = self.estimate_for(&recipe, &self.machine_info(), &[]);
-        let known_median = est
-            .as_ref()
-            .filter(|e| e.samples > 0)
-            .map(|e| e.median_secs);
+        let recipe = RecipeKey::history_key(&rec.spec.argv, &rec.spec.env)
+            .unwrap_or_else(|| rec.spec.argv.first().cloned().unwrap_or_default());
+        let info = self.machine_info();
+        let peers: Vec<MachineInfo> = self
+            .forwarder
+            .peers()
+            .iter()
+            .map(|p| MachineInfo {
+                name: p.machine.name.0.clone(),
+                cores: p.machine.cores,
+            })
+            .collect();
+        let plan = self.planning_for(&recipe, &info, &[]).unwrap_or(Planning {
+            median_secs: UNKNOWN_RUN_SECS,
+            p90_secs: UNKNOWN_RUN_SECS,
+            samples: 0,
+            basis: tasks_timing::Basis::BuiltIn,
+        });
+        let want = self.wanted_cache(&recipe);
+        let shown = self.shown_for(&recipe, &info, &peers, want);
         let checkout = matches!(rec.spec.kind, Kind::Compile | Kind::Test | Kind::Package)
             .then(|| checkout_key(&rec.spec.cwd));
         let (short_secs, peak_memory) = self.short_facts(&recipe);
         let facts = Arc::new(JobFacts {
             recipe,
-            est,
-            known_median,
+            plan,
+            shown,
+            want,
             short_secs,
             peak_memory,
             checkout,
@@ -217,7 +267,10 @@ impl Scheduler {
                 target: Some(label.clone()),
                 machine: info.name.clone(),
             };
-            let e = estimate(h, &key, &info, &[]).ok().filter(|e| e.samples > 0);
+            // a target's time follows the same rule as the job's: passing runs here only
+            let e = shown(h, &key, &info, &[], facts.want)
+                .ok()
+                .and_then(|s| s.eta().map(Estimate::from));
             targets.insert(label, e);
         }
         Estimates {
@@ -270,7 +323,8 @@ impl Scheduler {
         if let Some(eta) = p.eta_secs {
             return eta.max(0.0);
         }
-        rj.est_median.map_or(60.0, |m| (m - elapsed).max(0.0))
+        rj.est_median
+            .map_or(UNKNOWN_RUN_SECS, |m| (m - elapsed).max(0.0))
     }
 
     /// The jobs waiting for slots, by the kind they wait for, as the queue estimate sees them.
@@ -294,7 +348,7 @@ impl Scheduler {
             waiter.priority = rec.spec.priority;
             out.entry(kind).or_default().push(Queued {
                 waiter,
-                runtime_secs: facts.est.as_ref().map_or(60.0, |e| e.median_secs),
+                runtime_secs: facts.plan.median_secs,
             });
         }
         out
@@ -440,8 +494,11 @@ impl Scheduler {
                 cores: p.machine.cores,
             })
             .collect();
-        let run_est =
-            |e: Option<Estimate>| e.filter(|e| e.samples > 0).map(|e| RunEstimate::from(&e));
+        // placement scores with measured runs only; anything else is "assumed" in its score
+        let run_est = |p: Option<Planning>| {
+            p.filter(Planning::is_measured)
+                .map(|p| RunEstimate::from(&p))
+        };
         let slot = tasks_placement::slot_for(rec.spec.kind);
         let (blocked, summary) = match (slot, &ctx.readings) {
             (None, _) => (false, String::new()),
@@ -465,7 +522,7 @@ impl Scheduler {
             queue_depth: standing.map_or(0, |(ahead, _)| ahead),
             expected_wait_secs: standing.and_then(|(_, start)| start),
             pressure: Pressure { blocked, summary },
-            estimate: run_est(self.estimate_for(&facts.recipe, &info, &peer_infos)),
+            estimate: run_est(self.planning_for(&facts.recipe, &info, &peer_infos)),
             checkout: Checkout {
                 synced: true,
                 sync_bytes: 0,
@@ -483,7 +540,7 @@ impl Scheduler {
                 let mut others = peer_infos.clone();
                 others.retain(|o| o.name != mine.name);
                 others.push(info.clone());
-                p.estimate = run_est(self.estimate_for(&facts.recipe, &mine, &others));
+                p.estimate = run_est(self.planning_for(&facts.recipe, &mine, &others));
             }
             machines.push(p);
         }

@@ -96,12 +96,12 @@ fn finished(rec: &JobRecord, machine: &str) -> FinishedJob {
             .unwrap_or_else(|| rec.phase.word().to_string()),
     };
     let mut samples = Vec::new();
-    let keys = RecipeKey::from_argv(&rec.spec.argv, &rec.spec.env);
+    let key_text = RecipeKey::history_key(&rec.spec.argv, &rec.spec.env);
     let ran =
         rec.started_at_ms.is_some() && matches!(rec.phase, Phase::Passed | Phase::Failed { .. });
-    if let (Some(k), true) = (keys.first(), ran) {
+    if let (Some(k), true) = (key_text, ran) {
         let key = SampleKey {
-            recipe: k.to_string(),
+            recipe: k,
             target: None,
             machine: machine.to_string(),
         };
@@ -363,6 +363,7 @@ impl StatusSource for DaemonStatus {
                 io_pct: snap.pressure.io.map(pct),
                 summary: snap.pressure.compile_blocker.clone().unwrap_or_default(),
                 cpu_busy_pct: snap.pressure.cpu_busy_pct.map(pct),
+                memory_available_bytes: snap.pressure.available_memory,
                 swap_total_bytes: snap.pressure.swap_total,
                 swap_used_bytes: snap.pressure.swap_used,
                 swap_in_per_s: snap.pressure.swap_in_per_s,
@@ -515,6 +516,10 @@ mod tests {
             total_targets: 0,
             current: None,
             eta_secs: None,
+            usual_secs: None,
+            over_by_secs: None,
+            eta_rough_from: None,
+            no_eta_why: None,
             log_bytes: 0,
             figures: None,
             cores: None,
@@ -546,6 +551,14 @@ mod tests {
         let s = DaemonStatus::new(r.sch.clone()).status();
         assert!(s.slots.iter().any(|x| x.total > 0));
         assert_eq!(s.queue.waiting, 0);
+    }
+
+    // R-643
+    #[test]
+    fn r643_a_peers_report_carries_the_memory_it_has_available() {
+        let r = Rig::new();
+        let s = DaemonStatus::new(r.sch.clone()).status();
+        assert_eq!(s.pressure.memory_available_bytes, Some(8 << 30));
     }
 
     // R-523

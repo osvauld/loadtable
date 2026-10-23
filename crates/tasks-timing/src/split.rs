@@ -123,9 +123,7 @@ pub fn split_cargo_test(
         hints: StepHints::default(),
     }];
     // each piece records its run time under the unsplit command's recipe plus its label
-    let unsplit = RecipeKey::from_argv(argv, &[])
-        .first()
-        .map(ToString::to_string);
+    let unsplit = RecipeKey::history_key(argv, &[]);
     let mut used: BTreeSet<String> = BTreeSet::from(["build".to_string()]);
     for exe in test_executables {
         let (prefix, sel): (&str, Vec<String>) = match exe.kind {

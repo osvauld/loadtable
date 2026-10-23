@@ -638,3 +638,39 @@ Tests of earlier rows whose expectations changed with the redesign, kept and edi
 | R-614 | With `power.peer_jobs_on_battery` false and the machine on battery, jobs received from peers wait with `MACHINE is on battery` and hold no slot; local jobs are unaffected; the setting or AC lets them run. | `r614_*` (daemon) | any |
 | R-615 | A job waiting only on battery does not keep the machine awake. | `r614_a_job_from_a_peer_waits_while_this_machine_is_on_battery` (asserts no hold) | any |
 | R-616 | The local time zone offset used for the clock times in wait texts is read from the system. | `r616_the_offset_is_a_sane_zone_offset` (platform) | unix |
+
+## v2-estimates
+
+| ID | Rule | Test | Platforms |
+|---|---|---|---|
+| R-660 | Only passing runs back a shown estimate; failed and cancelled runs never do. | `r660_failed_and_cancelled_runs_never_make_an_estimate`, `r660_a_history_that_cannot_be_read_is_an_error_not_an_estimate` (timing) | any |
+| R-661 | No passing run anywhere: no ETA, with the reason `first run` (no samples at all) or `no passing run yet` (only failures). | `r661_no_run_at_all_is_a_first_run_and_only_failures_say_no_passing_run` (timing) | any |
+| R-662 | A first build here (this machine has no passing run of the wanted warmth) is not given a warm time; another machine's same-warmth passing runs may stand in, labelled rough, otherwise `first build here`. Older samples with unknown warmth count for either. `tasks2 estimate` says which case applies and never offers a built-in default. | `r662_a_first_build_here_does_not_borrow_a_warm_time`, `r662_history_from_before_warmth_was_kept_counts_for_either` (timing), `r662_the_estimate_request_says_which_case_applies` (daemon), `r662_tasks2_estimate_says_which_case_applies` (cli) | any |
+| R-663 | Another machine's passing runs are always labelled rough: `~4m (rough, from nixos's runs)`, in the CLI, MCP and UI. | `r663_another_machines_passing_runs_are_labelled_rough_and_scaled` (timing), `r663_a_running_job_says_left_rough_or_why_not_never_a_bare_guess` (cli) | any |
+| R-664 | What is shown (`Shown`: an estimate or a reason) and what the scheduler plans with (`Planning`) are different types; a built-in or failed-run guess is `Planning` only and never an ETA. | `r664_a_guess_for_planning_is_a_different_type_and_never_a_shown_estimate` (timing) | any |
+| R-665 | The warmth a run starts from is cold until this machine has a passing run of the command, warm after; finished runs are stamped with it. | `r665_the_wanted_warmth_is_cold_until_this_machine_has_a_passing_run` (timing), `r665_a_finished_run_is_stamped_cold_until_this_machine_has_passed_it` (daemon) | any |
+| R-666 | A running job of a command that never ran carries no ETA and `no_eta_why` = `first run`. | `r666_a_command_that_never_ran_shows_no_estimate_and_says_first_run` (daemon) | any |
+| R-667 | A command that only ever failed carries no ETA and `no passing run yet`. | `r667_a_command_that_only_ever_failed_shows_no_estimate_and_says_so` (daemon) | any |
+| R-668 | A passing run here gives an ETA that is not rough. | `r668_a_passing_run_here_gives_an_estimate_and_it_is_not_rough` (daemon) | any |
+| R-669 | The queue and placement still plan with a number when nothing is shown (start estimates marked rough; placement counts only measured runs as known). | `r669_the_queue_still_plans_with_a_number_when_nothing_is_shown` (daemon) | any |
+| R-670 | A job forwarded to a peer that holds it back is shown with the peer's reason (`waiting on mac: memory stalls: ...`), not `starting` and a start time of about now. | `r670_a_forwarded_job_the_peer_holds_back_shows_the_peers_reason_not_starting` (daemon) | any |
+| R-671 | The UI draws no progress bar for a running job with no estimate; it shows elapsed time and the reason. | `r671_r672_r675_the_state_cell_draws_a_bar_only_for_a_real_estimate_and_never_says_zero_left`, `r581_running_rows_say_progress_and_time_left_or_that_there_is_no_estimate` (ui) | any |
+| R-672 | The UI labels a rough ETA with the machine it comes from. | same ui test as R-671 | any |
+| R-675 | A run past its usual time says `over the usual by 1m20s (usual 57s)`, never `0s left`, and draws no bar. | `r675_past_the_usual_time_is_over_the_usual_never_zero_left` (timing), `r675_a_run_past_its_usual_time_is_over_the_usual_with_no_time_left` (daemon), `r675_a_job_past_its_usual_time_says_so_instead_of_zero_left` (cli), ui test of R-671 | any |
+| R-676 | History is keyed by the whole `sh -c "a && b"` chain, not its first command, so different chains do not share durations. Samples filed under the old first-command key stop matching. | `r676_a_chain_is_keyed_by_the_whole_chain_not_its_first_command` (timing), `r676_different_sh_chains_keep_separate_history` (daemon) | any |
+
+## v2-ui-step2
+
+| ID | Rule | Test | Platforms |
+|---|---|---|---|
+| R-640 | The side panel's Resources block shows CPU in cores of the machine (`3.2 of 10 cores`), memory with the usual peak (`1.4 GiB (usual peak 2.1 GiB)`) and a dashed line at it, disk read/write rates and totals, and processes grouped by program (max 12 + others); it says where a forwarded job was measured and gives empty and failed states in words. | `r640_*` (ui resources) | any |
+| R-641 | A memory level reads ok / tight / critical everywhere (UI, `tasks2 status`, MCP status); the stall percentage is detail. | `r641_a_memory_level_reads_ok_tight_or_critical_everywhere` (daemon api), `r641_memory_reads_ok_tight_or_critical_in_status_for_this_machine_and_peers` (cli) | any |
+| R-642 | The daemon reports the memory-stall limit (`memory.some_warn`) in `PressureView` where it measures stalls; the UI no longer guesses it from text. | `r642_the_daemon_reports_the_memory_stall_limit_where_it_measures_stalls` (daemon) | any |
+| R-643 | A peer reports memory available; machine rows show RAM `used of total` and only what is known. | `r643_*` (daemon status, serve; ui machine) | any |
+| R-644 | Every machine row shows CPU busy % (a peer without a busy figure derives it from cores in use) and a bar split by running job. | `r644_*` (ui machine), `r644_every_machine_row_has_cpu_percent_and_a_bar_by_job` (ui model) | any |
+| R-645 | Metrics are polled every 2 s only while the shown job runs, once more after it ends (up to 5 min), never for a waiting job. | `r645_*` (ui resources, feed, window) | any |
+| R-646 | Memory level words: the machine's own level (macOS normal/warn/critical, Linux derived by the daemon from PSI against `memory.some_warn`/`some_critical`); a bare percentage from an older peer is tight at the limit, critical at three times it. | `r646_the_machines_own_level_decides_and_a_bare_percentage_is_judged_by_its_limit` (ui machine) | any |
+| R-647 | A disk alert says "below its reserve" only when it is, and "filling up" while space is above the reserve. | `r647_a_disk_alert_never_says_low_while_the_space_is_above_the_reserve` (ui model) | any |
+| R-648 | The daemon keeps what the sync before a forwarded run sent and how long it took, and `JobView.sync` carries it. | `r648_the_sync_note_is_kept_next_to_the_log_and_read_back`, `r648_a_forwarded_job_keeps_what_its_sync_sent_and_how_long_it_took` (daemon) | any |
+| R-649 | The phase strip has a sync segment and the facts a Sync line (`synced 742 B in 0.4 s`); fetch results show in the panel. | `r649_*` (ui detail) | any |
+| R-650 | The window shows an offline peer only in its machine row (`Offline · last seen …`), not again as a banner; a peer with no row still gets one. | `r650_an_offline_peer_is_said_in_its_row_not_again_in_a_banner` (ui) | any |

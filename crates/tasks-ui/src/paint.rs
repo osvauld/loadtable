@@ -3,10 +3,12 @@
 
 use crate::columns::{self, Col, ColSpec, GAP};
 use crate::detail::{SegKind, Segment, Strip};
+use crate::machine::MemLevel;
 use crate::model::{JobRow, MachineCard, Online, PhaseClass, Section, SlotLine, StateCell};
+use crate::resources::{self, Graph, Procs};
 use crate::theme::{self, LABEL, Palette, SECONDARY};
 use eframe::egui::{
-    self, Align2, Color32, CornerRadius, FontId, Painter, Rect, Sense, Stroke, StrokeKind, Ui,
+    self, Color32, CornerRadius, FontId, Painter, Rect, RichText, Sense, Stroke, StrokeKind, Ui,
     epaint::text::LayoutJob, pos2, vec2,
 };
 use std::sync::Arc;
@@ -86,31 +88,6 @@ fn online_color(p: &Palette, o: Online) -> Color32 {
     }
 }
 
-/// A thin horizontal gauge: `frac` of the track filled, with an optional limit mark.
-fn gauge(
-    painter: &Painter,
-    rect: Rect,
-    p: &Palette,
-    frac: Option<f32>,
-    fill: Color32,
-    limit: Option<f32>,
-) {
-    let track = Rect::from_center_size(rect.center(), vec2(rect.width(), 6.0));
-    painter.rect_filled(track, round(3.0), p.raise);
-    if let Some(f) = frac {
-        let w = (track.width() * f.clamp(0.0, 1.0)).max(if f > 0.0 { 3.0 } else { 0.0 });
-        let fill_rect = Rect::from_min_size(track.min, vec2(w, track.height()));
-        painter.rect_filled(fill_rect, round(3.0), fill);
-    }
-    if let Some(l) = limit {
-        let x = track.min.x + track.width() * l.clamp(0.0, 1.0);
-        painter.line_segment(
-            [pos2(x, track.min.y - 3.0), pos2(x, track.max.y + 3.0)],
-            Stroke::new(2.0_f32, p.ink.gamma_multiply(0.5)),
-        );
-    }
-}
-
 fn pips(painter: &Painter, p: &Palette, x: f32, cy: f32, s: &SlotLine, max_x: f32) -> f32 {
     let label = text_at(painter, x, cy, &s.kind, theme::sans(SECONDARY - 0.5), p.dim);
     let mut cx = x + label + 6.0;
@@ -147,24 +124,79 @@ fn pips(painter: &Painter, p: &Palette, x: f32, cy: f32, s: &SlotLine, max_x: f3
     cx - x
 }
 
-/// The machine rows. Each machine is one row: name and role, memory-stall gauge with the
-/// limit mark, CPU gauge, free RAM and the slot pips (R-582). An away machine gets one line
-/// in place of the gauges.
+/// The colour of a memory level's word.
+fn level_color(p: &Palette, l: MemLevel) -> Color32 {
+    match l {
+        MemLevel::Ok => p.ok,
+        MemLevel::Tight => p.warn,
+        MemLevel::Critical => p.bad,
+        MemLevel::Unknown => p.dim,
+    }
+}
+
+/// The CPU cell: the bar split by job, then `47% busy`.
+fn cpu_cell(painter: &Painter, p: &Palette, m: &MachineCard, x: f32, cy: f32, w: f32) {
+    let val_w = 70.0;
+    let bar = Rect::from_min_size(pos2(x, cy - 4.0), vec2((w - val_w - 18.0).max(30.0), 8.0));
+    painter.rect_filled(bar, round(2.0), p.raise);
+    let mut left = bar.min.x;
+    for piece in m.cpu_load.pieces() {
+        let pw = (bar.width() * piece.frac).max(2.0).min(bar.max.x - left);
+        if pw <= 0.0 {
+            break;
+        }
+        let color = piece.hue.map_or(p.faint, |h| p.agent(h));
+        painter.rect_filled(
+            Rect::from_min_size(pos2(left, bar.min.y), vec2(pw, bar.height())),
+            0.0,
+            color,
+        );
+        left += pw;
+    }
+    // with no per-job split the bar still shows how busy the machine is
+    if m.cpu_load.pieces().is_empty()
+        && let Some(b) = m.cpu_busy
+    {
+        painter.rect_filled(
+            Rect::from_min_size(
+                bar.min,
+                vec2(bar.width() * (b / 100.0).clamp(0.0, 1.0), bar.height()),
+            ),
+            0.0,
+            p.faint,
+        );
+    }
+    let (text, color) = match m.cpu_busy {
+        Some(b) => (format!("{b:.0}% busy"), p.ink),
+        None => ("no reading".to_string(), p.dim),
+    };
+    text_at(
+        painter,
+        bar.max.x + 10.0,
+        cy,
+        &text,
+        theme::sans(SECONDARY),
+        color,
+    );
+}
+
+/// The machine rows. Each machine is one row: name and role, memory in words with RAM used,
+/// CPU busy with the bar split by job, and the slot pips (R-582, R-644, R-646). An away
+/// machine gets one line in place of the figures.
 pub fn machine_strip(ui: &mut Ui, p: &Palette, machines: &[MachineCard]) {
     let width = ui.available_width();
     let wide = width >= 900.0;
     let name_w = if wide { 170.0 } else { 140.0 };
-    let ram_w = if wide { 110.0 } else { 0.0 };
-    let flex = (width - 2.0 * PAD - name_w - ram_w).max(200.0);
-    let (stall_w, cpu_w, slots_w) = if wide {
-        (flex / 3.25, flex / 3.25, flex * 1.25 / 3.25)
+    let flex = (width - 2.0 * PAD - name_w).max(300.0);
+    let (mem_w, cpu_w) = if wide {
+        (flex * 0.27, flex * 0.33)
     } else {
-        (flex * 0.27, flex * 0.27, flex * 0.46)
+        (flex * 0.34, flex * 0.30)
     };
-    let x_stall = PAD + name_w;
-    let x_cpu = x_stall + stall_w;
-    let x_ram = x_cpu + cpu_w;
-    let x_slots = x_ram + ram_w;
+    let x_mem = PAD + name_w;
+    let x_cpu = x_mem + mem_w;
+    let x_slots = x_cpu + cpu_w;
+    let slots_w = flex - mem_w - cpu_w;
 
     // header
     let (hr, _) = ui.allocate_exact_size(vec2(width, 24.0), Sense::hover());
@@ -177,15 +209,12 @@ pub fn machine_strip(ui: &mut Ui, p: &Palette, machines: &[MachineCard]) {
             hr.center().y + 1.0,
             &t.to_uppercase(),
             theme::sans(LABEL),
-            p.faint,
+            p.dim,
         );
     };
     head(PAD, "Machine");
-    head(x_stall, "Memory stall");
-    head(x_cpu, "CPU");
-    if wide {
-        head(x_ram, "RAM free");
-    }
+    head(x_mem, "Memory");
+    head(x_cpu, "CPU, by job");
     head(x_slots, "Slots");
 
     for m in machines {
@@ -215,12 +244,12 @@ pub fn machine_strip(ui: &mut Ui, p: &Palette, machines: &[MachineCard]) {
             cy,
             m.role,
             theme::sans(LABEL + 0.5),
-            p.faint,
+            p.dim,
         );
         if let Some(note) = &m.away_note {
             text_at(
                 &painter,
-                rect.min.x + x_stall,
+                rect.min.x + x_mem,
                 cy,
                 note,
                 theme::sans(SECONDARY),
@@ -229,65 +258,35 @@ pub fn machine_strip(ui: &mut Ui, p: &Palette, machines: &[MachineCard]) {
             resp.on_hover_text(&m.status_text);
             continue;
         }
-        // memory stall: the scale ends at twice the limit, so the mark sits mid-gauge
-        let over = m.stall.is_some_and(|s| s > m.stall_limit);
-        let scale = m.stall_limit * 2.0;
-        let gx = rect.min.x + x_stall;
-        let val_w = 44.0;
-        let g_rect = Rect::from_min_size(
-            pos2(gx, cy - 5.0),
-            vec2((stall_w - val_w - 16.0).max(30.0), 10.0),
-        );
-        gauge(
+        // memory: the level in a word, RAM used beside it; the stall figures are the tooltip
+        let mx = rect.min.x + x_mem;
+        let word = text_at(
             &painter,
-            g_rect,
-            p,
-            m.stall.map(|s| s / scale),
-            if over { p.warn } else { p.dim },
-            Some(0.5),
-        );
-        text_right(
-            &painter,
-            g_rect.max.x + 8.0 + val_w,
+            mx,
             cy,
-            &crate::format::percent(m.stall),
-            theme::sans(SECONDARY),
-            if over { p.warn } else { p.dim },
+            m.mem_level.word(),
+            theme::sans_semibold(SECONDARY),
+            fade(level_color(p, m.mem_level)),
         );
-        let sx = Rect::from_min_max(pos2(gx, rect.min.y), pos2(rect.min.x + x_cpu, rect.max.y));
+        let ram = fit(
+            &painter,
+            &m.ram_used,
+            theme::sans(SECONDARY),
+            fade(p.ink),
+            (mem_w - word - 22.0).max(30.0),
+        );
+        put(&painter, mx + word + 10.0, cy, ram);
+        let mem_box =
+            Rect::from_min_max(pos2(mx, rect.min.y), pos2(rect.min.x + x_cpu, rect.max.y));
+        ui.interact(mem_box, resp.id.with("mem"), Sense::hover())
+            .on_hover_text(format!("{}\n{}\n{}", m.pressure, m.ram, m.swap));
         // CPU
         let cx = rect.min.x + x_cpu;
-        let c_rect = Rect::from_min_size(
-            pos2(cx, cy - 5.0),
-            vec2((cpu_w - val_w - 16.0).max(30.0), 10.0),
-        );
-        gauge(
-            &painter,
-            c_rect,
-            p,
-            m.cpu_busy.map(|c| c / 100.0),
-            p.dim,
-            None,
-        );
-        text_right(
-            &painter,
-            c_rect.max.x + 8.0 + val_w,
-            cy,
-            &crate::format::percent(m.cpu_busy),
-            theme::sans(SECONDARY),
-            p.dim,
-        );
-        let cr = Rect::from_min_max(pos2(cx, rect.min.y), pos2(rect.min.x + x_ram, rect.max.y));
-        if wide {
-            text_at(
-                &painter,
-                rect.min.x + x_ram,
-                cy,
-                &m.ram_free,
-                theme::sans(SECONDARY),
-                fade(p.ink),
-            );
-        }
+        cpu_cell(&painter, p, m, cx, cy, cpu_w - 10.0);
+        let cpu_box =
+            Rect::from_min_max(pos2(cx, rect.min.y), pos2(rect.min.x + x_slots, rect.max.y));
+        ui.interact(cpu_box, resp.id.with("cpu"), Sense::hover())
+            .on_hover_text(format!("{}\n\n{}", m.cpu_load.tooltip(), m.cpu));
         // slots
         let mut px = rect.min.x + x_slots;
         let right_edge = (px + slots_w).min(rect.max.x - PAD);
@@ -309,10 +308,6 @@ pub fn machine_strip(ui: &mut Ui, p: &Palette, machines: &[MachineCard]) {
             }
             px += used + 18.0;
         }
-        ui.interact(sx, resp.id.with("stall"), Sense::hover())
-            .on_hover_text(format!("{}\n{}", m.pressure, m.swap));
-        ui.interact(cr, resp.id.with("cpu"), Sense::hover())
-            .on_hover_text(format!("{}\n{}", m.cpu, m.ram));
         if let Some(b) = &m.blocker {
             resp.on_hover_text(format!("A new compile here waits: {b}"));
         }
@@ -559,6 +554,9 @@ pub fn phase_strip(ui: &mut Ui, p: &Palette, strip: &Strip) {
             SegKind::Queued => {
                 painter.rect_filled(bar, round(2.0), p.faint);
             }
+            SegKind::Sync => {
+                painter.rect_filled(bar, round(2.0), p.agent(1));
+            }
             SegKind::Running => {
                 painter.rect_filled(bar, round(2.0), p.accent);
             }
@@ -659,31 +657,268 @@ pub fn button(
     resp
 }
 
-/// The labelled, empty region the live metrics will fill (graphs and the process table). It
-/// shows no numbers: until the daemon reports them there is nothing honest to draw.
-pub fn resources_placeholder(ui: &mut Ui, p: &Palette) {
-    let width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(vec2(width, 96.0), Sense::hover());
+/// A section heading of the side panel: the name on the left, a faint note on the right.
+pub fn section_head(ui: &mut Ui, p: &Palette, title: &str, note: &str) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::hover());
     let painter = ui.painter_at(rect);
-    painter.line_segment(
-        [pos2(rect.min.x, rect.min.y), pos2(rect.max.x, rect.min.y)],
-        Stroke::new(1.0_f32, p.line),
-    );
-    text_at(
+    let cy = rect.center().y;
+    let w = text_at(
         &painter,
         rect.min.x,
-        rect.min.y + 16.0,
-        "Resources",
+        cy,
+        title,
         theme::sans_semibold(SECONDARY),
         p.ink,
     );
-    painter.text(
-        rect.center() + vec2(0.0, 10.0),
-        Align2::CENTER_CENTER,
-        "Live CPU, memory and disk for this job will show here.",
-        theme::sans(LABEL + 0.5),
-        p.faint,
+    if !note.is_empty() {
+        let room = (rect.width() - w - 16.0).max(40.0);
+        let g = fit(&painter, note, theme::sans(LABEL + 0.5), p.dim, room);
+        let x = rect.max.x - g.size().x;
+        put(&painter, x, cy, g);
+    }
+}
+
+/// A dashed horizontal line from `x0` to `x1` at `y`.
+fn dashed(painter: &Painter, x0: f32, x1: f32, y: f32, stroke: Stroke) {
+    let mut x = x0;
+    while x < x1 {
+        painter.line_segment([pos2(x, y), pos2((x + 4.0).min(x1), y)], stroke);
+        x += 7.0;
+    }
+}
+
+/// One live graph: its label and value on top, the line under them with the scale at its top
+/// left and, when there is one, the dashed marker named at its right.
+fn graph(ui: &mut Ui, p: &Palette, g: &Graph, span: &str, color: Color32) {
+    let width = ui.available_width();
+    let (top, resp) = ui.allocate_exact_size(vec2(width, 20.0), Sense::hover());
+    let tp = ui.painter_at(top);
+    let cy = top.center().y;
+    let lw = text_at(
+        &tp,
+        top.min.x,
+        cy,
+        g.label,
+        theme::sans_medium(SECONDARY),
+        p.ink,
     );
+    text_at(
+        &tp,
+        top.min.x + lw + 8.0,
+        cy,
+        span,
+        theme::sans(LABEL + 0.5),
+        p.dim,
+    );
+    let vw = (width - lw - 16.0).max(40.0);
+    let val = fit(&tp, &g.text, theme::sans_medium(SECONDARY), p.ink, vw);
+    let vx = top.max.x - val.size().x;
+    put(&tp, vx, cy, val);
+    resp.on_hover_text(&g.tip);
+
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 44.0), Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, round(3.0), p.win);
+    painter.rect_stroke(
+        rect,
+        round(3.0),
+        Stroke::new(1.0_f32, p.line),
+        StrokeKind::Inside,
+    );
+    let inner = rect.shrink2(vec2(0.0, 3.0));
+    let n = g.points.len();
+    let xy = |i: usize, v: f32| {
+        let x = if n <= 1 {
+            inner.max.x
+        } else {
+            inner.min.x + inner.width() * i as f32 / (n - 1) as f32
+        };
+        pos2(x, inner.max.y - inner.height() * v.clamp(0.0, 1.0))
+    };
+    let pts: Vec<_> = g
+        .points
+        .iter()
+        .enumerate()
+        .map(|(i, v)| xy(i, *v))
+        .collect();
+    // the area under the line, a trapezoid per step so each piece is convex
+    for w in pts.windows(2) {
+        if let [a, b] = w {
+            painter.add(egui::Shape::convex_polygon(
+                vec![*a, *b, pos2(b.x, inner.max.y), pos2(a.x, inner.max.y)],
+                color.gamma_multiply(0.18),
+                Stroke::NONE,
+            ));
+        }
+    }
+    if pts.len() >= 2 {
+        painter.add(egui::Shape::line(pts, Stroke::new(1.5_f32, color)));
+    } else if let Some(pt) = pts.first() {
+        painter.circle_filled(*pt, 2.5, color);
+    }
+    if let Some(m) = g.marker {
+        let y = inner.max.y - inner.height() * m.clamp(0.0, 1.0);
+        dashed(
+            &painter,
+            rect.min.x,
+            rect.max.x,
+            y,
+            Stroke::new(1.0_f32, p.dim),
+        );
+        let t = painter.layout_no_wrap("usual peak".to_string(), theme::sans(LABEL), p.dim);
+        let ty = (y - t.size().y - 1.0).max(rect.min.y + 1.0);
+        painter.galley(
+            pos2(rect.max.x - t.size().x - 4.0, ty),
+            t,
+            Color32::PLACEHOLDER,
+        );
+    }
+    text_at(
+        &painter,
+        rect.min.x + 5.0,
+        rect.max.y - 8.0,
+        &g.scale,
+        theme::sans(LABEL),
+        p.dim,
+    );
+}
+
+/// A label and its value, one line of the Resources block.
+fn fact_line(ui: &mut Ui, p: &Palette, label: &str, value: &str) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::hover());
+    let painter = ui.painter_at(rect);
+    let cy = rect.center().y;
+    text_at(
+        &painter,
+        rect.min.x,
+        cy,
+        label,
+        theme::sans(SECONDARY),
+        p.dim,
+    );
+    let g = fit(
+        &painter,
+        value,
+        theme::sans(SECONDARY),
+        p.ink,
+        (rect.width() - 104.0).max(40.0),
+    );
+    put(&painter, rect.min.x + 104.0, cy, g);
+}
+
+/// The processes grouped by program: program and count, CPU in cores with a bar, memory.
+fn proc_table(ui: &mut Ui, p: &Palette, procs: &Procs) {
+    let width = ui.available_width();
+    let cpu_x = (width * 0.42).max(120.0);
+    let (hr, _) = ui.allocate_exact_size(vec2(width, 20.0), Sense::hover());
+    let hp = ui.painter_at(hr);
+    let hy = hr.center().y + 2.0;
+    let head = |x: f32, t: &str| {
+        text_at(
+            &hp,
+            hr.min.x + x,
+            hy,
+            &t.to_uppercase(),
+            theme::sans(LABEL),
+            p.dim,
+        );
+    };
+    head(0.0, "Program");
+    head(cpu_x, "CPU in cores");
+    let mem_head = hp.layout_no_wrap("MEMORY".to_string(), theme::sans(LABEL), p.dim);
+    put(&hp, hr.max.x - mem_head.size().x, hy, mem_head);
+    for r in &procs.rows {
+        let (rect, _) = ui.allocate_exact_size(vec2(width, 22.0), Sense::hover());
+        let painter = ui.painter_at(rect);
+        painter.hline(rect.x_range(), rect.min.y, Stroke::new(1.0_f32, p.line));
+        let cy = rect.center().y;
+        let name_color = if r.others { p.dim } else { p.ink };
+        let font = if r.others {
+            theme::sans(SECONDARY)
+        } else {
+            theme::mono(SECONDARY)
+        };
+        let nw = text_at(&painter, rect.min.x, cy, &r.name, font, name_color);
+        if !r.count.is_empty() {
+            text_at(
+                &painter,
+                rect.min.x + nw + 6.0,
+                cy,
+                &r.count,
+                theme::sans(LABEL + 0.5),
+                p.dim,
+            );
+        }
+        let bar_w = 44.0;
+        let track = Rect::from_min_size(pos2(rect.min.x + cpu_x, cy - 2.5), vec2(bar_w, 5.0));
+        painter.rect_filled(track, round(2.0), p.raise);
+        if r.cpu_frac > 0.0 {
+            painter.rect_filled(
+                Rect::from_min_size(track.min, vec2((bar_w * r.cpu_frac).max(2.0), 5.0)),
+                round(2.0),
+                p.accent,
+            );
+        }
+        text_at(
+            &painter,
+            track.max.x + 8.0,
+            cy,
+            &r.cpu,
+            theme::sans(SECONDARY),
+            p.ink,
+        );
+        text_right(
+            &painter,
+            rect.max.x,
+            cy,
+            &r.mem,
+            theme::sans(SECONDARY),
+            p.ink,
+        );
+    }
+}
+
+/// The Resources block: heading, CPU and memory graphs, disk lines, process table. Every
+/// word and number comes from [`resources::Panel`].
+pub fn resources(ui: &mut Ui, p: &Palette, panel: &resources::Panel) {
+    section_head(ui, p, "Resources", &panel.note);
+    ui.add_space(4.0);
+    match &panel.body {
+        resources::Body::Message(m) => {
+            ui.add(
+                egui::Label::new(RichText::new(m).font(theme::sans(SECONDARY)).color(p.dim)).wrap(),
+            );
+        }
+        resources::Body::Live(l) => {
+            graph(ui, p, &l.cpu, &l.span, p.accent);
+            ui.add_space(6.0);
+            graph(ui, p, &l.mem, &l.span, p.agent(0));
+            ui.add_space(6.0);
+            for (k, v) in &l.disk {
+                fact_line(ui, p, k, v);
+            }
+            if let Some(s) = &l.stale {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(s)
+                            .font(theme::sans(LABEL + 0.5))
+                            .color(p.warn),
+                    )
+                    .wrap(),
+                );
+            }
+            if let Some(procs) = &l.procs {
+                ui.add_space(10.0);
+                section_head(
+                    ui,
+                    p,
+                    "Processes",
+                    &format!("grouped by program · {}", procs.note),
+                );
+                proc_table(ui, p, procs);
+            }
+        }
+    }
 }
 
 /// A full-width table for the tabs that list rows: fixed column widths, the last column takes

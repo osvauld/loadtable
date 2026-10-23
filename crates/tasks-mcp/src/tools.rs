@@ -1212,13 +1212,16 @@ impl Tools {
             return Err(unexpected("estimate", &resp));
         };
         Ok(ToolResult {
-            text: format!(
-                "{} (median {}, p90 {}, {} sample(s))",
-                e.text,
-                dur(e.median_secs),
-                dur(e.p90_secs),
-                e.samples
-            ),
+            text: match (e.median_secs, e.p90_secs) {
+                (Some(m), Some(p)) => format!(
+                    "{} (median {}, p90 {}, {} passing run(s))",
+                    e.text,
+                    dur(m),
+                    dur(p),
+                    e.samples
+                ),
+                _ => e.text.clone(),
+            },
             structured: serde_json::to_value(&e).unwrap_or(Value::Null),
             is_error: false,
         })
@@ -1303,8 +1306,19 @@ fn status_text(s: &StatusSnapshot) -> String {
             r.owner,
             r.command,
             dur(r.elapsed_secs),
-            r.eta_secs
-                .map_or(String::new(), |e| format!(", about {} left", dur(e)))
+            match (r.usual_secs, r.over_by_secs, r.eta_secs, &r.no_eta_why) {
+                (Some(u), Some(by), _, _) =>
+                    format!(", over the usual by {} (usual {})", dur(by), dur(u)),
+                (_, _, Some(e), _) => {
+                    let rough = r
+                        .eta_rough_from
+                        .as_ref()
+                        .map_or(String::new(), |m| format!(" (rough, from {m}'s runs)"));
+                    format!(", about {} left{rough}", dur(e))
+                }
+                (_, _, None, Some(why)) => format!(", no estimate: {why}"),
+                _ => String::new(),
+            }
         ));
     }
     if s.waiting.is_empty() {
@@ -1335,11 +1349,17 @@ fn status_text(s: &StatusSnapshot) -> String {
     }
     let p = &s.pressure;
     let pct = |v: Option<f32>| v.map_or("?".to_string(), |v| format!("{v:.0}%"));
+    let word = tasks_daemon::api::memory_word(&p.memory);
+    let memory = match p.memory_some {
+        Some(some) => format!(
+            "memory {word} (stalled {}, fully stalled {})",
+            pct(Some(some)),
+            pct(p.memory_full)
+        ),
+        None => format!("memory {word}"),
+    };
     t.push_str(&format!(
-        "pressure: memory {} (some {}, full {}), cpu {}, io {}\n",
-        p.memory,
-        pct(p.memory_some),
-        pct(p.memory_full),
+        "pressure: {memory}, cpu {}, io {}\n",
         pct(p.cpu),
         pct(p.io)
     ));

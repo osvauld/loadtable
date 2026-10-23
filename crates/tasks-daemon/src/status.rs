@@ -6,7 +6,7 @@ use crate::api::{
 };
 use crate::api::{PeerJobUseView, PeerMachineView, PeerSlotView};
 use crate::queue_estimate::{Queued, starts_in_queue_order};
-use crate::queue_view::{class_note, remote_wait};
+use crate::queue_view::{class_note, peer_hold, remote_wait};
 use crate::scheduler::{RunningJob, Scheduler, lock, shorten};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -38,6 +38,7 @@ fn peer_machine_view(s: &tasks_peer::proto::PeerStatus) -> PeerMachineView {
         io_pct: s.pressure.io_pct,
         pressure_summary: s.pressure.summary.clone(),
         cpu_busy_pct: s.pressure.cpu_busy_pct,
+        memory_available_bytes: s.pressure.memory_available_bytes,
         swap_total: s.pressure.swap_total_bytes,
         swap_used: s.pressure.swap_used_bytes,
         swap_in_per_s: s.pressure.swap_in_per_s,
@@ -97,6 +98,15 @@ pub fn job_view(r: &JobRecord) -> JobView {
         remote_wait: remote_wait(r),
         fetch_paths: r.spec.fetch.clone(),
         fetch: fetch_results(r),
+        sync: sync_view(r),
+    }
+}
+
+/// The sync before a forwarded run, when it has happened (R-648).
+fn sync_view(r: &JobRecord) -> Option<crate::api::SyncView> {
+    match (&r.log_path, &r.forward) {
+        (Some(log), Some(_)) => crate::peer_link::sync_note::read(log),
+        _ => None,
     }
 }
 
@@ -215,6 +225,7 @@ impl Scheduler {
                 .push(r);
         }
         let mut waiting = Vec::new();
+        let peer_views = self.forwarder.peers();
         let mut computed = 0usize;
         for (kind, rows) in &per_kind {
             let (total, remaining) = match kind {
@@ -234,10 +245,9 @@ impl Scheduler {
                 let (runtime, rough) = if computed < MAX_STATUS_WAITERS {
                     computed += 1;
                     let f = self.facts(r);
-                    (
-                        f.est.as_ref().map_or(60.0, |e| e.median_secs),
-                        f.known_median.is_none(),
-                    )
+                    // queue order plans with the planning figure; "rough" says no passing run
+                    // backs it
+                    (f.plan.median_secs, !f.plan.is_measured())
                 } else {
                     (60.0, true)
                 };
@@ -262,13 +272,31 @@ impl Scheduler {
                 };
                 let eff = effective(w, now_ms, aging_ms);
                 let waited = now_ms.saturating_sub(w.queued_at_ms);
+                // a forwarded job the peer holds back: say what the peer says, not "starting"
+                // and a start time of about now (R-670)
+                let blocker = r.forward.as_ref().and_then(|fw| {
+                    let gated = tasks_placement::slot_for(r.spec.kind) == Some(SlotKind::Compile);
+                    peer_views
+                        .iter()
+                        .find(|p| p.machine.name.0 == fw.peer.0)
+                        .filter(|p| gated && p.pressure.blocked)
+                        .map(|p| p.pressure.summary.as_str())
+                });
+                let held = peer_hold(r, blocker);
                 waiting.push(WaiterView {
                     id: r.id,
                     owner: r.spec.owner.as_str().to_string(),
                     command: shorten(&r.spec.argv.join(" ")),
-                    wait_text: r.wait_text.clone().unwrap_or_else(|| "queued".to_string()),
+                    wait_text: held
+                        .clone()
+                        .or_else(|| r.wait_text.clone())
+                        .unwrap_or_else(|| "queued".to_string()),
                     position: i + 1,
-                    start_estimate_secs: if kind.is_some() { *start } else { None },
+                    start_estimate_secs: if kind.is_some() && held.is_none() {
+                        *start
+                    } else {
+                        None
+                    },
                     rough: *rough,
                     class: eff.class.as_str().to_string(),
                     class_note: class_note(
@@ -278,7 +306,7 @@ impl Scheduler {
                         waited,
                         aging_ms,
                     ),
-                    on_peer: None,
+                    on_peer: held.and(r.forward.as_ref().map(|fw| fw.peer.0.clone())),
                 });
             }
         }
@@ -317,6 +345,21 @@ impl Scheduler {
                 let p = progress(&tl, &rj.estimates);
                 drop(tl);
                 let live = lock(&self.metrics).latest(rj.id);
+                let elapsed = rj.started.elapsed().as_secs_f64();
+                // time left only when passing runs back the job's estimate (R-660..R-665)
+                let (eta, over, rough_from, no_why) = match &rj.shown {
+                    tasks_timing::Shown::Eta(e) => {
+                        let (eta, over) = match e.left(p.eta_secs, elapsed) {
+                            tasks_timing::Left::Secs(s) => (Some(s), None),
+                            tasks_timing::Left::Over {
+                                usual_secs,
+                                by_secs,
+                            } => (None, Some((usual_secs, by_secs))),
+                        };
+                        (eta, over, e.rough.then(|| e.machine.clone()), None)
+                    }
+                    tasks_timing::Shown::Absent(w) => (None, None, None, Some(w.to_string())),
+                };
                 RunningView {
                     id: rj.id,
                     owner: rj.owner.clone(),
@@ -326,10 +369,11 @@ impl Scheduler {
                     done_targets: p.done_targets,
                     total_targets: p.total_targets,
                     current: p.current,
-                    eta_secs: p.eta_secs.or_else(|| {
-                        rj.est_median
-                            .map(|m| (m - rj.started.elapsed().as_secs_f64()).max(0.0))
-                    }),
+                    eta_secs: eta,
+                    usual_secs: over.map(|o| o.0),
+                    over_by_secs: over.map(|o| o.1),
+                    eta_rough_from: rough_from,
+                    no_eta_why: no_why,
                     log_bytes: std::fs::metadata(&rj.log_path)
                         .map(|m| m.len())
                         .unwrap_or(0),
@@ -458,11 +502,16 @@ impl Scheduler {
                 memory: level_name(r.pressure.memory).to_string(),
                 memory_some: r.pressure.memory_some,
                 memory_full: r.pressure.memory_full,
+                memory_stall_limit: r
+                    .pressure
+                    .memory_some
+                    .map(|_| policy.psi().memory_some_warn),
                 cpu: r.pressure.cpu,
                 io: r.pressure.io,
                 available_memory: Some(r.available_memory),
                 memory_total: mem.map(|m| m.total_bytes),
                 cpu_busy_pct: rates.cpu_pct,
+                cpu_cores: Some(self.cores),
                 cores_in_use: rates
                     .cpu_pct
                     .map(|p| f64::from(p) / 100.0 * f64::from(self.cores)),
@@ -486,12 +535,14 @@ impl Scheduler {
                 memory: "unknown".to_string(),
                 memory_some: None,
                 memory_full: None,
+                memory_stall_limit: None,
                 cpu: None,
                 io: None,
                 available_memory: None,
                 memory_total: None,
                 cpu_busy_pct: None,
                 cores_in_use: None,
+                cpu_cores: Some(self.cores),
                 swap_total: None,
                 swap_used: None,
                 swap_in_per_s: None,
@@ -511,7 +562,7 @@ mod peer_view_tests {
     use tasks_peer::proto::{PeerStatus, PressureSummary, QueueSummary, SlotStatus};
 
     #[test]
-    fn a_peers_last_report_reaches_the_status_view() {
+    fn r643_a_peers_last_report_reaches_the_status_view() {
         let machine = tasks_core::Machine {
             name: tasks_core::MachineName("nixos".into()),
             os: tasks_core::Os::Linux,
@@ -539,6 +590,7 @@ mod peer_view_tests {
                 io_pct: Some(0),
                 summary: "memory stalls".into(),
                 cpu_busy_pct: Some(61),
+                memory_available_bytes: Some(51 << 30),
                 swap_total_bytes: Some(4 << 30),
                 swap_used_bytes: Some(1 << 30),
                 swap_in_per_s: Some(0),
@@ -556,6 +608,8 @@ mod peer_view_tests {
             (v.slots[0].kind.as_str(), v.slots[0].total, v.slots[0].used),
             ("compile", 4, 3)
         );
+        // R-643: what the peer has free reaches the origin's view
+        assert_eq!(v.memory_available_bytes, Some(51 << 30));
         // unknown stays unknown; a measured zero stays zero
         assert_eq!(
             (v.cpu_pct, v.memory_pct, v.io_pct),

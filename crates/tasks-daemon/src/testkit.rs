@@ -86,6 +86,9 @@ impl FakeMachine {
     pub fn set_io(&self, pct: f32) {
         lock(&self.state).pressure.io = Some(pct);
     }
+    pub fn set_memory_some(&self, pct: Option<f32>) {
+        lock(&self.state).pressure.memory_some = pct;
+    }
     pub fn set_memory_level(&self, l: Level) {
         lock(&self.state).pressure.memory = l;
     }

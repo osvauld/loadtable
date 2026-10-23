@@ -6,12 +6,15 @@ use crate::model::{JobRow, PhaseClass, Section};
 use jiff::tz::TimeZone;
 use std::path::Path;
 use tasks_core::{FetchStatus, Placement, Priority};
+use tasks_daemon::api::SyncView;
 
 /// What a strip segment stands for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SegKind {
     /// Submitted, waiting to start.
     Queued,
+    /// Sending the checkout to the peer before a forwarded run.
+    Sync,
     /// Executing.
     Running,
     /// Still to come, by the estimate.
@@ -104,6 +107,18 @@ fn strip(row: &JobRow, now_ms: i64, tz: &TimeZone) -> Option<Strip> {
                 format!("queued {}", format::coarse(queued)),
             ));
             let ran = secs_between(s, end);
+            // the sync happens at the start of the forwarded run: carve it out of it
+            let synced = j
+                .sync
+                .map(|y| (y, (y.millis as f64 / 1000.0).min(ran)))
+                .filter(|(_, secs)| *secs > 0.0);
+            let ran = match synced {
+                Some((y, secs)) => {
+                    kinds.push((SegKind::Sync, secs, sync_words(&y)));
+                    (ran - secs).max(0.0)
+                }
+                None => ran,
+            };
             let cap = format!("running {}", format::coarse(ran));
             kinds.push((SegKind::Running, ran, cap));
             times.push(format!("{} started", at(s)));
@@ -144,6 +159,20 @@ fn strip(row: &JobRow, now_ms: i64, tz: &TimeZone) -> Option<Strip> {
         })
         .collect();
     Some(Strip { segments, times })
+}
+
+/// A sync in words: `synced 742 B in 0.4 s`, or that the peer already had the tree (R-649).
+pub fn sync_words(y: &SyncView) -> String {
+    let took = if y.millis < 10_000 {
+        format!("{:.1} s", y.millis as f64 / 1000.0)
+    } else {
+        span_words(y.millis as f64 / 1000.0)
+    };
+    if y.already_there {
+        format!("peer already had this tree, checked in {took}")
+    } else {
+        format!("synced {} in {took}", format::bytes(y.bytes))
+    }
 }
 
 fn why_there(row: &JobRow) -> String {
@@ -264,6 +293,9 @@ pub fn detail(row: &JobRow, now_ms: i64, tz: &TimeZone, home: Option<&Path>) -> 
     }
     if let Some(f) = &j.figures {
         facts.push(("Cost", f.summary()));
+    }
+    if let Some(y) = &j.sync {
+        facts.push(("Sync", format!("{} ({} files)", sync_words(y), y.files)));
     }
     if let Some(f) = fetch_lines(row) {
         facts.push(("Fetch results", f));
@@ -434,6 +466,62 @@ mod tests {
             .expect("f")
             .1;
         assert_eq!(f, "out/app.apk · 3.0 MiB\nout/b.bin · not on the peer");
+    }
+
+    #[test]
+    fn r649_a_forwarded_job_shows_its_sync_in_the_strip_and_the_facts() {
+        let mut d = fixtures::busy();
+        let j = d.jobs.iter_mut().find(|j| j.id.0 == 103).expect("job");
+        j.sync = Some(SyncView {
+            bytes: 742,
+            files: 120,
+            millis: 400,
+            already_there: false,
+        });
+        let vm = model::build(&d, 0);
+        let r = vm.running.iter().find(|r| r.id == 103).expect("row");
+        let det = detail(r, fixtures::NOW_MS, &utc(), None);
+        let strip = det.strip.expect("strip");
+        let kinds: Vec<_> = strip.segments.iter().map(|g| g.kind).collect();
+        assert_eq!(
+            kinds[..3],
+            [SegKind::Queued, SegKind::Sync, SegKind::Running]
+        );
+        assert_eq!(strip.segments[1].caption, "synced 742 B in 0.4 s");
+        let total: f32 = strip.segments.iter().map(|g| g.share).sum();
+        assert!((total - 1.0).abs() < 1e-4, "{total}");
+        let fact = det.facts.iter().find(|(l, _)| *l == "Sync").expect("fact");
+        assert_eq!(fact.1, "synced 742 B in 0.4 s (120 files)");
+        // a job without a note has no sync segment
+        let none = detail(&row(101), fixtures::NOW_MS, &utc(), None);
+        assert!(
+            none.strip
+                .expect("strip")
+                .segments
+                .iter()
+                .all(|g| g.kind != SegKind::Sync)
+        );
+    }
+
+    #[test]
+    fn r649_sync_words_cover_a_slow_sync_and_a_tree_the_peer_already_had() {
+        let slow = SyncView {
+            bytes: 5 << 20,
+            files: 9,
+            millis: 120_000,
+            already_there: false,
+        };
+        assert_eq!(sync_words(&slow), "synced 5.0 MiB in 2 min");
+        let had = SyncView {
+            bytes: 0,
+            files: 9,
+            millis: 200,
+            already_there: true,
+        };
+        assert_eq!(
+            sync_words(&had),
+            "peer already had this tree, checked in 0.2 s"
+        );
     }
 
     #[test]

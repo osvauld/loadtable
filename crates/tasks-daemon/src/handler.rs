@@ -20,7 +20,7 @@ use tasks_ledger::{
     RetryPolicy, action, retry_busy,
 };
 use tasks_policy::{Executables, ExpandOptions, RealFs, Timing};
-use tasks_timing::{History, RecipeKey};
+use tasks_timing::{History, RecipeKey, Shown};
 
 /// Longest cancel reason, in characters.
 const MAX_CANCEL_REASON: usize = 500;
@@ -764,12 +764,11 @@ impl Scheduler {
         })
     }
 
-    fn estimate(&self, argv: &[String], kind: Option<tasks_core::Kind>) -> Response {
-        let keys = RecipeKey::from_argv(argv, &[]);
-        let recipe = keys.first().map_or_else(
-            || argv.first().cloned().unwrap_or_default(),
-            ToString::to_string,
-        );
+    /// What may be shown as a command's duration. The request's `kind` only ever picked a
+    /// built-in default, which is never shown as an estimate.
+    fn estimate(&self, argv: &[String], _kind: Option<tasks_core::Kind>) -> Response {
+        let recipe = RecipeKey::history_key(argv, &[])
+            .unwrap_or_else(|| argv.first().cloned().unwrap_or_default());
         let others: Vec<_> = self
             .forwarder
             .peers()
@@ -779,30 +778,27 @@ impl Scheduler {
                 cores: p.machine.cores,
             })
             .collect();
-        match self.estimate_for(&recipe, &self.machine_info(), &others) {
-            Some(mut e) => {
-                if e.samples == 0
-                    && let Some(k) = kind
-                {
-                    let (median, p90) = tasks_timing::estimate::kind_default(k);
-                    e.median_secs = median;
-                    e.p90_secs = p90;
-                }
-                Response::Estimate(EstimateView {
-                    recipe,
-                    median_secs: e.median_secs,
-                    p90_secs: e.p90_secs,
-                    samples: e.samples,
-                    text: e.to_string(),
-                })
-            }
-            None => Response::Estimate(EstimateView {
+        let want = self.wanted_cache(&recipe);
+        let shown = self.shown_for(&recipe, &self.machine_info(), &others, want);
+        Response::Estimate(match &shown {
+            Shown::Eta(e) => EstimateView {
                 recipe,
-                median_secs: 0.0,
-                p90_secs: 0.0,
+                median_secs: Some(e.median_secs),
+                p90_secs: Some(e.p90_secs),
+                samples: e.samples,
+                text: shown.to_string(),
+                why_not: None,
+                rough: e.rough,
+            },
+            Shown::Absent(w) => EstimateView {
+                recipe,
+                median_secs: None,
+                p90_secs: None,
                 samples: 0,
-                text: "no estimate: the timing history could not be read".to_string(),
-            }),
-        }
+                text: shown.to_string(),
+                why_not: Some(w.to_string()),
+                rough: false,
+            },
+        })
     }
 }
