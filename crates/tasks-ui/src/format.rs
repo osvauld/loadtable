@@ -20,41 +20,36 @@ pub fn agent_of(owner: &str) -> &str {
     }
 }
 
-/// Colours the agents get, chosen to stay apart on light and dark backgrounds.
-const PALETTE: [[u8; 3]; 20] = [
-    [0x1f, 0x77, 0xb4],
-    [0xff, 0x7f, 0x0e],
-    [0x2c, 0xa0, 0x2c],
-    [0xd6, 0x27, 0x28],
-    [0x94, 0x67, 0xbd],
-    [0x8c, 0x56, 0x4b],
-    [0xe3, 0x77, 0xc2],
-    [0x7f, 0x7f, 0x7f],
-    [0xbc, 0xbd, 0x22],
-    [0x17, 0xbe, 0xcf],
-    [0x39, 0x3b, 0x79],
-    [0xad, 0x49, 0x4a],
-    [0x00, 0x80, 0x80],
-    [0xb8, 0x86, 0x0b],
-    [0x4a, 0x90, 0xd9],
-    [0xc7, 0x15, 0x85],
-    [0x66, 0xa6, 0x1e],
-    [0xe6, 0x55, 0x00],
-    [0x5f, 0x6b, 0x7a],
-    [0x7b, 0x2d, 0x8e],
-];
+/// Muted hues an agent can get (the theme's `a1..a4`).
+pub const AGENT_HUES: usize = 4;
 
-/// A stable colour for an agent name: the same name always gets the same colour, across
-/// refreshes and runs (R-204).
-pub fn agent_color(agent: &str) -> [u8; 3] {
-    // FNV-1a: stable across runs and platforms, unlike the std hasher.
+/// A stable hue index (0..[`AGENT_HUES`]) for an agent name: the same name always gets the
+/// same one, across refreshes and runs (R-204, R-580). The theme maps it to a colour that
+/// never reads as a status.
+pub fn agent_hue(agent: &str) -> usize {
+    // FNV-1a: stable across runs and platforms, unlike the std hasher. Its low bits mix
+    // poorly for short names, so fold the high half in before taking the remainder.
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in agent.bytes() {
         h ^= u64::from(b);
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    let i = usize::try_from(h % PALETTE.len() as u64).unwrap_or(0);
-    PALETTE.get(i).copied().unwrap_or([0x7f, 0x7f, 0x7f])
+    h ^= h >> 32;
+    usize::try_from(h % AGENT_HUES as u64).unwrap_or(0)
+}
+
+/// The coding-agent product an agent name mentions (`ui-claude` -> `claude`), shown as small
+/// text next to the name. A name that is just the product shows nothing extra (R-583).
+pub fn vendor_of(agent: &str) -> Option<&'static str> {
+    const VENDORS: [&str; 4] = ["claude", "codex", "cursor", "pi"];
+    let lower = agent.to_lowercase();
+    if VENDORS.contains(&lower.as_str()) {
+        return None;
+    }
+    // whole words only, so `pipeline` is not `pi`
+    lower
+        .split(|c: char| !c.is_alphanumeric())
+        .find_map(|w| VENDORS.iter().copied().find(|v| *v == w))
 }
 
 /// `45s`, `3m05s`, `2h07m`, `3d04h`.
@@ -74,6 +69,72 @@ pub fn duration(secs: f64) -> String {
 /// `3m05s ago`.
 pub fn ago(secs: u64) -> String {
     format!("{} ago", duration(secs as f64))
+}
+
+/// `just now`, `5 min ago`, `2 h ago`, `3 d ago`: how long ago, in words (R-583).
+pub fn ago_words(secs: u64) -> String {
+    match secs {
+        0..=59 => "just now".to_string(),
+        60..=3599 => format!("{} min ago", secs / 60),
+        3600..=86_399 => format!("{} h ago", secs / 3600),
+        _ => format!("{} d ago", secs / 86_400),
+    }
+}
+
+/// A duration without the noise of seconds once it is long: `45s`, `2m`, `1h20m`. For
+/// estimates (`starts ~2m`), where the seconds are a guess anyway.
+pub fn coarse(secs: f64) -> String {
+    if !secs.is_finite() || secs < 0.0 {
+        return UNKNOWN.to_string();
+    }
+    let s = secs.round() as u64;
+    match s {
+        0..=59 => format!("{s}s"),
+        60..=3599 => format!("{}m", (s + 30) / 60),
+        _ => format!("{}h{:02}m", s / 3600, (s % 3600) / 60),
+    }
+}
+
+/// `1st`, `2nd`, `3rd`, `4th`, `11th`, `21st`.
+pub fn ordinal(n: usize) -> String {
+    let suffix = match (n % 10, n % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix}")
+}
+
+/// The wall-clock time of `ms` in `tz`: `12:05`, or `Oct 16 12:05` when it is not the same
+/// day as `now_ms` (R-586).
+pub fn clock_in(ms: i64, now_ms: i64, tz: &jiff::tz::TimeZone) -> String {
+    let at = |ms: i64| jiff::Timestamp::from_millisecond(ms).map(|t| t.to_zoned(tz.clone()));
+    match (at(ms), at(now_ms)) {
+        (Ok(z), Ok(now)) if z.date() == now.date() => {
+            format!("{:02}:{:02}", z.hour(), z.minute())
+        }
+        (Ok(z), _) => z.strftime("%b %-d %H:%M").to_string(),
+        _ => UNKNOWN.to_string(),
+    }
+}
+
+/// [`clock_in`] for the machine's own zone.
+pub fn local_clock(ms: i64, now_ms: i64) -> String {
+    clock_in(ms, now_ms, &jiff::tz::TimeZone::system())
+}
+
+/// A path with the home directory written `~`.
+pub fn tilde_path(path: &std::path::Path, home: Option<&std::path::Path>) -> String {
+    if let Some(rest) = home.and_then(|h| path.strip_prefix(h).ok()) {
+        return if rest.as_os_str().is_empty() {
+            "~".to_string()
+        } else {
+            format!("~/{}", rest.display())
+        };
+    }
+    path.display().to_string()
 }
 
 /// Bytes with a binary unit: `512 B`, `1.5 KiB`, `6.2 GiB`.
@@ -194,17 +255,81 @@ mod tests {
     }
 
     #[test]
-    fn r204_agent_colours_are_stable_and_distinct() {
-        let names = ["claude", "codex", "v2-ui", "v2-core", "hard-errors", "lead"];
-        let colours: Vec<_> = names.iter().map(|n| agent_color(n)).collect();
-        for (n, c) in names.iter().zip(&colours) {
-            assert_eq!(agent_color(n), *c, "stable");
+    fn r580_agent_hues_are_stable_in_range_and_apart_for_the_fixture_agents() {
+        let names = ["ui-claude", "core-codex", "hard-errors", "lint-pi", "lead"];
+        for n in names {
+            assert!(agent_hue(n) < AGENT_HUES);
+            assert_eq!(agent_hue(n), agent_hue(n), "stable");
         }
-        for (i, a) in colours.iter().enumerate() {
-            for b in colours.iter().skip(i + 1) {
-                assert_ne!(a, b, "distinct for the fixture agents");
-            }
-        }
+        // the fixture's four agents each get their own hue, so a screenshot tells them apart
+        let fixture: Vec<_> = ["ui-claude", "core-codex", "hard-errors", "lint-pi"]
+            .iter()
+            .map(|n| agent_hue(n))
+            .collect();
+        let mut sorted = fixture.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 4, "{fixture:?}");
+    }
+
+    #[test]
+    fn r583_vendor_is_a_whole_word_of_the_name_and_never_the_name_itself() {
+        assert_eq!(vendor_of("ui-claude"), Some("claude"));
+        assert_eq!(vendor_of("v2_codex"), Some("codex"));
+        assert_eq!(vendor_of("cursor-lint"), Some("cursor"));
+        assert_eq!(vendor_of("pi.worker"), Some("pi"));
+        assert_eq!(vendor_of("pipeline"), None);
+        assert_eq!(vendor_of("hard-errors"), None);
+        assert_eq!(vendor_of("claude"), None, "the name already says it");
+        assert_eq!(vendor_of("Claude"), None);
+    }
+
+    #[test]
+    fn r583_times_read_in_words() {
+        assert_eq!(ago_words(5), "just now");
+        assert_eq!(ago_words(60), "1 min ago");
+        assert_eq!(ago_words(600), "10 min ago");
+        assert_eq!(ago_words(7300), "2 h ago");
+        assert_eq!(ago_words(200_000), "2 d ago");
+        assert_eq!(coarse(45.0), "45s");
+        assert_eq!(coarse(125.0), "2m");
+        assert_eq!(coarse(300.0), "5m");
+        assert_eq!(coarse(4800.0), "1h20m");
+        assert_eq!(coarse(f64::NAN), UNKNOWN);
+        assert_eq!(ordinal(1), "1st");
+        assert_eq!(ordinal(2), "2nd");
+        assert_eq!(ordinal(3), "3rd");
+        assert_eq!(ordinal(4), "4th");
+        assert_eq!(ordinal(11), "11th");
+        assert_eq!(ordinal(12), "12th");
+        assert_eq!(ordinal(21), "21st");
+    }
+
+    #[test]
+    fn r586_clock_times_are_local_and_name_the_day_only_when_it_differs() {
+        let tz = jiff::tz::TimeZone::fixed(jiff::tz::offset(2));
+        // 2026-10-17 12:22:13Z is 14:22 at +02:00
+        let now = 1_792_239_733_000;
+        assert_eq!(clock_in(now, now, &tz), "14:22");
+        assert_eq!(clock_in(now - 900_000, now, &tz), "14:07");
+        assert_eq!(clock_in(now - 86_400_000, now, &tz), "Oct 16 14:22");
+        assert_eq!(clock_in(0, now, &jiff::tz::TimeZone::UTC), "Jan 1 00:00");
+    }
+
+    #[test]
+    fn r586_home_is_written_as_a_tilde() {
+        use std::path::Path;
+        let home = Some(Path::new("/home/demo"));
+        assert_eq!(
+            tilde_path(Path::new("/home/demo/work/tasks"), home),
+            "~/work/tasks"
+        );
+        assert_eq!(tilde_path(Path::new("/home/demo"), home), "~");
+        assert_eq!(
+            tilde_path(Path::new("/home/demo2/x"), home),
+            "/home/demo2/x"
+        );
+        assert_eq!(tilde_path(Path::new("/srv/x"), None), "/srv/x");
     }
 
     #[test]

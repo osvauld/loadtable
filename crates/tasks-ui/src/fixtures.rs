@@ -94,7 +94,7 @@ fn pressure() -> PressureView {
         swap_used: Some(1 << 30),
         swap_in_per_s: Some(0),
         swap_out_per_s: Some(0),
-        cache_free: Some(120 << 30),
+        cache_free: Some(280 << 30),
         state_free: Some(300 << 30),
         compile_blocker: None,
         warning: None,
@@ -102,9 +102,13 @@ fn pressure() -> PressureView {
 }
 
 fn peer(state: &str, ago: Option<u64>) -> PeerView {
+    named_peer("nixos", state, ago)
+}
+
+fn named_peer(name: &str, state: &str, ago: Option<u64>) -> PeerView {
     PeerView {
-        name: "nixos".into(),
-        node_id: "node-nixos".into(),
+        name: name.into(),
+        node_id: format!("node-{name}"),
         state: state.into(),
         last_seen_ago_secs: ago,
         detail: if state == "offline" {
@@ -216,8 +220,8 @@ fn waiter(
 /// A busy laptop: running, queued and finished jobs, one forward to the worker.
 pub fn busy() -> Dashboard {
     let mut d = idle();
-    let owner_a = "claude@laptop";
-    let owner_b = "v2-core@laptop";
+    let owner_a = "ui-claude@laptop";
+    let owner_b = "core-codex@laptop";
     let owner_c = "hard-errors@laptop";
 
     let mut r1 = job(101, owner_a, Phase::Running);
@@ -245,10 +249,19 @@ pub fn busy() -> Dashboard {
     q2.log_path = None;
     let mut q3 = job(
         112,
-        "codex@laptop",
+        "lint-pi@laptop",
         Phase::Waiting(WaitReason::Slot(SlotKind::Compile)),
     );
     q3.log_path = None;
+    // a forward the worker holds back on its own queue (R-349)
+    let mut q4 = job(113, owner_c, Phase::Running);
+    q4.machine = Some("nixos".into());
+    q4.forwarded_to = Some(("nixos".into(), Some(1497)));
+    q4.placement = Placement::Peer(MachineName("nixos".into()));
+    q4.remote_phase = Some(Phase::Waiting(WaitReason::Slot(SlotKind::Compile)));
+    q4.remote_wait = Some("waiting on nixos: its compile queue".into());
+    q4.started_at_ms = None;
+    q4.log_path = None;
 
     let mut f1 = job(90, owner_a, Phase::Passed);
     f1.finished_at_ms = Some(NOW_MS - 600_000);
@@ -261,7 +274,35 @@ pub fn busy() -> Dashboard {
     f3.cancel_requested_by = Some(owner_c.into());
     f3.cancel_reason = Some("wrong branch".into());
 
-    d.jobs = vec![f1, f2, f3, r1, r2, r3, q1, q2, q3];
+    let mut f4 = job(93, owner_b, Phase::Failed { exit: Some(101) });
+    f4.started_at_ms = Some(NOW_MS - 1_500_000);
+    f4.finished_at_ms = Some(NOW_MS - 1_200_000);
+    f4.exit = Some(101);
+    // older than an hour: in History only
+    let mut f5 = job(85, owner_c, Phase::Passed);
+    f5.started_at_ms = Some(NOW_MS - 7_300_000);
+    f5.finished_at_ms = Some(NOW_MS - 7_200_000);
+    f5.exit = Some(0);
+
+    d.jobs = vec![f1, f2, f3, f4, f5, r1, r2, r3, q1, q2, q3, q4];
+    for j in &mut d.jobs {
+        let line = match j.id.0 {
+            101 => "cargo test -p tasks-ui --lib",
+            102 => "cargo test -p tasks-core --test lifecycle",
+            103 => "cargo clippy --workspace -j 6",
+            110 => "cargo build -p desktop --release",
+            111 => "cargo test -p tasks-ledger --lib",
+            112 => "./gradlew :app:lintDebug",
+            113 => "cargo test -p tasks-peer --test sync",
+            90 => "cargo check --workspace",
+            91 => "cargo test -p tasks-peer --test sync",
+            92 => "cargo test -p tasks-ui",
+            93 => "cargo test -p tasks-daemon --lib",
+            85 => "cargo clippy --workspace",
+            _ => continue,
+        };
+        j.argv = line.split(' ').map(str::to_string).collect();
+    }
     let st = &mut d.status;
     st.running = vec![
         RunningView {
@@ -309,6 +350,20 @@ pub fn busy() -> Dashboard {
             true,
         ),
     ];
+    st.waiting.push(WaiterView {
+        on_peer: Some("nixos".into()),
+        position: 0,
+        start_estimate_secs: None,
+        rough: true,
+        ..waiter(
+            113,
+            owner_c,
+            "waiting on nixos: its compile queue",
+            0,
+            None,
+            true,
+        )
+    });
     st.waiting_more = 1;
     st.slots = vec![
         SlotGroupView {
@@ -358,11 +413,21 @@ pub fn busy() -> Dashboard {
     st.pressure.memory_some = Some(12.0);
     st.pressure.cpu = Some(78.0);
     st.alerts = vec![AlertView {
-        id: "disk".into(),
+        id: "disk-cache".into(),
         level: "warn".into(),
-        message: "cache disk below 150 GiB".into(),
+        message: "/home/demo/.cache/tasks has 280.0 GiB free, under twice its reserve of 150.0 GiB"
+            .into(),
         since_ms: NOW_MS - 3_600_000,
     }];
+    d
+}
+
+/// [`busy`] plus a second worker that is asleep: three machines, one of them away.
+pub fn three_machines() -> Dashboard {
+    let mut d = busy();
+    d.status
+        .peers
+        .push(named_peer("air", "offline", Some(4_200)));
     d
 }
 

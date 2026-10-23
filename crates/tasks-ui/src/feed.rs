@@ -186,6 +186,29 @@ pub fn cancel_job(
     ActionOutcome { what, result }
 }
 
+/// Moves a waiting job up one queue class (R-588). The daemon accepts it only from the job's
+/// owner, so the request is made as that owner, like a cancel.
+pub fn move_up(
+    link: &dyn DaemonLink,
+    id: tasks_core::JobId,
+    owner: &str,
+    to: tasks_core::Priority,
+) -> ActionOutcome {
+    let what = format!("move #{} up", id.0);
+    let result = match link.call(&Request::Prioritize {
+        id,
+        who: owner.to_string(),
+        priority: to,
+        reason: (to == tasks_core::Priority::Blocking)
+            .then(|| "moved up from the tasks window".to_string()),
+    }) {
+        Ok(Response::Prioritized { to, .. }) => Ok(format!("now {to}")),
+        Ok(other) => Err(format!("unexpected reply: {}", kind_of(&other))),
+        Err(e) => Err(refusal_text(&e)),
+    };
+    ActionOutcome { what, result }
+}
+
 /// Drains the queue (naming `who`), or resumes it.
 pub fn set_drain(link: &dyn DaemonLink, cancel: bool, who: &str) -> ActionOutcome {
     let what = if cancel { "resume" } else { "drain" }.to_string();
@@ -283,6 +306,11 @@ mod tests {
                 ApiError::new(ErrorCode::NotOwner, "only the owner may cancel").message,
             )),
             Request::Drain { .. } => Ok(Response::Ack),
+            Request::Prioritize { id, priority, .. } => Ok(Response::Prioritized {
+                id: *id,
+                from: tasks_core::Priority::Normal,
+                to: *priority,
+            }),
             _ => Err(LinkError("unexpected".into())),
         })
     }
@@ -340,6 +368,41 @@ mod tests {
         assert!(o.result.is_ok());
         let refused = cancel_job(&link, JobId(1), "someone@else", "x");
         assert!(refused.result.unwrap_err().contains("owner"));
+    }
+
+    #[test]
+    fn r588_move_up_asks_for_the_next_class_as_the_owner_and_blocking_gets_a_reason() {
+        use tasks_core::Priority;
+        let link = daemon_fake();
+        let o = move_up(&link, JobId(110), "ui-claude@laptop", Priority::Normal);
+        assert_eq!(o.what, "move #110 up");
+        assert_eq!(o.result, Ok("now normal".to_string()));
+        let o = move_up(&link, JobId(110), "ui-claude@laptop", Priority::Blocking);
+        assert!(o.result.is_ok());
+        assert_eq!(
+            link.requests(),
+            vec![
+                Request::Prioritize {
+                    id: JobId(110),
+                    who: "ui-claude@laptop".into(),
+                    priority: Priority::Normal,
+                    reason: None
+                },
+                Request::Prioritize {
+                    id: JobId(110),
+                    who: "ui-claude@laptop".into(),
+                    priority: Priority::Blocking,
+                    reason: Some("moved up from the tasks window".into())
+                }
+            ]
+        );
+        let refused = move_up(
+            &FakeLink::from_fn(|_| Err(LinkError("only the owner".into()))),
+            JobId(1),
+            "x",
+            Priority::Normal,
+        );
+        assert_eq!(refused.result, Err("only the owner".to_string()));
     }
 
     #[test]

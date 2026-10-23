@@ -2,6 +2,7 @@
 //! queue-stopped banner reads (R-189). Pure.
 
 use crate::format;
+use tasks_core::Priority;
 use tasks_daemon::api::{DaemonView, JobView};
 
 /// One button's availability.
@@ -35,6 +36,18 @@ pub struct Actions {
     pub cancel: Avail,
     /// Open its log.
     pub log: Avail,
+    /// Move a waiting job up one queue class (R-588).
+    pub move_up: Avail,
+}
+
+/// The class one step above `p`, or `None` at the top. `blocking` needs a reason, which the
+/// window supplies.
+pub fn class_above(p: Priority) -> Option<Priority> {
+    match p {
+        Priority::Background => Some(Priority::Normal),
+        Priority::Normal => Some(Priority::Blocking),
+        Priority::Blocking => None,
+    }
 }
 
 /// Which actions apply to a job. The local daemon is the authority for every job in its
@@ -66,7 +79,20 @@ pub fn actions_for(job: &JobView, local_machine: &str) -> Actions {
     } else {
         Avail::Disabled("This job has no log.".into())
     };
-    Actions { cancel, log }
+    let move_up = if job.started_at_ms.is_some() || finished {
+        Avail::Disabled("Only a waiting job can move up the queue.".into())
+    } else if job.cancel_requested_by.is_some() {
+        Avail::Disabled("A cancel was already requested.".into())
+    } else if class_above(job.priority).is_none() {
+        Avail::Disabled("Already in the top queue class.".into())
+    } else {
+        Avail::Enabled
+    };
+    Actions {
+        cancel,
+        log,
+        move_up,
+    }
 }
 
 /// The banner text when the queue is held, or `None` when it runs (R-189). Names who stopped
@@ -83,7 +109,9 @@ pub fn queue_banner(d: &DaemonView) -> Option<String> {
             let secs = u64::try_from((d.now_ms - at).max(0) / 1000).unwrap_or(0);
             text.push_str(&format!(", {}", format::ago(secs)));
         }
-        text.push_str(". Running jobs finish; queued jobs wait. Press Resume to start them.");
+        text.push_str(
+            ". Running jobs finish; queued jobs wait. Resume it from the menu at the top right.",
+        );
     } else {
         text.push_str("Execution is stopped (it persists across restarts). Queued jobs wait; resume with `tasks2 start-worker`.");
     }
@@ -135,6 +163,27 @@ mod tests {
         assert_eq!(drain_button(&d), ("Drain", false));
         d.execution_enabled = false;
         assert!(queue_banner(&d).unwrap_or_default().contains("stopped"));
+    }
+
+    #[test]
+    fn r588_only_a_waiting_job_below_the_top_class_can_move_up() {
+        let mut q = fixtures::job(13, "claude@laptop", fixtures::Phase::Queued);
+        assert!(actions_for(&q, "laptop").move_up.is_enabled());
+        assert_eq!(class_above(Priority::Background), Some(Priority::Normal));
+        assert_eq!(class_above(Priority::Normal), Some(Priority::Blocking));
+        assert_eq!(class_above(Priority::Blocking), None);
+        q.priority = Priority::Blocking;
+        assert!(
+            actions_for(&q, "laptop")
+                .move_up
+                .reason()
+                .unwrap_or_default()
+                .contains("top")
+        );
+        let running = fixtures::job(10, "claude@laptop", fixtures::Phase::Running);
+        assert!(!actions_for(&running, "laptop").move_up.is_enabled());
+        let done = fixtures::job(11, "claude@laptop", fixtures::Phase::Passed);
+        assert!(!actions_for(&done, "laptop").move_up.is_enabled());
     }
 
     #[test]
