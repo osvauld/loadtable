@@ -71,6 +71,7 @@ pub fn job(id: i64, owner: &str, phase: Phase) -> JobView {
         log_path: Some(PathBuf::from(format!(
             "/home/demo/.local/state/tasks/logs/{id}.log"
         ))),
+        figures: None,
     }
 }
 
@@ -165,6 +166,9 @@ pub fn idle() -> Dashboard {
             alerts: vec![],
             settings: vec![],
             peers: vec![peer("up", Some(1))],
+            attribution: "attribution: process tree (no cgroup delegation: fixture)".into(),
+            transfer: None,
+            trips: vec![],
         },
         jobs,
         jobs_truncated: false,
@@ -252,6 +256,7 @@ pub fn busy() -> Dashboard {
             current: Some("test:lifecycle".into()),
             eta_secs: Some(80.0),
             log_bytes: 20_480,
+            figures: None,
         },
         RunningView {
             id: JobId(102),
@@ -264,6 +269,7 @@ pub fn busy() -> Dashboard {
             current: None,
             eta_secs: None,
             log_bytes: 512,
+            figures: None,
         },
     ];
     st.waiting = vec![

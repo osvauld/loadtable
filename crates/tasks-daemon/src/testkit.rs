@@ -82,6 +82,9 @@ impl FakeMachine {
     pub fn set_disk(&self, free: u64) {
         lock(&self.state).disk_free = free;
     }
+    pub fn set_io(&self, pct: f32) {
+        lock(&self.state).pressure.io = Some(pct);
+    }
     pub fn set_memory_level(&self, l: Level) {
         lock(&self.state).pressure.memory = l;
     }
@@ -396,6 +399,10 @@ pub struct Rig {
     /// The audit sink (a signing log over [`Rig::audit_store`] on the rig's clock).
     pub audit: Arc<AuditSink>,
     pub audit_store: Arc<MemoryAudit>,
+    /// The rig's cgroups: unavailable unless a test swaps the platform.
+    pub cgroups: Arc<tasks_platform::fake::FakeCgroups>,
+    /// The process table the rig reports.
+    pub table: Arc<tasks_platform::fake::FakePlatform>,
 }
 
 /// The identity the rig signs its audit checkpoints with.
@@ -413,6 +420,15 @@ impl Rig {
     }
     pub fn with_policy(policy: &str) -> Rig {
         Rig::build(policy, Arc::new(NoForwarder), false)
+    }
+    /// Fake cgroups that work, so jobs are placed in `tasks.slice/job-<id>`.
+    pub fn delegated() -> Rig {
+        Rig::build_with(
+            "",
+            Arc::new(NoForwarder),
+            false,
+            tasks_platform::fake::FakeCgroups::delegated(),
+        )
     }
     pub fn with_forwarder(f: Arc<dyn Forwarder>) -> Rig {
         Rig::build("", f, false)
@@ -434,12 +450,27 @@ impl Rig {
             parent_env: vec![("PATH".into(), "/usr/bin:/bin".into())],
             execution_enabled: true,
             runner_poll: Duration::from_millis(2),
+            transfer_gate: None,
         });
         sch.set_audit(self.audit.clone());
         sch
     }
 
     fn build(policy: &str, forwarder: Arc<dyn Forwarder>, native: bool) -> Rig {
+        Rig::build_with(
+            policy,
+            forwarder,
+            native,
+            tasks_platform::fake::FakeCgroups::unavailable("test rig"),
+        )
+    }
+
+    fn build_with(
+        policy: &str,
+        forwarder: Arc<dyn Forwarder>,
+        native: bool,
+        cgroups: tasks_platform::fake::FakeCgroups,
+    ) -> Rig {
         let dir = TempDir::new("rig");
         let cfg = DaemonConfig {
             state_dir: dir.path().join("state"),
@@ -454,6 +485,8 @@ impl Rig {
         let procs = Arc::new(FakeProcs::new());
         let machine = Arc::new(FakeMachine::new());
         let holders = Arc::new(FakeHolders::default());
+        let cgroups = Arc::new(cgroups);
+        let table = Arc::new(tasks_platform::fake::FakePlatform::default());
         let platform = Platform {
             memory: machine.clone(),
             pressure: machine.clone(),
@@ -465,6 +498,8 @@ impl Rig {
             disk: machine.clone(),
             locks: Arc::new(FlockSlots::new(&cfg.lock_dir)),
             holders: holders.clone(),
+            cgroups: cgroups.clone(),
+            table: table.clone(),
         };
         let policy = MachinePolicy::from_text(
             if policy.is_empty() {
@@ -494,6 +529,7 @@ impl Rig {
             )],
             execution_enabled: true,
             runner_poll: Duration::from_millis(2),
+            transfer_gate: None,
         });
         sch.set_audit(audit.clone());
         Rig {
@@ -509,6 +545,8 @@ impl Rig {
             ledger,
             audit,
             audit_store,
+            cgroups,
+            table,
         }
     }
 

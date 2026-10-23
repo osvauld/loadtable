@@ -386,6 +386,24 @@ pub struct AuditArgs {
     pub json: bool,
 }
 
+/// Arguments of `stalls`.
+#[derive(Args, Debug, Clone)]
+pub struct StallsArgs {
+    /// Only trips since: a duration such as 2h or 3d, unix seconds, or a UTC date such as
+    /// 2026-10-22 or 2026-10-22T14:30.
+    #[arg(long, value_name = "DUR|TIME")]
+    pub since: Option<String>,
+    /// Only trips until: the same forms as --since.
+    #[arg(long, value_name = "DUR|TIME")]
+    pub until: Option<String>,
+    /// Most trips (default 20).
+    #[arg(long, value_name = "N")]
+    pub limit: Option<usize>,
+    /// The audit rows as JSON lines, details included.
+    #[arg(long)]
+    pub json: bool,
+}
+
 /// All commands.
 #[derive(Subcommand, Debug)]
 pub enum Command {
@@ -495,6 +513,9 @@ pub enum Command {
     },
     /// The audit log: who did what, when; `audit verify` checks it was not altered.
     Audit(AuditArgs),
+    /// Stalls explained: each recorded pressure trip with the busiest job, transfer and
+    /// outside process at that moment.
+    Stalls(StallsArgs),
     /// The desktop window (not built in this binary).
     Ui {
         /// Ignored.

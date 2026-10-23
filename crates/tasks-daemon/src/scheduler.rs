@@ -75,6 +75,8 @@ pub(crate) struct RunningJob {
     pub kill_reason: Mutex<Option<String>>,
     pub stuck: Mutex<StuckDetector>,
     pub est_median: Option<f64>,
+    /// The latest sample of what the job costs the machine.
+    pub figures: Mutex<Option<tasks_core::JobFigures>>,
 }
 
 /// Per-tick bookkeeping that survives between ticks.
@@ -136,6 +138,8 @@ pub struct SchedulerParts {
     pub execution_enabled: bool,
     /// How often a runner polls its job.
     pub runner_poll: Duration,
+    /// The gate sync work enters; bound to the scheduler by [`Scheduler::new`]. `None` makes one.
+    pub transfer_gate: Option<Arc<crate::attrib::TransferGate>>,
 }
 
 /// The scheduler and the state the API reads.
@@ -159,6 +163,10 @@ pub struct Scheduler {
     pub(crate) maintenance_hooks: Mutex<Vec<crate::trust_runtime::MaintenanceHook>>,
     pub(crate) state: Mutex<TickState>,
     pub(crate) wake: Wake,
+    /// Attribution between ticks: the outside-process window and the transfer counters.
+    pub(crate) attrib: Mutex<crate::attrib::AttribState>,
+    /// At most one pressure trip per resource per interval.
+    pub(crate) trip_throttle: tasks_ledger::Throttle,
     pub(crate) draining: AtomicBool,
     /// Who drained and when (ms); set with `draining`, cleared by a resume (R-189).
     pub(crate) drained: Mutex<Option<(String, i64)>>,
@@ -173,7 +181,10 @@ impl Scheduler {
     /// Builds the scheduler.
     pub fn new(parts: SchedulerParts) -> Arc<Scheduler> {
         let started_ms = parts.clock.now_ms();
-        Arc::new(Scheduler {
+        let trip_window_ms =
+            i64::try_from(parts.policy.trip_interval_secs().saturating_mul(1000)).unwrap_or(60_000);
+        let gate = parts.transfer_gate;
+        let sch = Arc::new(Scheduler {
             cfg: parts.cfg,
             policy: RwLock::new(Arc::new(parts.policy)),
             ledger: parts.ledger,
@@ -192,6 +203,8 @@ impl Scheduler {
             maintenance_hooks: Mutex::new(Vec::new()),
             state: Mutex::new(TickState::default()),
             wake: Wake::default(),
+            attrib: Mutex::new(crate::attrib::AttribState::new()),
+            trip_throttle: tasks_ledger::Throttle::new(trip_window_ms, 1),
             draining: AtomicBool::new(false),
             drained: Mutex::new(None),
             execution_enabled: AtomicBool::new(parts.execution_enabled),
@@ -199,7 +212,18 @@ impl Scheduler {
             started_ms,
             parent_env: parts.parent_env,
             runner_poll: parts.runner_poll,
-        })
+        });
+        if let Some(g) = gate {
+            g.bind(&sch);
+        }
+        sch
+    }
+
+    /// The gate that makes sync work wait for a transfer slot and the I/O gate.
+    pub fn transfer_gate(self: &Arc<Self>) -> Arc<crate::attrib::TransferGate> {
+        let g = crate::attrib::TransferGate::new();
+        g.bind(self);
+        g
     }
 
     /// Plugs in trust control: `Identity`, `Pair*` and `Peers` requests, peer trust in the
@@ -312,6 +336,7 @@ impl Scheduler {
         self.sync_cancels();
         self.supervise(&policy, now);
         self.admit(&policy, &mut rep);
+        self.psi_trips(&policy);
         self.maintenance(&policy, now);
         self.evaluate_alerts(&policy, now);
         rep
@@ -538,6 +563,10 @@ impl Scheduler {
     }
 
     fn wait_on(&self, id: JobId, reason: &AdmitWait) {
+        // a refused pressure gate is a trip: record what the machine was doing (rate-limited)
+        if let Some(resource) = crate::attrib::gate_resource(reason) {
+            self.record_trip(resource, "gate", &reason.to_string());
+        }
         self.set_wait(id, coarse(reason), &reason.to_string());
     }
 
@@ -651,6 +680,7 @@ impl Scheduler {
             est_median: facts
                 .known_median
                 .or(facts.est.as_ref().map(|e| e.median_secs)),
+            figures: Mutex::new(None),
         });
         // the spec's own limit, else a plan step's hint (older rows), capped by the machine's
         let wall = crate::machine_policy::effective_wall_timeout(

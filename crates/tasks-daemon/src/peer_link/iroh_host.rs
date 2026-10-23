@@ -105,10 +105,11 @@ impl PeerRuntimeFactory for IrohFactory {
         let origin = Arc::new(
             OriginSync::new(
                 Arc::new(GixSnapshot::new(&cfg.state_dir)),
-                Arc::new(GixTransfer::new()),
+                Arc::new(GixTransfer::new().with_cgroup_procs(ctx.transfer_procs.clone())),
                 SyncLimits::default(),
                 cfg.state_dir.clone(),
             )
+            .with_gate(ctx.transfer_gate.clone())
             .with_extras(Arc::new(super::PolicyExtras))
             .with_observer(Arc::new(crate::audited::AuditSync::new(ctx.audit.clone()))),
         );

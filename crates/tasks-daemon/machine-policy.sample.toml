@@ -6,6 +6,7 @@
 # compile = 2   # env TASKS_COMPILE_SLOTS
 # run = 4   # env TASKS_RUN_SLOTS
 # offload = 4   # env TASKS_OFFLOAD_SLOTS
+# transfer = 1   # env TASKS_TRANSFER_SLOTS
 # short_lane = 1   # env TASKS_SHORT_LANE_SLOTS
 # short_job_max_secs = 60   # env TASKS_SHORT_JOB_MAX_SECS
 
@@ -21,6 +22,15 @@
 
 [pressure.offload]
 # max_memory = "normal"   # env TASKS_OFFLOAD_MAX_MEMORY
+
+[pressure.transfer]
+# max_io = 40   # env TASKS_TRANSFER_MAX_IO
+
+[attribution]
+# trip_io_pct = 10   # env TASKS_TRIP_IO_PCT
+# trip_cpu_pct = 60   # env TASKS_TRIP_CPU_PCT
+# trip_interval_secs = 60   # env TASKS_TRIP_INTERVAL_SECS
+# sample_secs = 5   # env TASKS_ATTRIB_SAMPLE_SECS
 
 [memory]
 # min_available_gib = 2   # env TASKS_MIN_AVAILABLE_GIB

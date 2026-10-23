@@ -22,6 +22,7 @@ use tasks_peer::receiver::{
 };
 use tasks_peer::sync::{GixTransfer, SyncLimits, SyncStore};
 use tasks_peer::{PeerId, RemoteJobId, SubmitKey};
+use tasks_platform::CgroupName;
 use tasks_timing::{Cache, Outcome as TimingOutcome, RecipeKey, Sample, SampleKey};
 
 /// The scheduler and ledger as the receiver's [`JobRunner`].
@@ -220,11 +221,13 @@ fn read_range(path: &Path, offset: u64, max: usize) -> Vec<u8> {
 /// The store of synced copies under `store_dir`: bare mirrors and working copies, with sync
 /// and retention events going to the audit log.
 pub fn build_store(sch: &Arc<Scheduler>, store_dir: std::path::PathBuf) -> Arc<SyncStore> {
+    let procs = sch.platform.cgroups.create(CgroupName::Transfer).ok();
     let mut store = SyncStore::new(
         store_dir,
         SyncLimits::default(),
-        Arc::new(GixTransfer::new()),
-    );
+        Arc::new(GixTransfer::new().with_cgroup_procs(procs)),
+    )
+    .with_gate(sch.transfer_gate());
     if let Some(sink) = sch.audit_sink() {
         store = store.with_observer(Arc::new(crate::audited::AuditSync::new(sink)));
     }

@@ -6,8 +6,8 @@
 //! [`stats`], [`actions`]). The egui window itself sits behind the `ui` feature, so a default
 //! workspace build never compiles egui (R-199).
 //!
-//! The Audit tab is built ([`audit`]); the planned "Pressure events" tab (see
-//! `docs/DESIGN-peers-sync-audit.md`) has a place in [`model::Tab`] but no content yet.
+//! The Audit tab ([`audit`]) and the Pressure events tab ([`stalls`]) read the audit log; the
+//! latter lists `pressure.trip` rows (design §9: what caused each stall).
 
 pub mod actions;
 pub mod audit;
@@ -19,6 +19,7 @@ pub mod link;
 pub mod logview;
 pub mod mailbox;
 pub mod model;
+pub mod stalls;
 pub mod stats;
 
 #[cfg(feature = "ui")]

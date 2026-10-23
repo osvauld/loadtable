@@ -441,3 +441,55 @@ fn estimate_and_stats_render() {
     assert_eq!(stats(&[]), "(no timing samples)\n");
     assert_eq!(fmt_bytes(512 << 20), "512 MiB");
 }
+
+// R-326, R-335
+#[test]
+fn r326_status_says_how_exact_the_costs_are_and_shows_cost_and_trips() {
+    use tasks_core::{Attribution, JobFigures};
+    use tasks_daemon::api::{TransferView, TripView};
+    let mut s = crate::testutil::status_snapshot();
+    s.attribution = "attribution: process tree (no cgroup delegation: not under systemd)".into();
+    let mut f = JobFigures::empty(Attribution::ProcessTree);
+    f.io_write_bytes = Some(3 << 30);
+    s.running[0].figures = Some(f.clone());
+    s.transfer = Some(TransferView {
+        active: 1,
+        waiting: Some("Pack: I/O stalls: pressure 52% > 40% for transfer".into()),
+        runs: 3,
+        inproc_read_bytes: 1 << 20,
+        inproc_write_bytes: 2 << 20,
+        figures: None,
+    });
+    s.trips = vec![TripView {
+        seq: 9,
+        at_ms: 1_792_239_733_000,
+        resource: "io".into(),
+        source: "gate".into(),
+        summary: "io gate: I/O stalls; busiest outside jobs: firefox (pid 7) moved 25 GiB".into(),
+        suppressed: 0,
+    }];
+    let text = status(&s);
+    assert!(
+        text.contains("attribution: process tree (no cgroup delegation: not under systemd)"),
+        "{text}"
+    );
+    assert!(text.contains("cost: wrote 3 GiB (process tree)"), "{text}");
+    assert!(
+        text.contains("transfers: 1 active, 3 run(s)")
+            && text.contains("waiting: Pack: I/O stalls"),
+        "{text}"
+    );
+    assert!(
+        text.contains("busiest outside jobs: firefox (pid 7) moved 25 GiB"),
+        "{text}"
+    );
+    // an older daemon sends none of it
+    s.attribution.clear();
+    s.transfer = None;
+    s.trips.clear();
+    assert!(!status(&s).contains("attribution"));
+    // and a job's cost shows in `get`
+    let mut j = job(1, "o", "/w", Phase::Passed, "make");
+    j.figures = Some(f);
+    assert!(job_detail(&j, 0, None).contains("cost:      wrote 3 GiB (process tree)"));
+}

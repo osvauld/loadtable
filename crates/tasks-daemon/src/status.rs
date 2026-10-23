@@ -63,6 +63,7 @@ pub fn job_view(r: &JobRecord) -> JobView {
         remote_phase: r.remote_phase.clone(),
         plan: r.plan_id.zip(r.step_name.clone()),
         log_path: r.log_path.clone(),
+        figures: r.figures.clone(),
     }
 }
 
@@ -103,7 +104,12 @@ impl Scheduler {
 
         let mut slots = Vec::new();
         let layout = policy.layout();
-        for kind in [SlotKind::Compile, SlotKind::Run, SlotKind::Offload] {
+        for kind in [
+            SlotKind::Compile,
+            SlotKind::Run,
+            SlotKind::Offload,
+            SlotKind::Transfer,
+        ] {
             let total = layout.counts.get(&kind).copied().unwrap_or(0);
             let mut busy = Vec::new();
             for rj in running
@@ -127,6 +133,18 @@ impl Scheduler {
                     external: true,
                     holder: orphan_text.get(&(*k, *index)).cloned(),
                 });
+            }
+            if kind == SlotKind::Transfer {
+                // transfer slots are held by sync phases, not by ledger jobs
+                let active = lock(&self.attrib).transfer.active;
+                for index in 0..active.min(total) {
+                    busy.push(SlotView {
+                        index,
+                        job: None,
+                        external: false,
+                        holder: Some("checkout sync".to_string()),
+                    });
+                }
             }
             busy.sort_by_key(|b| b.index);
             let normal_busy = busy
@@ -222,6 +240,7 @@ impl Scheduler {
                     log_bytes: std::fs::metadata(&rj.log_path)
                         .map(|m| m.len())
                         .unwrap_or(0),
+                    figures: lock(&rj.figures).clone(),
                 }
             })
             .collect();
@@ -251,6 +270,9 @@ impl Scheduler {
             alerts: lock(&self.alerts).views(),
             settings: policy.settings(),
             peers: self.peer_views(),
+            attribution: self.attribution_line(),
+            transfer: self.transfer_view(),
+            trips: self.trip_views(crate::attrib::STATUS_TRIPS),
         }
     }
 

@@ -4,11 +4,11 @@
 //! Times are UTC. A broken chain is a normal answer, not a failure of the command: `verify`
 //! prints where and why and exits 1.
 
-use crate::args::{AuditArgs, AuditCommand};
+use crate::args::{AuditArgs, AuditCommand, StallsArgs};
 use crate::commands::Ctx;
 use crate::error::{CliError, EXIT_FAILURE, EXIT_OK};
 use crate::trust::short_did;
-use tasks_daemon::api::{AuditRowView, AuditVerifyView, Request, Response};
+use tasks_daemon::api::{AuditRowView, AuditVerifyView, Request, Response, TripDetails};
 use tasks_daemon::logs::{format_utc, parse_time, parse_utc};
 
 /// Rows shown when `--limit` is not given.
@@ -167,6 +167,144 @@ pub fn table(rows: &[AuditRowView]) -> String {
     out
 }
 
+/// Trips shown when `--limit` is not given.
+const DEFAULT_STALLS: usize = 20;
+
+/// `tasks2 stalls`: the `pressure.trip` audit rows, oldest first, each with the busiest
+/// outside process and the running jobs' costs. Reads the same rows as
+/// `tasks2 audit --action pressure.trip`.
+pub fn stalls(ctx: &mut Ctx<'_>, a: &StallsArgs) -> Result<i32, CliError> {
+    let now = (ctx.now_ms)();
+    let since_ms = a.since.as_deref().map(|t| parse_when(t, now)).transpose()?;
+    let until_ms = a.until.as_deref().map(|t| parse_when(t, now)).transpose()?;
+    let Response::Audit {
+        mut rows,
+        truncated,
+    } = ctx.client.call(&Request::Audit {
+        since_ms,
+        until_ms,
+        peer: None,
+        job: None,
+        action: Some(tasks_daemon::api::PRESSURE_TRIP_ACTION.to_string()),
+        limit: Some(a.limit.unwrap_or(DEFAULT_STALLS)),
+    })?
+    else {
+        return Err(CliError::Failed("unexpected reply to audit".into()));
+    };
+    rows.reverse();
+    if a.json {
+        for r in &rows {
+            let line = serde_json::to_string(r)
+                .map_err(|e| CliError::Failed(format!("cannot render JSON: {e}")))?;
+            writeln!(ctx.out, "{line}")?;
+        }
+        return Ok(EXIT_OK);
+    }
+    if rows.is_empty() {
+        writeln!(ctx.out, "no pressure trips recorded")?;
+        return Ok(EXIT_OK);
+    }
+    write!(ctx.out, "{}", stalls_text(&rows))?;
+    if truncated {
+        writeln!(
+            ctx.err,
+            "showing the latest {} trips; narrow with --since or raise --limit",
+            rows.len()
+        )?;
+    }
+    Ok(EXIT_OK)
+}
+
+/// The trips as text, oldest first: one header line each, then the evidence.
+pub fn stalls_text(rows: &[AuditRowView]) -> String {
+    let mut out = String::new();
+    for r in rows {
+        let Ok(d) = serde_json::from_value::<TripDetails>(r.details.clone()) else {
+            out.push_str(&format!(
+                "{} (row {}: details not readable by this client)\n",
+                format_utc(r.at_ms),
+                r.seq
+            ));
+            continue;
+        };
+        let more = if d.suppressed > 0 {
+            format!(" (+{} more suppressed since the last)", d.suppressed)
+        } else {
+            String::new()
+        };
+        out.push_str(&format!(
+            "{} {} {}: {}{more}\n",
+            format_utc(r.at_ms),
+            d.resource,
+            d.source,
+            d.reason
+        ));
+        let m = &d.machine;
+        let pct = |v: Option<f32>| v.map_or("-".to_string(), |x| format!("{x:.0}%"));
+        out.push_str(&format!(
+            "  machine: io {} cpu {} memory {} (some {}, full {}), {} available\n",
+            pct(m.io_pct),
+            pct(m.cpu_pct),
+            m.mem_level,
+            pct(m.mem_some_pct),
+            pct(m.mem_full_pct),
+            m.available_bytes
+                .map_or("-".to_string(), tasks_core::human_bytes)
+        ));
+        if d.jobs.is_empty() {
+            out.push_str("  jobs: none running\n");
+        }
+        for j in &d.jobs {
+            out.push_str(&format!("  job {}: {}\n", j.job, j.figures.summary()));
+        }
+        if let Some(t) = &d.transfer {
+            out.push_str(&format!(
+                "  transfer: {} active; daemon read {} wrote {}{}\n",
+                t.active,
+                tasks_core::human_bytes(t.inproc_read_bytes),
+                tasks_core::human_bytes(t.inproc_write_bytes),
+                t.figures
+                    .as_ref()
+                    .map_or(String::new(), |f| format!("; cgroup {}", f.summary()))
+            ));
+        }
+        let window = if d.window_ms == 0 {
+            "first sample, no window".to_string()
+        } else {
+            format!("last {} s", d.window_ms / 1000)
+        };
+        if !d.top_io.is_empty() {
+            out.push_str(&format!("  outside jobs, by disk bytes ({window}):\n"));
+            for p in &d.top_io {
+                out.push_str(&format!(
+                    "    {:<20} pid {:<8} {}\n",
+                    p.name,
+                    p.pid,
+                    tasks_core::human_bytes(p.io_bytes)
+                ));
+            }
+        }
+        if !d.top_rss.is_empty() {
+            out.push_str("  outside jobs, by memory:\n");
+            for p in d.top_rss.iter().take(5) {
+                out.push_str(&format!(
+                    "    {:<20} pid {:<8} {}\n",
+                    p.name,
+                    p.pid,
+                    tasks_core::human_bytes(p.rss_bytes)
+                ));
+            }
+        }
+        if d.unreadable > 0 {
+            out.push_str(&format!(
+                "  ({} process(es) of other users could not be read)\n",
+                d.unreadable
+            ));
+        }
+    }
+    out
+}
+
 fn verify(ctx: &mut Ctx<'_>, json: bool) -> Result<i32, CliError> {
     let Response::AuditVerify(v) = ctx.client.call(&Request::AuditVerify)? else {
         return Err(CliError::Failed("unexpected reply to audit verify".into()));
@@ -319,6 +457,108 @@ mod tests {
             lines[2].contains("by=agent-1 reason=wrong branch"),
             "{}",
             lines[2]
+        );
+    }
+
+    fn trip_row(seq: i64) -> AuditRowView {
+        use tasks_daemon::api::{TripJob, TripProc};
+        let mut f = tasks_core::JobFigures::empty(tasks_core::Attribution::Cgroup);
+        f.io_write_bytes = Some(2 << 30);
+        let d = TripDetails {
+            resource: "io".into(),
+            source: "gate".into(),
+            reason: "I/O stalls: pressure 52% > 40% for compile".into(),
+            suppressed: 4,
+            jobs: vec![TripJob {
+                job: 12,
+                figures: f,
+            }],
+            window_ms: 5000,
+            top_io: vec![TripProc {
+                pid: 4242,
+                name: "firefox".into(),
+                io_bytes: 25 << 30,
+                rss_bytes: 1 << 30,
+            }],
+            ..TripDetails::default()
+        };
+        let mut r = row(seq, "pressure.trip", None);
+        r.details = serde_json::to_value(d).unwrap();
+        r
+    }
+
+    // R-336
+    #[test]
+    fn r336_stalls_reads_the_trip_rows_and_names_the_busiest_process() {
+        let client = Arc::new(FakeClient::from_fn(|_| {
+            Ok(Response::Audit {
+                rows: vec![trip_row(2), trip_row(1)],
+                truncated: false,
+            })
+        }));
+        let r = Harness::default().run(&client, &["stalls", "--since", "1d"]);
+        assert_eq!(r.code, 0, "{}", r.err);
+        match &client.requests()[0] {
+            Request::Audit {
+                action,
+                since_ms,
+                limit,
+                ..
+            } => {
+                assert_eq!(action.as_deref(), Some("pressure.trip"));
+                assert_eq!(*since_ms, Some(NOW - 86_400_000));
+                assert_eq!(*limit, Some(20));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            r.out.contains("io gate: I/O stalls: pressure 52% > 40%"),
+            "{}",
+            r.out
+        );
+        assert!(
+            r.out.contains("(+4 more suppressed since the last)"),
+            "{}",
+            r.out
+        );
+        assert!(
+            r.out.contains("job 12: wrote 2 GiB (exact cgroup)"),
+            "{}",
+            r.out
+        );
+        assert!(
+            r.out.contains("firefox") && r.out.contains("pid 4242") && r.out.contains("25 GiB"),
+            "{}",
+            r.out
+        );
+        assert!(r.out.contains("last 5 s"), "{}", r.out);
+    }
+
+    // R-336
+    #[test]
+    fn r336_stalls_json_is_one_audit_row_per_line_and_an_empty_log_is_said() {
+        let client = Arc::new(FakeClient::from_fn(|_| {
+            Ok(Response::Audit {
+                rows: vec![trip_row(2), trip_row(1)],
+                truncated: false,
+            })
+        }));
+        let r = Harness::default().run(&client, &["stalls", "--json", "--limit", "3"]);
+        let parsed: Vec<AuditRowView> = r
+            .out
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(parsed.iter().map(|p| p.seq).collect::<Vec<_>>(), [1, 2]);
+        let empty = Arc::new(FakeClient::from_fn(|_| {
+            Ok(Response::Audit {
+                rows: vec![],
+                truncated: false,
+            })
+        }));
+        assert_eq!(
+            Harness::default().run(&empty, &["stalls"]).out,
+            "no pressure trips recorded\n"
         );
     }
 

@@ -1257,6 +1257,17 @@ fn status_text(s: &StatusSnapshot) -> String {
     for a in &s.alerts {
         t.push_str(&format!("alert [{}] {}\n", a.level, a.message));
     }
+    if !s.attribution.is_empty() {
+        t.push_str(&format!("{}\n", s.attribution));
+    }
+    for r in s.running.iter().filter(|r| r.figures.is_some()) {
+        if let Some(f) = &r.figures {
+            t.push_str(&format!("cost #{}: {}\n", r.id.0, f.summary()));
+        }
+    }
+    for trip in s.trips.iter().take(3) {
+        t.push_str(&format!("pressure trip: {}\n", trip.summary));
+    }
     for p in &s.peers {
         t.push_str(&format!(
             "peer {}: {}{}\n",

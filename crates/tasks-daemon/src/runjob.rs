@@ -7,14 +7,14 @@
 
 use crate::scheduler::{RunningJob, Scheduler, lock};
 use std::sync::Arc;
-use tasks_core::{Kind, MachineName, Phase, SplitOrigin};
+use tasks_core::{JobFigures, Kind, MachineName, Phase, SplitOrigin};
 use tasks_ledger::{
     Finish, LeaseRecord, LedgerError, RetryPolicy, StartInfo, TimeoutReason, retry_busy,
 };
 use tasks_platform::{Child, Signal, SlotGuard};
 use tasks_runner::{
-    ElisionCaps, End, EnvPolicy, JobStart, Lease, Outcome, Policy as RunPolicy, RunEvents, Runner,
-    RunnerError, SystemClock, TimedLine, cap_log_file,
+    Attrib, ElisionCaps, End, EnvPolicy, JobStart, Lease, Outcome, Policy as RunPolicy, RunEvents,
+    Runner, RunnerError, SystemClock, TimedLine, cap_log_file,
 };
 use tasks_timing::record::{JobResult, samples_from_timeline, split_piece_sample};
 use tasks_timing::{Cache, CargoParser, Event, GradleParser, Sample, SampleKey};
@@ -77,7 +77,11 @@ pub(crate) fn run_job(
         policy,
         env_policy,
         sch.parent_env.clone(),
-    );
+    )
+    .with_attribution(Attrib {
+        cgroups: &*sch.platform.cgroups,
+        table: &*sch.platform.table,
+    });
     let mut ev = Events {
         sch: sch.clone(),
         rj: rj.clone(),
@@ -85,6 +89,7 @@ pub(crate) fn run_job(
         meta,
         started_ok: false,
         finished: false,
+        figures_saved: None,
     };
     let result = runner.run(&start, &rj.token, &mut ev);
     if let Err(e) = result {
@@ -102,9 +107,28 @@ struct Events {
     parser: Parser,
     started_ok: bool,
     finished: bool,
+    /// When the figures were last written to the ledger.
+    figures_saved: Option<std::time::Instant>,
 }
 
+/// Running figures reach the ledger at most this often; the final ones always do.
+const FIGURES_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+
 impl Events {
+    fn save_figures(&mut self, f: &JobFigures) {
+        let id = self.rj.id;
+        let ledger = &self.sch.ledger;
+        // figures are a record, not an outcome: a failed write is noted, never fails the job
+        if let Err(e) = retry_busy(&RetryPolicy::default(), &sleep, || {
+            ledger.set_figures(id, f)
+        }) && !matches!(e, LedgerError::NotFound(_))
+        {
+            self.sch
+                .note_error(&format!("record figures of job {}: {e}", id.0));
+        }
+        self.figures_saved = Some(std::time::Instant::now());
+    }
+
     fn write_finish(&self, fin: &Finish, sample: Option<&(SampleKey, Sample)>) -> bool {
         let id = self.rj.id;
         let ledger = &self.sch.ledger;
@@ -198,6 +222,17 @@ impl RunEvents for Events {
         }
     }
 
+    fn figures(&mut self, f: &JobFigures) {
+        *lock(&self.rj.figures) = Some(f.clone());
+        if self.started_ok
+            && self
+                .figures_saved
+                .is_none_or(|t| t.elapsed() >= FIGURES_EVERY)
+        {
+            self.save_figures(f);
+        }
+    }
+
     fn lines(&mut self, lines: &[TimedLine]) {
         let mut tl = lock(&self.rj.timeline);
         for l in lines {
@@ -214,6 +249,12 @@ impl RunEvents for Events {
         }
         self.finished = true;
         let wall_ms = u64::try_from(o.wall.as_millis()).unwrap_or(u64::MAX);
+        if let Some(f) = &o.figures {
+            *lock(&self.rj.figures) = Some(f.clone());
+            if self.started_ok {
+                self.save_figures(f);
+            }
+        }
         {
             let mut tl = lock(&self.rj.timeline);
             for e in self.parser.finish() {

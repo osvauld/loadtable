@@ -146,12 +146,15 @@ fn r005_a_transient_ledger_error_on_one_job_does_not_stop_the_others() {
             disk: r.machine.clone(),
             locks: Arc::new(FlockSlots::new(&r.cfg.lock_dir)),
             holders: r.holders.clone(),
+            cgroups: r.cgroups.clone(),
+            table: r.table.clone(),
         },
         clock: r.clock.clone(),
         forwarder: Arc::new(crate::forwarder::NoForwarder),
         parent_env: vec![],
         execution_enabled: true,
         runner_poll: Duration::from_millis(2),
+        transfer_gate: None,
     });
     let bad = r.submit(&r.spec("o", &["make", "bad"], Kind::Run));
     let good = r.submit(&r.spec("o", &["make", "good"], Kind::Run));
@@ -936,6 +939,8 @@ pub(crate) fn daemon_options(dir: &TempDir, procs: &Arc<FakeProcs>) -> DaemonOpt
         disk: machine,
         locks: Arc::new(FlockSlots::new(&cfg.lock_dir)),
         holders: Arc::new(FakeHolders::default()),
+        cgroups: Arc::new(tasks_platform::fake::FakeCgroups::unavailable("test")),
+        table: Arc::new(tasks_platform::fake::FakePlatform::default()),
     };
     let mut o = DaemonOptions::new(cfg);
     o.env = vec![("PATH".into(), "/usr/bin:/bin".into())];
@@ -1180,6 +1185,9 @@ impl Store for Flaky {
     }
     fn set_log_path(&self, id: JobId, path: &Path) -> tasks_ledger::Result<()> {
         self.inner.set_log_path(id, path)
+    }
+    fn set_figures(&self, id: JobId, figures: &tasks_core::JobFigures) -> tasks_ledger::Result<()> {
+        self.inner.set_figures(id, figures)
     }
     fn find_recent_spec(
         &self,

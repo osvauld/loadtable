@@ -53,6 +53,7 @@ pub fn job(id: i64, owner: &str, cwd: &str, phase: Phase, cmd: &str) -> JobView 
         remote_phase: None,
         plan: None,
         log_path: None,
+        figures: None,
     }
 }
 
@@ -277,6 +278,7 @@ pub fn status_snapshot() -> StatusSnapshot {
             current: Some("tasks-core".into()),
             eta_secs: Some(200.0),
             log_bytes: 10,
+            figures: None,
         }],
         pressure: PressureView {
             memory: "ok".into(),
@@ -292,6 +294,9 @@ pub fn status_snapshot() -> StatusSnapshot {
             warning: None,
         },
         peers: Vec::new(),
+        attribution: String::new(),
+        transfer: None,
+        trips: Vec::new(),
         alerts: vec![AlertView {
             id: "a".into(),
             level: "warn".into(),

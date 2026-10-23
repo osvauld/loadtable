@@ -4,7 +4,9 @@ use crate::holders::{HolderSource, ProcHolders};
 use std::path::Path;
 use std::sync::Arc;
 use tasks_ledger::Store;
-use tasks_platform::{Disk, FlockSlots, Memory, Pressure, Processes, SlotLocks};
+use tasks_platform::{
+    Cgroups, Disk, FlockSlots, Memory, Pressure, ProcessTable, Processes, SlotLocks,
+};
 use tasks_timing::History;
 
 /// A ledger the daemon can use from many threads: job storage plus timing history.
@@ -26,6 +28,10 @@ pub struct Platform {
     pub locks: Arc<dyn SlotLocks + Send + Sync>,
     /// Who holds a busy slot.
     pub holders: Arc<dyn HolderSource>,
+    /// Per-job cgroups, or the reason there are none (design §9).
+    pub cgroups: Arc<dyn Cgroups>,
+    /// The process table: per-job figures without cgroups, and the top processes outside jobs.
+    pub table: Arc<dyn ProcessTable>,
 }
 
 impl Platform {
@@ -36,9 +42,13 @@ impl Platform {
             memory: native.clone(),
             pressure: native.clone(),
             procs: native.clone(),
-            disk: native,
+            disk: native.clone(),
             locks: Arc::new(FlockSlots::new(lock_dir)),
             holders: Arc::new(ProcHolders),
+            // On Linux this moves the daemon into its `daemon` leaf cgroup when the service
+            // unit delegated one; otherwise it says why it did not.
+            cgroups: Arc::from(tasks_platform::native_cgroups()),
+            table: native,
         }
     }
 }

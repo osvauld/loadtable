@@ -115,6 +115,7 @@ pub fn job_json(j: &JobView, now_ms: i64) -> Value {
         "cancel_requested_by": j.cancel_requested_by,
         "cancel_reason": j.cancel_reason,
         "timeout_secs": j.timeout_secs,
+        "figures": j.figures,
     })
 }
 
@@ -150,6 +151,9 @@ pub fn job_detail(j: &JobView, now_ms: i64) -> String {
     }
     if let Some((plan, step)) = &j.plan {
         s.push_str(&format!("plan {plan} step {step}\n"));
+    }
+    if let Some(f) = &j.figures {
+        s.push_str(&format!("cost: {}\n", f.summary()));
     }
     s
 }

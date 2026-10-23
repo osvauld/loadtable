@@ -77,6 +77,10 @@ pub struct PeerContext {
     pub created: bool,
     /// Where audit rows go.
     pub audit: Arc<AuditSink>,
+    /// The gate sync phases enter: transfer slot plus the I/O gate (design §9).
+    pub transfer_gate: Arc<crate::attrib::TransferGate>,
+    /// The transfer cgroup's `cgroup.procs`, when cgroups are delegated: `git` children join it.
+    pub transfer_procs: Option<std::path::PathBuf>,
 }
 
 /// Opens the trust ledger and builds the [`TrustNode`] over the identity in `ctx`. Trust events

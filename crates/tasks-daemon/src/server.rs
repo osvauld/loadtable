@@ -5,6 +5,7 @@
 //! connection thread only reads a request, asks the scheduler and writes a reply.
 
 use crate::api::{ApiError, ErrorCode, MAX_REQUEST_BYTES, Reply, parse_request, render_reply};
+use crate::attrib::TransferGate;
 use crate::audited::{AuditSink, AuditedLedger};
 use crate::config::{DaemonConfig, PidLock, raise_nofile};
 use crate::error::DaemonError;
@@ -23,6 +24,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tasks_identity::{Keystore, Signer};
 use tasks_ledger::{AuditLedger, AuditLog, RetryPolicy, SqliteStore, SystemClock, retry_busy};
+use tasks_platform::{CgroupName, Cgroups};
 
 /// Most connections served at once.
 pub const MAX_CONNECTIONS: usize = 64;
@@ -116,10 +118,18 @@ impl Daemon {
         let ledger: Arc<dyn Ledger> = Arc::new(AuditedLedger::new(store, audit.clone()));
         // Identity, trust and the transport start only now: the state is locked, so a stray
         // second daemon never binds an endpoint or touches the keystore.
+        // The platform comes first: on Linux building it moves the daemon into its `daemon`
+        // cgroup, and the peer runtime needs the transfer cgroup and the transfer gate.
+        let platform = opts
+            .platform
+            .unwrap_or_else(|| Platform::native(&cfg.lock_dir));
+        let transfer_gate = TransferGate::new();
         let ctx = PeerContext {
             identity,
             created: keystore.created(),
             audit: audit.clone(),
+            transfer_gate: transfer_gate.clone(),
+            transfer_procs: platform.cgroups.create(CgroupName::Transfer).ok(),
         };
         let peer_rt = match opts.peer_runtime {
             Some(f) => Some(f.start(&cfg, &policy, &ctx)?),
@@ -129,10 +139,10 @@ impl Daemon {
             .as_ref()
             .and_then(|r| r.forwarder.clone())
             .unwrap_or(opts.forwarder);
-        let platform = opts
-            .platform
-            .unwrap_or_else(|| Platform::native(&cfg.lock_dir));
         let startup = reconcile(&*ledger, &*platform.procs, policy.cancel_grace(), &sleep)?;
+        let mut startup = startup;
+        startup.notes.push(platform.cgroups.status().line());
+        sweep_stale_cgroups(&*platform.cgroups);
         let enabled = std::fs::read_to_string(cfg.intent_path())
             .map(|t| t.trim() != "stopped")
             .unwrap_or(true);
@@ -147,6 +157,7 @@ impl Daemon {
             parent_env: env,
             execution_enabled: enabled,
             runner_poll: Duration::from_millis(50),
+            transfer_gate: Some(transfer_gate),
         });
         sch.set_audit(audit);
         let mut keepalive = None;
@@ -200,6 +211,11 @@ impl Daemon {
             .name("accept".into())
             .spawn(move || accept_loop(&accept_sch, &listener))
             .map_err(|e| DaemonError::io(&socket, e))?;
+        let sampler_sch = self.sch.clone();
+        let sampler = std::thread::Builder::new()
+            .name("attrib-sampler".into())
+            .spawn(move || sampler_sch.run_sampler())
+            .ok();
         while !self.sch.is_shutdown() {
             self.sch.tick();
             self.sch.wake().wait(self.sch.policy().tick());
@@ -207,6 +223,9 @@ impl Daemon {
         // unblock the accept loop, which sees the shutdown flag
         let _ = UnixStream::connect(&socket);
         let _ = accept.join();
+        if let Some(s) = sampler {
+            let _ = s.join();
+        }
         let _ = std::fs::remove_file(&socket);
         Ok(())
     }
@@ -292,5 +311,20 @@ pub fn serve_connection(sch: &Arc<Scheduler>, stream: UnixStream) {
         if writeln!(out, "{}", render_reply(reply)).is_err() {
             return;
         }
+    }
+}
+
+/// Removes the job cgroups a previous daemon left behind. Run after `reconcile`, so every job
+/// that was running is already marked interrupted and its process group is gone: whatever still
+/// lives in a job cgroup escaped the group, and is killed through the cgroup before the cgroup
+/// is removed.
+pub fn sweep_stale_cgroups(cgroups: &dyn Cgroups) {
+    for id in cgroups.list_jobs().unwrap_or_default() {
+        let name = CgroupName::Job(id);
+        if cgroups.pids(name).is_ok_and(|p| !p.is_empty()) {
+            let _ = cgroups.kill(name);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = cgroups.remove(name);
     }
 }

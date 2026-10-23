@@ -8,8 +8,7 @@ use std::collections::BTreeMap;
 use tasks_core::{Phase, WaitReason};
 use tasks_daemon::api::{JobView, PeerView, RunningView, StatusSnapshot, WaiterView};
 
-/// Tabs of the window. `PressureEvents` is planned (see `docs/DESIGN-peers-sync-audit.md`) and
-/// has no content yet.
+/// Tabs of the window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tab {
     /// Machine cards and the job tables.
@@ -18,15 +17,15 @@ pub enum Tab {
     Stats,
     /// The audit log.
     Audit,
-    /// Planned: pressure and stall events.
+    /// Pressure trips: what caused each stall.
     PressureEvents,
 }
 
 impl Tab {
     /// Tabs with content, in order.
-    pub const SHOWN: [Tab; 3] = [Tab::Dashboard, Tab::Stats, Tab::Audit];
-    /// Tabs that are reserved but not built.
-    pub const PLANNED: [Tab; 1] = [Tab::PressureEvents];
+    pub const SHOWN: [Tab; 4] = [Tab::Dashboard, Tab::Stats, Tab::Audit, Tab::PressureEvents];
+    /// Tabs that are reserved but not built (none now).
+    pub const PLANNED: [Tab; 0] = [];
 
     /// The tab's title.
     pub fn label(self) -> &'static str {

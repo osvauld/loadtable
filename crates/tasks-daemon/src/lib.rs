@@ -8,6 +8,9 @@
 
 pub mod alerts;
 pub mod api;
+mod attrib;
+#[cfg(test)]
+mod attrib_tests;
 #[cfg(test)]
 mod audit_tests;
 pub mod audited;
@@ -49,6 +52,7 @@ mod trust_tests;
 #[cfg(test)]
 mod wiring_tests;
 
+pub use attrib::TransferGate;
 pub use error::DaemonError;
 pub use scheduler::{Scheduler, SchedulerParts, TickReport};
 pub use server::{Daemon, DaemonOptions};

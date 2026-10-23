@@ -81,6 +81,12 @@ const FIELDS: &[Field] = &[
     f("slots.run", "TASKS_RUN_SLOTS", Ty::Uint(1, 16), "4"),
     f("slots.offload", "TASKS_OFFLOAD_SLOTS", Ty::Uint(1, 16), "4"),
     f(
+        "slots.transfer",
+        "TASKS_TRANSFER_SLOTS",
+        Ty::Uint(1, 4),
+        "1",
+    ),
+    f(
         "slots.short_lane",
         "TASKS_SHORT_LANE_SLOTS",
         Ty::Uint(0, 4),
@@ -137,6 +143,39 @@ const FIELDS: &[Field] = &[
         "TASKS_OFFLOAD_MAX_MEMORY",
         Ty::Level,
         "normal",
+    ),
+    fm(
+        "pressure.transfer.max_io",
+        "TASKS_TRANSFER_MAX_IO",
+        Ty::OptFloat(0.0, 100.0),
+        "40",
+        "off",
+    ),
+    fm(
+        "attribution.trip_io_pct",
+        "TASKS_TRIP_IO_PCT",
+        Ty::OptFloat(0.0, 100.0),
+        "10",
+        "off",
+    ),
+    fm(
+        "attribution.trip_cpu_pct",
+        "TASKS_TRIP_CPU_PCT",
+        Ty::OptFloat(0.0, 100.0),
+        "60",
+        "off",
+    ),
+    f(
+        "attribution.trip_interval_secs",
+        "TASKS_TRIP_INTERVAL_SECS",
+        Ty::Uint(1, 86_400),
+        "60",
+    ),
+    f(
+        "attribution.sample_secs",
+        "TASKS_ATTRIB_SAMPLE_SECS",
+        Ty::Uint(1, 600),
+        "5",
     ),
     f(
         "memory.min_available_gib",
@@ -658,11 +697,29 @@ impl MachinePolicy {
             SlotKind::Compile => "slots.compile",
             SlotKind::Run => "slots.run",
             SlotKind::Offload => "slots.offload",
+            SlotKind::Transfer => "slots.transfer",
             SlotKind::Device => {
                 return u32::try_from(self.list("machine.devices").len()).unwrap_or(0);
             }
         };
         u32::try_from(self.u(key)).unwrap_or(1)
+    }
+    /// Machine I/O pressure (percent, avg10) at or above which a pressure trip is recorded;
+    /// `None` turns the trip off.
+    pub fn trip_io_pct(&self) -> Option<f32> {
+        self.of("attribution.trip_io_pct").map(|v| v as f32)
+    }
+    /// Machine CPU pressure (percent, avg10) at or above which a pressure trip is recorded.
+    pub fn trip_cpu_pct(&self) -> Option<f32> {
+        self.of("attribution.trip_cpu_pct").map(|v| v as f32)
+    }
+    /// Shortest time between two trips of the same kind; the rest are counted.
+    pub fn trip_interval_secs(&self) -> u64 {
+        self.u("attribution.trip_interval_secs")
+    }
+    /// How often the outside-process window is sampled.
+    pub fn attrib_sample_secs(&self) -> u64 {
+        self.u("attribution.sample_secs")
     }
     /// Device serials attached to this machine, in lock-index order.
     pub fn devices(&self) -> Vec<String> {
@@ -675,7 +732,12 @@ impl MachinePolicy {
     /// The slot layout admission works on.
     pub fn layout(&self) -> Layout {
         let mut l = Layout::default();
-        for k in [SlotKind::Compile, SlotKind::Run, SlotKind::Offload] {
+        for k in [
+            SlotKind::Compile,
+            SlotKind::Run,
+            SlotKind::Offload,
+            SlotKind::Transfer,
+        ] {
             l.counts.insert(k, self.slot_count(k));
         }
         for (i, d) in self.devices().into_iter().enumerate() {
@@ -699,6 +761,11 @@ impl MachinePolicy {
                 max_cpu: None,
                 max_io: None,
                 max_memory: self.lvl("pressure.offload.max_memory"),
+            },
+            transfer: Gate {
+                max_cpu: None,
+                max_io: self.of("pressure.transfer.max_io").map(|v| v as f32),
+                max_memory: self.lvl("pressure.run.max_memory"),
             },
             cache_reserve_bytes: (self.fl("disk.cache_reserve_gib") * GIB as f64) as u64,
             state_reserve_bytes: (self.fl("disk.state_reserve_gib") * GIB as f64) as u64,

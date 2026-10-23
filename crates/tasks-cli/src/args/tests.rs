@@ -332,3 +332,22 @@ fn r283_audit_takes_filters_or_one_subcommand_but_not_both() {
     assert!(parse(&["audit", "verify", "--job", "3"]).is_err());
     assert!(parse(&["audit", "--job", "x"]).is_err());
 }
+
+// R-336
+#[test]
+fn r336_stalls_takes_since_until_limit_and_json() {
+    match parse(&[
+        "stalls", "--since", "2h", "--until", "1h", "--limit", "5", "--json",
+    ])
+    .unwrap()
+    .command
+    {
+        Command::Stalls(a) => {
+            assert_eq!(a.since.as_deref(), Some("2h"));
+            assert_eq!(a.until.as_deref(), Some("1h"));
+            assert_eq!(a.limit, Some(5));
+            assert!(a.json);
+        }
+        other => panic!("{other:?}"),
+    }
+}

@@ -123,6 +123,10 @@ impl Scheduler {
             .collect();
         let layout = policy.layout();
         for (kind, n) in &layout.counts {
+            // transfer slots belong to sync phases, which no ledger job tracks
+            if *kind == SlotKind::Transfer {
+                continue;
+            }
             for index in 0..*n {
                 if tracked.contains(&(*kind, index)) || self.slot_is_free(*kind, index) {
                     continue;
@@ -411,6 +415,9 @@ impl Scheduler {
         let layout = policy.layout();
         let mut busy_now = BTreeSet::new();
         for (kind, n) in &layout.counts {
+            if *kind == SlotKind::Transfer {
+                continue;
+            }
             for index in 0..*n {
                 let key = (*kind, index);
                 if tracked.contains(&key) || self.slot_is_free(*kind, index) {

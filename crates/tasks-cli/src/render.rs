@@ -362,6 +362,9 @@ pub fn job_detail(j: &JobView, now_ms: i64, waiter: Option<&WaiterView>) -> Stri
     if let Some(n) = wait_note(j, waiter) {
         let _ = writeln!(out, "  {n}");
     }
+    if let Some(f) = &j.figures {
+        let _ = writeln!(out, "  cost:      {}", f.summary());
+    }
     if let Some(p) = &j.log_path {
         let _ = writeln!(out, "  log:       {}", p.display());
     }
@@ -521,6 +524,9 @@ pub fn status(s: &StatusSnapshot) -> String {
                 fmt_precise(r.elapsed_secs),
                 truncate_end(&r.command, TABLE_COMMAND)
             );
+            if let Some(f) = &r.figures {
+                let _ = writeln!(out, "    cost: {}", f.summary());
+            }
         }
     }
     if !s.waiting.is_empty() {
@@ -565,6 +571,38 @@ pub fn status(s: &StatusSnapshot) -> String {
     }
     for a in &s.alerts {
         let _ = writeln!(out, "alert [{}] {}", a.level, a.message);
+    }
+    // an older daemon sends no attribution line
+    if !s.attribution.is_empty() {
+        let _ = writeln!(out, "{}", s.attribution);
+    }
+    if let Some(t) = &s.transfer {
+        let wait = t
+            .waiting
+            .as_deref()
+            .map_or(String::new(), |w| format!("; waiting: {w}"));
+        let _ = writeln!(
+            out,
+            "transfers: {} active, {} run(s); daemon read {}, wrote {}{wait}",
+            t.active,
+            t.runs,
+            fmt_bytes(t.inproc_read_bytes),
+            fmt_bytes(t.inproc_write_bytes)
+        );
+        if let Some(f) = &t.figures {
+            let _ = writeln!(out, "  transfer cgroup: {}", f.summary());
+        }
+    }
+    if !s.trips.is_empty() {
+        out.push_str("pressure trips (newest first; `tasks2 stalls` lists more):\n");
+        for t in &s.trips {
+            let _ = writeln!(
+                out,
+                "  {} {}",
+                tasks_daemon::logs::format_utc(t.at_ms),
+                truncate_end(&t.summary, 150)
+            );
+        }
     }
     out
 }

@@ -1005,6 +1005,7 @@ fn snapshot() -> tasks_daemon::api::StatusSnapshot {
             current: None,
             eta_secs: Some(30.0),
             log_bytes: 10,
+            figures: None,
         }],
         pressure: PressureView {
             memory: "ok".into(),
@@ -1044,6 +1045,9 @@ fn snapshot() -> tasks_daemon::api::StatusSnapshot {
             path: "unknown".into(),
             rtt_ms: None,
         }],
+        attribution: "attribution: process tree (no cgroup delegation: test)".into(),
+        transfer: None,
+        trips: vec![],
     }
 }
 

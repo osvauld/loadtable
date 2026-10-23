@@ -10,6 +10,7 @@ use crate::link::DaemonLink;
 use crate::logview::{LogSnapshot, SearchHits};
 use crate::mailbox::Mailbox;
 use crate::model::{self, JobRow, MachineCard, Online, PhaseClass, Section, Tab, ViewModel};
+use crate::stalls::{self, StallData};
 use crate::stats;
 use eframe::egui::{self, Align, Color32, Layout, RichText, Sense, Stroke, vec2};
 use std::collections::BTreeSet;
@@ -96,6 +97,10 @@ pub struct App {
     audit_filter: AuditFilter,
     audit_loading: bool,
     audit_asked: bool,
+    stalls_box: Arc<Mailbox<Result<StallData, String>>>,
+    stalls: Option<Result<StallData, String>>,
+    stalls_loading: bool,
+    stalls_asked: bool,
 }
 
 impl App {
@@ -142,6 +147,10 @@ impl App {
             audit_filter: AuditFilter::default(),
             audit_loading: false,
             audit_asked: false,
+            stalls_box: Arc::new(Mailbox::new()),
+            stalls: None,
+            stalls_loading: false,
+            stalls_asked: false,
         }
     }
 
@@ -174,6 +183,12 @@ impl App {
     pub fn set_audit(&mut self, data: AuditData) {
         self.audit = Some(Ok(data));
         self.audit_asked = true;
+    }
+
+    /// Gives the Pressure events tab its rows (for screenshots).
+    pub fn set_stalls(&mut self, data: StallData) {
+        self.stalls = Some(Ok(data));
+        self.stalls_asked = true;
     }
 
     /// Opens the cancel dialog for a job (for screenshots).
@@ -232,6 +247,10 @@ impl App {
         if let Some(d) = self.audit_box.take() {
             self.audit = Some(d);
             self.audit_loading = false;
+        }
+        if let Some(d) = self.stalls_box.take() {
+            self.stalls = Some(d);
+            self.stalls_loading = false;
         }
         if let Some(l) = &mut self.log {
             if let Some(s) = l.updates.take() {
@@ -331,9 +350,7 @@ impl App {
             Tab::Dashboard => self.dashboard(ui),
             Tab::Stats => self.stats_tab(ui),
             Tab::Audit => self.audit_tab(ui),
-            Tab::PressureEvents => {
-                ui.weak("Planned. See docs/DESIGN-peers-sync-audit.md.");
-            }
+            Tab::PressureEvents => self.stalls_tab(ui),
         });
         self.cancel_dialog(ctx);
         self.log_window(ctx);
@@ -528,6 +545,9 @@ impl App {
                     ui.end_row();
                 };
                 kv(ui, "Owner", j.owner.clone());
+                if let Some(f) = &j.figures {
+                    kv(ui, "Cost", f.summary());
+                }
                 kv(ui, "Command", row.command.clone());
                 kv(ui, "Directory", j.cwd.display().to_string());
                 kv(ui, "Kind / placement", format!("{:?} / {:?}", j.kind, j.placement));
@@ -791,6 +811,65 @@ impl App {
                                     let c = audit::cells(r);
                                     for (i, text) in c.iter().enumerate() {
                                         let l = if i == 0 || i == 4 {
+                                            RichText::new(text).monospace()
+                                        } else {
+                                            RichText::new(text)
+                                        };
+                                        ui.add(egui::Label::new(l).truncate()).on_hover_text(text);
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            }
+        }
+    }
+
+    fn stalls_tab(&mut self, ui: &mut egui::Ui) {
+        if !self.stalls_asked {
+            self.stalls_asked = true;
+            self.stalls_loading = true;
+            let link = Arc::clone(&self.link);
+            feed::spawn_once(
+                Arc::clone(&self.stalls_box),
+                Arc::clone(&self.wake),
+                move || stalls::fetch(link.as_ref()),
+            );
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!self.stalls_loading, egui::Button::new("Refresh"))
+                .clicked()
+            {
+                self.stalls_asked = false;
+            }
+            if self.stalls_loading {
+                ui.weak("loading...");
+            }
+        });
+        match &self.stalls {
+            None => {
+                ui.weak("No pressure trips loaded yet.");
+            }
+            Some(Err(e)) => {
+                ui.colored_label(Color32::from_rgb(220, 90, 80), e);
+            }
+            Some(Ok(d)) => {
+                ui.weak(stalls::summary(d));
+                egui::ScrollArea::both()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        egui::Grid::new("stalls-table")
+                            .striped(true)
+                            .num_columns(stalls::COLUMNS.len())
+                            .show(ui, |ui| {
+                                for t in stalls::COLUMNS {
+                                    ui.label(RichText::new(t).strong());
+                                }
+                                ui.end_row();
+                                for r in &d.rows {
+                                    for (i, text) in stalls::cells(r).iter().enumerate() {
+                                        let l = if i == 0 {
                                             RichText::new(text).monospace()
                                         } else {
                                             RichText::new(text)

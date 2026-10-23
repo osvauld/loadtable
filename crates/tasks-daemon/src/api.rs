@@ -11,7 +11,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tasks_core::plan::Plan;
-use tasks_core::{JobId, JobSpec, Kind, Phase, Placement};
+use tasks_core::{JobFigures, JobId, JobSpec, Kind, Phase, Placement};
 
 /// The protocol version this build speaks.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -43,6 +43,10 @@ pub const DEFAULT_HISTORY_SAMPLES: usize = 30;
 pub const MAX_HISTORY_SAMPLES: usize = 200;
 /// Most samples in one `history` reply, over all series; the reply says when it cut.
 pub const MAX_HISTORY_TOTAL_SAMPLES: usize = 20_000;
+
+/// The audit action of a pressure trip (`tasks_ledger::action::PRESSURE_TRIP`), for clients that
+/// do not depend on the ledger.
+pub const PRESSURE_TRIP_ACTION: &str = "pressure.trip";
 
 /// A request to the daemon.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -680,6 +684,9 @@ pub struct JobView {
     pub plan: Option<(i64, String)>,
     /// Log file path.
     pub log_path: Option<PathBuf>,
+    /// What the job cost the machine and how exact that is (design §9).
+    #[serde(default)]
+    pub figures: Option<JobFigures>,
 }
 
 /// One block of grep output.
@@ -841,6 +848,9 @@ pub struct RunningView {
     pub eta_secs: Option<f64>,
     /// Log size in bytes.
     pub log_bytes: u64,
+    /// What it has cost the machine so far (sampled every few seconds).
+    #[serde(default)]
+    pub figures: Option<JobFigures>,
 }
 
 /// Pressure and disk readings.
@@ -977,6 +987,196 @@ pub struct StatusSnapshot {
     /// Link state per configured peer (empty without peers).
     #[serde(default)]
     pub peers: Vec<PeerView>,
+    /// One line: whether job costs are exact (cgroups) or summed over process trees, and why.
+    #[serde(default)]
+    pub attribution: String,
+    /// Sync and fetch work (the transfer slot and cgroup).
+    #[serde(default)]
+    pub transfer: Option<TransferView>,
+    /// The latest pressure trips, newest first.
+    #[serde(default)]
+    pub trips: Vec<TripView>,
+}
+
+/// Transfer (checkout sync) activity as the status shows it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransferView {
+    /// Phases holding a transfer slot now.
+    pub active: u32,
+    /// Why a phase waits for the slot or the I/O gate, when one does.
+    pub waiting: Option<String>,
+    /// Phases run since the daemon started.
+    pub runs: u64,
+    /// Storage bytes read by the daemon process itself while holding a transfer slot
+    /// (approximate: includes anything else the daemon did meanwhile).
+    pub inproc_read_bytes: u64,
+    /// Storage bytes written likewise.
+    pub inproc_write_bytes: u64,
+    /// What the `git` children in the transfer cgroup cost (exact, cgroup only).
+    pub figures: Option<JobFigures>,
+}
+
+/// One pressure trip as the status and the UI list it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TripView {
+    /// Audit row.
+    pub seq: i64,
+    /// When, ms since epoch.
+    pub at_ms: i64,
+    /// `io`, `cpu` or `memory`.
+    pub resource: String,
+    /// `gate`, `psi` or `transfer`.
+    pub source: String,
+    /// One line: what tripped, and the biggest process outside any job.
+    pub summary: String,
+    /// Trips of the same resource dropped by the rate limit since the previous one.
+    pub suppressed: u64,
+}
+
+/// Machine pressure at a trip.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TripMachine {
+    /// I/O pressure, `some` avg10 percent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub io_pct: Option<f32>,
+    /// CPU pressure, avg10 percent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_pct: Option<f32>,
+    /// Memory `some` avg10 percent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_some_pct: Option<f32>,
+    /// Memory `full` avg10 percent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_full_pct: Option<f32>,
+    /// Memory level: `normal`, `warn` or `critical`.
+    #[serde(default)]
+    pub mem_level: String,
+    /// Available memory in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_bytes: Option<u64>,
+}
+
+/// A running job's figures at a trip.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TripJob {
+    /// The job.
+    pub job: i64,
+    /// Its figures, with their quality.
+    pub figures: JobFigures,
+}
+
+/// Transfer work at a trip.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TripTransfer {
+    /// Phases holding a slot.
+    pub active: u32,
+    /// Daemon-process bytes read while holding a slot.
+    pub inproc_read_bytes: u64,
+    /// Daemon-process bytes written while holding a slot.
+    pub inproc_write_bytes: u64,
+    /// The transfer cgroup's figures, when delegated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub figures: Option<JobFigures>,
+}
+
+/// A process outside any job: its program name only, never arguments or environment.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TripProc {
+    /// Process id.
+    pub pid: i32,
+    /// Program base name.
+    pub name: String,
+    /// Disk bytes in the sample window.
+    pub io_bytes: u64,
+    /// Resident memory.
+    pub rss_bytes: u64,
+}
+
+/// The details of a `pressure.trip` audit row (design §9): what was stalled, what every job and
+/// the transfer cgroup had cost, and who outside any job was busiest in the last window.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TripDetails {
+    /// `io`, `cpu` or `memory`.
+    pub resource: String,
+    /// `gate` (admission refused), `psi` (machine pressure over the alert threshold) or `transfer`.
+    pub source: String,
+    /// The gate's wait text or the threshold crossed.
+    pub reason: String,
+    /// Trips of this resource dropped by the rate limit since the previous one.
+    #[serde(default)]
+    pub suppressed: u64,
+    /// The attribution line (exact cgroup or process tree).
+    #[serde(default)]
+    pub attribution: String,
+    /// Machine-wide pressure.
+    #[serde(default)]
+    pub machine: TripMachine,
+    /// Running jobs' figures.
+    #[serde(default)]
+    pub jobs: Vec<TripJob>,
+    /// Transfer work.
+    #[serde(default)]
+    pub transfer: Option<TripTransfer>,
+    /// Length of the sample window the processes below cover, ms (0: first sample).
+    #[serde(default)]
+    pub window_ms: u64,
+    /// Outside processes by disk bytes in the window, biggest first.
+    #[serde(default)]
+    pub top_io: Vec<TripProc>,
+    /// Outside processes by resident memory, biggest first.
+    #[serde(default)]
+    pub top_rss: Vec<TripProc>,
+    /// Processes whose I/O could not be read (other users').
+    #[serde(default)]
+    pub unreadable: usize,
+}
+
+/// Largest serialized trip details; the audit row bound is 4096 bytes.
+const TRIP_DETAILS_BUDGET: usize = 3600;
+
+impl TripDetails {
+    /// Drops the least useful entries until the details fit the audit row bound: process lists
+    /// shrink first (the head of each ranking is what matters), then the jobs.
+    pub fn bounded(mut self) -> TripDetails {
+        let size = |d: &TripDetails| serde_json::to_string(d).map_or(usize::MAX, |s| s.len());
+        while size(&self) > TRIP_DETAILS_BUDGET {
+            if self.top_rss.len() > 3 {
+                self.top_rss.pop();
+            } else if self.top_io.len() > 3 {
+                self.top_io.pop();
+            } else if self.jobs.len() > 2 {
+                self.jobs.pop();
+            } else if !self.top_rss.is_empty() || !self.top_io.is_empty() {
+                self.top_rss.pop();
+                self.top_io.pop();
+            } else {
+                self.jobs.clear();
+                self.reason.truncate(120);
+                break;
+            }
+        }
+        self
+    }
+
+    /// One line for lists: the resource, the source, the reason and the busiest outside process.
+    pub fn summary(&self) -> String {
+        let who = match (self.top_io.first(), self.top_rss.first()) {
+            (Some(p), _) if p.io_bytes > 0 => format!(
+                "; busiest outside jobs: {} (pid {}) moved {}",
+                p.name,
+                p.pid,
+                tasks_core::human_bytes(p.io_bytes)
+            ),
+            (None, Some(p)) | (Some(_), Some(p)) => format!(
+                "; largest outside jobs: {} (pid {}) {}",
+                p.name,
+                p.pid,
+                tasks_core::human_bytes(p.rss_bytes)
+            ),
+            _ => String::new(),
+        };
+        format!("{} {}: {}{who}", self.resource, self.source, self.reason)
+    }
 }
 
 /// A duration estimate.

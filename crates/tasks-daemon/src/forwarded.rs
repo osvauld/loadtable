@@ -93,6 +93,7 @@ impl Scheduler {
             kill_reason: Mutex::new(None),
             stuck: Mutex::new(StuckDetector::new(policy.stuck_window_secs())),
             est_median: None,
+            figures: Mutex::new(None),
         })
     }
 

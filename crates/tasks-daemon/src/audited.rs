@@ -509,6 +509,10 @@ impl Store for AuditedLedger {
         self.inner.set_log_path(id, path)
     }
 
+    fn set_figures(&self, id: JobId, figures: &tasks_core::JobFigures) -> Result<()> {
+        self.inner.set_figures(id, figures)
+    }
+
     fn find_running(&self) -> Result<Vec<JobRecord>> {
         self.inner.find_running()
     }
