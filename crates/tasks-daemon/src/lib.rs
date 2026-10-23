@@ -20,6 +20,8 @@ pub mod config;
 pub mod entry;
 pub mod error;
 #[cfg(test)]
+mod fetch_tests;
+#[cfg(test)]
 mod follow_tests;
 mod forwarded;
 pub mod forwarder;

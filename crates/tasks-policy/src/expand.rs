@@ -178,6 +178,7 @@ pub fn expand(
                 priority: def.priority.filter(|p| *p != tasks_core::Priority::Normal),
                 // set by `split_cargo_test`; the suite's hints must not lose it
                 split: p.hints.split.clone(),
+                fetch: p.hints.fetch.clone(),
             };
             steps.push(p);
         }

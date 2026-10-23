@@ -81,7 +81,8 @@ pub fn tool_defs() -> Vec<ToolDef> {
             "name": {"type": "string", "description": "Unique step name (letters, digits, '.', '_', '-')."},
             "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Program and arguments."},
             "after": {"type": "array", "items": {"type": "string"}, "description": "Names of steps that must pass first."},
-            "kind": {"type": "string", "enum": ["compile", "test", "run", "package", "device", "probe"], "description": "Admission class (default compile)."}
+            "kind": {"type": "string", "enum": ["compile", "test", "run", "package", "device", "probe"], "description": "Admission class (default compile)."},
+            "fetch": {"type": "array", "items": {"type": "string"}, "maxItems": 256, "description": "Output files to bring back to this checkout after the job ran on a peer, as paths relative to the checkout root (e.g. android/app/build/outputs/apk/debug/app-debug.apk). Absolute paths and .. are refused. The result of each is reported by wait/get; a job that ran here already has its files."}
         }),
         &["name", "argv"],
     );
@@ -100,6 +101,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     "timeout_s": {"type": "integer", "minimum": 1, "description": "Stop the job after this many seconds (1 s to 7 days; the job ends timed out)."},
                     "broad_test": {"type": "boolean", "description": "Deliberately build every test target of a filtered `cargo test`. Prefer naming the target."},
                     "after": {"type": "array", "items": {"type": "integer", "minimum": 1}, "description": "Job ids that must pass before this job may start."},
+                    "fetch": {"type": "array", "items": {"type": "string"}, "maxItems": 256, "description": "Output files to bring back to this checkout after the job ran on a peer, as paths relative to the checkout root (e.g. android/app/build/outputs/apk/debug/app-debug.apk). Absolute paths and .. are refused. The result of each is reported by wait/get; a job that ran here already has its files."},
                     "priority": priority.clone(),
                     "reason": reason.clone()
                 }),

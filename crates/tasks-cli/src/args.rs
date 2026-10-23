@@ -152,6 +152,10 @@ pub struct RunArgs {
     /// Allow a `cargo test` with a name filter but no target selector to build every target.
     #[arg(long)]
     pub broad_test: bool,
+    /// Bring this output file back after the job ran on a peer (path relative to the checkout
+    /// root; repeatable). A job that ran here already has it.
+    #[arg(long, value_name = "REL")]
+    pub fetch: Vec<String>,
     /// Submit and print the id; do not follow the log (`run` only).
     #[arg(long)]
     pub detach: bool,

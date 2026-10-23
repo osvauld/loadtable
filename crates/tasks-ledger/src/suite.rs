@@ -122,6 +122,7 @@ fn spec(owner: &str, after: Vec<JobId>) -> JobSpec {
         broad_test_escape: false,
         priority: tasks_core::Priority::Normal,
         priority_reason: None,
+        fetch: Vec::new(),
     }
 }
 
@@ -730,6 +731,7 @@ fn r177_plan(e: &Env) {
         timeout_secs: Some(600),
         long: true,
         tools: vec!["cargo".into()],
+        fetch: vec!["out/report.html".into()],
         ..StepHints::default()
     };
     test.kind = Kind::Test;
@@ -752,6 +754,8 @@ fn r177_plan(e: &Env) {
     assert_eq!(t.plan_id, Some(done.plan_id));
     assert_eq!(t.step_name.as_deref(), Some("test"));
     assert_eq!(t.hints, test.hints);
+    // R-518: the step's fetch list becomes the job's
+    assert_eq!(t.spec.fetch, ["out/report.html"]);
     assert_eq!(t.spec.after, vec![id("build"), id("lint")]);
     assert_eq!(
         (t.spec.kind, t.spec.cwd.as_path()),

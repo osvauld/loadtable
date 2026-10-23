@@ -155,6 +155,8 @@ pub enum SyncPhase {
     Pack,
     /// Indexing a pack and writing the working copy (worker).
     Apply,
+    /// Writing fetched output files into the checkout (origin).
+    Fetch,
 }
 
 impl SyncPhase {
@@ -164,6 +166,7 @@ impl SyncPhase {
             SyncPhase::Snapshot => "snapshot",
             SyncPhase::Pack => "pack",
             SyncPhase::Apply => "apply",
+            SyncPhase::Fetch => "fetch",
         }
     }
 }

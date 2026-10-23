@@ -659,3 +659,36 @@ fn r358_status_shows_cpu_busy_and_swap_with_rates_and_says_so_when_there_is_no_s
     let t = status(&s);
     assert!(!t.contains("swap") && !t.contains("cpu busy"), "{t}");
 }
+
+// R-504
+#[test]
+fn r504_get_lists_each_fetch_result_and_a_passed_job_with_a_failed_one_exits_one() {
+    use tasks_core::{FetchResult, FetchStatus};
+    let mut j = job(1, "a", "/w", Phase::Passed, "x");
+    j.fetch = vec![
+        FetchResult {
+            path: "a.apk".into(),
+            status: FetchStatus::Fetched {
+                bytes: 2048,
+                sha256: "ff".into(),
+                unchanged: false,
+            },
+        },
+        FetchResult {
+            path: "b.apk".into(),
+            status: FetchStatus::Missing,
+        },
+    ];
+    assert_eq!(job_exit_code(&j), 1);
+    let text = job_detail(&j, NOW, None);
+    assert!(
+        text.contains("fetch:     fetched a.apk (2 KiB, sha256 ff)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("fetch failed: b.apk does not exist on the peer"),
+        "{text}"
+    );
+    j.fetch.truncate(1);
+    assert_eq!(job_exit_code(&j), 0);
+}

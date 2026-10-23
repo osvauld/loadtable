@@ -161,8 +161,11 @@ pub fn exit_label(j: &JobView) -> String {
 }
 
 /// The exit code `tasks2 run` returns for a finished job: the job's own code when it has one.
+/// A job that passed but could not bring back a file it was asked to fetch exits 1, as the
+/// earlier release did (R-504); the command's own exit code is never changed.
 pub fn job_exit_code(j: &JobView) -> i32 {
     match &j.phase {
+        Phase::Passed if tasks_core::any_failed(&j.fetch) => 1,
         Phase::Passed => 0,
         Phase::Failed { .. } | Phase::TimedOut { .. } => {
             let own = j.exit.filter(|c| *c != 0);
@@ -395,6 +398,13 @@ pub fn job_detail(j: &JobView, now_ms: i64, waiter: Option<&WaiterView>) -> Stri
     }
     if let Some(f) = &j.figures {
         let _ = writeln!(out, "  cost:      {}", f.summary());
+    }
+    for (i, r) in j.fetch.iter().enumerate() {
+        let label = if i == 0 { "fetch:     " } else { "           " };
+        let _ = writeln!(out, "  {label}{}", r.line());
+    }
+    if j.fetch.is_empty() && !j.fetch_paths.is_empty() {
+        let _ = writeln!(out, "  fetch:     requested {}", j.fetch_paths.join(", "));
     }
     if let Some(p) = &j.log_path {
         let _ = writeln!(out, "  log:       {}", p.display());

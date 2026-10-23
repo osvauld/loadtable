@@ -10,6 +10,12 @@ pub const DENIED_DEVICES: &[&str] = &["ZD22257P6G"];
 /// Longest wall-clock limit a job may ask for: seven days.
 pub const MAX_TIMEOUT_SECS: u64 = 604_800;
 
+/// Most output paths one job may ask to have fetched back (the peer's list request limit).
+pub const MAX_FETCH_PATHS: usize = 256;
+
+/// Longest output path, in bytes.
+pub const MAX_FETCH_PATH_BYTES: usize = 1024;
+
 /// What a job does, for scheduling and ETA purposes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Kind {
@@ -110,6 +116,37 @@ pub struct JobSpec {
     /// Why the job is `blocking`, kept with the job and in the audit log.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority_reason: Option<String>,
+    /// Output files, relative to the checkout root, to bring back when the job ran on a peer
+    /// (`--fetch`). Older senders omit it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fetch: Vec<String>,
+}
+
+/// Checks one `--fetch` path: relative to the checkout, no `.`/`..`/empty component, no `.git`.
+pub fn check_fetch_path(p: &str) -> Result<(), CoreError> {
+    let bad = |why: &str| CoreError::BadFetchPath(p.to_string(), why.to_string());
+    if p.is_empty() {
+        return Err(bad("empty path"));
+    }
+    if p.len() > MAX_FETCH_PATH_BYTES {
+        return Err(bad("path is too long"));
+    }
+    if p.starts_with('/') {
+        return Err(bad(
+            "absolute paths are not allowed; give a path inside the checkout",
+        ));
+    }
+    if p.contains('\0') || p.contains('\\') {
+        return Err(bad("NUL or backslash"));
+    }
+    for c in p.split('/') {
+        match c {
+            "" | "." | ".." => return Err(bad("`.`, `..` and empty components are not allowed")),
+            ".git" => return Err(bad("paths inside .git cannot be fetched")),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn valid_env_name(n: &str) -> bool {
@@ -143,6 +180,12 @@ impl JobSpec {
         {
             return Err(CoreError::BadTimeout(t));
         }
+        if self.fetch.len() > MAX_FETCH_PATHS {
+            return Err(CoreError::TooManyFetchPaths(self.fetch.len()));
+        }
+        for p in &self.fetch {
+            check_fetch_path(p)?;
+        }
         crate::check_reason(self.priority, self.priority_reason.as_deref())?;
         for d in DENIED_DEVICES {
             if self.argv.iter().any(|a| a.contains(d)) {
@@ -172,6 +215,7 @@ pub(crate) mod tests {
             broad_test_escape: false,
             priority: Priority::Normal,
             priority_reason: None,
+            fetch: Vec::new(),
         }
     }
 
@@ -298,5 +342,48 @@ pub(crate) mod tests {
     fn probe_not_eta() {
         assert!(!Kind::Probe.counts_for_eta());
         assert!(Kind::Compile.counts_for_eta());
+    }
+
+    #[test]
+    fn r500_fetch_paths_are_relative_and_inside_the_checkout() {
+        let mut s = spec();
+        s.fetch = vec!["android/app/build/outputs/apk/debug/app-debug.apk".into()];
+        assert_eq!(s.validate(), Ok(()));
+        for bad in [
+            "",
+            "/etc/passwd",
+            "../x",
+            "a/../b",
+            "a//b",
+            "./a",
+            "a/",
+            ".git/config",
+            "a\\b",
+        ] {
+            s.fetch = vec![bad.into()];
+            assert!(
+                matches!(s.validate(), Err(CoreError::BadFetchPath(..))),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn r500_the_number_of_fetch_paths_is_bounded() {
+        let mut s = spec();
+        s.fetch = (0..=MAX_FETCH_PATHS).map(|i| format!("f{i}")).collect();
+        assert_eq!(
+            s.validate(),
+            Err(CoreError::TooManyFetchPaths(MAX_FETCH_PATHS + 1))
+        );
+    }
+
+    #[test]
+    fn r501_an_older_spec_without_fetch_still_parses() {
+        let mut v = serde_json::to_value(spec()).unwrap();
+        assert!(v.get("fetch").is_none());
+        v.as_object_mut().unwrap().remove("fetch");
+        let back: JobSpec = serde_json::from_value(v).unwrap();
+        assert!(back.fetch.is_empty());
     }
 }

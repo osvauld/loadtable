@@ -740,6 +740,12 @@ pub struct JobView {
     /// reason. Such a job is waiting, not running, though its local row says `Running` (R-015).
     #[serde(default)]
     pub remote_wait: Option<String>,
+    /// Output files the job asked to have fetched back from its peer (`--fetch`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fetch_paths: Vec<String>,
+    /// What became of each, once the job has ended.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fetch: Vec<tasks_core::FetchResult>,
 }
 
 /// One block of grep output.

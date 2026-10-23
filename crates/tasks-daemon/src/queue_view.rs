@@ -134,6 +134,7 @@ mod tests {
             broad_test_escape: false,
             priority: Priority::Normal,
             priority_reason: None,
+            fetch: Vec::new(),
         };
         let store = tasks_ledger::MemoryStore::new();
         let id = tasks_ledger::Store::submit(&store, &spec).unwrap();

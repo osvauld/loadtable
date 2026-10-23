@@ -1805,3 +1805,89 @@ fn r368_submit_warnings_from_the_daemon_are_printed_by_the_cli() {
     );
     assert!(!quiet.err.contains("warning"), "{}", quiet.err);
 }
+
+// R-504, R-517
+#[test]
+fn r504_fetch_is_carried_on_the_spec_and_a_failed_fetch_of_a_passed_job_exits_one() {
+    use tasks_core::{FetchResult, FetchStatus};
+    let mut j = finished(7, Phase::Passed);
+    j.fetch = vec![FetchResult {
+        path: "out/app.apk".into(),
+        status: FetchStatus::Missing,
+    }];
+    let c = daemon(7, vec![chunk("built\n", 6, true)], j);
+    let r = Harness::default().run(
+        &c,
+        &[
+            "run",
+            "--fetch",
+            "out/app.apk",
+            "--fetch",
+            "out/b.txt",
+            "--",
+            "make",
+        ],
+    );
+    assert_eq!(
+        r.code, 1,
+        "the command passed, the fetch did not: {}",
+        r.err
+    );
+    assert!(
+        r.err.contains("1 requested file(s) could not be fetched"),
+        "{}",
+        r.err
+    );
+    let Some(Request::Submit { spec }) = c
+        .requests()
+        .into_iter()
+        .find(|r| matches!(r, Request::Submit { .. }))
+    else {
+        panic!("no submit")
+    };
+    assert_eq!(spec.fetch, ["out/app.apk", "out/b.txt"]);
+    // a fetch that worked leaves the exit code alone
+    let mut ok = finished(8, Phase::Passed);
+    ok.fetch = vec![FetchResult {
+        path: "out/app.apk".into(),
+        status: FetchStatus::Fetched {
+            bytes: 1,
+            sha256: "ab".into(),
+            unchanged: false,
+        },
+    }];
+    let c = daemon(8, vec![chunk("", 0, true)], ok);
+    assert_eq!(
+        Harness::default()
+            .run(&c, &["run", "--fetch", "a", "--", "make"])
+            .code,
+        0
+    );
+    // a failed job keeps its own code whatever the fetch says
+    let mut bad = finished(9, Phase::Failed { exit: Some(101) });
+    bad.fetch = vec![FetchResult {
+        path: "a".into(),
+        status: FetchStatus::Failed {
+            reason: "not fetched: the job did not pass (failed)".into(),
+        },
+    }];
+    let c = daemon(9, vec![chunk("", 0, true)], bad);
+    assert_eq!(
+        Harness::default()
+            .run(&c, &["run", "--fetch", "a", "--", "make"])
+            .code,
+        101
+    );
+}
+
+// R-517
+#[test]
+fn r517_a_fetch_path_outside_the_checkout_is_refused_before_anything_is_sent() {
+    for bad in ["../x", "/etc/passwd", "a/../b"] {
+        let c = daemon(1, vec![], finished(1, Phase::Passed));
+        let r = Harness::default().run(&c, &["run", "--fetch", bad, "--", "make"]);
+        assert_ne!(r.code, 0, "{bad}");
+        assert!(r.err.contains("cannot fetch"), "{}", r.err);
+        assert_eq!(submits(&c), 0);
+    }
+}

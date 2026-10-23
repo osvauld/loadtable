@@ -228,6 +228,7 @@ struct SubmitArgs {
     after: Option<Vec<i64>>,
     priority: Option<String>,
     reason: Option<String>,
+    fetch: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -238,6 +239,8 @@ struct StepArg {
     #[serde(default)]
     after: Vec<String>,
     kind: Option<String>,
+    #[serde(default)]
+    fetch: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -540,6 +543,7 @@ impl Tools {
                 .into_iter()
                 .map(job_id)
                 .collect::<Result<_, _>>()?,
+            fetch: a.fetch.unwrap_or_default(),
         };
         spec.requirements.device = a.device.map(DeviceId);
         spec.validate()
@@ -671,7 +675,10 @@ impl Tools {
                 after: s.after,
                 kind,
                 requirements: tasks_core::Requirements::default(),
-                hints: tasks_core::StepHints::default(),
+                hints: tasks_core::StepHints {
+                    fetch: s.fetch,
+                    ..tasks_core::StepHints::default()
+                },
             });
         }
         let plan = Plan { steps };
@@ -998,6 +1005,9 @@ impl Tools {
         );
         if let Some(t) = job.summary.as_ref().filter(|t| !t.is_empty()) {
             text.push_str(&format!(": {t}"));
+        }
+        for r in &job.fetch {
+            text.push_str(&format!("\n{}", r.line()));
         }
         let mut log_lines = None;
         if tail > 0 {

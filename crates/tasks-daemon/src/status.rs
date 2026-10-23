@@ -73,6 +73,16 @@ pub fn job_view(r: &JobRecord) -> JobView {
         priority: r.spec.priority,
         priority_reason: r.spec.priority_reason.clone(),
         remote_wait: remote_wait(r),
+        fetch_paths: r.spec.fetch.clone(),
+        fetch: fetch_results(r),
+    }
+}
+
+/// The recorded fetch results of a finished job that asked for any.
+fn fetch_results(r: &JobRecord) -> Vec<tasks_core::FetchResult> {
+    match (&r.log_path, r.spec.fetch.is_empty(), r.phase.is_terminal()) {
+        (Some(log), false, true) => crate::peer_link::fetch::read_results(log),
+        _ => Vec::new(),
     }
 }
 

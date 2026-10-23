@@ -729,6 +729,19 @@ impl Scheduler {
         if let Some(n) = &rewritten.note {
             let _ = notes.note(&log_path, "cargo-jobs", n);
         }
+        // a job asked to fetch its output back that runs here has nothing to fetch (R-503); a
+        // job received from a peer carries the list for its origin to act on, not for this side
+        if !rec.spec.fetch.is_empty() && rec.origin.is_none() {
+            let _ = notes.note(
+                &log_path,
+                "fetch",
+                &format!(
+                    "fetch: this job runs here, so its output is already in the checkout; \
+                     nothing fetched ({})",
+                    rec.spec.fetch.join(", ")
+                ),
+            );
+        }
         // what the submit rules allowed with a warning (a broad test in `warn` mode, or one
         // deliberately escaped) stays visible with the job (R-191)
         let via = if rec.origin.is_some() {

@@ -191,6 +191,7 @@ pub fn build_spec(ctx: &mut Ctx<'_>, a: &RunArgs) -> Result<JobSpec, CliError> {
         broad_test_escape: a.broad_test,
         priority: Priority::Normal,
         priority_reason: None,
+        fetch: a.fetch.clone(),
     };
     (spec.priority, spec.priority_reason) = a.class.resolve()?;
     spec.requirements.device = a.device.clone().map(DeviceId);
@@ -310,7 +311,16 @@ fn run(ctx: &mut Ctx<'_>, a: &RunArgs, follow: bool) -> Result<i32, CliError> {
     let mut state = FollowState::default();
     let end = follow_log(ctx, id, &mut state);
     match end {
-        Ok(FollowEnd::Finished(job)) => Ok(render::job_exit_code(&job)),
+        Ok(FollowEnd::Finished(job)) => {
+            if job.phase == Phase::Passed && tasks_core::any_failed(&job.fetch) {
+                let n = job.fetch.iter().filter(|r| !r.ok()).count();
+                ctx.note(&format!(
+                    "tasks: job {} passed, but {n} requested file(s) could not be fetched back; see the fetch lines above (exit 1)",
+                    id.0
+                ));
+            }
+            Ok(render::job_exit_code(&job))
+        }
         Ok(FollowEnd::Signal(sig)) => {
             ctx.note(&render::still_live(id.0));
             Ok(128 + sig)

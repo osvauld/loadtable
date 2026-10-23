@@ -124,6 +124,8 @@ pub fn job_json(j: &JobView, now_ms: i64) -> Value {
         "priority": j.priority.as_str(),
         "priority_reason": j.priority_reason,
         "remote_wait": j.remote_wait,
+        "fetch": j.fetch,
+        "fetch_failed": tasks_core::any_failed(&j.fetch),
     })
 }
 
@@ -172,6 +174,9 @@ pub fn job_detail(j: &JobView, now_ms: i64) -> String {
     }
     if let Some(f) = &j.figures {
         s.push_str(&format!("cost: {}\n", f.summary()));
+    }
+    for r in &j.fetch {
+        s.push_str(&format!("fetch: {}\n", r.line()));
     }
     s
 }

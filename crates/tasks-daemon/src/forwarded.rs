@@ -315,6 +315,34 @@ impl Scheduler {
         for (k, s) in &end.samples {
             let _ = retry_busy(&retry, &sleep, || self.ledger.record_sample(k, s));
         }
+        self.audit_fetched(id, peer, &end.fetch);
+    }
+
+    /// One `data.fetched` row per output file brought back: path, hash, bytes, peer and job.
+    fn audit_fetched(&self, id: JobId, peer: &MachineName, results: &[tasks_core::FetchResult]) {
+        let Some(sink) = self.audit_sink() else {
+            return;
+        };
+        let Ok(Some(rec)) = self.ledger.get(id) else {
+            return;
+        };
+        for r in results {
+            if let tasks_core::FetchStatus::Fetched {
+                bytes,
+                sha256,
+                unchanged,
+            } = &r.status
+            {
+                sink.record(
+                    sink.job_event(tasks_ledger::action::DATA_FETCHED, &rec)
+                        .target(r.path.clone())
+                        .detail("sha256", sha256.clone())
+                        .detail("bytes", *bytes)
+                        .detail("unchanged", *unchanged)
+                        .detail("peer_name", peer.0.as_str()),
+                );
+            }
+        }
     }
 
     /// Only a job that asked for "anywhere" may fall back; one pinned to a peer fails instead.

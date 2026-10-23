@@ -16,6 +16,7 @@
 //! The receiving half (a daemon hosting `tasks_peer::Receiver`) is in [`serve`].
 
 mod drive;
+pub mod fetch;
 pub mod serve;
 
 #[cfg(feature = "iroh")]
@@ -35,7 +36,7 @@ use std::time::{Duration, Instant};
 use tasks_core::{Arch, JobId, Machine, MachineName, Os, SlotKind};
 use tasks_ledger::JobRecord;
 use tasks_peer::proto::{Body, PeerStatus};
-use tasks_peer::sync::SyncDriver;
+use tasks_peer::sync::{SyncDriver, SyncGate};
 use tasks_peer::transport::{LinkInfo as PathInfo, PeerError, Transport};
 use tasks_peer::{
     CheckoutId, CheckoutLocks, Forward, ForwardJob, ForwardPolicy, LockOwner, PeerId, Refusal,
@@ -119,6 +120,14 @@ pub struct PeerLinkOptions {
     pub background_status: bool,
     /// Told when a link comes up, goes down or changes path.
     pub observer: Option<Arc<dyn LinkObserver>>,
+    /// Held while fetched outputs are written into a checkout: the transfer slot and I/O gate
+    /// (design: sync and fetch both take a transfer slot).
+    pub gate: Arc<dyn SyncGate>,
+    /// Paths from a checkout root that are coordinator-placed output links (`target`,
+    /// `android/app/build`): a fetch writes through these and through no other symlink.
+    pub fetch_links: Vec<String>,
+    /// Largest output file fetched back.
+    pub fetch_max_bytes: u64,
 }
 
 impl PeerLinkOptions {
@@ -140,6 +149,9 @@ impl PeerLinkOptions {
             tick_every: Duration::from_millis(50),
             background_status: true,
             observer: None,
+            gate: Arc::new(tasks_peer::sync::OpenGate),
+            fetch_links: Vec::new(),
+            fetch_max_bytes: tasks_peer::outputs::FetchPolicy::default().max_file_bytes,
         }
     }
 }
@@ -157,6 +169,12 @@ pub(crate) struct Published {
 pub(crate) struct Job {
     pub id: JobId,
     pub checkout: CheckoutId,
+    /// The checkout root on this machine, where fetched outputs land.
+    pub root: PathBuf,
+    /// The peer running the job.
+    pub peer: PeerId,
+    /// Output files to bring back when the job passes (`--fetch`).
+    pub fetch: Vec<String>,
     /// The checkout lock a resumed job holds while it is followed, so later forwards of the
     /// same checkout wait for it instead of syncing over its files.
     pub resumed_lock: Option<(CheckoutId, LockOwner)>,
@@ -581,7 +599,7 @@ impl<T: Transport + 'static> Forwarder for PeerLink<T> {
             spec: rec.spec.clone(),
             root: root.clone(),
             origin_host: self.inner.opts.local_name.clone(),
-            peer: spec.node_id,
+            peer: spec.node_id.clone(),
             key: key.clone(),
         };
         let ticket = ForwardTicket {
@@ -598,6 +616,9 @@ impl<T: Transport + 'static> Forwarder for PeerLink<T> {
         let entry = Arc::new(Job {
             id: rec.id,
             checkout: CheckoutId::derive(&self.inner.opts.local_name, &root),
+            root: root.clone(),
+            peer: spec.node_id.clone(),
+            fetch: rec.spec.fetch.clone(),
             resumed_lock: None,
             ticket: ticket.clone(),
             fwd: Mutex::new(Some(fwd)),
@@ -682,6 +703,9 @@ impl<T: Transport + 'static> Forwarder for PeerLink<T> {
         let entry = Arc::new(Job {
             id: rec.id,
             checkout: checkout.clone(),
+            root: root.clone(),
+            peer: spec.node_id.clone(),
+            fetch: rec.spec.fetch.clone(),
             resumed_lock: Some((checkout, owner)),
             ticket: ForwardTicket {
                 remote_job: fw.remote_job,
@@ -786,6 +810,7 @@ pub(crate) fn lost_end(reason: &str) -> ForwardEnd {
         remote_job: None,
         nothing_submitted: false,
         samples: Vec::new(),
+        fetch: Vec::new(),
     }
 }
 

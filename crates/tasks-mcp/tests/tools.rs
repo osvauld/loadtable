@@ -1447,3 +1447,45 @@ fn r358_status_reports_cpu_busy_swap_and_the_peers_path_and_reply_time() {
         assert!(r.text.contains(want), "missing {want:?} in:\n{}", r.text);
     }
 }
+
+// R-517
+#[test]
+fn r517_submit_and_steps_take_a_fetch_list_checked_before_any_daemon_request() {
+    let apk = "android/app/build/outputs/apk/debug/app-debug.apk";
+    let d = submitted(7);
+    let r = call(
+        &tools_with(&d),
+        "submit",
+        json!({"argv": ["./android/gradlew", ":app:assembleDebug"], "peer": "nixos", "fetch": [apk]}),
+    );
+    assert!(!r.is_error, "{}", r.text);
+    assert_eq!(submits(&d)[0].fetch, [apk]);
+    let d = plan_daemon();
+    let r = call(
+        &tools_with(&d),
+        "submit_steps",
+        json!({"steps": [{"name": "apk", "argv": ["./gradlew", "assembleDebug"], "fetch": [apk]}], "peer": "nixos"}),
+    );
+    assert!(!r.is_error, "{}", r.text);
+    let Request::SubmitPlan { plan, .. } = &d.requests()[0] else {
+        panic!()
+    };
+    assert_eq!(plan.steps[0].hints.fetch, [apk]);
+    // refused without asking the daemon
+    let never = never_called();
+    for bad in ["../x", "/etc/passwd", "a/../../b"] {
+        let r = call(
+            &tools_with(&never),
+            "submit",
+            json!({"argv": ["true"], "fetch": [bad]}),
+        );
+        assert!(r.is_error, "{bad} accepted");
+        let r = call(
+            &tools_with(&never),
+            "submit_steps",
+            json!({"steps": [{"name": "a", "argv": ["true"], "fetch": [bad]}]}),
+        );
+        assert!(r.is_error, "{bad} accepted in a step");
+    }
+    assert!(never.requests().is_empty());
+}

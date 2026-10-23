@@ -77,6 +77,10 @@ pub struct ForwardEnd {
     pub nothing_submitted: bool,
     /// Timing samples measured on the peer.
     pub samples: Vec<(SampleKey, Sample)>,
+    /// What became of each output the job asked to have fetched back (empty when it asked for
+    /// none). Filled by the adapter before the end is published, so a job never shows as
+    /// finished while its files are still arriving.
+    pub fetch: Vec<tasks_core::FetchResult>,
 }
 
 /// What [`Forwarder::poll`] found.
@@ -250,6 +254,7 @@ impl Forwarder for NoForwarder {
             remote_job: None,
             nothing_submitted: false,
             samples: Vec::new(),
+            fetch: Vec::new(),
         })
     }
     fn cancel(&self, _job: JobId, _reason: &str) {}

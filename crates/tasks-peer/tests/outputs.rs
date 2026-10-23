@@ -278,3 +278,151 @@ fn r405_an_android_output_link_below_the_top_level_is_followed_only_when_named()
     let r = run_fetch(&s, &["other/outputs/apk/app.apk"], u64::MAX);
     assert!(r.fetched.is_empty(), "{r:?}");
 }
+
+/// A connection that dies after `ok_chunks` chunk requests, as a link lost mid-transfer.
+struct Dies {
+    inner: Box<dyn tasks_peer::transport::Connection>,
+    ok_chunks: usize,
+}
+
+impl tasks_peer::transport::Connection for Dies {
+    fn request(
+        &mut self,
+        msg: tasks_peer::proto::Body,
+    ) -> Result<tasks_peer::proto::Body, tasks_peer::PeerError> {
+        if matches!(msg, tasks_peer::proto::Body::FetchChunk { .. }) {
+            if self.ok_chunks == 0 {
+                return Err(tasks_peer::PeerError::LinkLost("cable pulled".into()));
+            }
+            self.ok_chunks -= 1;
+        }
+        self.inner.request(msg)
+    }
+    fn subscribe(
+        &mut self,
+        remote: tasks_peer::RemoteJobId,
+        from_offset: u64,
+    ) -> Result<Box<dyn tasks_peer::transport::EventStream>, tasks_peer::PeerError> {
+        self.inner.subscribe(remote, from_offset)
+    }
+}
+
+fn leftovers(dir: &std::path::Path) -> Vec<String> {
+    let mut v: Vec<String> = fs::read_dir(dir)
+        .map(|rd| {
+            rd.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort();
+    v
+}
+
+// R-515
+#[test]
+fn r515_an_interrupted_fetch_leaves_no_partial_file_and_keeps_the_old_one() {
+    let s = synced();
+    let big = "q".repeat(MAX_CHUNK_BYTES * 3);
+    write(&s.tree, "out/app.bin", &big);
+    // nothing there before: after the failure still nothing, not even a temporary file
+    let inner =
+        s.w.transport
+            .connect(&s.w.nixos, Duration::from_secs(5))
+            .unwrap();
+    let mut conn = Dies {
+        inner,
+        ok_chunks: 1,
+    };
+    let r = tasks_peer::outputs::fetch(
+        &mut conn,
+        &s.id,
+        &["out/app.bin".to_string()],
+        &s.dest,
+        u64::MAX,
+    );
+    assert!(r.is_err(), "{r:?}");
+    assert_eq!(leftovers(&s.dest.join("out")), Vec::<String>::new());
+    // an older version in place stays exactly as it was
+    write(&s.dest, "out/app.bin", "old build");
+    let inner =
+        s.w.transport
+            .connect(&s.w.nixos, Duration::from_secs(5))
+            .unwrap();
+    let mut conn = Dies {
+        inner,
+        ok_chunks: 2,
+    };
+    assert!(
+        tasks_peer::outputs::fetch(
+            &mut conn,
+            &s.id,
+            &["out/app.bin".to_string()],
+            &s.dest,
+            u64::MAX
+        )
+        .is_err()
+    );
+    assert_eq!(
+        fs::read_to_string(s.dest.join("out/app.bin")).unwrap(),
+        "old build"
+    );
+    assert_eq!(leftovers(&s.dest.join("out")), ["app.bin"]);
+    // and a whole fetch replaces it in one rename
+    run_fetch(&s, &["out/app.bin"], u64::MAX);
+    assert_eq!(fs::read_to_string(s.dest.join("out/app.bin")).unwrap(), big);
+    assert_eq!(leftovers(&s.dest.join("out")), ["app.bin"]);
+}
+
+// R-516
+#[test]
+fn r516_the_destination_is_confined_to_the_checkout_and_only_named_links_are_followed() {
+    use std::os::unix::fs::symlink;
+    let s = synced();
+    write(&s.tree, "out/a.txt", "a");
+    write(&s.tree, "out/b.txt", "b");
+    let outside = s.w.tmp.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    // a directory component that is a symlink
+    symlink(&outside, s.dest.join("out")).unwrap();
+    let r = run_fetch(&s, &["out/a.txt"], u64::MAX);
+    assert!(
+        r.fetched.is_empty() && r.refused[0].1.contains("symlink"),
+        "{r:?}"
+    );
+    assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+    fs::remove_file(s.dest.join("out")).unwrap();
+    // the file's own place being a symlink (it would be replaced, or written through)
+    fs::create_dir_all(s.dest.join("out")).unwrap();
+    let victim = outside.join("victim");
+    fs::write(&victim, "keep").unwrap();
+    symlink(&victim, s.dest.join("out/b.txt")).unwrap();
+    let r = run_fetch(&s, &["out/b.txt"], u64::MAX);
+    assert!(
+        r.fetched.is_empty() && r.refused[0].1.contains("symlink"),
+        "{r:?}"
+    );
+    assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
+    // a directory where the file should go
+    fs::create_dir_all(s.dest.join("out/a.txt")).unwrap();
+    let r = run_fetch(&s, &["out/a.txt"], u64::MAX);
+    assert!(r.refused[0].1.contains("directory"), "{r:?}");
+    // an allowed link is followed, and only that one
+    fs::remove_dir(s.dest.join("out/a.txt")).unwrap();
+    fs::remove_dir_all(s.dest.join("out")).unwrap();
+    symlink(&outside, s.dest.join("out")).unwrap();
+    let mut conn =
+        s.w.transport
+            .connect(&s.w.nixos, Duration::from_secs(5))
+            .unwrap();
+    let r = tasks_peer::outputs::fetch_into(
+        conn.as_mut(),
+        &s.id,
+        &["out/a.txt".to_string()],
+        &s.dest,
+        u64::MAX,
+        &["out".to_string()],
+    )
+    .unwrap();
+    assert_eq!(r.fetched.len(), 1, "{r:?}");
+    assert_eq!(fs::read_to_string(outside.join("a.txt")).unwrap(), "a");
+}

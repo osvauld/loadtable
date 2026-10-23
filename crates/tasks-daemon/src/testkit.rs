@@ -572,6 +572,7 @@ impl Rig {
             broad_test_escape: false,
             priority: tasks_core::Priority::Normal,
             priority_reason: None,
+            fetch: Vec::new(),
         }
     }
 
@@ -650,6 +651,55 @@ pub struct PeerWorld {
     /// A checkout with a few files, and a second one.
     pub root_a: PathBuf,
     pub root_b: PathBuf,
+    /// The worker's store of synced copies: tests put build outputs into a copy's tree.
+    pub store: Arc<tasks_peer::sync::SyncStore>,
+    /// What the worker lets a peer fetch; `restart_worker` applies it.
+    pub fetch_policy: Mutex<tasks_peer::outputs::FetchPolicy>,
+}
+
+/// A worker built before output fetch existed: it answers `fetch_list` and `fetch_chunk` the way
+/// an older receiver answers a message kind it does not know, and everything else as `inner`.
+struct NoFetch(Arc<tasks_peer::receiver::Receiver>);
+
+impl tasks_peer::Handler for NoFetch {
+    fn handle(
+        &self,
+        from: &tasks_peer::PeerId,
+        msg: tasks_peer::proto::Body,
+    ) -> tasks_peer::proto::Body {
+        use tasks_peer::proto::Body;
+        match msg {
+            Body::FetchList { .. } | Body::FetchChunk { .. } => {
+                Body::Refuse(tasks_peer::Refusal::UnknownMessage {
+                    name: "fetch_list".into(),
+                })
+            }
+            other => self.0.handle(from, other),
+        }
+    }
+    fn events(
+        &self,
+        from: &tasks_peer::PeerId,
+        remote: tasks_peer::RemoteJobId,
+        from_offset: u64,
+    ) -> Result<Box<dyn tasks_peer::transport::EventStream>, tasks_peer::Refusal> {
+        self.0.events(from, remote, from_offset)
+    }
+    fn accept_upload(
+        &self,
+        from: &tasks_peer::PeerId,
+        head: &tasks_peer::proto::Body,
+    ) -> Result<(), tasks_peer::Refusal> {
+        self.0.accept_upload(from, head)
+    }
+    fn upload(
+        &self,
+        from: &tasks_peer::PeerId,
+        head: tasks_peer::proto::Body,
+        data: &mut dyn std::io::Read,
+    ) -> tasks_peer::proto::Body {
+        self.0.upload(from, head, data)
+    }
 }
 
 impl PeerWorld {
@@ -674,6 +724,11 @@ impl PeerWorld {
         let runner = Arc::new(tasks_peer::fake::FakeRunner::new());
         let origin = tasks_peer::PeerId::new("laptop-node").unwrap();
         let nixos = tasks_peer::PeerId::new("nixos-node").unwrap();
+        let store = Arc::new(tasks_peer::sync::SyncStore::new(
+            dir.path().join("peer-store"),
+            tasks_peer::sync::SyncLimits::default(),
+            Arc::new(tasks_peer::sync::GixTransfer::new()),
+        ));
         let w = PeerWorld {
             dir,
             net,
@@ -682,16 +737,38 @@ impl PeerWorld {
             nixos,
             root_a,
             root_b,
+            store,
+            fetch_policy: Mutex::new(tasks_peer::outputs::FetchPolicy::default()),
         };
         w.restart_worker();
         w
     }
 
+    /// The worker's copy of the checkout at `root` (the origin's path) as the worker has it.
+    pub fn worker_tree(&self, root: &Path) -> PathBuf {
+        let id = crate::peer_link::checkout_of("laptop", root);
+        self.store.tree_root(&self.origin, &id)
+    }
+
+    /// Replaces the daemon behind `nixos` with one that predates output fetch.
+    pub fn restart_worker_without_fetch(&self) {
+        self.net.serve(
+            &self.nixos,
+            Arc::new(NoFetch(Arc::new(self.receiver()))) as Arc<dyn tasks_peer::Handler>,
+        );
+    }
+
     /// Replaces the daemon behind `nixos` with a fresh receiver over the same runner and
     /// store, as after a restart of the worker.
     pub fn restart_worker(&self) {
+        self.net.serve(
+            &self.nixos,
+            Arc::new(self.receiver()) as Arc<dyn tasks_peer::Handler>,
+        );
+    }
+
+    fn receiver(&self) -> tasks_peer::receiver::Receiver {
         use tasks_peer::receiver::{AllowAll, Allowlist, Receiver};
-        use tasks_peer::sync::{GixTransfer, SyncLimits, SyncStore};
         let status = tasks_peer::proto::PeerStatus {
             machine: tasks_core::Machine {
                 name: MachineName("nixos".into()),
@@ -713,21 +790,15 @@ impl PeerWorld {
             queue: Default::default(),
             pressure: Default::default(),
         };
-        let r = Receiver::new(
+        Receiver::new(
             "nixos",
             Allowlist::new([self.origin.clone()]),
-            Arc::new(SyncStore::new(
-                self.dir.path().join("peer-store"),
-                SyncLimits::default(),
-                Arc::new(GixTransfer::new()),
-            )),
+            self.store.clone(),
             self.runner.clone(),
             Arc::new(tasks_peer::fake::FakeStatus(status)),
             Arc::new(AllowAll),
-            tasks_peer::outputs::FetchPolicy::default(),
-        );
-        self.net
-            .serve(&self.nixos, Arc::new(r) as Arc<dyn tasks_peer::Handler>);
+            lock(&self.fetch_policy).clone(),
+        )
     }
 
     /// Options for a link whose timeouts are short enough for a test.
