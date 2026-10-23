@@ -558,3 +558,23 @@ New in v2 (the earlier release's `--fetch REL` ported onto the peer link). A job
 | R-541 | Placement excludes the local machine for an `--anywhere` job whose parallelism is above the local cap; with no other machine the job is not started and the reason names the parallelism and the cap. | `r541_*` (placement, daemon sched_tests) | any |
 | R-542 | `tasks2 run` ends with exactly one stdout line `job N <passed\|failed\|cancelled\|interrupted> (exit X) owner=W [on HOST]`, with stdout a file or pipe, for local and forwarded jobs. | `r542_the_summary_line_has_the_documented_shape` (cli render), `r542_run_ends_with_the_summary_line_for_a_passed_and_a_failed_job` (cli e2e) | any |
 | R-543 | A job's `PATH` also holds the directories the daemon searches for tools (`$HOME/.cargo/bin`), after its own entries and without repeats, so `env NAME=v cargo ...` finds what the daemon finds. | `r543_extra_dirs_follow_the_path_in_order_without_repeats`, `r543_build_env_adds_the_extra_dirs_to_the_parent_or_the_jobs_own_path` (runner), `r543_a_job_finds_a_tool_by_name_through_env_in_the_daemons_fallback_dirs` (daemon) | unix |
+
+## v2-metrics: live job metrics
+
+| ID | Rule | Test | OS |
+|---|---|---|---|
+| R-560 | A job's sample history is a ring of the newest 900 samples. | `r560_the_ring_keeps_the_newest_900_samples` (daemon) | any |
+| R-561 | An ended job's history is readable for five minutes, then dropped; a running job's never expires. | `r561_an_ended_jobs_history_expires_and_a_running_ones_does_not` (daemon) | any |
+| R-562 | Cores come from the last two samples; a counter reset is unknown, not negative. | `r562_cores_come_from_the_last_two_samples_and_a_reset_is_unknown` (daemon); `rates_come_from_the_counter_deltas`, `a_counter_reset_or_an_empty_interval_gives_none`, `stall_is_clamped_and_unmeasured_counters_stay_none` (core) | any |
+| R-563 | Processes group by program name, sorted by cpu, then memory, then name. | `r563_groups_sum_by_program_and_sort_by_cpu_then_memory`, `r563_ties_on_cpu_break_by_memory_then_name` (daemon) | any |
+| R-564 | Processes match across snapshots by (pid, start): a reused pid is new, a reset counts nothing, no previous snapshot means unknown CPU. | `r564_a_reused_pid_is_a_new_process_and_a_counter_reset_counts_nothing`, `r564_without_a_previous_snapshot_or_time_the_cpu_is_unknown` (daemon) | any |
+| R-565 | At most 12 program groups are listed; the rest are one `others` row. | `r565_beyond_twelve_groups_the_rest_are_summed_into_an_others_row` (daemon) | any |
+| R-566 | A sample records current memory (falling back to the peak when only that is known). | `r566_a_sample_uses_the_current_level_and_falls_back_to_the_peak` (daemon) | any |
+| R-567 | `JobMetrics` on an unknown job is not-found; a job with no samples says why. | `r567_an_unknown_job_is_not_found_and_a_waiting_one_says_it_has_no_samples` (daemon) | any |
+| R-568 | A process-tree job lists its own tree only, grouped by program; the status row carries its cores and memory. | `r568_a_running_jobs_tree_is_grouped_by_program_and_outside_processes_are_left_out` (daemon) | any |
+| R-569 | A cgroup job's processes are exactly the cgroup's members. | `r569_a_cgroup_jobs_processes_are_the_cgroups_members_exactly` (daemon) | linux |
+| R-570 | A finished job returns its retained samples with a note, then empty samples with a "no longer held" note. | `r570_a_finished_jobs_samples_are_kept_for_a_while_then_dropped_with_a_note` (daemon) | any |
+| R-571 | Status and figures JSON written before the new fields still parse. | `r571_the_status_machine_cores_and_old_json_without_the_new_fields` (daemon) | any |
+| R-572 | The usual peak memory is the median peak of this command's past runs on this machine. | `r572_the_usual_peak_is_the_median_of_past_runs_on_this_machine` (daemon); `the_median_peak_skips_unmeasured_runs` (core) | any |
+| R-573 | `tasks2 metrics ID [--json]` prints cores, memory, disk rate and the top five groups. | `r573_metrics_prints_cores_memory_disk_and_the_top_five_groups` (cli) | any |
+| R-574 | The cgroup read and the tree meter report the memory in use now apart from the peak. | `r574_the_current_memory_is_read_apart_from_the_peak` (platform); `r327_the_tree_meter_keeps_what_exited_processes_had_done` (platform) | any |

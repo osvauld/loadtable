@@ -479,6 +479,14 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Live CPU, memory, disk and process groups of a running job.
+    Metrics {
+        /// The job.
+        id: i64,
+        /// The daemon's reply as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Cancel a job (only its owner may).
     Cancel {
         /// The job.

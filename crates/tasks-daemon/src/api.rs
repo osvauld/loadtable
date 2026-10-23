@@ -212,6 +212,11 @@ pub enum Request {
         #[serde(default)]
         who: Option<String>,
     },
+    /// Live samples and process groups of one job on this machine.
+    JobMetrics {
+        /// The job.
+        id: JobId,
+    },
     /// Timing samples and known targets per recipe and machine, bounded in size.
     History {
         /// Only these recipes (the `RecipeKey` display strings); empty means every recipe the
@@ -574,6 +579,8 @@ pub enum Response {
     Estimate(EstimateView),
     /// Timing history.
     History(HistoryView),
+    /// Live samples, process groups and the usual peak of one job.
+    JobMetrics(tasks_core::metrics::JobMetricsView),
     /// Audit rows, newest first.
     Audit {
         /// The rows.
@@ -921,6 +928,12 @@ pub struct RunningView {
     /// What it has cost the machine so far (sampled every few seconds).
     #[serde(default)]
     pub figures: Option<JobFigures>,
+    /// CPU in cores over the last sample interval, when two samples exist.
+    #[serde(default)]
+    pub cores: Option<f64>,
+    /// Memory in use now, bytes, when sampled.
+    #[serde(default)]
+    pub mem_bytes: Option<u64>,
 }
 
 /// Pressure and disk readings.
@@ -944,6 +957,10 @@ pub struct PressureView {
     /// CPU busy percent over the last interval (not CPU pressure), when two readings exist.
     #[serde(default)]
     pub cpu_busy_pct: Option<f32>,
+    /// The whole machine's CPU in use, in cores (`cpu_busy_pct` of its logical cores). Minus
+    /// the jobs' `cores` it is the work outside jobs.
+    #[serde(default)]
+    pub cores_in_use: Option<f64>,
     /// Swap size in bytes (0 without swap), when the platform reports it.
     #[serde(default)]
     pub swap_total: Option<u64>,
