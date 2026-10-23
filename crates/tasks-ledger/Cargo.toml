@@ -1,0 +1,24 @@
+[package]
+name = "tasks-ledger"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tasks-core.workspace = true
+tasks-timing.workspace = true
+tasks-identity.workspace = true
+sha2.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+rusqlite.workspace = true
+
+# Linux builds SQLite from source; macOS links the system SQLite (always present), which also
+# lets the workspace type-check for aarch64-apple-darwin from Linux without a macOS C toolchain.
+[target.'cfg(target_os = "linux")'.dependencies]
+rusqlite = { workspace = true, features = ["bundled"] }

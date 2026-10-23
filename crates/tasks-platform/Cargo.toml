@@ -1,0 +1,22 @@
+[package]
+name = "tasks-platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+fake = []
+
+[dependencies]
+tasks-core.workspace = true
+thiserror.workspace = true
+rustix = { workspace = true, features = ["param", "fs", "process", "std"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+sysinfo = { version = "0.37", default-features = false, features = ["system"] }

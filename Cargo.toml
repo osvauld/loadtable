@@ -1,39 +1,49 @@
-[package]
-name = "tinline-task-manager"
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "GPL-3.0-or-later"
+rust-version = "1.92"
+license = "MIT"
 publish = false
 
-# Standalone tooling workspace: do not drag app/media builds into the scheduler.
-# crates/peer: the daemon-to-daemon iroh link (LAN only). experiments/ stay independent.
-[workspace]
-members = ["crates/peer", "crates/platform", "crates/setup"]
-
-[dependencies]
+[workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.38", features = ["bundled"] }
+thiserror = "2"
+rustix = { version = "1", features = ["fs", "process"] }
+rusqlite = "0.37"
+anyhow = "1"
+tasks-core = { path = "crates/tasks-core" }
+tasks-platform = { path = "crates/tasks-platform" }
+tasks-ledger = { path = "crates/tasks-ledger" }
+tasks-timing = { path = "crates/tasks-timing" }
+toml = "0.9"
 sha2 = "0.10"
-toml = "0.8"
-libc = "0.2"
-eframe = { version = "0.33", optional = true, default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
-# Daemon-to-daemon link (iroh, LAN only); runs in the daemon's own peer thread/runtime.
-task-manager-peer = { path = "crates/peer" }
-# Native identity/headroom primitives, independently checkable without an Apple SDK.
-task-manager-platform = { path = "crates/platform" }
-task-manager-setup = { path = "crates/setup" }
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time", "net", "io-util"] }
-# Submission policy file (~/.config/tasks/policy.huml); only dependency: serde.
-huml-rs = "0.3.0"
+tempfile = "3"
+tasks-runner = { path = "crates/tasks-runner" }
+tasks-admission = { path = "crates/tasks-admission" }
+tasks-placement = { path = "crates/tasks-placement" }
+tasks-policy = { path = "crates/tasks-policy" }
+tasks-daemon = { path = "crates/tasks-daemon" }
+clap = { version = "4.5", features = ["derive"] }
+signal-hook = "0.4"
+tasks-peer = { path = "crates/tasks-peer" }
+tasks-mcp = { path = "crates/tasks-mcp" }
+tasks-ui = { path = "crates/tasks-ui" }
+tasks-identity = { path = "crates/tasks-identity" }
 
-# `ui`: the egui window (`tasks ui`); `mcp`: the MCP stdio server (`tasks mcp`). A compute
-# worker builds `--no-default-features`: daemon, CLI, peer link and status, no GUI stack.
-[features]
-default = ["ui", "mcp"]
-ui = ["dep:eframe", "task-manager-setup/ui"]
-mcp = []
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+indexing_slicing = "warn"
 
-[[bin]]
-name = "tasks"
-path = "src/bin/tasks/main.rs"
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"

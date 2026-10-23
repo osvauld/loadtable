@@ -1,0 +1,121 @@
+//! The run-policy data model, as written in `.tasks/run-policy.toml`.
+
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+/// The schema version this crate reads and writes.
+pub const SCHEMA_VERSION: u32 = 1;
+
+/// A repo's run policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Policy {
+    /// Schema version; must equal [`SCHEMA_VERSION`].
+    pub version: u32,
+    /// Named suites.
+    #[serde(default)]
+    pub suites: BTreeMap<String, Suite>,
+    /// What travels with a checkout when a job is forwarded to another machine.
+    #[serde(default, skip_serializing_if = "SyncSection::is_empty")]
+    pub sync: SyncSection,
+}
+
+/// `[sync]`: files beyond the git working tree that a forwarded job needs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncSection {
+    /// Gitignored files that must travel (e.g. `local.properties`), as relative paths. `*` and
+    /// `?` match inside one path component; a trailing `/` takes a whole directory. Anything
+    /// not listed here and ignored by git never leaves the machine, and a file that looks like
+    /// a secret is refused by name.
+    #[serde(default)]
+    pub extra: Vec<String>,
+}
+
+impl SyncSection {
+    /// True when nothing is listed.
+    pub fn is_empty(&self) -> bool {
+        self.extra.is_empty()
+    }
+}
+
+/// Most `[sync] extra` patterns.
+pub const MAX_SYNC_EXTRA: usize = 64;
+
+/// A named group of steps, e.g. `core-tests`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Suite {
+    /// Free text for agents: when to run this suite, what it needs.
+    #[serde(default)]
+    pub notes: Option<String>,
+    /// Tools the suite needs on the machine (informational hints for placement).
+    #[serde(default)]
+    pub tools: Vec<String>,
+    /// The steps, in the order they are written.
+    #[serde(default)]
+    pub steps: Vec<StepDef>,
+    /// Per-target notes keyed by history label (`test:lifecycle`, `lib:p2pcore`).
+    #[serde(default)]
+    pub targets: BTreeMap<String, TargetNote>,
+}
+
+/// How a step is split into per-target steps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SplitMode {
+    /// One build step plus one step per cargo test executable.
+    #[serde(rename = "cargo-test")]
+    CargoTest,
+}
+
+/// One step of a suite.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StepDef {
+    /// Unique name within the suite.
+    pub name: String,
+    /// Command and arguments.
+    pub command: Vec<String>,
+    /// Steps that must pass first.
+    #[serde(default)]
+    pub after: Vec<String>,
+    /// Placement hint, e.g. a machine name.
+    #[serde(default)]
+    pub placement: Option<String>,
+    /// Timeout in seconds.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+    /// Split rule.
+    #[serde(default)]
+    pub split: Option<SplitMode>,
+    /// True if a quick check may skip this step.
+    #[serde(default)]
+    pub skip_in_quick: bool,
+    /// Queue class: `background` for warm-ups and long sweeps that may wait behind the rest
+    /// (`normal` is the default). `blocking` is not a policy setting; it needs a person's reason
+    /// at submit time.
+    #[serde(default)]
+    pub priority: Option<tasks_core::Priority>,
+}
+
+/// Notes about one test target.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TargetNote {
+    /// Known to run for a long time: schedule it first.
+    #[serde(default)]
+    pub long: bool,
+    /// Must run alone (e.g. it binds fixed network ports).
+    #[serde(default)]
+    pub isolate: bool,
+    /// Free text.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+impl Suite {
+    /// The step called `name`.
+    pub fn step(&self, name: &str) -> Option<&StepDef> {
+        self.steps.iter().find(|s| s.name == name)
+    }
+}

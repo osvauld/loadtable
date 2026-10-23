@@ -1,5 +1,0 @@
-#!/bin/sh
-# ssh fallback for the cluster status stream (see status_watch_ssh.py). No profile sourcing.
-set -eu
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-exec python3 -B "$SCRIPT_DIR/status_watch_ssh.py" "$@"

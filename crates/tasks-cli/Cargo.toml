@@ -1,0 +1,43 @@
+[package]
+name = "tasks-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "tasks_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tasks2"
+path = "src/main.rs"
+
+[features]
+# `ui` builds `tasks2 ui` (the egui window); off, it fails with "built without ui" (R-199).
+ui = ["dep:tasks-ui", "tasks-ui/ui"]
+mcp = ["dep:tasks-mcp"]
+
+[dependencies]
+tasks-core.workspace = true
+tasks-daemon.workspace = true
+tasks-identity.workspace = true
+tasks-platform.workspace = true
+tasks-policy.workspace = true
+tasks-timing.workspace = true
+tasks-mcp = { workspace = true, optional = true }
+tasks-ui = { workspace = true, optional = true }
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+signal-hook.workspace = true
+
+[dev-dependencies]
+rustix.workspace = true
+tempfile.workspace = true
