@@ -810,7 +810,8 @@ impl Scheduler {
         };
         lock(&self.running).insert(id, rj.clone());
         lock(&self.state).last_wait.remove(&id);
-        let env_policy = cache.env_policy(&settings, Some(cj.default));
+        let mut env_policy = cache.env_policy(&settings, Some(cj.default));
+        env_policy.path_extra = crate::build_cache::fallback_tool_dirs(&self.parent_env);
         let sch = self.clone();
         let spawned = std::thread::Builder::new()
             .name(format!("job-{}", id.0))

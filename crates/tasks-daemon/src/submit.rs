@@ -8,7 +8,8 @@
 
 use crate::scheduler::Scheduler;
 use std::path::Path;
-use tasks_core::JobSpec;
+use tasks_core::{JobSpec, Placement};
+use tasks_placement::Request;
 use tasks_policy::submit_rules::{self, KnownTargets, SubmitRules};
 
 /// Test targets of the package a `cargo test` names, counted from the layout on disk. Only
@@ -63,6 +64,16 @@ pub(crate) enum Via {
     Peer,
 }
 
+/// True when the job can only run on this machine, so this machine's Cargo cap is the one that
+/// applies at submit (R-540). `Peer` and `Anywhere` jobs are judged where they run.
+fn runs_here(placement: &Placement, hint: Option<&str>) -> bool {
+    let request = match (placement, hint) {
+        (Placement::Anywhere | Placement::Here, Some(h)) => Request::from_hint(h),
+        (p, _) => Request::from_placement(p),
+    };
+    matches!(request, Request::Local | Request::Pin)
+}
+
 impl Scheduler {
     /// Applies the submit rules to one job spec. `Ok` carries the warnings; `Err` the refusal
     /// text (one line per refusing rule).
@@ -84,6 +95,16 @@ impl Scheduler {
         spec: &JobSpec,
         via: Via,
     ) -> Result<submit_rules::Verdict, Vec<submit_rules::Refusal>> {
+        self.spec_verdict_hinted(spec, via, None)
+    }
+
+    /// As `spec_verdict`, for a plan step whose own placement hint may differ from the job's.
+    pub(crate) fn spec_verdict_hinted(
+        &self,
+        spec: &JobSpec,
+        via: Via,
+        hint: Option<&str>,
+    ) -> Result<submit_rules::Verdict, Vec<submit_rules::Refusal>> {
         let policy = self.policy();
         // a denied serial named as the device resource is refused like one in argv (R-210)
         let mut hay = spec.argv.clone();
@@ -100,8 +121,10 @@ impl Scheduler {
             broad_mode: policy.broad_test_mode(),
             known: known.as_ref(),
             max_cargo_jobs: match via {
-                Via::Local => Some(policy.cargo_max_jobs()),
-                Via::Peer => None,
+                Via::Local if runs_here(&spec.placement, hint) => Some(policy.cargo_max_jobs()),
+                // the machine that runs the job applies its own cap: a peer when it receives the
+                // job (R-137), or placement, which keeps an over-cap job off this machine (R-541)
+                Via::Local | Via::Peer => None,
             },
         });
         if verdict.allowed() {

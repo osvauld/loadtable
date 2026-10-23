@@ -18,7 +18,7 @@ mod run;
 mod testkit;
 
 pub use clock::{Clock, SystemClock};
-pub use env::{ENV_ALLOWLIST, ENV_PREFIX_ALLOWLIST, EnvPolicy, build_env};
+pub use env::{ENV_ALLOWLIST, ENV_PREFIX_ALLOWLIST, EnvPolicy, build_env, with_dirs};
 pub use error::RunnerError;
 pub use events::{RunEvents, TimedLine};
 pub use lease::Lease;

@@ -184,6 +184,29 @@ pub fn job_exit_code(j: &JobView) -> i32 {
     }
 }
 
+/// The last stdout line of `tasks2 run`: `job N <word> (exit X) owner=W [on HOST]`, so that
+/// `| tail -1` recovers the id and the result (REQUIREMENTS 1.1). `HOST` is the peer a forwarded
+/// job ran on. A timeout or a job that never started reads as `failed`, with the exit code
+/// `tasks2 run` itself returns.
+pub fn summary_line(j: &JobView) -> String {
+    let word = match &j.phase {
+        Phase::Passed => "passed",
+        Phase::Cancelled => "cancelled",
+        Phase::Interrupted => "interrupted",
+        _ => "failed",
+    };
+    let mut s = format!(
+        "job {} {word} (exit {}) owner={}",
+        j.id.0,
+        job_exit_code(j),
+        j.owner
+    );
+    if let Some((peer, _)) = &j.forwarded_to {
+        s.push_str(&format!(" on {peer}"));
+    }
+    s
+}
+
 fn ms_to_secs(ms: i64) -> f64 {
     ms.max(0) as f64 / 1000.0
 }

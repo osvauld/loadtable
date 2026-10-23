@@ -95,6 +95,34 @@ fn r009_only_passed_shows_exit_zero() {
     assert_eq!(exit_label(&job(4, "a", "/w", Phase::Running, "x")), "-");
 }
 
+// R-542
+#[test]
+fn r542_the_summary_line_has_the_documented_shape() {
+    let mut j = job(
+        11,
+        "mac-trial",
+        "/w",
+        Phase::Failed { exit: Some(101) },
+        "x",
+    );
+    j.forwarded_to = Some(("mac".into(), Some(3)));
+    assert_eq!(
+        summary_line(&j),
+        "job 11 failed (exit 101) owner=mac-trial on mac"
+    );
+    let p = job(9, "a", "/w", Phase::Passed, "uname");
+    assert_eq!(summary_line(&p), "job 9 passed (exit 0) owner=a");
+    for (phase, word) in [
+        (Phase::Cancelled, "cancelled"),
+        (Phase::Interrupted, "interrupted"),
+        (Phase::TimedOut { exit: None }, "failed"),
+    ] {
+        let l = summary_line(&job(1, "a", "/w", phase, "x"));
+        assert!(l.starts_with(&format!("job 1 {word} (exit ")), "{l}");
+        assert!(!l.contains('\n'));
+    }
+}
+
 #[test]
 fn run_exit_codes_pass_the_jobs_code_through() {
     let j = |p| job(1, "a", "/w", p, "x");

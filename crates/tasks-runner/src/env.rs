@@ -43,12 +43,28 @@ pub struct EnvPolicy {
     pub scrub: Vec<String>,
     /// Prefixes removed likewise (`SCCACHE_`).
     pub scrub_prefixes: Vec<String>,
+    /// Directories appended to the job's `PATH` when it lacks them (R-543): the places the
+    /// daemon itself looks for tools, so a program a job runs by name (`env X=1 cargo`) is
+    /// found the way the daemon found it. Order kept, nothing repeated.
+    pub path_extra: Vec<String>,
     /// Variables the machine sets last; they win over the job and the daemon's environment.
     pub force: Vec<(String, String)>,
 }
 
 fn allowed(name: &str) -> bool {
     ENV_ALLOWLIST.contains(&name) || ENV_PREFIX_ALLOWLIST.iter().any(|p| name.starts_with(p))
+}
+
+/// `path` followed by each of `extra` it does not already contain (colon separated; empty
+/// entries dropped, so a missing PATH becomes just the extras).
+pub fn with_dirs(path: &str, extra: &[String]) -> String {
+    let mut dirs: Vec<&str> = path.split(':').filter(|d| !d.is_empty()).collect();
+    for e in extra {
+        if !e.is_empty() && !dirs.contains(&e.as_str()) {
+            dirs.push(e);
+        }
+    }
+    dirs.join(":")
 }
 
 /// Builds the complete child environment: allowlisted parent variables, then the
@@ -68,6 +84,10 @@ pub fn build_env(
     if let Some(n) = policy.default_cargo_jobs {
         map.entry("CARGO_BUILD_JOBS".to_string())
             .or_insert_with(|| n.to_string());
+    }
+    if !policy.path_extra.is_empty() {
+        let path = map.get("PATH").cloned().unwrap_or_default();
+        map.insert("PATH".to_string(), with_dirs(&path, &policy.path_extra));
     }
     // the machine's own settings are applied after everything a job could have supplied
     map.retain(|k, _| {
@@ -90,6 +110,43 @@ mod tests {
 
     fn kv(k: &str, v: &str) -> (String, String) {
         (k.to_string(), v.to_string())
+    }
+
+    // R-543
+    #[test]
+    fn r543_extra_dirs_follow_the_path_in_order_without_repeats() {
+        let ex = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            with_dirs(
+                "/usr/bin:/bin",
+                &ex(&["/h/.cargo/bin", "/usr/bin", "/h/.cargo/bin"])
+            ),
+            "/usr/bin:/bin:/h/.cargo/bin"
+        );
+        assert_eq!(with_dirs("", &ex(&["/a", "/b"])), "/a:/b");
+        assert_eq!(with_dirs("/a", &[]), "/a");
+    }
+
+    // R-543
+    #[test]
+    fn r543_build_env_adds_the_extra_dirs_to_the_parent_or_the_jobs_own_path() {
+        let policy = EnvPolicy {
+            path_extra: vec!["/h/.cargo/bin".into()],
+            ..EnvPolicy::default()
+        };
+        let get =
+            |env: Vec<(String, String)>| env.into_iter().find(|(k, _)| k == "PATH").map(|(_, v)| v);
+        let from_parent = build_env(JobId(1), vec![kv("PATH", "/usr/bin")], &[], &policy);
+        assert_eq!(get(from_parent).as_deref(), Some("/usr/bin:/h/.cargo/bin"));
+        let from_job = build_env(
+            JobId(1),
+            vec![kv("PATH", "/usr/bin")],
+            &[kv("PATH", "/x")],
+            &policy,
+        );
+        assert_eq!(get(from_job).as_deref(), Some("/x:/h/.cargo/bin"));
+        let none = build_env(JobId(1), vec![], &[], &policy);
+        assert_eq!(get(none).as_deref(), Some("/h/.cargo/bin"));
     }
 
     #[test]

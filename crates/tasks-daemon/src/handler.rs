@@ -301,8 +301,13 @@ impl Scheduler {
     /// The shared submit rules for a spec (R-191, R-210, R-091); a refusal is `Refused` and is
     /// written to the audit log with the rule that refused it.
     /// Applies the submit rules; the warnings of a passing spec come back for the reply.
-    fn rules(&self, spec: &JobSpec, what: &str) -> Result<Vec<String>, ApiError> {
-        match self.spec_verdict(spec, Via::Local) {
+    fn rules(
+        &self,
+        spec: &JobSpec,
+        what: &str,
+        hint: Option<&str>,
+    ) -> Result<Vec<String>, ApiError> {
+        match self.spec_verdict_hinted(spec, Via::Local, hint) {
             Ok(v) => Ok(v.warnings),
             Err(refusals) => {
                 self.audit_refusal(spec, &refusals, Via::Local, None);
@@ -409,7 +414,7 @@ impl Scheduler {
         Self::owner(spec.owner.as_str())?;
         spec.validate()
             .map_err(|e| ApiError::new(ErrorCode::Refused, format!("invalid job: {e}")))?;
-        let warnings = self.rules(&spec, "")?;
+        let warnings = self.rules(&spec, "", None)?;
         let id = retry_busy(&API_RETRY, &sleep, || self.ledger.submit(&spec))
             .map_err(|e| ledger_error(&e))?;
         self.wake.notify();
@@ -497,7 +502,11 @@ impl Scheduler {
                     format!("step {:?}: invalid job: {e}", step.name),
                 )
             })?;
-            self.rules(&spec, &format!("step {:?}: ", step.name))?;
+            self.rules(
+                &spec,
+                &format!("step {:?}: ", step.name),
+                step.hints.placement.as_deref(),
+            )?;
         }
         Ok(())
     }

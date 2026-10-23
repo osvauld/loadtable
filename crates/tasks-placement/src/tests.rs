@@ -70,6 +70,7 @@ fn input(request: Request, machines: Vec<MachineView>) -> Input {
         hints: StepHints::default(),
         request,
         local_only_reason: None,
+        local_cargo_jobs: None,
         machines,
     }
 }
@@ -1105,4 +1106,42 @@ fn property_decisions_respect_exclusions_pin_and_determinism() {
             assert!(matches!(r.decision, Decision::Refuse(_)));
         }
     }
+}
+
+// ---- R-541: the cap of the machine that runs the job ----
+
+#[test]
+fn r541_an_anywhere_job_above_the_local_cap_goes_to_a_peer_even_when_local_is_faster() {
+    let mut l = view("laptop", true);
+    l.estimate = est(10.0);
+    let mut p = view("nixos", false);
+    p.estimate = est(600.0);
+    let mut i = input(Request::Anywhere, vec![l, p]);
+    i.local_cargo_jobs = Some(CargoJobs { asked: 6, cap: 2 });
+    let r = run(&i);
+    assert_eq!(chosen(&r).as_deref(), Some("nixos"));
+    assert!(matches!(
+        exclusions_of(&r, "laptop"),
+        [Exclusion::AboveCargoCap { asked: 6, cap: 2 }]
+    ));
+}
+
+#[test]
+fn r541_with_no_other_machine_an_anywhere_job_above_the_cap_is_refused_naming_the_caps() {
+    let mut i = input(Request::Anywhere, vec![view("laptop", true)]);
+    i.local_cargo_jobs = Some(CargoJobs { asked: 6, cap: 2 });
+    let r = run(&i);
+    assert!(matches!(r.decision, Decision::Refuse(_)));
+    let text = r.one_line();
+    assert!(
+        text.contains("parallelism 6") && text.contains("cap of 2"),
+        "{text}"
+    );
+}
+
+#[test]
+fn r541_a_request_within_the_cap_or_none_changes_nothing() {
+    let mut i = input(Request::Anywhere, vec![view("laptop", true)]);
+    i.local_cargo_jobs = Some(CargoJobs { asked: 2, cap: 2 });
+    assert_eq!(chosen(&run(&i)).as_deref(), Some("laptop"));
 }

@@ -530,10 +530,14 @@ impl Rig {
             platform: platform.clone(),
             clock: clock.clone(),
             forwarder,
-            parent_env: vec![(
-                "PATH".into(),
-                std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()),
-            )],
+            parent_env: vec![
+                (
+                    "PATH".into(),
+                    std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()),
+                ),
+                // a service's HOME: its ~/.cargo/bin is searched for tools (R-543)
+                ("HOME".into(), dir.path().join("home").display().to_string()),
+            ],
             execution_enabled: true,
             runner_poll: Duration::from_millis(2),
             transfer_gate: None,
