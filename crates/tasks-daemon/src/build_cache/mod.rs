@@ -92,6 +92,22 @@ const WRAPPER_VARS: &[&str] = &[
 const SCCACHE_PREFIX: &str = "SCCACHE_";
 /// Where sccache lives besides `PATH`, under `$HOME`.
 const SCCACHE_FALLBACK_DIRS: &[&str] = &[".cargo/bin"];
+/// The directories under `$HOME` the daemon looks in for tools besides its own `PATH`, as
+/// absolute paths, for the job's `PATH` too (R-543). Empty without a `HOME`.
+pub fn fallback_tool_dirs(env: &[(String, String)]) -> Vec<String> {
+    env.iter()
+        .find(|(k, _)| k == "HOME")
+        .map(|(_, h)| h.as_str())
+        .filter(|h| !h.is_empty())
+        .map(|home| {
+            SCCACHE_FALLBACK_DIRS
+                .iter()
+                .map(|d| Path::new(home).join(d).to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The sccache directory and the Gradle home under the cache root.
 const SCCACHE_SUBDIR: &str = "sccache";
 const GRADLE_SUBDIR: &str = "gradle";
@@ -212,6 +228,7 @@ impl BuildCache {
             default_cargo_jobs: cargo_jobs,
             scrub: WRAPPER_VARS.iter().map(ToString::to_string).collect(),
             scrub_prefixes: vec![SCCACHE_PREFIX.to_string()],
+            path_extra: Vec::new(),
             force,
         }
     }

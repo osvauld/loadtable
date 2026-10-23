@@ -503,6 +503,71 @@ fn r137_a_raised_cap_in_the_machine_policy_accepts_what_it_allows() {
     assert_eq!(err(submit(&r, s)).code, ErrorCode::Refused);
 }
 
+fn placed_over_cap(r: &Rig, placement: Placement) -> Reply {
+    let mut s = r.spec("o", &["cargo", "test", "-j", "6"], Kind::Test);
+    s.broad_test_escape = true;
+    s.placement = placement;
+    submit(r, s)
+}
+
+// R-540: the cap of the machine that will run the job applies, not the origin's
+#[test]
+fn r540_a_peer_job_is_not_held_to_the_origins_cargo_cap() {
+    let r = Rig::new();
+    let peer = Placement::Peer(tasks_core::MachineName("nixos".into()));
+    assert!(matches!(
+        ok(placed_over_cap(&r, peer)),
+        Response::Submitted { .. }
+    ));
+}
+
+#[test]
+fn r540_an_anywhere_job_is_left_to_placement_and_here_or_pinned_jobs_are_refused() {
+    let r = Rig::new();
+    assert!(matches!(
+        ok(placed_over_cap(&r, Placement::Anywhere)),
+        Response::Submitted { .. }
+    ));
+    for p in [Placement::Here, Placement::Pin] {
+        let e = err(placed_over_cap(&r, p));
+        assert_eq!(e.code, ErrorCode::Refused);
+        assert!(e.message.contains("cap of 2"), "{}", e.message);
+    }
+}
+
+#[test]
+fn r540_plan_steps_follow_the_same_rule_by_plan_placement_and_step_hint() {
+    let r = Rig::new();
+    let over = || Plan {
+        steps: vec![step("a", "cargo check -j 9")],
+    };
+    let send = |plan: Plan, placement: Placement| {
+        r.sch.handle(Request::SubmitPlan {
+            plan,
+            owner: "o".into(),
+            cwd: r.dir.path().to_path_buf(),
+            env: vec![],
+            placement,
+            broad_test: false,
+            priority: Default::default(),
+            priority_reason: None,
+        })
+    };
+    let peer = Placement::Peer(tasks_core::MachineName("nixos".into()));
+    assert!(matches!(
+        ok(send(over(), peer)),
+        Response::PlanSubmitted { .. }
+    ));
+    assert_eq!(err(send(over(), Placement::Here)).code, ErrorCode::Refused);
+    // a step that asks for a peer by hint is the peer's to judge
+    let mut hinted = over();
+    hinted.steps[0].hints.placement = Some("nixos".into());
+    assert!(matches!(
+        ok(send(hinted, Placement::Here)),
+        Response::PlanSubmitted { .. }
+    ));
+}
+
 #[test]
 fn r191_plans_get_the_same_answer_naming_the_step() {
     let r = Rig::new();
@@ -871,4 +936,23 @@ fn r369_a_tail_returns_the_offset_a_follower_resumes_from_without_gaps_or_repeat
     // a complete tail ends at the file's end
     let (lines, end) = tail(&r);
     assert_eq!((lines.len(), end), (4, Some(19)));
+}
+
+// R-543: a program the job runs by name, directly or through `env`, is found in the same
+// directories the daemon searches ($HOME/.cargo/bin), not only in the daemon's own PATH
+#[test]
+fn r543_a_job_finds_a_tool_by_name_through_env_in_the_daemons_fallback_dirs() {
+    use std::os::unix::fs::PermissionsExt;
+    let r = Rig::native();
+    let bin = r.dir.path().join("home/.cargo/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let tool = bin.join("r543-tool");
+    std::fs::write(&tool, "#!/bin/sh\necho tool-ran-$R543\n").unwrap();
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let id = r.submit(&r.spec("o", &["env", "R543=1", "r543-tool"], Kind::Run));
+    assert_eq!(r.until_done(id), tasks_core::Phase::Passed);
+    let log = r.log_text(id);
+    assert!(log.contains("tool-ran-1"), "{log}");
+    let id = r.submit(&r.spec("o", &["r543-tool"], Kind::Run));
+    assert_eq!(r.until_done(id), tasks_core::Phase::Passed);
 }

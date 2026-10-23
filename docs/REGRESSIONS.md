@@ -549,3 +549,12 @@ New in v2 (the earlier release's `--fetch REL` ported onto the peer link). A job
 - **SSH `tasks-offload` / `status-watch-ssh` / sidecar reconcile path** (`only_interrupted_ssh_offloads_are_candidates`): retired in favour of the iroh peer link (per the project's iroh-then-MCP direction). Keep the invariant (R-173: never mark an unknown remote half as success) for forwards.
 - **Historical text pins**: `default_cargo_jobs_cap_rejects_three_with_the_historical_text`, `historical_identity_json_is_unchanged`, `thresholds_default_exactly_to_the_previous_constants`. Keep the values, not the exact wording.
 - **`contracts.rs` `only_queued_jobs_can_be_cancelled_in_control_plane_milestone`**: a milestone restriction that running-job cancel supersedes.
+
+## v2-cli-fixes
+
+| ID | Rule | Test | Platforms |
+|---|---|---|---|
+| R-540 | The Cargo `-j` cap checked at submit is the cap of the machine that runs the job: `--here`/`--pin` jobs (and plan steps placed there) are refused by this machine's cap; `--peer NAME` jobs, steps hinted to a peer, and `--anywhere` jobs are not held to the origin's cap (the peer lowers to its own at launch, R-137). | `r540_a_peer_job_is_not_held_to_the_origins_cargo_cap`, `r540_an_anywhere_job_is_left_to_placement_and_here_or_pinned_jobs_are_refused`, `r540_plan_steps_follow_the_same_rule_by_plan_placement_and_step_hint` (daemon) | any |
+| R-541 | Placement excludes the local machine for an `--anywhere` job whose parallelism is above the local cap; with no other machine the job is not started and the reason names the parallelism and the cap. | `r541_*` (placement, daemon sched_tests) | any |
+| R-542 | `tasks2 run` ends with exactly one stdout line `job N <passed\|failed\|cancelled\|interrupted> (exit X) owner=W [on HOST]`, with stdout a file or pipe, for local and forwarded jobs. | `r542_the_summary_line_has_the_documented_shape` (cli render), `r542_run_ends_with_the_summary_line_for_a_passed_and_a_failed_job` (cli e2e) | any |
+| R-543 | A job's `PATH` also holds the directories the daemon searches for tools (`$HOME/.cargo/bin`), after its own entries and without repeats, so `env NAME=v cargo ...` finds what the daemon finds. | `r543_extra_dirs_follow_the_path_in_order_without_repeats`, `r543_build_env_adds_the_extra_dirs_to_the_parent_or_the_jobs_own_path` (runner), `r543_a_job_finds_a_tool_by_name_through_env_in_the_daemons_fallback_dirs` (daemon) | unix |
