@@ -748,7 +748,8 @@ impl Snapshot for GixSnapshot {
         raw.push_str(&format!(
             "author tasks <tasks@localhost> {now_secs} +0000\ncommitter tasks <tasks@localhost> {now_secs} +0000\n\nsync snapshot\n"
         ));
-        let commit = gix::objs::CommitRef::from_bytes(raw.as_bytes()).map_err(store)?;
+        let commit =
+            gix::objs::CommitRef::from_bytes(raw.as_bytes(), tasks.object_hash()).map_err(store)?;
         let id = tasks.write_object(&commit).map_err(store)?.detach();
         gid(id)
     }

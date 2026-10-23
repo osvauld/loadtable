@@ -14,6 +14,7 @@
 
 mod extras;
 mod git_cli;
+mod gix_objects;
 mod gix_snapshot;
 mod limits;
 mod origin;
@@ -154,6 +155,17 @@ pub enum SyncPhase {
     Pack,
     /// Indexing a pack and writing the working copy (worker).
     Apply,
+}
+
+impl SyncPhase {
+    /// The phase as a word for status text.
+    pub fn word(&self) -> &'static str {
+        match self {
+            SyncPhase::Snapshot => "snapshot",
+            SyncPhase::Pack => "pack",
+            SyncPhase::Apply => "apply",
+        }
+    }
 }
 
 /// Held while a sync phase does local disk work. Step 4 implements this on top of admission so
