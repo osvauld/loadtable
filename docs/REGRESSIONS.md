@@ -673,3 +673,4 @@ Tests of earlier rows whose expectations changed with the redesign, kept and edi
 | R-647 | A disk alert says "below its reserve" only when it is, and "filling up" while space is above the reserve. | `r647_a_disk_alert_never_says_low_while_the_space_is_above_the_reserve` (ui model) | any |
 | R-648 | The daemon keeps what the sync before a forwarded run sent and how long it took, and `JobView.sync` carries it. | `r648_the_sync_note_is_kept_next_to_the_log_and_read_back`, `r648_a_forwarded_job_keeps_what_its_sync_sent_and_how_long_it_took` (daemon) | any |
 | R-649 | The phase strip has a sync segment and the facts a Sync line (`synced 742 B in 0.4 s`); fetch results show in the panel. | `r649_*` (ui detail) | any |
+| R-650 | The window shows an offline peer only in its machine row (`Offline · last seen …`), not again as a banner; a peer with no row still gets one. | `r650_an_offline_peer_is_said_in_its_row_not_again_in_a_banner` (ui) | any |

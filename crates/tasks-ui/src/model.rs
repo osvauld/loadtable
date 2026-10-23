@@ -446,9 +446,18 @@ fn notices(st: &StatusSnapshot) -> Vec<Notice> {
             text: text.to_string(),
         });
     }
+    // a peer that is offline already says so in its machine row; a banner would repeat it (R-650)
+    let in_a_row = |a: &AlertView| {
+        st.peers.iter().any(|p| {
+            a.id.strip_prefix("peer-")
+                .and_then(|r| r.strip_suffix("-offline"))
+                == Some(p.name.as_str())
+        })
+    };
     out.extend(
         st.alerts
             .iter()
+            .filter(|a| !in_a_row(a))
             .map(|a| alert_notice(a, &st.daemon.machine)),
     );
     out.extend(st.daemon.policy_problems.iter().map(|p| Notice {
@@ -1739,6 +1748,31 @@ mod tests {
                 "{n:?}"
             );
         }
+    }
+
+    #[test]
+    fn r650_an_offline_peer_is_said_in_its_row_not_again_in_a_banner() {
+        let mut d = fixtures::offline();
+        let peer = d.status.peers.first().map(|p| p.name.clone()).unwrap();
+        d.status.alerts.push(AlertView {
+            id: format!("peer-{peer}-offline"),
+            level: "warn".into(),
+            message: format!("peer {peer} is offline (last answered 611 s ago): connect timed out"),
+            since_ms: 0,
+        });
+        // a peer this machine has no row for still gets its banner
+        d.status.alerts.push(AlertView {
+            id: "peer-gone-offline".into(),
+            level: "warn".into(),
+            message: "peer gone is offline (never answered)".into(),
+            since_ms: 0,
+        });
+        let titles: Vec<String> = build(&d, 0).notices.into_iter().map(|n| n.title).collect();
+        assert!(!titles.iter().any(|t| t.contains(&peer)), "{titles:?}");
+        assert!(
+            titles.iter().any(|t| t == "Peer gone is offline"),
+            "{titles:?}"
+        );
     }
 
     #[test]
