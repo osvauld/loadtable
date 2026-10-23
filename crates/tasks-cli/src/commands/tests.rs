@@ -66,7 +66,7 @@ fn r183_run_prints_the_submit_line_and_follows_the_log_to_stdout() {
     );
     let r = Harness::default().run(&c, &["run", "--", "cargo", "test", "-p", "x"]);
     assert_eq!(r.code, 0, "{}", r.err);
-    assert_eq!(r.out, "compiling\ndone\n");
+    assert_eq!(r.out, "compiling\ndone\njob 7 passed (exit 0) owner=me\n");
     assert!(
         r.err
             .starts_with("tasks: submitted job 7; cwd /w/repo; argv cargo test -p x;"),
@@ -110,7 +110,12 @@ fn r111_the_follower_streams_appended_bytes_once_in_order_and_lines_wait_for_new
             .filter(|p| *p != "\n")
             .cloned()
             .collect::<Vec<_>>(),
-        ["hello\n", "world\n", "tail-without-newline"]
+        [
+            "hello\n",
+            "world\n",
+            "tail-without-newline",
+            "job 1 passed (exit 0) owner=me"
+        ]
     );
     let offsets: Vec<u64> = c
         .requests()
@@ -215,7 +220,7 @@ fn a_queued_job_prints_what_it_waits_for_while_following() {
         "{}",
         r.err
     );
-    assert_eq!(r.out, "go\n");
+    assert_eq!(r.out, "go\njob 4 passed (exit 0) owner=me\n");
 }
 
 // R-104
@@ -415,7 +420,7 @@ fn r099_a_lost_submit_reply_is_reconciled_without_resubmitting() {
         "{}",
         r.err
     );
-    assert_eq!(r.out, "ok\n");
+    assert_eq!(r.out, "ok\njob 31 passed (exit 0) owner=me\n");
 }
 
 #[test]

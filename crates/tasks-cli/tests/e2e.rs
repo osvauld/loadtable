@@ -16,7 +16,16 @@ struct Rig {
 
 impl Rig {
     fn start() -> Rig {
-        let dir = std::env::temp_dir().join(format!("tcli-e2e-{}", std::process::id()));
+        Rig::start_as("tcli-e2e", true)
+    }
+
+    /// A daemon that launches what it is given, in its own directory.
+    fn start_running(tag: &str) -> Rig {
+        Rig::start_as(tag, false)
+    }
+
+    fn start_as(tag: &str, stopped: bool) -> Rig {
+        let dir = std::env::temp_dir().join(format!("{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let args = ConfigArgs {
@@ -32,7 +41,9 @@ impl Rig {
         .unwrap();
         std::fs::create_dir_all(&cfg.state_dir).unwrap();
         // stopped before the daemon starts: nothing is ever launched
-        std::fs::write(cfg.intent_path(), "stopped\n").unwrap();
+        if stopped {
+            std::fs::write(cfg.intent_path(), "stopped\n").unwrap();
+        }
         let daemon = Daemon::start(DaemonOptions::new(cfg)).unwrap();
         std::thread::spawn(move || {
             let _ = daemon.run();
@@ -161,4 +172,38 @@ fn the_client_talks_to_a_real_daemon() {
     let (code, out, _) = rig.tasks(&["log-search", "zzz-not-there"]);
     assert_eq!(code, 0);
     assert!(out.contains("(no matches)"), "{out}");
+}
+
+// R-542: `run` ends with the summary line on stdout even when stdout is not a terminal (the
+// test's output is a buffer, as with `> log 2>&1` or a pipe), whatever the job printed last.
+#[test]
+fn r542_run_ends_with_the_summary_line_for_a_passed_and_a_failed_job() {
+    let rig = Rig::start_running("tcli-e2e-r542");
+    let (code, out, err) = rig.tasks(&["run", "--pin", "--", "sh", "-c", "echo hello"]);
+    assert_eq!(code, 0, "{err}\n{out}");
+    let last = out.lines().last().unwrap_or_default();
+    assert!(
+        last.starts_with("job ") && last.ends_with(" passed (exit 0) owner=e2e"),
+        "{out}"
+    );
+    assert!(out.contains("hello"), "{out}");
+    let (code, out, _) = rig.tasks(&[
+        "run",
+        "--pin",
+        "--",
+        "sh",
+        "-c",
+        "echo 'error: test failed' >&2; exit 101",
+    ]);
+    assert_eq!(code, 101, "{out}");
+    let last = out.lines().last().unwrap_or_default();
+    assert!(
+        last.starts_with("job ") && last.ends_with(" failed (exit 101) owner=e2e"),
+        "{out}"
+    );
+    assert_eq!(
+        out.matches("owner=e2e").count(),
+        1,
+        "exactly one summary: {out}"
+    );
 }

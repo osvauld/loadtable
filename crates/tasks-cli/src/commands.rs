@@ -319,6 +319,11 @@ fn run(ctx: &mut Ctx<'_>, a: &RunArgs, follow: bool) -> Result<i32, CliError> {
                     id.0
                 ));
             }
+            // the last stdout line, whatever the job printed (a failed pipe changes no result)
+            if writeln!(ctx.out, "{}", render::summary_line(&job)).is_err() {
+                return Ok(EXIT_PIPE);
+            }
+            let _ = ctx.out.flush();
             Ok(render::job_exit_code(&job))
         }
         Ok(FollowEnd::Signal(sig)) => {
