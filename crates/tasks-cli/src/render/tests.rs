@@ -179,6 +179,9 @@ fn r186_active_table_names_the_remote_job_and_what_a_queued_job_waits_for() {
         position: 2,
         start_estimate_secs: Some(190.0),
         rough: true,
+        class: String::new(),
+        class_note: String::new(),
+        on_peer: None,
     };
     let t = job_table(
         &[fwd, queued],

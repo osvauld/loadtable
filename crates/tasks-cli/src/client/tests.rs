@@ -207,6 +207,14 @@ fn only_read_only_requests_are_classified_as_safe_to_resend() {
             placement: Placement::Here,
             quick: false,
             broad_test: false,
+            priority: Default::default(),
+            priority_reason: None,
+        },
+        Request::Prioritize {
+            id: JobId(1),
+            who: "a".into(),
+            priority: tasks_core::Priority::Background,
+            reason: None,
         },
     ] {
         assert!(!is_read_only(&r), "{r:?}");
@@ -243,6 +251,8 @@ fn r101_a_connection_limit_reply_is_safely_resent_but_a_busy_reply_is_not() {
         after: vec![],
         timeout_secs: None,
         broad_test_escape: false,
+        priority: tasks_core::Priority::Normal,
+        priority_reason: None,
     };
     let r = c.call(&Request::Submit { spec }).unwrap();
     assert_eq!(r, Response::Submitted { id: JobId(9) });

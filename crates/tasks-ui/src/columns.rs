@@ -27,6 +27,8 @@ pub enum Col {
     Position,
     /// What it waits for.
     Wait,
+    /// The class the queue orders the job by.
+    Class,
     /// Start estimate.
     StartEstimate,
     /// The peer's phase of a forward.
@@ -88,6 +90,7 @@ pub fn specs(section: Section) -> Vec<ColSpec> {
             c(Col::Command, "Command", 200.0, 0),
             c(Col::Position, "#", 32.0, 1),
             c(Col::Wait, "Waiting for", 230.0, 2),
+            c(Col::Class, "Class", 84.0, 2),
             c(Col::StartEstimate, "Starts in", 140.0, 3),
             c(Col::Machine, "Machine", 72.0, 4),
             c(Col::Age, "Queued", 64.0, 5),
@@ -152,6 +155,13 @@ pub fn cell(row: &JobRow, col: Col) -> String {
         }
         Col::Position => row.position.map_or_else(dash, |p| p.to_string()),
         Col::Wait => row.wait.clone().unwrap_or_else(dash),
+        Col::Class => {
+            if row.queue_class.is_empty() {
+                dash()
+            } else {
+                row.queue_class.clone()
+            }
+        }
         Col::StartEstimate => row.start_estimate.clone().unwrap_or_else(dash),
         Col::RemotePhase => row.remote_phase.clone().unwrap_or_else(dash),
         Col::Timeout => row.timeout.clone().unwrap_or_else(dash),

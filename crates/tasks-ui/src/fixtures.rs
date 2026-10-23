@@ -72,6 +72,9 @@ pub fn job(id: i64, owner: &str, phase: Phase) -> JobView {
             "/home/demo/.local/state/tasks/logs/{id}.log"
         ))),
         figures: None,
+        priority: Default::default(),
+        priority_reason: None,
+        remote_wait: None,
     }
 }
 
@@ -191,6 +194,9 @@ fn waiter(
         position: pos,
         start_estimate_secs: est,
         rough,
+        class: String::new(),
+        class_note: String::new(),
+        on_peer: None,
     }
 }
 

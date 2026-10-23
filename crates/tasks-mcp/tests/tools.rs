@@ -992,6 +992,9 @@ fn snapshot() -> tasks_daemon::api::StatusSnapshot {
             position: 1,
             start_estimate_secs: None,
             rough: true,
+            class: String::new(),
+            class_note: String::new(),
+            on_peer: None,
         }],
         waiting_more: 0,
         running: vec![RunningView {
@@ -1219,4 +1222,154 @@ fn r284_an_empty_audit_log_says_so() {
     let r = call(&tools_with(&d), "audit", json!({}));
     assert!(!r.is_error);
     assert_eq!(r.text, "no audit rows match");
+}
+
+// ---- priority -------------------------------------------------------------------------------
+
+// R-339
+#[test]
+fn r339_submit_takes_a_class_and_blocking_needs_a_reason_before_anything_is_sent() {
+    let d = submitted(7);
+    let t = tools_with(&d);
+    let r = call(
+        &t,
+        "submit",
+        json!({"argv": ["cargo", "check"], "who": "a", "priority": "blocking"}),
+    );
+    assert_eq!(error_kind(&r), "invalid_arguments");
+    assert!(r.text.contains("needs a reason"), "{}", r.text);
+    let r = call(
+        &t,
+        "submit",
+        json!({"argv": ["cargo", "check"], "who": "a", "priority": "urgent"}),
+    );
+    assert_eq!(error_kind(&r), "invalid_arguments");
+    let r = call(
+        &t,
+        "submit",
+        json!({"argv": ["cargo", "check"], "who": "a", "reason": "no class"}),
+    );
+    assert_eq!(error_kind(&r), "invalid_arguments");
+    assert!(submits(&d).is_empty(), "nothing reached the daemon");
+    let r = call(
+        &t,
+        "submit",
+        json!({"argv": ["cargo", "check"], "who": "a", "priority": "blocking", "reason": "user waits"}),
+    );
+    assert!(!r.is_error, "{}", r.text);
+    let r = call(
+        &t,
+        "submit",
+        json!({"argv": ["cargo", "check"], "who": "a", "priority": "background"}),
+    );
+    assert!(!r.is_error, "{}", r.text);
+    let specs = submits(&d);
+    assert_eq!(
+        (specs[0].priority, specs[0].priority_reason.as_deref()),
+        (tasks_core::Priority::Blocking, Some("user waits"))
+    );
+    assert_eq!(specs[1].priority, tasks_core::Priority::Background);
+}
+
+// R-350
+#[test]
+fn r350_prioritize_asks_the_daemon_and_says_what_changed() {
+    let d = fake(|r| match r {
+        Request::Prioritize { who, .. } if who == "me" => Ok(Response::Prioritized {
+            id: JobId(3),
+            from: tasks_core::Priority::Normal,
+            to: tasks_core::Priority::Blocking,
+        }),
+        Request::Prioritize { .. } => Err(DaemonError::Refused(ApiError::new(
+            ErrorCode::NotOwner,
+            "job 3 belongs to me",
+        ))),
+        _ => Err(DaemonError::Failed("unexpected".into())),
+    });
+    let t = tools_with(&d);
+    let r = call(
+        &t,
+        "prioritize",
+        json!({"id": 3, "who": "intruder", "priority": "background"}),
+    );
+    assert_eq!(error_kind(&r), "not_owner");
+    // blocking without a reason never leaves the server
+    let r = call(
+        &t,
+        "prioritize",
+        json!({"id": 3, "who": "me", "priority": "blocking"}),
+    );
+    assert_eq!(error_kind(&r), "invalid_arguments");
+    let r = call(
+        &t,
+        "prioritize",
+        json!({"id": 3, "who": "me", "priority": "blocking", "reason": "release"}),
+    );
+    assert!(
+        r.text.contains("normal -> blocking") && r.text.contains("reason: release"),
+        "{}",
+        r.text
+    );
+    assert_eq!(d.requests().len(), 2);
+    // who is required, as for cancel
+    assert_eq!(
+        error_kind(&call(
+            &t,
+            "prioritize",
+            json!({"id": 3, "priority": "background"})
+        )),
+        "invalid_arguments"
+    );
+}
+
+// R-343: no tool accepts a way to claim the short lane
+#[test]
+fn r343_no_tool_has_a_short_lane_input_and_an_invented_one_is_refused() {
+    for def in tasks_mcp::defs::tool_defs() {
+        let props = def.input_schema["properties"].as_object().unwrap();
+        for name in props.keys() {
+            assert!(
+                !name.to_lowercase().contains("short") && !name.to_lowercase().contains("lane"),
+                "{}: {name}",
+                def.name
+            );
+        }
+        assert_eq!(
+            def.input_schema["additionalProperties"], false,
+            "{}",
+            def.name
+        );
+    }
+    let d = submitted(1);
+    let r = call(
+        &tools_with(&d),
+        "submit",
+        json!({"argv": ["cargo", "check"], "who": "a", "short": true}),
+    );
+    assert_eq!(error_kind(&r), "invalid_arguments");
+    assert!(submits(&d).is_empty());
+}
+
+// R-349
+#[test]
+fn r349_a_forwarded_job_the_peer_holds_back_reads_as_waiting() {
+    let mut j = job(5, "me", Phase::Running, "cargo test");
+    j.forwarded_to = Some(("nixos".into(), Some(7)));
+    j.remote_wait = Some("waiting on nixos: CPU contended".into());
+    let d = fake(move |_| {
+        Ok(Response::Job {
+            job: Box::new(j.clone()),
+        })
+    });
+    let r = call(&tools_with(&d), "get", json!({"id": 5}));
+    assert!(r.text.starts_with("job 5 waiting on nixos"), "{}", r.text);
+    assert!(
+        r.text.contains("waiting: waiting on nixos: CPU contended"),
+        "{}",
+        r.text
+    );
+    assert_eq!(
+        r.structured["remote_wait"],
+        "waiting on nixos: CPU contended"
+    );
 }

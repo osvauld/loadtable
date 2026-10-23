@@ -84,6 +84,7 @@ pub fn kind_of(r: &Response) -> &'static str {
         Response::LogChunk { .. } => "log_chunk",
         Response::LogSearch { .. } => "log_search",
         Response::Cancelled { .. } => "cancelled",
+        Response::Prioritized { .. } => "prioritized",
         Response::Status(_) => "status",
         Response::Estimate(_) => "estimate",
         Response::History(_) => "history",

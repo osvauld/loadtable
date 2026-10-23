@@ -110,7 +110,12 @@ pub fn phase_tag(p: &Phase) -> &'static str {
 
 /// Phase plus where a forward runs and its remote job (R-186).
 pub fn phase_label(j: &JobView) -> String {
-    let mut s = phase_tag(&j.phase).to_string();
+    // a forwarded job the peer holds back on its own gates is waiting, not running
+    let mut s = if j.remote_wait.is_some() {
+        "waiting".to_string()
+    } else {
+        phase_tag(&j.phase).to_string()
+    };
     if j.phase == Phase::Cancelled
         && let Some(why) = j.cancel_reason.as_ref().filter(|w| !w.is_empty())
     {
@@ -194,7 +199,7 @@ fn run_time(j: &JobView, now_ms: i64) -> String {
 }
 
 fn is_waiting(j: &JobView) -> bool {
-    matches!(j.phase, Phase::Queued | Phase::Waiting(_))
+    matches!(j.phase, Phase::Queued | Phase::Waiting(_)) || j.remote_wait.is_some()
 }
 
 /// Options of the list table.
@@ -220,6 +225,7 @@ pub fn wait_note(j: &JobView, waiter: Option<&WaiterView>) -> Option<String> {
     }
     let reason = waiter
         .map(|w| w.wait_text.as_str())
+        .or(j.remote_wait.as_deref())
         .or(j.wait_text.as_deref())
         .filter(|t| !t.is_empty());
     let mut parts = Vec::new();
@@ -227,7 +233,14 @@ pub fn wait_note(j: &JobView, waiter: Option<&WaiterView>) -> Option<String> {
         parts.push(format!("waits for: {r}"));
     }
     if let Some(w) = waiter {
-        parts.push(format!("position {}", w.position));
+        if w.on_peer.is_none() {
+            parts.push(format!("position {}", w.position));
+        }
+        if !w.class_note.is_empty() {
+            parts.push(w.class_note.clone());
+        } else if !w.class.is_empty() && w.class != "normal" {
+            parts.push(format!("class {}", w.class));
+        }
         if let Some(e) = w.start_estimate_secs {
             parts.push(format!(
                 "starts in ~{}{}",
@@ -355,6 +368,16 @@ pub fn job_detail(j: &JobView, now_ms: i64, waiter: Option<&WaiterView>) -> Stri
     }
     if let Some(t) = j.timeout_secs {
         let _ = writeln!(out, "  timeout:   {}", fmt_precise(t as f64));
+    }
+    if j.priority != tasks_core::Priority::Normal {
+        match &j.priority_reason {
+            Some(r) => {
+                let _ = writeln!(out, "  priority:  {} (reason: {r})", j.priority);
+            }
+            None => {
+                let _ = writeln!(out, "  priority:  {}", j.priority);
+            }
+        }
     }
     if let Some(rp) = &j.remote_phase {
         let _ = writeln!(out, "  remote:    {}", phase_tag(rp));
@@ -539,15 +562,26 @@ pub fn status(s: &StatusSnapshot) -> String {
                     if w.rough { " (rough)" } else { "" }
                 )
             });
+            let place = match &w.on_peer {
+                Some(p) => format!("on {p}"),
+                None => format!("#{}", w.position),
+            };
+            let class = if w.class.is_empty() || w.class == "normal" {
+                String::new()
+            } else {
+                format!(" [{}]", w.class)
+            };
             let _ = writeln!(
                 out,
-                "  #{} job {} {}: {} ({}{est})",
-                w.position,
+                "  {place} job {} {}{class}: {} ({}{est})",
                 w.id.0,
                 w.owner,
                 truncate_end(&w.command, TABLE_COMMAND),
                 w.wait_text
             );
+            if !w.class_note.is_empty() {
+                let _ = writeln!(out, "      {}", w.class_note);
+            }
         }
         if s.waiting_more > 0 {
             let _ = writeln!(out, "  ... and {} more", s.waiting_more);

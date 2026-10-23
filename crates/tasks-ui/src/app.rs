@@ -578,6 +578,21 @@ impl App {
                 if let Some(w) = &row.wait {
                     kv(ui, "Waiting for", w.clone());
                 }
+                if !row.queue_class.is_empty() {
+                    let why = if row.queue_note.is_empty() {
+                        row.queue_class.clone()
+                    } else {
+                        format!("{}: {}", row.queue_class, row.queue_note)
+                    };
+                    kv(ui, "Queue class", why);
+                }
+                if j.priority != tasks_core::Priority::Normal {
+                    let mut p = format!("submitted {}", j.priority);
+                    if let Some(r) = &j.priority_reason {
+                        p.push_str(&format!(" (reason: {r})"));
+                    }
+                    kv(ui, "Priority", p);
+                }
                 if let Some(t) = &row.timeout {
                     kv(ui, "Wall-clock limit", t.clone());
                 }

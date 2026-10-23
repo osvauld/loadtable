@@ -54,6 +54,9 @@ pub fn job(id: i64, owner: &str, cwd: &str, phase: Phase, cmd: &str) -> JobView 
         plan: None,
         log_path: None,
         figures: None,
+        priority: Default::default(),
+        priority_reason: None,
+        remote_wait: None,
     }
 }
 
@@ -265,6 +268,9 @@ pub fn status_snapshot() -> StatusSnapshot {
             position: 1,
             start_estimate_secs: Some(120.0),
             rough: false,
+            class: String::new(),
+            class_note: String::new(),
+            on_peer: None,
         }],
         waiting_more: 2,
         running: vec![RunningView {

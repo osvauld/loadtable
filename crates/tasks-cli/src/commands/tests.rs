@@ -1552,3 +1552,190 @@ fn r199_the_headless_build_keeps_the_command_line() {
         .pid == 1
     );
 }
+
+// ---- priority ---------------------------------------------------------------------------
+
+// R-339
+#[test]
+fn r339_blocking_needs_a_reason_and_nothing_is_sent_without_one() {
+    let c = daemon(1, vec![], finished(1, Phase::Passed));
+    let h = Harness::default();
+    let r = h.run(
+        &c,
+        &["enqueue", "--priority", "blocking", "--", "cargo", "check"],
+    );
+    assert_eq!(r.code, 2, "{}", r.err);
+    assert!(
+        r.err.contains("needs a reason") && r.err.contains("--reason"),
+        "{}",
+        r.err
+    );
+    assert_eq!(submits(&c), 0);
+    let r = h.run(&c, &["enqueue", "--reason", "why", "--", "cargo", "check"]);
+    assert_eq!(r.code, 2, "{}", r.err);
+    let r = h.run(
+        &c,
+        &["enqueue", "--priority", "urgent", "--", "cargo", "check"],
+    );
+    assert_eq!(r.code, 2, "{}", r.err);
+    assert_eq!(submits(&c), 0);
+    let r = h.run(
+        &c,
+        &[
+            "enqueue",
+            "--priority",
+            "blocking",
+            "--reason",
+            "release waits",
+            "--",
+            "cargo",
+            "check",
+        ],
+    );
+    assert_eq!(r.code, 0, "{}", r.err);
+    let r = h.run(
+        &c,
+        &[
+            "enqueue",
+            "--priority",
+            "background",
+            "--",
+            "cargo",
+            "check",
+        ],
+    );
+    assert_eq!(r.code, 0, "{}", r.err);
+    let specs: Vec<_> = c
+        .requests()
+        .into_iter()
+        .filter_map(|r| match r {
+            Request::Submit { spec } => Some(spec),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        (specs[0].priority, specs[0].priority_reason.as_deref()),
+        (tasks_core::Priority::Blocking, Some("release waits"))
+    );
+    assert_eq!(specs[1].priority, tasks_core::Priority::Background);
+}
+
+// R-350
+#[test]
+fn r350_prioritize_sends_the_class_and_reason_and_prints_the_change() {
+    let c = Arc::new(FakeClient::from_fn(|req| match req {
+        Request::Prioritize { id, priority, .. } => Ok(Response::Prioritized {
+            id: *id,
+            from: tasks_core::Priority::Normal,
+            to: *priority,
+        }),
+        other => Err(ClientError::BadReply(format!("{other:?}"))),
+    }));
+    let h = Harness::default();
+    let r = h.run(
+        &c,
+        &[
+            "prioritize",
+            "9",
+            "--priority",
+            "blocking",
+            "--reason",
+            "user waits",
+        ],
+    );
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(
+        r.out.contains("job 9: normal -> blocking") && r.out.contains("(reason: user waits)"),
+        "{}",
+        r.out
+    );
+    assert_eq!(
+        c.requests(),
+        [Request::Prioritize {
+            id: JobId(9),
+            who: "me".into(),
+            priority: tasks_core::Priority::Blocking,
+            reason: Some("user waits".into())
+        }]
+    );
+    // blocking without a reason is refused before the daemon is asked
+    let before = c.requests().len();
+    let r = h.run(&c, &["prioritize", "9", "--priority", "blocking"]);
+    assert_eq!(r.code, 2, "{}", r.err);
+    assert_eq!(c.requests().len(), before);
+}
+
+#[test]
+fn r350_a_refusal_of_prioritize_reaches_the_user() {
+    let c = Arc::new(FakeClient::from_fn(|_| {
+        Err(api_err(
+            ErrorCode::Refused,
+            "job 9 is Running; only a queued or waiting job can change priority",
+        ))
+    }));
+    let r = Harness::default().run(&c, &["prioritize", "9", "--priority", "background"]);
+    assert_ne!(r.code, 0);
+    assert!(r.err.contains("only a queued or waiting job"), "{}", r.err);
+}
+
+// R-343: there is no flag that claims the short lane
+#[test]
+fn r343_no_command_has_a_flag_that_claims_the_short_lane() {
+    use clap::CommandFactory;
+    fn walk(cmd: &clap::Command, path: &str, bad: &mut Vec<String>) {
+        for a in cmd.get_arguments() {
+            let names: Vec<String> = std::iter::once(a.get_id().to_string())
+                .chain(a.get_long().map(str::to_string))
+                .chain(
+                    a.get_all_aliases()
+                        .into_iter()
+                        .flatten()
+                        .map(str::to_string),
+                )
+                .collect();
+            if names.iter().any(|n| {
+                let n = n.to_lowercase();
+                n.contains("short") || n.contains("lane") || n.contains("quick-start")
+            }) {
+                bad.push(format!("{path}: {names:?}"));
+            }
+        }
+        for sub in cmd.get_subcommands() {
+            walk(sub, &format!("{path} {}", sub.get_name()), bad);
+        }
+    }
+    let mut bad = Vec::new();
+    walk(&crate::args::Cli::command(), "tasks2", &mut bad);
+    assert!(bad.is_empty(), "{bad:?}");
+    // and clap refuses one an agent invents
+    let c = daemon(1, vec![], finished(1, Phase::Passed));
+    let r = Harness::default().run(&c, &["enqueue", "--short", "--", "cargo", "check"]);
+    assert_ne!(r.code, 0);
+    assert_eq!(submits(&c), 0);
+}
+
+// R-349
+#[test]
+fn r349_the_status_and_the_table_show_a_job_held_by_a_peer_as_waiting() {
+    let mut j = job(5, "me", "/w/repo", Phase::Running, "cargo test");
+    j.forwarded_to = Some(("nixos".into(), Some(7)));
+    j.remote_phase = Some(Phase::Waiting(tasks_core::WaitReason::Pressure(
+        "CPU contended".into(),
+    )));
+    j.remote_wait = Some("waiting on nixos: CPU contended".into());
+    let t = crate::render::job_table(
+        &[j.clone()],
+        crate::testutil::NOW,
+        None,
+        &[],
+        Default::default(),
+    );
+    assert!(t.contains("waiting → nixos #7"), "{t}");
+    assert!(!t.contains("running →"), "{t}");
+    assert!(
+        t.contains("waits for: waiting on nixos: CPU contended"),
+        "{t}"
+    );
+    let d = crate::render::job_detail(&j, crate::testutil::NOW, None);
+    assert!(d.starts_with("job 5: waiting"), "{d}");
+}

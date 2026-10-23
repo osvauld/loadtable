@@ -24,7 +24,12 @@ pub fn phase_tag(p: &Phase) -> &'static str {
 
 /// The phase with its exit code or reason.
 pub fn phase_text(j: &JobView) -> String {
-    let tag = phase_tag(&j.phase);
+    // a forwarded job the peer holds back on its own gates is waiting, not running
+    let tag = if j.remote_wait.is_some() {
+        "waiting"
+    } else {
+        phase_tag(&j.phase)
+    };
     let mut s = match &j.phase {
         Phase::Failed { exit: Some(c) } | Phase::TimedOut { exit: Some(c) } => {
             format!("{tag} (exit {c})")
@@ -116,6 +121,9 @@ pub fn job_json(j: &JobView, now_ms: i64) -> Value {
         "cancel_reason": j.cancel_reason,
         "timeout_secs": j.timeout_secs,
         "figures": j.figures,
+        "priority": j.priority.as_str(),
+        "priority_reason": j.priority_reason,
+        "remote_wait": j.remote_wait,
     })
 }
 
@@ -135,6 +143,16 @@ pub fn job_detail(j: &JobView, now_ms: i64) -> String {
     }
     if let Some(w) = &j.wait_text {
         s.push_str(&format!("waiting: {w}\n"));
+    }
+    if let Some(w) = &j.remote_wait {
+        s.push_str(&format!("waiting: {w}\n"));
+    }
+    if j.priority != tasks_core::Priority::Normal {
+        s.push_str(&format!("priority: {}", j.priority));
+        if let Some(r) = &j.priority_reason {
+            s.push_str(&format!(" (reason: {r})"));
+        }
+        s.push('\n');
     }
     if let Some(t) = &j.summary {
         s.push_str(&format!("summary: {t}\n"));

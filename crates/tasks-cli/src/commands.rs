@@ -13,7 +13,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tasks_core::plan::Plan;
-use tasks_core::{DeviceId, JobId, JobSpec, Kind, Owner, Phase, Placement};
+use tasks_core::{DeviceId, JobId, JobSpec, Kind, Owner, Phase, Placement, Priority};
 use tasks_daemon::api::{
     ErrorCode, HistoryView, JobView, LogSearchQuery, LogView, MAX_CONTEXT, MAX_TAIL_LINES, Request,
     Response, StatusSnapshot, WaiterView,
@@ -93,6 +93,12 @@ fn dispatch(ctx: &mut Ctx<'_>, cmd: &Command) -> Result<i32, CliError> {
         Command::LogSearch(a) => log_search(ctx, a),
         Command::Get { id, json } => get(ctx, *id, *json),
         Command::Cancel { id, who, reason } => cancel(ctx, *id, who.as_deref(), reason.as_deref()),
+        Command::Prioritize {
+            id,
+            who,
+            priority,
+            reason,
+        } => prioritize(ctx, *id, who.as_deref(), priority, reason.as_deref()),
         Command::Status { json } => status(ctx, *json, false),
         Command::Admission { json } => status(ctx, *json, true),
         Command::Estimate { command } => estimate(ctx, command),
@@ -183,7 +189,10 @@ pub fn build_spec(ctx: &mut Ctx<'_>, a: &RunArgs) -> Result<JobSpec, CliError> {
         // recipe and the ETA history
         timeout_secs: a.timeout,
         broad_test_escape: a.broad_test,
+        priority: Priority::Normal,
+        priority_reason: None,
     };
+    (spec.priority, spec.priority_reason) = a.class.resolve()?;
     spec.requirements.device = a.device.clone().map(DeviceId);
     spec.validate()
         .map_err(|e| CliError::Refused(format!("invalid job: {e}")))?;
@@ -878,6 +887,46 @@ fn cancel(
     Ok(EXIT_OK)
 }
 
+fn prioritize(
+    ctx: &mut Ctx<'_>,
+    id: i64,
+    who: Option<&str>,
+    priority: &str,
+    reason: Option<&str>,
+) -> Result<i32, CliError> {
+    let args = crate::args::PriorityArgs {
+        priority: Some(priority.to_string()),
+        reason: reason.map(str::to_string),
+    };
+    let (class, reason) = args.resolve()?;
+    let owner = resolve_owner(ctx, who)?;
+    let resp = ctx.client.call(&Request::Prioritize {
+        id: JobId(id),
+        who: owner.as_str().to_string(),
+        priority: class,
+        reason: reason.clone(),
+    });
+    let resp = match resp {
+        Ok(r) => r,
+        Err(ClientError::ReplyLost { detail }) => {
+            return Err(CliError::Failed(format!(
+                "the prioritize request for job {id} was sent but no reply arrived ({detail}); it was not resent. Check with `tasks2 get {id}`"
+            )));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let Response::Prioritized { from, to, .. } = resp else {
+        return Err(CliError::Failed(format!(
+            "unexpected reply to prioritize: {resp:?}"
+        )));
+    };
+    match reason {
+        Some(r) => writeln!(ctx.out, "job {id}: {from} -> {to} (reason: {r})")?,
+        None => writeln!(ctx.out, "job {id}: {from} -> {to}")?,
+    }
+    Ok(EXIT_OK)
+}
+
 fn ack(ctx: &Ctx<'_>, req: &Request) -> Result<(), CliError> {
     match ctx.client.call(req)? {
         Response::Ack => Ok(()),
@@ -946,6 +995,7 @@ fn steps(ctx: &mut Ctx<'_>, a: &StepsArgs) -> Result<i32, CliError> {
     plan.validate()
         .map_err(|e| CliError::Usage(format!("{}: {e}", a.file.display())))?;
     let placement = a.place.placement(None)?;
+    let (priority, priority_reason) = a.class.resolve()?;
     let owner = resolve_owner(ctx, a.who.as_deref())?;
     for s in &plan.steps {
         placement_note(ctx, &s.argv, &placement);
@@ -957,6 +1007,8 @@ fn steps(ctx: &mut Ctx<'_>, a: &StepsArgs) -> Result<i32, CliError> {
         env: Vec::new(),
         placement,
         broad_test: a.broad_test,
+        priority,
+        priority_reason,
     })?;
     let Response::PlanSubmitted { plan_id, jobs } = resp else {
         return Err(CliError::Failed(format!(
@@ -969,6 +1021,7 @@ fn steps(ctx: &mut Ctx<'_>, a: &StepsArgs) -> Result<i32, CliError> {
 
 fn suite_run(ctx: &mut Ctx<'_>, a: &SuiteRunArgs) -> Result<i32, CliError> {
     let placement = a.place.placement(None)?;
+    let (priority, priority_reason) = a.class.resolve()?;
     let owner = resolve_owner(ctx, a.who.as_deref())?;
     let resp = ctx.client.call(&Request::SubmitSuite {
         name: a.name.clone(),
@@ -978,6 +1031,8 @@ fn suite_run(ctx: &mut Ctx<'_>, a: &SuiteRunArgs) -> Result<i32, CliError> {
         placement,
         quick: a.quick,
         broad_test: a.broad_test,
+        priority,
+        priority_reason,
     })?;
     let Response::PlanSubmitted { plan_id, jobs } = resp else {
         return Err(CliError::Failed(format!(

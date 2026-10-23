@@ -72,6 +72,7 @@ fn r195_tools_list_matches_the_schemas() {
             "logs",
             "wait",
             "cancel",
+            "prioritize",
             "status",
             "estimate",
             "audit"

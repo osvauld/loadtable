@@ -3,7 +3,7 @@
 use crate::error::{CliError, EXIT_CODES_HELP};
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
-use tasks_core::{MachineName, Placement};
+use tasks_core::{MachineName, Placement, Priority};
 
 /// `tasks2`: submit builds and tests to the tasks coordinator, watch them, read history.
 #[derive(Parser, Debug)]
@@ -91,6 +91,46 @@ impl PlaceArgs {
     }
 }
 
+/// The queue class of a submission. Normal when neither flag is given.
+#[derive(Args, Debug, Clone, Default)]
+pub struct PriorityArgs {
+    /// Queue class: `background` for work that may wait behind the rest, `blocking` when
+    /// someone is waiting on the result now (needs --reason; audited), or `normal`.
+    #[arg(long, value_name = "CLASS")]
+    pub priority: Option<String>,
+    /// Why the job is blocking (required with `--priority blocking`).
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
+}
+
+impl PriorityArgs {
+    /// The class and reason, or what to fix.
+    pub fn resolve(&self) -> Result<(Priority, Option<String>), CliError> {
+        let class = match &self.priority {
+            None => Priority::Normal,
+            Some(p) => p
+                .parse::<Priority>()
+                .map_err(|e| CliError::Usage(e.to_string()))?,
+        };
+        let reason = self
+            .reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|r| !r.is_empty());
+        match (class, reason) {
+            (Priority::Blocking, None) => Err(CliError::Usage(
+                "--priority blocking needs a reason: add --reason \"what is waiting on this\""
+                    .into(),
+            )),
+            (Priority::Blocking, Some(r)) => Ok((class, Some(r.to_string()))),
+            (_, Some(_)) => Err(CliError::Usage(
+                "--reason goes with --priority blocking; drop it, or claim blocking".into(),
+            )),
+            (_, None) => Ok((class, None)),
+        }
+    }
+}
+
 /// Arguments of `run`, `enqueue` and `submit`.
 #[derive(Args, Debug, Clone)]
 pub struct RunArgs {
@@ -100,6 +140,9 @@ pub struct RunArgs {
     /// Where the job may run.
     #[command(flatten)]
     pub place: PlaceArgs,
+    /// Queue class.
+    #[command(flatten)]
+    pub class: PriorityArgs,
     /// Run on this attached device (adb serial); the job stays on this machine.
     #[arg(long, value_name = "SERIAL")]
     pub device: Option<String>,
@@ -210,6 +253,9 @@ pub struct StepsArgs {
     /// Where the steps may run.
     #[command(flatten)]
     pub place: PlaceArgs,
+    /// Queue class of every step.
+    #[command(flatten)]
+    pub class: PriorityArgs,
     /// Allow broad `cargo test` steps.
     #[arg(long)]
     pub broad_test: bool,
@@ -229,6 +275,9 @@ pub struct SuiteRunArgs {
     /// Where the steps may run.
     #[command(flatten)]
     pub place: PlaceArgs,
+    /// Queue class of every step (without it each step keeps the class its policy gives it).
+    #[command(flatten)]
+    pub class: PriorityArgs,
     /// Allow broad `cargo test` steps.
     #[arg(long)]
     pub broad_test: bool,
@@ -435,6 +484,21 @@ pub enum Command {
         who: Option<String>,
         /// Why; kept with the job and shown by `get` and `list`.
         #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Change the queue class of a job that has not started (only its owner may). Never
+    /// preempts a running job.
+    Prioritize {
+        /// The job.
+        id: i64,
+        /// The asking owner (default: $TASKS_WHO, then $USER).
+        #[arg(long, value_name = "OWNER")]
+        who: Option<String>,
+        /// The new class: blocking, normal or background.
+        #[arg(long, value_name = "CLASS")]
+        priority: String,
+        /// Why (required for blocking).
+        #[arg(long, value_name = "TEXT")]
         reason: Option<String>,
     },
     /// Slots, waiting and running jobs, pressure and alerts.

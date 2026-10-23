@@ -184,6 +184,30 @@ fn parse<T: DeserializeOwned>(args: Value) -> Result<T, ToolError> {
     serde_json::from_value(args).map_err(|e| ToolError::Args(format!("invalid arguments: {e}")))
 }
 
+/// The queue class and reason of a call: `blocking` needs a reason, the others take none.
+fn class(
+    priority: Option<&str>,
+    reason: Option<&str>,
+) -> Result<(tasks_core::Priority, Option<String>), ToolError> {
+    let class = match priority {
+        None => tasks_core::Priority::Normal,
+        Some(p) => p
+            .parse::<tasks_core::Priority>()
+            .map_err(|e| ToolError::Args(e.to_string()))?,
+    };
+    let reason = reason.map(str::trim).filter(|r| !r.is_empty());
+    match (class, reason) {
+        (tasks_core::Priority::Blocking, None) => Err(ToolError::Args(
+            "priority blocking needs a reason: say what is waiting on this job".into(),
+        )),
+        (tasks_core::Priority::Blocking, Some(r)) => Ok((class, Some(r.to_string()))),
+        (_, Some(_)) => Err(ToolError::Args(
+            "reason goes with priority blocking only".into(),
+        )),
+        (_, None) => Ok((class, None)),
+    }
+}
+
 fn unexpected(what: &str, r: &Response) -> ToolError {
     ToolError::Daemon(DaemonError::Failed(format!(
         "unexpected reply to {what}: {r:?}"
@@ -202,6 +226,8 @@ struct SubmitArgs {
     timeout_s: Option<u64>,
     broad_test: Option<bool>,
     after: Option<Vec<i64>>,
+    priority: Option<String>,
+    reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -223,6 +249,8 @@ struct StepsArgs {
     placement: Option<String>,
     peer: Option<String>,
     broad_test: Option<bool>,
+    priority: Option<String>,
+    reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -235,6 +263,8 @@ struct SuiteArgs {
     peer: Option<String>,
     quick: Option<bool>,
     broad_test: Option<bool>,
+    priority: Option<String>,
+    reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -277,6 +307,15 @@ struct WaitArgs {
 struct CancelArgs {
     id: i64,
     who: String,
+    reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrioritizeArgs {
+    id: i64,
+    who: String,
+    priority: String,
     reason: Option<String>,
 }
 
@@ -396,6 +435,7 @@ impl Tools {
             "logs" => parse(args).and_then(|a| self.logs(a)),
             "wait" => parse(args).and_then(|a| self.wait(a, tok)),
             "cancel" => parse(args).and_then(|a| self.cancel(a)),
+            "prioritize" => parse(args).and_then(|a| self.prioritize(a)),
             "status" => parse::<EmptyArgs>(args).and_then(|_| self.status()),
             "estimate" => parse(args).and_then(|a| self.estimate(a)),
             "audit" => parse(args).and_then(|a| self.audit(a)),
@@ -481,6 +521,7 @@ impl Tools {
                 .first()
                 .map_or(Kind::Run, RecipeKey::kind)
         };
+        let (priority, priority_reason) = class(a.priority.as_deref(), a.reason.as_deref())?;
         let mut spec = JobSpec {
             owner,
             argv: a.argv,
@@ -491,6 +532,8 @@ impl Tools {
             placement,
             timeout_secs: a.timeout_s,
             broad_test_escape: a.broad_test.unwrap_or(false),
+            priority,
+            priority_reason,
             after: a
                 .after
                 .unwrap_or_default()
@@ -631,6 +674,7 @@ impl Tools {
         let plan = Plan { steps };
         plan.validate()
             .map_err(|e| ToolError::Args(format!("invalid plan: {e}")))?;
+        let (priority, priority_reason) = class(a.priority.as_deref(), a.reason.as_deref())?;
         let notes: Vec<String> = Vec::new();
         let resp = self.call_daemon(&Request::SubmitPlan {
             plan,
@@ -639,6 +683,8 @@ impl Tools {
             env: Vec::new(),
             placement,
             broad_test: a.broad_test.unwrap_or(false),
+            priority,
+            priority_reason,
         })?;
         plan_result(resp, "plan", "submit_steps", notes)
     }
@@ -647,6 +693,7 @@ impl Tools {
         let placement = placement(a.placement.as_deref(), a.peer.as_deref(), None)?;
         let owner = self.owner(a.who.as_deref())?;
         let cwd = self.cwd(a.cwd.as_deref())?;
+        let (priority, priority_reason) = class(a.priority.as_deref(), a.reason.as_deref())?;
         let resp = self.call_daemon(&Request::SubmitSuite {
             name: a.name.clone(),
             owner: owner.as_str().to_string(),
@@ -655,6 +702,8 @@ impl Tools {
             placement,
             quick: a.quick.unwrap_or(false),
             broad_test: a.broad_test.unwrap_or(false),
+            priority,
+            priority_reason,
         })?;
         plan_result(resp, &format!("suite {}", a.name), "run_suite", Vec::new())
     }
@@ -921,7 +970,7 @@ impl Tools {
                     phase_text(&job),
                     dur(start.elapsed().as_secs_f64())
                 );
-                if let Some(w) = &job.wait_text {
+                if let Some(w) = job.remote_wait.as_ref().or(job.wait_text.as_ref()) {
                     text.push_str(&format!("\nwaiting: {w}"));
                 }
                 return Ok(ToolResult {
@@ -1012,6 +1061,38 @@ impl Tools {
         Ok(ToolResult {
             text,
             structured: json!({"id": id.0, "result": result, "reason": a.reason}),
+            is_error: false,
+        })
+    }
+
+    fn prioritize(&self, a: PrioritizeArgs) -> ToolOk {
+        let id = job_id(a.id)?;
+        let owner = self.owner(Some(&a.who))?;
+        let (priority, reason) = class(Some(&a.priority), a.reason.as_deref())?;
+        let resp = match self.daemon.call(&Request::Prioritize {
+            id,
+            who: owner.as_str().to_string(),
+            priority,
+            reason: reason.clone(),
+        }) {
+            Err(DaemonError::ReplyLost(d)) => {
+                return Err(ToolError::Daemon(DaemonError::Failed(format!(
+                    "the prioritize request for job {} was sent but no reply arrived ({d}); it was not resent. Check with get",
+                    id.0
+                ))));
+            }
+            other => other?,
+        };
+        let Response::Prioritized { from, to, .. } = resp else {
+            return Err(unexpected("prioritize", &resp));
+        };
+        let mut text = format!("job {}: {from} -> {to}", id.0);
+        if let Some(r) = &reason {
+            text.push_str(&format!(" (reason: {r})"));
+        }
+        Ok(ToolResult {
+            text,
+            structured: json!({"id": id.0, "from": from.as_str(), "to": to.as_str(), "reason": reason}),
             is_error: false,
         })
     }
@@ -1220,10 +1301,22 @@ fn status_text(s: &StatusSnapshot) -> String {
             s.waiting.len() + s.waiting_more
         ));
         for w in s.waiting.iter().take(10) {
+            let class = if w.class.is_empty() || w.class == "normal" {
+                String::new()
+            } else {
+                format!(" [{}]", w.class)
+            };
+            let place = w
+                .on_peer
+                .as_ref()
+                .map_or(String::new(), |p| format!(" on {p}"));
             t.push_str(&format!(
-                "  #{} {} {}: {}\n",
+                "  #{} {}{class}{place} {}: {}\n",
                 w.id.0, w.owner, w.command, w.wait_text
             ));
+            if !w.class_note.is_empty() {
+                t.push_str(&format!("      {}\n", w.class_note));
+            }
         }
     }
     let p = &s.pressure;

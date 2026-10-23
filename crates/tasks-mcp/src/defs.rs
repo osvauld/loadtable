@@ -3,7 +3,7 @@
 use serde_json::{Value, json};
 
 /// The tool names, in the order `tools/list` returns them.
-pub const TOOL_NAMES: [&str; 11] = [
+pub const TOOL_NAMES: [&str; 12] = [
     "submit",
     "submit_steps",
     "run_suite",
@@ -12,6 +12,7 @@ pub const TOOL_NAMES: [&str; 11] = [
     "logs",
     "wait",
     "cancel",
+    "prioritize",
     "status",
     "estimate",
     "audit",
@@ -46,6 +47,14 @@ fn placement_props() -> (Value, Value) {
     )
 }
 
+fn priority_props() -> (Value, Value) {
+    (
+        json!({"type": "string", "enum": ["blocking", "normal", "background"],
+            "description": "Queue class. normal (default). background: warm-ups, long suites and sweeps, which wait behind everything else and rise to normal after 20 minutes. blocking: you are waiting on the result right now; needs reason and is audited. The class orders the queue only; it never preempts a running job and never makes a job 'short' (the short lane comes from measured history alone)."}),
+        json!({"type": "string", "description": "Why the job is blocking (required with priority blocking; kept in the audit log)."}),
+    )
+}
+
 /// One tool: name, description and input schema.
 pub struct ToolDef {
     /// The tool name.
@@ -66,6 +75,7 @@ impl ToolDef {
 /// Every tool, in [`TOOL_NAMES`] order.
 pub fn tool_defs() -> Vec<ToolDef> {
     let (placement, peer) = placement_props();
+    let (priority, reason) = priority_props();
     let step = object(
         json!({
             "name": {"type": "string", "description": "Unique step name (letters, digits, '.', '_', '-')."},
@@ -89,7 +99,9 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     "device": {"type": "string", "description": "adb serial of an attached test device; the job holds that device's slot and stays on this machine."},
                     "timeout_s": {"type": "integer", "minimum": 1, "description": "Stop the job after this many seconds (1 s to 7 days; the job ends timed out)."},
                     "broad_test": {"type": "boolean", "description": "Deliberately build every test target of a filtered `cargo test`. Prefer naming the target."},
-                    "after": {"type": "array", "items": {"type": "integer", "minimum": 1}, "description": "Job ids that must pass before this job may start."}
+                    "after": {"type": "array", "items": {"type": "integer", "minimum": 1}, "description": "Job ids that must pass before this job may start."},
+                    "priority": priority.clone(),
+                    "reason": reason.clone()
                 }),
                 &["argv"],
             ),
@@ -104,7 +116,9 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     "who": who_prop(),
                     "placement": placement,
                     "peer": peer,
-                    "broad_test": {"type": "boolean", "description": "Allow broad `cargo test` steps."}
+                    "broad_test": {"type": "boolean", "description": "Allow broad `cargo test` steps."},
+                    "priority": priority.clone(),
+                    "reason": reason.clone()
                 }),
                 &["steps"],
             ),
@@ -120,7 +134,9 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     "placement": placement,
                     "peer": peer,
                     "quick": {"type": "boolean", "description": "Drop steps marked skip_in_quick."},
-                    "broad_test": {"type": "boolean", "description": "Allow broad `cargo test` steps."}
+                    "broad_test": {"type": "boolean", "description": "Allow broad `cargo test` steps."},
+                    "priority": priority.clone(),
+                    "reason": reason.clone()
                 }),
                 &["name"],
             ),
@@ -181,6 +197,19 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     "reason": {"type": "string", "description": "Why, for the record."}
                 }),
                 &["id", "who"],
+            ),
+        },
+        ToolDef {
+            name: "prioritize",
+            description: "Change the queue class of one of YOUR jobs that has not started yet (raise a job someone now waits on to blocking, or lower one to background). Refused unless who equals the job's owner, and refused for a running or finished job: priority orders the queue and never preempts. blocking needs a reason; the change is audited.",
+            input_schema: object(
+                json!({
+                    "id": id_prop("The job id."),
+                    "who": {"type": "string", "description": "Your agent name; must equal the job's owner."},
+                    "priority": priority.clone(),
+                    "reason": reason.clone()
+                }),
+                &["id", "who", "priority"],
             ),
         },
         ToolDef {

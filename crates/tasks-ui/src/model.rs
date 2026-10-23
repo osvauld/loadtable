@@ -116,6 +116,12 @@ pub struct JobRow {
     pub position: Option<usize>,
     /// What the job waits for.
     pub wait: Option<String>,
+    /// The class the queue orders a waiting job by (`blocking`, `normal`, `background`); empty
+    /// for a job that is not waiting.
+    pub queue_class: String,
+    /// Why it is in that class when not plainly normal (the blocking reason, or how aging
+    /// lifted it).
+    pub queue_note: String,
     /// When the daemon expects it to start (R-129).
     pub start_estimate: Option<String>,
     /// Running time, waiting time or time since finish, by section.
@@ -263,8 +269,10 @@ pub fn phase_text(p: &Phase) -> (String, PhaseClass) {
     }
 }
 
-fn section_of(p: &Phase) -> Section {
-    match p {
+fn section_of(j: &JobView) -> Section {
+    match &j.phase {
+        // a forwarded job the peer holds back on its own gates is waiting, not running
+        Phase::Running if j.remote_wait.is_some() => Section::Queued,
         Phase::Running => Section::Running,
         Phase::Queued | Phase::Waiting(_) => Section::Queued,
         _ => Section::Recent,
@@ -301,8 +309,12 @@ fn job_row(
     now_ms: i64,
 ) -> JobRow {
     let local = st.daemon.machine.as_str();
-    let section = section_of(&j.phase);
-    let (phase, class) = phase_text(&j.phase);
+    let section = section_of(j);
+    let (phase, class) = if j.remote_wait.is_some() {
+        ("waiting".to_string(), PhaseClass::Waiting)
+    } else {
+        phase_text(&j.phase)
+    };
     let machine = machine_of(j, local).to_string();
     let remote = machine != local;
     let agent = format::agent_of(&j.owner).to_string();
@@ -332,6 +344,7 @@ fn job_row(
     };
 
     let wait = match (&j.phase, wv) {
+        (Phase::Running, _) if j.remote_wait.is_some() => j.remote_wait.clone(),
         (Phase::Queued | Phase::Waiting(_), Some(w)) if !w.wait_text.is_empty() => {
             Some(w.wait_text.clone())
         }
@@ -380,9 +393,14 @@ fn job_row(
         current,
         eta,
         eta_basis,
-        position: wv.map(|w| w.position),
+        // a job waiting on a peer's gate is not in this machine's queue
+        position: wv.filter(|w| w.on_peer.is_none()).map(|w| w.position),
         wait,
-        start_estimate: wv.map(|w| start_estimate_text(w)),
+        queue_class: wv.map(|w| w.class.clone()).unwrap_or_default(),
+        queue_note: wv.map(|w| w.class_note.clone()).unwrap_or_default(),
+        start_estimate: wv
+            .filter(|w| w.on_peer.is_none())
+            .map(|w| start_estimate_text(w)),
         age,
         timeout: j
             .timeout_secs
@@ -720,6 +738,81 @@ mod tests {
         let local: Vec<_> = vm.running.iter().filter(|r| !r.remote).collect();
         assert!(local.iter().all(|r| r.remote_phase.is_none()));
         assert_eq!(vm.running.iter().filter(|r| r.id == fwd[0].id).count(), 1);
+    }
+
+    // R-349
+    #[test]
+    fn r349_a_forwarded_job_the_peer_holds_back_is_a_queued_row_not_a_running_one() {
+        let mut d = fixtures::busy();
+        let why = "waiting on nixos: CPU contended: pressure 63% > 40% for compile";
+        let j = d.jobs.iter_mut().find(|j| j.id.0 == 103).expect("forward");
+        j.remote_phase = Some(Phase::Waiting(WaitReason::Pressure("CPU contended".into())));
+        j.remote_wait = Some(why.to_string());
+        d.status.running.retain(|r| r.id.0 != 103);
+        d.status.waiting.push(WaiterView {
+            id: tasks_core::JobId(103),
+            owner: "hard-errors@laptop".into(),
+            command: "cargo test".into(),
+            wait_text: why.into(),
+            position: 0,
+            start_estimate_secs: None,
+            rough: true,
+            class: "normal".into(),
+            class_note: String::new(),
+            on_peer: Some("nixos".into()),
+        });
+        let vm = build(&d, 0);
+        assert!(vm.running.iter().all(|r| r.id != 103));
+        let row = vm.queued.iter().find(|r| r.id == 103).expect("queued row");
+        assert_eq!(row.phase, "waiting");
+        assert_eq!(row.class, PhaseClass::Waiting);
+        assert_eq!(row.wait.as_deref(), Some(why));
+        // it is not in this machine's queue: no position, no start estimate
+        assert_eq!((row.position, row.start_estimate.clone()), (None, None));
+        assert_eq!(row.machine, "nixos");
+    }
+
+    // R-340
+    #[test]
+    fn r340_a_waiting_row_shows_its_class_and_why() {
+        let mut d = fixtures::busy();
+        let w = d
+            .status
+            .waiting
+            .iter_mut()
+            .find(|w| w.id.0 == 110)
+            .expect("waiter");
+        w.class = "normal".into();
+        w.class_note = "submitted background, rose to normal after 20m (aging); waited 25m".into();
+        let vm = build(&d, 0);
+        let row = vm.queued.iter().find(|r| r.id == 110).expect("row");
+        assert_eq!(row.queue_class, "normal");
+        assert!(
+            row.queue_note.contains("rose to normal"),
+            "{}",
+            row.queue_note
+        );
+        assert_eq!(
+            crate::columns::cell(row, crate::columns::Col::Class),
+            "normal"
+        );
+        // a job that is not waiting has no class
+        let run = vm.running.first().expect("running");
+        assert_eq!(
+            crate::columns::cell(run, crate::columns::Col::Class),
+            crate::format::UNKNOWN
+        );
+        // the column belongs to the queue table only
+        assert!(
+            crate::columns::specs(Section::Queued)
+                .iter()
+                .any(|c| c.col == crate::columns::Col::Class)
+        );
+        assert!(
+            crate::columns::specs(Section::Running)
+                .iter()
+                .all(|c| c.col != crate::columns::Col::Class)
+        );
     }
 
     #[test]
