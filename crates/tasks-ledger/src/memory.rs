@@ -16,7 +16,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tasks_core::plan::Plan;
-use tasks_core::{JobId, MachineName, Phase, WaitReason};
+use tasks_core::{JobFigures, JobId, MachineName, Phase, WaitReason};
 use tasks_timing::{History, Sample, SampleKey, TimingError};
 
 #[derive(Debug, Clone, Default)]
@@ -284,6 +284,13 @@ impl Store for MemoryStore {
     fn set_log_path(&self, id: JobId, path: &Path) -> Result<()> {
         let mut s = self.lock()?;
         apply_log_path(s.job(id)?, path.to_path_buf());
+        s.changes += 1;
+        Ok(())
+    }
+
+    fn set_figures(&self, id: JobId, figures: &JobFigures) -> Result<()> {
+        let mut s = self.lock()?;
+        s.job(id)?.figures = Some(figures.clone());
         s.changes += 1;
         Ok(())
     }

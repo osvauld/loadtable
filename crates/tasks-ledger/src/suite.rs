@@ -37,6 +37,7 @@ const CASES: &[Case] = &[
         r006_cancel_wins,
     ),
     ("r007_wait_text_never_drops_a_cancel", r007_no_lost_update),
+    ("r335_figures_are_kept_with_the_job", r335_figures),
     ("r009_only_passed_reports_exit_zero", r009_exit_zero),
     (
         "start_and_finish_record_the_full_outcome",
@@ -352,6 +353,32 @@ fn r007_no_lost_update(e: &Env) {
     assert_eq!(r.log_path, Some(PathBuf::from("/logs/new.txt")));
     assert_eq!(r.remote_phase, Some(Phase::Running));
     assert_eq!(r.lease.unwrap().pgid, 4242);
+}
+
+// R-335: figures set while running survive the job's end and a later phase change.
+fn r335_figures(e: &Env) {
+    let s = &*e.store;
+    let id = s.submit(&spec("a", vec![])).unwrap();
+    assert_eq!(s.get(id).unwrap().unwrap().figures, None);
+    s.start(id, &info()).unwrap();
+    let mut f = tasks_core::JobFigures::empty(tasks_core::Attribution::Cgroup);
+    f.io_write_bytes = Some(5 << 30);
+    f.mem_peak_bytes = Some(1 << 30);
+    s.set_figures(id, &f).unwrap();
+    assert_eq!(s.get(id).unwrap().unwrap().figures, Some(f.clone()));
+    f.io_write_bytes = Some(6 << 30);
+    s.set_figures(id, &f).unwrap();
+    s.finish(id, &Finish::from_phase(Phase::Passed)).unwrap();
+    let r = s.get(id).unwrap().unwrap();
+    assert_eq!(r.figures, Some(f));
+    assert_eq!(r.phase, Phase::Passed);
+    assert!(matches!(
+        s.set_figures(
+            JobId(999),
+            &tasks_core::JobFigures::empty(tasks_core::Attribution::ProcessTree)
+        ),
+        Err(LedgerError::NotFound(_))
+    ));
 }
 
 // R-009: only a passed job shows exit 0; an interrupted one shows none.

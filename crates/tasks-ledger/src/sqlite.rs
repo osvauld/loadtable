@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tasks_core::plan::Plan;
-use tasks_core::{JobId, MachineName, Phase, WaitReason};
+use tasks_core::{JobFigures, JobId, MachineName, Phase, WaitReason};
 use tasks_timing::{Cache, History, Outcome, Sample, SampleKey, TimingError};
 
 const ACTIVE: &str = "('queued','waiting','running')";
@@ -122,7 +122,7 @@ impl SqliteStore {
 const COLS: &str = "id, spec, hints, plan_id, step_name, phase, wait_text, submitted_at_ms, \
     started_at_ms, finished_at_ms, machine, exit_code, signal, timeout, summary, lease_pgid, \
     lease_start, log_path, fwd_peer, fwd_job, remote_phase, cancel_by, cancel_at_ms, fwd_key, \
-    origin_peer, origin_key, cancel_reason";
+    origin_peer, origin_key, cancel_reason, figures";
 
 struct Raw {
     id: i64,
@@ -152,6 +152,7 @@ struct Raw {
     origin_peer: Option<String>,
     origin_key: Option<String>,
     cancel_reason: Option<String>,
+    figures: Option<String>,
 }
 
 fn raw(r: &Row<'_>) -> rusqlite::Result<Raw> {
@@ -183,6 +184,7 @@ fn raw(r: &Row<'_>) -> rusqlite::Result<Raw> {
         origin_peer: r.get(24)?,
         origin_key: r.get(25)?,
         cancel_reason: r.get(26)?,
+        figures: r.get(27)?,
     })
 }
 
@@ -247,6 +249,7 @@ fn record(r: Raw) -> Result<JobRecord> {
             at_ms: r.cancel_at.unwrap_or(0),
             reason: r.cancel_reason,
         }),
+        figures: r.figures.as_deref().map(serde_json::from_str).transpose()?,
     })
 }
 
@@ -293,8 +296,8 @@ fn write_record(tx: &Connection, r: &JobRecord) -> Result<()> {
              finished_at_ms = ?5, machine = ?6, exit_code = ?7, signal = ?8, timeout = ?9,
              summary = ?10, lease_pgid = ?11, lease_start = ?12, log_path = ?13, fwd_peer = ?14,
              fwd_job = ?15, remote_phase = ?16, cancel_by = ?17, cancel_at_ms = ?18,
-             fwd_key = ?19, cancel_reason = ?20
-         WHERE id = ?21",
+             fwd_key = ?19, cancel_reason = ?20, figures = ?21
+         WHERE id = ?22",
         params![
             serde_json::to_string(&r.phase)?,
             phase_tag(&r.phase),
@@ -321,6 +324,7 @@ fn write_record(tx: &Connection, r: &JobRecord) -> Result<()> {
             r.cancel.as_ref().map(|c| c.at_ms),
             fwd_key,
             r.cancel.as_ref().and_then(|c| c.reason.clone()),
+            r.figures.as_ref().map(serde_json::to_string).transpose()?,
             r.id.0,
         ],
     )?;
@@ -600,6 +604,13 @@ impl Store for SqliteStore {
     fn set_log_path(&self, id: JobId, path: &Path) -> Result<()> {
         self.modify(id, |r, _| {
             apply_log_path(r, path.to_path_buf());
+            Ok(())
+        })
+    }
+
+    fn set_figures(&self, id: JobId, figures: &JobFigures) -> Result<()> {
+        self.modify(id, |r, _| {
+            r.figures = Some(figures.clone());
             Ok(())
         })
     }

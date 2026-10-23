@@ -67,6 +67,10 @@ pub mod action {
     pub const DATA_SYNC_REFUSED: &str = "data.sync_refused";
     /// Sync data was deleted by retention (what, bytes freed).
     pub const DATA_RETENTION: &str = "data.retention";
+    /// An admission gate tripped or machine pressure crossed the alert threshold; the details
+    /// hold the pressure, the per-job and transfer figures and the biggest processes outside
+    /// any job (names only), so the stall can be explained afterwards.
+    pub const PRESSURE_TRIP: &str = "pressure.trip";
     /// The queue was drained.
     pub const QUEUE_DRAIN: &str = "queue.drain";
     /// A drain was lifted.
@@ -97,6 +101,7 @@ pub mod action {
         DATA_SYNC_RECEIVED,
         DATA_SYNC_REFUSED,
         DATA_RETENTION,
+        PRESSURE_TRIP,
         QUEUE_DRAIN,
         QUEUE_RESUME,
         crate::audit::ACTION_CHECKPOINT,

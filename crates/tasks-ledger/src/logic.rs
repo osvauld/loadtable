@@ -33,6 +33,7 @@ pub(crate) fn new_record(id: JobId, job: &NewJob, now: i64) -> JobRecord {
         origin: job.origin.clone(),
         remote_phase: None,
         cancel: None,
+        figures: None,
     }
 }
 

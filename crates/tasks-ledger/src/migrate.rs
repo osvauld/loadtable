@@ -148,11 +148,17 @@ CREATE INDEX audit_peer ON audit(peer) WHERE peer IS NOT NULL;
 CREATE INDEX audit_action ON audit(action, seq);
 ";
 
+/// Per-job resource figures (design §9, attribution of stalls): a JSON `JobFigures` with the
+/// disk bytes, peak memory, CPU time and stall times of the job, and how exact they are.
+const V7: &str = "
+ALTER TABLE jobs ADD COLUMN figures TEXT;
+";
+
 /// The migrations in order; entry `i` upgrades version `i` to `i + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7];
 
 /// The schema version this build writes.
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 fn version(conn: &Connection) -> Result<i64> {
     Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
@@ -277,7 +283,7 @@ mod tests {
             [],
         )
         .unwrap();
-        migrate(&mut c, MIGRATIONS).unwrap();
+        migrate(&mut c, &MIGRATIONS[..6]).unwrap();
         assert_eq!(uv(&c), 6);
         for (table, want) in [
             ("jobs", 1),
@@ -291,6 +297,38 @@ mod tests {
                 .unwrap();
             assert_eq!(n, want, "{table}");
         }
+    }
+
+    // R-334
+    #[test]
+    fn r334_a_v6_database_upgrades_to_v7_and_keeps_jobs_and_audit_rows() {
+        let mut c = Connection::open_in_memory().unwrap();
+        migrate(&mut c, &MIGRATIONS[..6]).unwrap();
+        assert_eq!(uv(&c), 6);
+        c.execute(
+            "INSERT INTO jobs(spec, phase, phase_tag, submitted_at_ms, owner, cwd, argv, hints)
+             VALUES ('{}', '\"Queued\"', 'queued', 1, 'o', '/', '[]', '{}')",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO audit(seq, at_ms, actor, owner, action, details, prev_hash, hash)
+             VALUES (1, 5, 'did:key:zA', '', 'job.started', '{}', '0', 'h')",
+            [],
+        )
+        .unwrap();
+        migrate(&mut c, MIGRATIONS).unwrap();
+        assert_eq!(uv(&c), 7);
+        let (jobs, figures): (i64, Option<String>) = c
+            .query_row("SELECT count(*), max(figures) FROM jobs", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((jobs, figures), (1, None));
+        let audit: i64 = c
+            .query_row("SELECT count(*) FROM audit", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(audit, 1);
     }
 
     #[test]

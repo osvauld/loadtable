@@ -1,7 +1,7 @@
 //! Stored job records and list filters.
 
 use std::path::PathBuf;
-use tasks_core::{JobId, JobSpec, MachineName, Phase, StepHints};
+use tasks_core::{JobFigures, JobId, JobSpec, MachineName, Phase, StepHints};
 
 /// Why a job was stopped by a timeout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +99,8 @@ pub struct JobRecord {
     pub remote_phase: Option<Phase>,
     /// The cancel request, if one was made.
     pub cancel: Option<CancelRequest>,
+    /// What the job cost the machine (latest sample while running, final when it ended).
+    pub figures: Option<JobFigures>,
 }
 
 impl JobRecord {
@@ -226,6 +228,7 @@ pub(crate) mod tests {
             origin: None,
             remote_phase: None,
             cancel: None,
+            figures: None,
         }
     }
 

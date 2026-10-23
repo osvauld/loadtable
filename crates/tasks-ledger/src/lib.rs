@@ -43,7 +43,7 @@ pub use trust::{GrantDirection, GrantRecord, MemoryTrust, PeerRecord, TrustLedge
 use std::path::Path;
 use std::time::Duration;
 use tasks_core::plan::Plan;
-use tasks_core::{JobId, JobSpec, MachineName, Phase, WaitReason};
+use tasks_core::{JobFigures, JobId, JobSpec, MachineName, Phase, WaitReason};
 use tasks_timing::{Sample, SampleKey};
 
 /// Result type for ledger operations.
@@ -138,6 +138,9 @@ pub trait Store {
     fn set_remote_phase(&self, id: JobId, phase: &Phase) -> Result<()>;
     /// Records the job's log path.
     fn set_log_path(&self, id: JobId, path: &Path) -> Result<()>;
+    /// Records what the job cost the machine (latest sample while it runs, the final figures when
+    /// it ends). Allowed in any phase: figures describe the past and change no outcome.
+    fn set_figures(&self, id: JobId, figures: &JobFigures) -> Result<()>;
     /// Jobs recorded as running, for restart reconciliation.
     fn find_running(&self) -> Result<Vec<JobRecord>> {
         Ok(self
