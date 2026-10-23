@@ -216,6 +216,7 @@ impl MetricsStore {
                 .map(|c| group_procs(h.prev.as_ref(), c))
                 .unwrap_or_default(),
             usual_peak_mem_bytes: None,
+            source: None,
             note: h
                 .ended_ms
                 .map(|_| "the job has ended; these are its last samples".to_string()),
@@ -272,6 +273,36 @@ impl Scheduler {
         Some(ProcSnap::of(now, &rows))
     }
 
+    /// Answers `Request::JobMetrics` for the API: a job forwarded to a peer is asked of that
+    /// peer (bounded; see [`crate::peer_link::metrics`]), any other from this machine's store.
+    pub(crate) fn api_job_metrics(&self, rec: &tasks_ledger::JobRecord) -> JobMetricsView {
+        let Some(fwd) = rec.forward.as_ref() else {
+            return self.job_metrics(rec);
+        };
+        let peer = &fwd.peer.0;
+        let Some(remote) = fwd.remote_job else {
+            let mut v = crate::peer_link::metrics::empty_view(format!(
+                "{peer} has not accepted the job yet"
+            ));
+            v.source = Some(format!("on {peer}"));
+            return v;
+        };
+        if rec.phase.is_terminal() {
+            let mut v = crate::peer_link::metrics::empty_view(
+                "the job has finished and its samples are no longer held".to_string(),
+            );
+            v.source = Some(format!("on {peer}, remote job #{remote}"));
+            return v;
+        }
+        let mut v = match self.forwarder.remote_metrics(&fwd.peer, remote) {
+            Ok(v) => v,
+            Err(e) => crate::peer_link::metrics::empty_view(e.to_string()),
+        };
+        v.source
+            .get_or_insert_with(|| format!("on {peer}, remote job #{remote}"));
+        v
+    }
+
     /// Answers `Request::JobMetrics`.
     pub(crate) fn job_metrics(&self, rec: &tasks_ledger::JobRecord) -> JobMetricsView {
         let now = self.clock.now_ms();
@@ -281,6 +312,7 @@ impl Scheduler {
             samples: Vec::new(),
             procs: Vec::new(),
             usual_peak_mem_bytes: None,
+            source: None,
             note: Some(if rec.phase.is_terminal() {
                 "the job has finished and its samples are no longer held".to_string()
             } else {

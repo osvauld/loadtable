@@ -1076,6 +1076,29 @@ pub struct PeerMachineView {
     /// Swap write-out rate, bytes per second.
     #[serde(default)]
     pub swap_out_per_s: Option<u64>,
+    /// The jobs running there and what each uses now; empty from an older peer. Jobs this
+    /// machine forwarded are among them (their remote id is `forwarded_to`).
+    #[serde(default)]
+    pub jobs: Vec<PeerJobUseView>,
+    /// The peer's whole CPU in use, thousandths of a core (minus the jobs' sum it is the work
+    /// outside jobs); `None` from an older peer.
+    #[serde(default)]
+    pub cores_in_use_milli: Option<u32>,
+}
+
+/// One running job on a peer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerJobUseView {
+    /// The job's id on the peer.
+    pub id: u64,
+    /// Its owner there.
+    pub owner: String,
+    /// CPU in thousandths of a core, when measured.
+    #[serde(default)]
+    pub cores_milli: Option<u32>,
+    /// Memory in use now, bytes, when measured.
+    #[serde(default)]
+    pub mem_bytes: Option<u64>,
 }
 
 /// One peer slot kind.
@@ -1580,6 +1603,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(peer.machine, None);
+        // R-627: a peer machine written before per-job use existed
+        let m: PeerMachineView = serde_json::from_str(
+            r#"{"cores":4,"memory_bytes":1,"slots":[],"waiting":0,"running":0,
+                "cpu_pct":null,"memory_pct":null,"io_pct":null,"pressure_summary":""}"#,
+        )
+        .unwrap();
+        assert!(m.jobs.is_empty() && m.cores_in_use_milli.is_none());
+        let v: tasks_core::metrics::JobMetricsView =
+            serde_json::from_str(r#"{"quality":null,"samples":[],"procs":[]}"#).unwrap();
+        assert_eq!(v.source, None);
         let p: PressureView = serde_json::from_str(
             r#"{"memory":"normal","memory_some":null,"memory_full":null,"cpu":null,"io":null,
                 "available_memory":null,"cache_free":null,"state_free":null,

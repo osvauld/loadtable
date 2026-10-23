@@ -83,6 +83,15 @@ pub trait JobRunner: Send + Sync {
     fn view(&self, peer: &PeerId, id: RemoteJobId) -> Option<JobView>;
     /// Log bytes from `offset`, at most `max`.
     fn read_log(&self, peer: &PeerId, id: RemoteJobId, offset: u64, max: usize) -> Vec<u8>;
+    /// The job's live metrics, when it exists, belongs to `peer` and the runner keeps them.
+    fn metrics(
+        &self,
+        peer: &PeerId,
+        id: RemoteJobId,
+    ) -> Option<tasks_core::metrics::JobMetricsView> {
+        let _ = (peer, id);
+        None
+    }
     /// Cancels; `None` when unknown.
     fn cancel(&self, peer: &PeerId, id: RemoteJobId) -> Option<CancelState>;
     /// True while a job of `peer` that has not ended runs in (or waits to run in) the synced
@@ -229,6 +238,10 @@ impl Receiver {
             Body::Submit(job) => self.submit(from, job),
             Body::Cancel { remote } => match self.runner.cancel(from, remote) {
                 Some(state) => Body::CancelAck { remote, state },
+                None => Body::Refuse(Refusal::UnknownJob { remote }),
+            },
+            Body::JobMetricsRequest { remote } => match self.runner.metrics(from, remote) {
+                Some(v) => Body::JobMetrics(crate::proto::fit_metrics(v)),
                 None => Body::Refuse(Refusal::UnknownJob { remote }),
             },
             Body::SyncOffer { checkout, .. } | Body::SyncApply(SyncApply { checkout, .. })

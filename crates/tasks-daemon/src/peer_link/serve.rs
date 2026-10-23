@@ -10,11 +10,12 @@ use crate::scheduler::{Scheduler, lock};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use tasks_core::metrics::JobMetricsView;
 use tasks_core::{JobId, JobSpec, Phase};
 use tasks_ledger::{CancelOutcome, JobRecord, LedgerError, NewJob, Origin, TimeoutReason};
 use tasks_peer::proto::{
-    CancelState, PeerStatus, PressureSummary, QueueSummary, SlotStatus, WireEnd, WireOutcome,
-    WireSample,
+    CancelState, MAX_STATUS_JOBS, PeerJobUse, PeerStatus, PressureSummary, QueueSummary,
+    SlotStatus, WireEnd, WireOutcome, WireSample,
 };
 use tasks_peer::receiver::{
     Allowlist, FinishedJob, JobRunner, JobView, Receiver, StatusSource, SubmitPolicy,
@@ -164,6 +165,11 @@ impl JobRunner for DaemonRunner {
             phase: rec.phase,
             log_len,
         })
+    }
+
+    fn metrics(&self, peer: &PeerId, id: RemoteJobId) -> Option<JobMetricsView> {
+        let rec = self.owned(peer, id)?;
+        Some(self.sch.job_metrics(&rec))
     }
 
     fn read_log(&self, peer: &PeerId, id: RemoteJobId, offset: u64, max: usize) -> Vec<u8> {
@@ -362,8 +368,31 @@ impl StatusSource for DaemonStatus {
                 swap_in_per_s: snap.pressure.swap_in_per_s,
                 swap_out_per_s: snap.pressure.swap_out_per_s,
             },
+            jobs: running_use(&snap.running),
+            cores_in_use_milli: snap.pressure.cores_in_use.map(milli),
         }
     }
+}
+
+/// Thousandths of a core, rounded; negative and absurd readings clamp.
+fn milli(cores: f64) -> u32 {
+    (cores.max(0.0) * 1000.0).round().min(f64::from(u32::MAX)) as u32
+}
+
+/// The running jobs' use as the status request lists it (the busiest [`MAX_STATUS_JOBS`]).
+fn running_use(running: &[crate::api::RunningView]) -> Vec<PeerJobUse> {
+    let mut rows: Vec<PeerJobUse> = running
+        .iter()
+        .map(|r| PeerJobUse {
+            id: u64::try_from(r.id.0).unwrap_or(0),
+            owner: r.owner.clone(),
+            cores_milli: r.cores.map(milli),
+            mem_bytes: r.mem_bytes,
+        })
+        .collect();
+    rows.sort_by(|a, b| b.cores_milli.cmp(&a.cores_milli).then(a.id.cmp(&b.id)));
+    rows.truncate(MAX_STATUS_JOBS);
+    rows
 }
 
 fn pct(v: f32) -> u8 {
@@ -443,6 +472,68 @@ mod tests {
         assert!(!run.checkout_busy(&peer(), &tree.join("elsewhere")));
         assert_eq!(run.cancel(&peer(), id), Some(CancelState::Requested));
         assert!(!run.checkout_busy(&peer(), &tree));
+    }
+
+    // R-626
+    #[test]
+    fn r626_status_lists_running_jobs_busiest_first_and_capped() {
+        use crate::api::RunningView;
+        let mk = |id: i64, cores: Option<f64>| {
+            let mut v = r626_row(id);
+            v.cores = cores;
+            v.mem_bytes = Some(1 << 20);
+            v
+        };
+        let mut rows: Vec<RunningView> = (1..=40).map(|i| mk(i, Some(i as f64 / 10.0))).collect();
+        rows.push(mk(99, None));
+        let out = running_use(&rows);
+        assert_eq!(out.len(), MAX_STATUS_JOBS);
+        assert_eq!(out[0].id, 40);
+        assert_eq!(out[0].cores_milli, Some(4000));
+        assert_eq!(out[0].mem_bytes, Some(1 << 20));
+        assert_eq!(milli(-1.0), 0);
+        assert_eq!(milli(0.0004), 0);
+        assert_eq!(milli(1.2345), 1235);
+        assert_eq!(milli(f64::MAX), u32::MAX);
+        // an unmeasured job sorts after the measured ones
+        let few = running_use(&[mk(5, None), mk(6, Some(0.5))]);
+        assert_eq!((few[0].id, few[1].id), (6, 5));
+    }
+
+    fn r626_row(id: i64) -> crate::api::RunningView {
+        crate::api::RunningView {
+            id: JobId(id),
+            owner: "o".into(),
+            command: "make".into(),
+            slot: None,
+            elapsed_secs: 0.0,
+            done_targets: 0,
+            total_targets: 0,
+            current: None,
+            eta_secs: None,
+            log_bytes: 0,
+            figures: None,
+            cores: None,
+            mem_bytes: None,
+        }
+    }
+
+    // R-622
+    #[test]
+    fn r622_a_peer_gets_metrics_only_for_jobs_it_sent() {
+        let r = Rig::new();
+        let run = DaemonRunner::new(r.sch.clone());
+        let key = SubmitKey::new("laptop:9").unwrap();
+        let (id, _) = run
+            .submit(&peer(), &key, r.spec("o", &["make", "x"], Kind::Run))
+            .unwrap();
+        let v = run.metrics(&peer(), id).unwrap();
+        assert!(v.samples.is_empty() && v.note.is_some());
+        assert!(
+            run.metrics(&PeerId::new("mac-node").unwrap(), id).is_none(),
+            "another peer must not read it"
+        );
+        assert!(run.metrics(&peer(), RemoteJobId(999)).is_none());
     }
 
     #[test]

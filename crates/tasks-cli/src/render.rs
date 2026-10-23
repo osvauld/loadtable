@@ -508,6 +508,9 @@ pub fn job_metrics(m: &tasks_core::metrics::JobMetricsView) -> String {
     let rate = |b: Option<f64>| b.map_or_else(na, |v| format!("{}/s", fmt_bytes(v as u64)));
     let stall = r.io_stall_pct.map_or_else(na, |p| format!("{p:.0}%"));
     let quality = m.quality.map_or("unknown", |q| q.label());
+    if let Some(src) = &m.source {
+        out.push_str(&format!("measured {src}\n"));
+    }
     out.push_str(&format!(
         "cpu {cores}, memory {mem}{usual}\ndisk read {}, write {}, io stall {stall}\n({} samples, {quality})\n",
         rate(r.read_bps),

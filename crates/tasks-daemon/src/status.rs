@@ -4,7 +4,7 @@ use crate::api::{
     DaemonView, JobView, MAX_STATUS_WAITERS, PeerView, PressureView, RunningView, SlotGroupView,
     SlotView, StatusSnapshot, WaiterView,
 };
-use crate::api::{PeerMachineView, PeerSlotView};
+use crate::api::{PeerJobUseView, PeerMachineView, PeerSlotView};
 use crate::queue_estimate::{Queued, starts_in_queue_order};
 use crate::queue_view::{class_note, remote_wait};
 use crate::scheduler::{RunningJob, Scheduler, lock, shorten};
@@ -42,6 +42,17 @@ fn peer_machine_view(s: &tasks_peer::proto::PeerStatus) -> PeerMachineView {
         swap_used: s.pressure.swap_used_bytes,
         swap_in_per_s: s.pressure.swap_in_per_s,
         swap_out_per_s: s.pressure.swap_out_per_s,
+        jobs: s
+            .jobs
+            .iter()
+            .map(|j| PeerJobUseView {
+                id: j.id,
+                owner: j.owner.clone(),
+                cores_milli: j.cores_milli,
+                mem_bytes: j.mem_bytes,
+            })
+            .collect(),
+        cores_in_use_milli: s.cores_in_use_milli,
     }
 }
 
@@ -522,6 +533,8 @@ mod peer_view_tests {
                 swap_in_per_s: Some(0),
                 swap_out_per_s: Some(512),
             },
+            jobs: vec![],
+            cores_in_use_milli: None,
         });
         assert_eq!(
             (v.cores, v.memory_bytes, v.waiting, v.running),
@@ -558,6 +571,8 @@ mod peer_view_tests {
                 slots: vec![],
                 queue: QueueSummary::default(),
                 pressure: PressureSummary::default(),
+                jobs: vec![],
+                cores_in_use_milli: None,
             }
         });
         assert_eq!(
