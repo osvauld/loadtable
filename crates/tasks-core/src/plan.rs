@@ -57,6 +57,14 @@ pub enum PlanError {
     /// A step hints `blocking`, which a plan cannot claim.
     #[error("step {0:?} hints priority blocking; only a submit with --reason can claim it")]
     StepPriority(String),
+    /// A step's fetch list is not valid.
+    #[error("step {step:?}: {error}")]
+    BadFetch {
+        /// The step.
+        step: String,
+        /// What is wrong.
+        error: crate::CoreError,
+    },
 }
 
 /// One named step of a plan.
@@ -108,6 +116,9 @@ pub struct StepHints {
     /// run time belongs under.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub split: Option<SplitOrigin>,
+    /// Output files (relative to the checkout) to bring back when the step runs on a peer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fetch: Vec<String>,
 }
 
 /// Where a split step's timing is recorded: under the recipe of the command before it was
@@ -177,6 +188,18 @@ impl Plan {
             }
             if s.hints.priority == Some(crate::Priority::Blocking) {
                 return Err(PlanError::StepPriority(s.name.clone()));
+            }
+            if s.hints.fetch.len() > crate::MAX_FETCH_PATHS {
+                return Err(PlanError::BadFetch {
+                    step: s.name.clone(),
+                    error: crate::CoreError::TooManyFetchPaths(s.hints.fetch.len()),
+                });
+            }
+            for f in &s.hints.fetch {
+                crate::check_fetch_path(f).map_err(|error| PlanError::BadFetch {
+                    step: s.name.clone(),
+                    error,
+                })?;
             }
             let mut seen = BTreeSet::new();
             for d in &s.after {
@@ -402,5 +425,40 @@ mod tests {
             o.iter().position(|x| *x == i).unwrap()
         };
         assert!(pos("a") < pos("b") && pos("b") < pos("c"));
+    }
+}
+
+#[cfg(test)]
+mod fetch_tests {
+    use super::*;
+
+    fn plan_with(fetch: &[&str]) -> Plan {
+        Plan {
+            steps: vec![Step {
+                name: "apk".into(),
+                argv: vec!["gradlew".into()],
+                after: vec![],
+                kind: Kind::Package,
+                requirements: Requirements::default(),
+                hints: StepHints {
+                    fetch: fetch.iter().map(ToString::to_string).collect(),
+                    ..StepHints::default()
+                },
+            }],
+        }
+    }
+
+    #[test]
+    fn r518_a_steps_fetch_paths_follow_the_same_rules_as_a_jobs() {
+        assert_eq!(plan_with(&["out/app.apk"]).validate(), Ok(()));
+        for bad in ["../x", "/abs", "a/../b", ""] {
+            assert!(
+                matches!(
+                    plan_with(&[bad]).validate(),
+                    Err(PlanError::BadFetch { .. })
+                ),
+                "{bad:?}"
+            );
+        }
     }
 }

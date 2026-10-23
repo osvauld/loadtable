@@ -256,6 +256,7 @@ fn r101_a_connection_limit_reply_is_safely_resent_but_a_busy_reply_is_not() {
         broad_test_escape: false,
         priority: tasks_core::Priority::Normal,
         priority_reason: None,
+        fetch: Vec::new(),
     };
     let r = c.call(&Request::Submit { spec }).unwrap();
     assert_eq!(

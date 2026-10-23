@@ -21,7 +21,7 @@ use tasks_peer::{ForwardIo, ForwardResult, ForwardState, LogSink, PeerId, Refusa
 
 /// The local job log as a sink for the peer's output. It holds only the peer's bytes, so its
 /// length is the offset a reattach resumes from; audit notes go to a sibling file instead.
-struct FileLog {
+pub(super) struct FileLog {
     file: File,
     path: PathBuf,
 }
@@ -35,6 +35,17 @@ impl FileLog {
             file: OpenOptions::new().create(true).append(true).open(path)?,
             path: path.to_path_buf(),
         })
+    }
+
+    /// The log file's path.
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Appends text this side wrote (fetch results) after the peer's bytes. Only done once the
+    /// peer's log is complete, so a reattach offset is never measured against it.
+    pub(super) fn append_local(&mut self, data: &[u8]) {
+        let _ = self.file.write_all(data);
     }
 
     /// Appends an audit line to `<log>.forward`.
@@ -112,6 +123,7 @@ fn end_of(r: &ForwardResult) -> ForwardEnd {
         remote_job: r.remote.and_then(|r| i64::try_from(r.0).ok()),
         nothing_submitted: r.nothing_submitted,
         samples: r.samples.clone(),
+        fetch: Vec::new(),
     }
 }
 
@@ -169,7 +181,8 @@ fn drive_forward<T: Transport>(inner: &Inner<T>, job: &Job, log_path: &Path) {
         let done = fwd.result().map(end_of);
         drop(guard);
         match done {
-            Some(end) => {
+            Some(mut end) => {
+                super::fetch::fetch_outputs(inner, job, &mut log, &mut end);
                 log.note(&format!(
                     "forward ended: {}: {}",
                     end.phase.word(),
@@ -198,6 +211,7 @@ fn outcome_end(
         remote_job: i64::try_from(remote.0).ok(),
         nothing_submitted: false,
         samples,
+        fetch: Vec::new(),
     }
 }
 
@@ -315,7 +329,8 @@ fn resume_body<T: Transport>(
             }
         })();
         match attempt {
-            Ok(Some(end)) => {
+            Ok(Some(mut end)) => {
+                super::fetch::fetch_outputs(inner, job, &mut log, &mut end);
                 finish(job, end);
                 return;
             }

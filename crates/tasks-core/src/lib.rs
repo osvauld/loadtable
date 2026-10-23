@@ -2,6 +2,7 @@
 
 mod attribution;
 mod error;
+mod fetch;
 mod ids;
 mod job;
 mod machine;
@@ -12,8 +13,12 @@ mod requirements;
 
 pub use attribution::{Attribution, JobFigures, human_bytes};
 pub use error::CoreError;
+pub use fetch::{FetchResult, FetchStatus, any_failed};
 pub use ids::{DeviceId, JobId, MachineName, Owner, Tool};
-pub use job::{DENIED_DEVICES, JobSpec, Kind, MAX_TIMEOUT_SECS, Placement};
+pub use job::{
+    DENIED_DEVICES, JobSpec, Kind, MAX_FETCH_PATH_BYTES, MAX_FETCH_PATHS, MAX_TIMEOUT_SECS,
+    Placement, check_fetch_path,
+};
 pub use machine::{Arch, Machine, Os};
 pub use phase::{Phase, SlotKind, WaitReason};
 pub use plan::{SplitOrigin, StepHints};

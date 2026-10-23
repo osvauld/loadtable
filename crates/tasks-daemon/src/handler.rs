@@ -489,6 +489,7 @@ impl Scheduler {
                 broad_test_escape: ctx.broad_test_escape,
                 priority: ctx.step_priority(&step.hints).0,
                 priority_reason: ctx.step_priority(&step.hints).1,
+                fetch: Vec::new(),
             };
             spec.validate().map_err(|e| {
                 ApiError::new(

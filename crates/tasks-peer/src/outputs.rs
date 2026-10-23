@@ -198,13 +198,60 @@ pub struct FetchReport {
     pub refused: Vec<(String, String)>,
 }
 
-/// Fetches `paths` of the peer's copy of `checkout` into `dest`.
+/// Fetches `paths` of the peer's copy of `checkout` into `dest`. No symlink below `dest` is
+/// followed: see [`fetch_into`] for placed output links.
 pub fn fetch(
     conn: &mut dyn Connection,
     checkout: &CheckoutId,
     paths: &[String],
     dest: &Path,
     max_file_bytes: u64,
+) -> Result<FetchReport, FetchError> {
+    fetch_into(conn, checkout, paths, dest, max_file_bytes, &[])
+}
+
+/// Checks where a fetched file would land under `dest`. A directory component that is a symlink
+/// is followed only when its path from `dest` is one of `allowed_links` (a coordinator-placed
+/// output link such as `android/app/build`, which points into the cache); any other symlink, and
+/// a symlink or directory in the file's own place, is refused so a fetch never writes outside
+/// the checkout or replaces something it did not make.
+fn check_destination(dest: &Path, rel: &str, allowed_links: &[String]) -> Result<(), String> {
+    let comps: Vec<&str> = rel.split('/').collect();
+    let mut cur = dest.to_path_buf();
+    for (i, c) in comps.iter().enumerate() {
+        cur.push(c);
+        let Ok(m) = fs::symlink_metadata(&cur) else {
+            // nothing here, so nothing below it either
+            return Ok(());
+        };
+        let last = i + 1 == comps.len();
+        if m.file_type().is_symlink() {
+            let prefix = comps
+                .iter()
+                .take(i + 1)
+                .copied()
+                .collect::<Vec<_>>()
+                .join("/");
+            if last || !allowed_links.contains(&prefix) {
+                return Err(format!("{prefix} is a symlink here; not written through"));
+            }
+        } else if last && m.is_dir() {
+            return Err(format!("{rel} is a directory here"));
+        }
+    }
+    Ok(())
+}
+
+/// [`fetch`], following the output links named in `allowed_links` (paths from `dest`). Every
+/// file is written to a temporary name in its directory and renamed into place once its size and
+/// hash match, so a failed or interrupted fetch leaves no partial file under the final name.
+pub fn fetch_into(
+    conn: &mut dyn Connection,
+    checkout: &CheckoutId,
+    paths: &[String],
+    dest: &Path,
+    max_file_bytes: u64,
+    allowed_links: &[String],
 ) -> Result<FetchReport, FetchError> {
     let mut report = FetchReport::default();
     for batch in paths.chunks(MAX_FETCH_PATHS) {
@@ -238,6 +285,10 @@ pub fn fetch(
                         report.too_large.push((path, size, max_file_bytes));
                         continue;
                     }
+                    if let Err(reason) = check_destination(dest, &path, allowed_links) {
+                        report.refused.push((path, reason));
+                        continue;
+                    }
                     match fetch_one(conn, checkout, &path, hash, size, exec, dest)? {
                         Ok(unchanged) => report.fetched.push(Fetched {
                             path,
@@ -254,6 +305,17 @@ pub fn fetch(
     Ok(report)
 }
 
+static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Removes the temporary file when dropped, so every way out of a fetch leaves nothing behind.
+struct TmpGuard(PathBuf);
+
+impl Drop for TmpGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
 /// `Ok(Ok(unchanged))` on success, `Ok(Err(reason))` for a per-file failure.
 fn fetch_one(
     conn: &mut dyn Connection,
@@ -265,23 +327,32 @@ fn fetch_one(
     dest: &Path,
 ) -> Result<Result<bool, String>, FetchError> {
     let target = dest.join(path);
-    let write_err = |e: std::io::Error| FetchError::Write {
-        path: path.to_string(),
-        detail: e.to_string(),
-    };
     if fs::metadata(&target).is_ok_and(|m| m.is_file() && m.len() == size)
         && hash_file(&target).is_ok_and(|(h, _)| h == hash)
     {
         return Ok(Ok(true));
     }
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent).map_err(write_err)?;
+    let local = |what: &str, e: std::io::Error| format!("{what} {path}: {e}");
+    if let Some(parent) = target.parent()
+        && let Err(e) = fs::create_dir_all(parent)
+    {
+        return Ok(Err(local("creating the directory of", e)));
     }
+    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = target.with_file_name(format!(
-        ".{}.tasks-fetch",
-        target.file_name().and_then(|n| n.to_str()).unwrap_or("out")
+        ".{}.{}.{seq}.tasks-fetch",
+        target.file_name().and_then(|n| n.to_str()).unwrap_or("out"),
+        std::process::id()
     ));
-    let mut out = fs::File::create(&tmp).map_err(write_err)?;
+    let mut out = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+    {
+        Ok(f) => f,
+        Err(e) => return Ok(Err(local("creating a temporary file for", e))),
+    };
+    let _guard = TmpGuard(tmp.clone());
     let mut digest = Sha256::new();
     let mut offset = 0u64;
     loop {
@@ -298,37 +369,35 @@ fn fetch_one(
                 data,
                 eof,
             }) if o == offset => (data, eof),
-            Ok(_) => {
-                let _ = fs::remove_file(&tmp);
-                return Err(FetchError::Unexpected("fetch_chunk"));
-            }
-            Err(PeerError::Refused(r)) => {
-                let _ = fs::remove_file(&tmp);
-                return Ok(Err(r.to_string()));
-            }
-            Err(e) => {
-                let _ = fs::remove_file(&tmp);
-                return Err(e.into());
-            }
+            Ok(_) => return Err(FetchError::Unexpected("fetch_chunk")),
+            Err(PeerError::Refused(r)) => return Ok(Err(r.to_string())),
+            Err(e) => return Err(e.into()),
         };
         digest.update(&data);
-        out.write_all(&data).map_err(write_err)?;
+        if let Err(e) = out.write_all(&data) {
+            return Ok(Err(local("writing", e)));
+        }
         offset += data.len() as u64;
         if offset > size {
-            let _ = fs::remove_file(&tmp);
             return Ok(Err("peer sent more than the announced size".to_string()));
         }
         if eof || data.is_empty() {
             break;
         }
     }
+    if let Err(e) = out.sync_all() {
+        return Ok(Err(local("flushing", e)));
+    }
     drop(out);
     if offset != size || Hash::from_digest(digest) != hash {
-        let _ = fs::remove_file(&tmp);
         return Ok(Err("content does not match its hash".to_string()));
     }
     let mode = if exec { 0o755 } else { 0o644 };
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(mode)).map_err(write_err)?;
-    fs::rename(&tmp, &target).map_err(write_err)?;
+    if let Err(e) = fs::set_permissions(&tmp, fs::Permissions::from_mode(mode)) {
+        return Ok(Err(local("setting the mode of", e)));
+    }
+    if let Err(e) = fs::rename(&tmp, &target) {
+        return Ok(Err(local("moving into place", e)));
+    }
     Ok(Ok(false))
 }

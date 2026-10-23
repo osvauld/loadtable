@@ -57,6 +57,8 @@ pub fn job(id: i64, owner: &str, cwd: &str, phase: Phase, cmd: &str) -> JobView 
         priority: Default::default(),
         priority_reason: None,
         remote_wait: None,
+        fetch_paths: Vec::new(),
+        fetch: Vec::new(),
     }
 }
 

@@ -676,6 +676,7 @@ fn r353_a_forwarded_job_that_passed_stores_the_peers_final_phase_not_the_last_on
             remote_job: Some(1),
             nothing_submitted: false,
             samples: vec![],
+            fetch: vec![],
         }),
     );
     assert_eq!(r.until_done(id), Phase::Passed);

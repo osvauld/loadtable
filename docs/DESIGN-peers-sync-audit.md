@@ -138,6 +138,12 @@ The job records `tree`, the HEAD commit it was based on and the dirty-file count
 ### Outputs and cleanup
 - Outputs (APKs, binaries) come back over the existing hashed, bounded fetch, written to
   a temp file and renamed into place.
+- `--fetch REL` (job spec `fetch`, paths relative to the checkout root): when a forwarded job
+  passes, the origin's forward driver fetches each path inside one transfer slot, before the
+  end of the job is published. Results (fetched with bytes and sha256, missing, too large,
+  failed) go to the job log, a sidecar next to it that `get` reads, and one `data.fetched`
+  audit row per file. Files may be written through the placed output links and no other
+  symlink. The job's phase never changes; `tasks2 run` exits 1 if a passed job lost a file.
 - Retention: the worker drops a working copy idle for N days (default 7) and runs
   `git gc --prune=<age>` on its mirrors weekly; the origin prunes its object dir of trees
   older than the newest job per checkout. Every deletion writes an audit row with bytes

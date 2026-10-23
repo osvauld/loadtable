@@ -205,6 +205,7 @@ pub(crate) fn plan_jobs(
                 broad_test_escape: ctx.broad_test_escape,
                 priority,
                 priority_reason,
+                fetch: step.hints.fetch.clone(),
             },
             hints: step.hints.clone(),
             step: Some((plan_id, step.name.clone())),

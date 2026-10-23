@@ -68,6 +68,9 @@ pub mod action {
     pub const DATA_SYNC_RECEIVED: &str = "data.sync_received";
     /// A sync was refused before anything was sent, naming the files and why.
     pub const DATA_SYNC_REFUSED: &str = "data.sync_refused";
+    /// An output file of a forwarded job was fetched back from its peer into the checkout
+    /// (path, content hash, bytes, the job and the peer).
+    pub const DATA_FETCHED: &str = "data.fetched";
     /// Sync data was deleted by retention (what, bytes freed).
     pub const DATA_RETENTION: &str = "data.retention";
     /// An admission gate tripped or machine pressure crossed the alert threshold; the details
@@ -104,6 +107,7 @@ pub mod action {
         DATA_SYNC_SENT,
         DATA_SYNC_RECEIVED,
         DATA_SYNC_REFUSED,
+        DATA_FETCHED,
         DATA_RETENTION,
         PRESSURE_TRIP,
         QUEUE_DRAIN,

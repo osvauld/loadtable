@@ -194,6 +194,7 @@ fn r230_a_forward_that_is_not_ready_takes_no_offload_slot_and_blocks_nobody() {
             remote_job: Some(1),
             nothing_submitted: false,
             samples: vec![],
+            fetch: vec![],
         }),
     );
     f.not_ready.lock().unwrap().remove(&j2);
@@ -254,6 +255,7 @@ fn an_accepted_job_goes_running_with_its_remote_id_and_ends_with_the_peers_resul
             remote_job: Some(7),
             nothing_submitted: false,
             samples: vec![],
+            fetch: vec![],
         }),
     );
     assert_eq!(r.until_done(id), Phase::Cancelled);

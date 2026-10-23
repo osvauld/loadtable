@@ -116,6 +116,9 @@ impl PeerRuntimeFactory for IrohFactory {
         let prune = origin.clone();
         let mut opts = PeerLinkOptions::new(&cfg.machine, Vec::new(), origin);
         opts.source = Some(Arc::new(NodePeers(rt.node.clone())));
+        // fetched outputs take a transfer slot and may be written through the placed links
+        opts.gate = ctx.transfer_gate.clone();
+        opts.fetch_links = crate::build_cache::BuildCache::fetch_policy().allowed_links;
         opts.observer = Some(Arc::new(crate::audited::AuditLinks::new(
             ctx.audit.clone(),
             Arc::new(SystemClock),

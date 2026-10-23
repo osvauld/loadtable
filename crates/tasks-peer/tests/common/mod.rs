@@ -141,6 +141,7 @@ impl World {
             broad_test_escape: false,
             priority: tasks_core::Priority::Normal,
             priority_reason: None,
+            fetch: Vec::new(),
         }
     }
 

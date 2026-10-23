@@ -38,4 +38,10 @@ pub enum CoreError {
     /// The priority reason is longer than [`crate::MAX_PRIORITY_REASON`] characters.
     #[error("the priority reason is longer than {max} characters", max = crate::MAX_PRIORITY_REASON)]
     PriorityReasonTooLong,
+    /// A `--fetch` path is not a relative path inside the checkout.
+    #[error("cannot fetch {0:?}: {1}")]
+    BadFetchPath(String, String),
+    /// More than [`crate::MAX_FETCH_PATHS`] fetch paths.
+    #[error("too many fetch paths: {0} (max {max})", max = crate::MAX_FETCH_PATHS)]
+    TooManyFetchPaths(usize),
 }

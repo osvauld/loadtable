@@ -30,7 +30,7 @@ pub const MAX_FRAME_BYTES: usize = MAX_DATA_FRAME_BYTES;
 /// Most snapshots a worker reports in one [`Body::SyncHave`].
 pub const MAX_SYNC_TIPS: usize = 32;
 /// Most paths in one fetch listing request.
-pub const MAX_FETCH_PATHS: usize = 256;
+pub const MAX_FETCH_PATHS: usize = tasks_core::MAX_FETCH_PATHS;
 /// Longest relative path accepted on the wire.
 pub const MAX_PATH_BYTES: usize = 1024;
 
