@@ -47,8 +47,7 @@ fn resolve(tree: &Path, rel: &str, policy: &FetchPolicy) -> Result<PathBuf, Stri
                 .copied()
                 .collect::<Vec<_>>()
                 .join("/");
-            let output_link =
-                comps.len() > i + 1 && policy.allowed_links.iter().any(|l| *l == prefix);
+            let output_link = comps.len() > i + 1 && policy.allowed_links.contains(&prefix);
             if !output_link {
                 return Err(format!("{c} is a symlink"));
             }

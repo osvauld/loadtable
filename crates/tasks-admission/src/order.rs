@@ -99,7 +99,7 @@ pub fn sequence(
     let head = |q: &OwnerQueue| {
         q.jobs
             .front()
-            .map_or((u64::MAX, u64::MAX, JobId(i64::MAX)), &key)
+            .map_or((u64::MAX, u64::MAX, JobId(i64::MAX)), key)
     };
     let mut out = Vec::with_capacity(waiters.len());
     for (_, owners) in classes {
