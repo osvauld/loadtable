@@ -68,7 +68,12 @@ fn basis_text(s: &Score) -> String {
         WaitBasis::Expected => "expected",
         WaitBasis::Unknown => "unknown, assumed",
     };
-    if s.pressure_secs > 0.0 {
+    if s.blocked {
+        format!(
+            "{base}, gate closed, pressure +{}",
+            fmt_secs(s.pressure_secs)
+        )
+    } else if s.pressure_secs > 0.0 {
         format!("{base}, pressure +{}", fmt_secs(s.pressure_secs))
     } else {
         base.to_string()

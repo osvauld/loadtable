@@ -70,7 +70,9 @@ pub enum Link {
 /// Pressure summary of a machine.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Pressure {
-    /// Admission would block a new job now (counts as extra wait, never as a skip).
+    /// Admission would block a new job now. Counts as extra wait; and a machine with a closed
+    /// gate never wins over one that could start the job at once. For a peer this is its
+    /// compile gate (all it reports), so it applies to compile-slot jobs.
     pub blocked: bool,
     /// Human readable summary, e.g. "memory PSI 12%".
     pub summary: String,

@@ -64,6 +64,9 @@ pub struct Score {
     pub wait_basis: WaitBasis,
     /// Part of `wait_secs` that is pressure.
     pub pressure_secs: f64,
+    /// The machine's admission gate for this job is closed (its own pressure for the local
+    /// machine; the compile gate a peer reports).
+    pub blocked: bool,
     /// Run time from the estimate.
     pub run_secs: f64,
     /// False when `run_secs` is the policy's assumption.
@@ -75,6 +78,13 @@ pub struct Score {
 }
 
 impl Score {
+    /// True when the job would start at once: a free slot, nobody ahead and no closed gate. A
+    /// machine that is not ready never beats one that is (a peer that holds the job back on its
+    /// own gates looks "running" here while this machine sits idle).
+    pub fn ready_now(&self) -> bool {
+        !self.blocked && self.wait_basis == WaitBasis::Free
+    }
+
     /// Expected finish time: wait + run + sync - local bonus.
     pub fn total_secs(&self) -> f64 {
         self.wait_secs + self.run_secs + self.sync_secs - self.local_bonus_secs
@@ -223,7 +233,10 @@ fn score(input: &Input, v: &MachineView, policy: &Policy) -> Score {
         } else {
             (policy.unknown_wait_secs, WaitBasis::Unknown)
         };
-    let pressure_secs = if v.pressure.blocked {
+    // a peer reports only its compile gate, so it counts for compile-slot jobs alone
+    let blocked =
+        v.pressure.blocked && (v.is_local || slot_for(input.kind) == Some(SlotKind::Compile));
+    let pressure_secs = if blocked {
         policy.pressure_wait_secs
     } else {
         0.0
@@ -245,6 +258,7 @@ fn score(input: &Input, v: &MachineView, policy: &Policy) -> Score {
         wait_secs,
         wait_basis,
         pressure_secs,
+        blocked,
         run_secs,
         run_known,
         sync_secs,
@@ -290,9 +304,17 @@ pub fn decide(input: &Input, policy: &Policy) -> Result<Report, PlacementError> 
         .collect();
     machines.sort_by(|a, b| a.name.cmp(&b.name));
 
+    // An idle machine beats any machine whose gate is closed, whatever the estimates say: a
+    // closed gate has no known end, and the job would sit there looking like it runs.
+    let someone_ready = machines
+        .iter()
+        .any(|m| matches!(&m.verdict, Verdict::Eligible(s) if s.ready_now()));
     let mut best: Option<(&MachineReport, &Score)> = None;
     for m in &machines {
         if let Verdict::Eligible(s) = &m.verdict {
+            if someone_ready && s.blocked {
+                continue;
+            }
             best = match best {
                 Some((bm, bs)) if better(bm, bs, m, s) != Ordering::Greater => Some((bm, bs)),
                 _ => Some((m, s)),

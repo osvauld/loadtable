@@ -224,6 +224,83 @@ fn r134_a_blocked_machine_counts_as_extra_wait_not_skipped() {
     assert_eq!(chosen(&r).as_deref(), Some("laptop"));
 }
 
+// ---- R-348 ----
+
+fn faster(v: &mut MachineView, secs: f64) {
+    v.estimate = est(secs);
+}
+
+fn gate_closed(v: &mut MachineView) {
+    v.pressure = Pressure {
+        blocked: true,
+        summary: "CPU contended: pressure 63% > 40% for compile".into(),
+    };
+}
+
+#[test]
+fn r348_a_peer_with_a_closed_gate_does_not_win_over_an_idle_local_machine() {
+    // the peer is much faster on paper (30 s against 200 s); only its gate is closed. The old
+    // arithmetic (60 s of pressure) still picked it, and the job sat there looking like it ran
+    let mut local = view("laptop", true);
+    faster(&mut local, 200.0);
+    let mut peer = view("nixos", false);
+    faster(&mut peer, 30.0);
+    gate_closed(&mut peer);
+    let r = run(&input(Request::Anywhere, vec![local, peer]));
+    assert_eq!(chosen(&r).as_deref(), Some("laptop"));
+    // it is still scored, with the reason, so the report explains the choice
+    let s = r.score_of(&n("nixos")).unwrap();
+    assert!(s.blocked && s.pressure_secs == 60.0);
+    assert!(r.one_line().contains("laptop"), "{}", r.one_line());
+}
+
+#[test]
+fn r348_the_same_peer_wins_when_its_gate_is_open() {
+    let mut local = view("laptop", true);
+    faster(&mut local, 200.0);
+    let mut peer = view("nixos", false);
+    faster(&mut peer, 30.0);
+    let r = run(&input(Request::Anywhere, vec![local, peer]));
+    assert_eq!(chosen(&r).as_deref(), Some("nixos"));
+}
+
+#[test]
+fn r348_a_blocked_peer_still_wins_when_the_local_machine_is_not_idle() {
+    let mut local = view("laptop", true);
+    faster(&mut local, 200.0);
+    busy(&mut local, Some(900.0));
+    let mut peer = view("nixos", false);
+    faster(&mut peer, 30.0);
+    gate_closed(&mut peer);
+    let r = run(&input(Request::Anywhere, vec![local, peer]));
+    assert_eq!(chosen(&r).as_deref(), Some("nixos"));
+}
+
+#[test]
+fn r348_a_peer_named_by_the_caller_is_used_whatever_its_gate_says() {
+    let mut local = view("laptop", true);
+    faster(&mut local, 200.0);
+    let mut peer = view("nixos", false);
+    gate_closed(&mut peer);
+    let r = run(&input(Request::Peer(n("nixos")), vec![local, peer]));
+    assert_eq!(chosen(&r).as_deref(), Some("nixos"));
+}
+
+#[test]
+fn r348_a_peers_compile_gate_does_not_count_against_a_run_job() {
+    let mut local = view("laptop", true);
+    local.free_slots.insert(SlotKind::Run, 1);
+    faster(&mut local, 200.0);
+    let mut peer = view("nixos", false);
+    peer.free_slots.insert(SlotKind::Run, 1);
+    faster(&mut peer, 30.0);
+    gate_closed(&mut peer);
+    // run-class jobs reach a peer only when it is named
+    let mut i = input(Request::Peer(n("nixos")), vec![local, peer]);
+    i.kind = Kind::Run;
+    assert!(!run(&i).score_of(&n("nixos")).unwrap().blocked);
+}
+
 #[test]
 fn r134_a_held_slot_without_a_known_holder_waits_the_unknown_eta() {
     let mut l = view("laptop", true);
@@ -940,13 +1017,20 @@ fn property_decisions_respect_exclusions_pin_and_determinism() {
                 assert_eq!(&v.machine.name, p);
             }
             // the winner has the lowest total among eligible machines
-            let best = r
+            // (a machine with a closed gate is passed over when another could start at once)
+            let eligible: Vec<&Score> = r
                 .machines
                 .iter()
                 .filter_map(|m| match &m.verdict {
-                    Verdict::Eligible(s) => Some(s.total_secs()),
+                    Verdict::Eligible(s) => Some(s),
                     _ => None,
                 })
+                .collect();
+            let someone_ready = eligible.iter().any(|s| s.ready_now());
+            let best = eligible
+                .iter()
+                .filter(|s| !(someone_ready && s.blocked))
+                .map(|s| s.total_secs())
                 .fold(f64::INFINITY, f64::min);
             assert_eq!(r.score_of(name).unwrap().total_secs(), best);
         } else if matches!(i.request, Request::Pin) {
