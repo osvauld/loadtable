@@ -153,6 +153,11 @@ impl fmt::Display for Refusal {
         match self {
             Refusal::UnknownPeer(n) => write!(f, "no peer named {}", n.0),
             Refusal::RequestedMachineCannot(n) => write!(f, "{} cannot run it", n.0),
+            Refusal::PeerNeverSeen(n) => write!(
+                f,
+                "{} has not answered since this daemon started, so there is nothing to wait for",
+                n.0
+            ),
             Refusal::NoCapableMachine => f.write_str("no machine can run it"),
         }
     }

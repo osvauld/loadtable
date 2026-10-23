@@ -508,6 +508,9 @@ pub fn job_metrics(m: &tasks_core::metrics::JobMetricsView) -> String {
     let rate = |b: Option<f64>| b.map_or_else(na, |v| format!("{}/s", fmt_bytes(v as u64)));
     let stall = r.io_stall_pct.map_or_else(na, |p| format!("{p:.0}%"));
     let quality = m.quality.map_or("unknown", |q| q.label());
+    if let Some(src) = &m.source {
+        out.push_str(&format!("measured {src}\n"));
+    }
     out.push_str(&format!(
         "cpu {cores}, memory {mem}{usual}\ndisk read {}, write {}, io stall {stall}\n({} samples, {quality})\n",
         rate(r.read_bps),
@@ -712,6 +715,11 @@ pub fn status(s: &StatusSnapshot) -> String {
     for a in &s.alerts {
         let _ = writeln!(out, "alert [{}] {}", a.level, a.message);
     }
+    // an older daemon sends no power view
+    if let Some(pw) = &s.power {
+        let _ = writeln!(out, "{}", pw.source_line());
+        let _ = writeln!(out, "{}", pw.awake_line());
+    }
     // an older daemon sends no attribution line
     if !s.attribution.is_empty() {
         let _ = writeln!(out, "{}", s.attribution);
@@ -745,6 +753,16 @@ pub fn status(s: &StatusSnapshot) -> String {
         }
     }
     out
+}
+
+/// A peer's memory pressure: the PSI percentage where it has one, else its native level
+/// (macOS), else `?` (R-523).
+fn peer_memory_text(pct: Option<u8>, level: Option<&str>) -> String {
+    match (pct, level) {
+        (Some(p), _) => format!("{p}%"),
+        (None, Some(l)) => l.to_string(),
+        (None, None) => "?".to_string(),
+    }
 }
 
 /// `cpu busy 23%, swap 1.0 GiB of 8.0 GiB used (in 0 B/s, out 0 B/s)`; `None` when the machine
@@ -836,9 +854,10 @@ fn peers_section(out: &mut String, peers: &[tasks_daemon::api::PeerView]) {
                 .map(|x| format!("{} {}/{}", x.kind, x.used, x.total))
                 .collect::<Vec<_>>()
                 .join(", ");
+            let power = m.power.as_ref().map_or(String::new(), |p| format!("; {p}"));
             let _ = writeln!(
                 out,
-                "    {} cores, {}; slots {slots}; {} waiting, {} running",
+                "    {} cores, {}; slots {slots}; {} waiting, {} running{power}",
                 m.cores,
                 fmt_size(m.memory_bytes),
                 m.waiting,
@@ -848,7 +867,7 @@ fn peers_section(out: &mut String, peers: &[tasks_daemon::api::PeerView]) {
             let mut load = format!(
                 "    pressure: cpu {}, memory {}, io {}",
                 pc(m.cpu_pct),
-                pc(m.memory_pct),
+                peer_memory_text(m.memory_pct, m.memory_level.as_deref()),
                 pc(m.io_pct)
             );
             if let Some(c) = m.cpu_busy_pct {

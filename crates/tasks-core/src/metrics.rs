@@ -113,6 +113,9 @@ pub struct JobMetricsView {
     /// Why there is little or nothing to show (finished job, history dropped).
     #[serde(default)]
     pub note: Option<String>,
+    /// Where the figures were measured when not on this machine ("on mac, remote job #9").
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 /// Samples kept per job: 30 minutes at one every two seconds.

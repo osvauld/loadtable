@@ -14,6 +14,7 @@ mod attrib_tests;
 #[cfg(test)]
 mod audit_tests;
 pub mod audited;
+mod awake;
 pub mod build_cache;
 pub mod cargo_jobs;
 pub mod config;
@@ -34,6 +35,9 @@ mod metrics;
 #[cfg(test)]
 mod metrics_tests;
 pub mod peer_link;
+#[cfg(test)]
+mod peer_sleep_tests;
+mod peer_wait;
 pub mod peers_config;
 mod place;
 pub mod platform;

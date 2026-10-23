@@ -148,6 +148,8 @@ fn r005_a_transient_ledger_error_on_one_job_does_not_stop_the_others() {
             holders: r.holders.clone(),
             cgroups: r.cgroups.clone(),
             table: r.table.clone(),
+            power: r.power.clone(),
+            sleep: r.power.clone(),
         },
         clock: r.clock.clone(),
         forwarder: Arc::new(crate::forwarder::NoForwarder),
@@ -936,6 +938,7 @@ pub(crate) fn daemon_options(dir: &TempDir, procs: &Arc<FakeProcs>) -> DaemonOpt
         machine: "testbox".into(),
     };
     let machine = Arc::new(FakeMachine::new());
+    let power = Arc::new(tasks_platform::fake::FakePower::default());
     let platform = Platform {
         memory: machine.clone(),
         pressure: machine.clone(),
@@ -945,6 +948,8 @@ pub(crate) fn daemon_options(dir: &TempDir, procs: &Arc<FakeProcs>) -> DaemonOpt
         holders: Arc::new(FakeHolders::default()),
         cgroups: Arc::new(tasks_platform::fake::FakeCgroups::unavailable("test")),
         table: Arc::new(tasks_platform::fake::FakePlatform::default()),
+        power: power.clone(),
+        sleep: power,
     };
     let mut o = DaemonOptions::new(cfg);
     o.env = vec![("PATH".into(), "/usr/bin:/bin".into())];

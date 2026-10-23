@@ -5,6 +5,7 @@ use crate::metrics::KEEP_AFTER_END_MS;
 use crate::scheduler::lock;
 use crate::testkit::Rig;
 use tasks_core::{Attribution, JobFigures, JobId, Kind, Phase};
+use tasks_ledger::Store as _;
 use tasks_platform::{CgroupName, ProcInfo};
 
 fn ok(r: Reply) -> Response {
@@ -201,4 +202,74 @@ fn r572_the_usual_peak_is_the_median_of_past_runs_on_this_machine() {
     // a command never run here has no usual peak
     let other = r.submit(&r.spec("o", &["ninja"], Kind::Compile));
     assert_eq!(metrics(&r, other).usual_peak_mem_bytes, None);
+}
+
+// ---------------------------------------------------------------- forwarded jobs (R-620..)
+
+fn peer_view_of(cores_cpu: u64) -> tasks_core::metrics::JobMetricsView {
+    use tasks_core::metrics::MetricSample;
+    let s = |t: i64, cpu: u64| MetricSample {
+        t_ms: t,
+        cpu_usec: Some(cpu),
+        mem_bytes: Some(1 << 30),
+        io_read_bytes: None,
+        io_write_bytes: None,
+        io_some_us: None,
+    };
+    tasks_core::metrics::JobMetricsView {
+        quality: Some(Attribution::Cgroup),
+        samples: vec![s(0, 0), s(2_000, cores_cpu)],
+        procs: Vec::new(),
+        usual_peak_mem_bytes: None,
+        note: None,
+        source: None,
+    }
+}
+
+fn forwarded_rig(
+    remote: Option<i64>,
+) -> (Rig, std::sync::Arc<crate::testkit::FakeForwarder>, JobId) {
+    let fw = std::sync::Arc::new(crate::testkit::FakeForwarder::new(Vec::new()));
+    let r = Rig::with_forwarder(fw.clone());
+    let id = r.submit(&r.spec("o", &["make"], Kind::Compile));
+    r.store
+        .set_forward(
+            id,
+            &tasks_core::MachineName("mac".into()),
+            remote,
+            Some("k"),
+        )
+        .unwrap();
+    (r, fw, id)
+}
+
+// R-620
+#[test]
+fn r620_a_forwarded_jobs_metrics_come_from_its_peer_and_say_where() {
+    let (r, fw, id) = forwarded_rig(Some(9));
+    *lock(&fw.metrics) = Some(peer_view_of(4_000_000));
+    let m = metrics(&r, id);
+    assert_eq!(m.samples.len(), 2);
+    assert_eq!(m.source.as_deref(), Some("on mac, remote job #9"));
+    assert_eq!(*lock(&fw.metrics_asked), vec![("mac".to_string(), 9)]);
+}
+
+// R-620
+#[test]
+fn r620_a_forwarded_job_the_peer_has_not_accepted_asks_nobody() {
+    let (r, fw, id) = forwarded_rig(None);
+    let m = metrics(&r, id);
+    assert!(m.samples.is_empty());
+    assert!(m.note.unwrap().contains("mac has not accepted"));
+    assert!(lock(&fw.metrics_asked).is_empty());
+}
+
+// R-623
+#[test]
+fn r623_a_forwarder_that_cannot_ask_gives_an_empty_view_with_the_reason() {
+    let (r, _fw, id) = forwarded_rig(Some(3));
+    let m = metrics(&r, id);
+    assert!(m.samples.is_empty());
+    assert!(m.note.is_some());
+    assert_eq!(m.source.as_deref(), Some("on mac, remote job #3"));
 }

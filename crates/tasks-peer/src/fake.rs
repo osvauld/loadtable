@@ -53,6 +53,7 @@ pub fn kind(b: &Body) -> &'static str {
         Body::SyncApply(_) => "sync_apply",
         Body::FetchList { .. } => "fetch_list",
         Body::FetchChunk { .. } => "fetch_chunk",
+        Body::JobMetricsRequest { .. } => "job_metrics",
         _ => "other",
     }
 }
@@ -391,6 +392,7 @@ struct FakeJob {
     detail: String,
     log: Vec<u8>,
     finished: Option<FinishedJob>,
+    metrics: Option<tasks_core::metrics::JobMetricsView>,
 }
 
 /// A runner whose jobs are driven by the test.
@@ -444,6 +446,10 @@ impl FakeRunner {
             });
         });
     }
+    /// Sets what the job answers to a metrics request.
+    pub fn set_metrics(&self, id: RemoteJobId, view: tasks_core::metrics::JobMetricsView) {
+        self.with(id, |j| j.metrics = Some(view));
+    }
     /// Specs the runner was given, in order, with their keys.
     pub fn submitted(&self) -> Vec<(SubmitKey, JobSpec)> {
         self.jobs()
@@ -477,6 +483,7 @@ impl JobRunner for FakeRunner {
             detail: String::new(),
             log: Vec::new(),
             finished: None,
+            metrics: None,
         });
         Ok((RemoteJobId(jobs.len() as u64), false))
     }
@@ -508,6 +515,17 @@ impl JobRunner for FakeRunner {
                 .collect()
         })
         .unwrap_or_default()
+    }
+    fn metrics(
+        &self,
+        peer: &PeerId,
+        id: RemoteJobId,
+    ) -> Option<tasks_core::metrics::JobMetricsView> {
+        let peer = peer.clone();
+        self.with(id, |j| {
+            (j.peer == peer).then(|| j.metrics.clone()).flatten()
+        })
+        .flatten()
     }
     fn checkout_busy(&self, peer: &PeerId, tree: &std::path::Path) -> bool {
         self.jobs()
@@ -561,6 +579,9 @@ impl FakeStatus {
             slots: Vec::new(),
             queue: QueueSummary::default(),
             pressure: PressureSummary::default(),
+            jobs: Vec::new(),
+            cores_in_use_milli: None,
+            power: None,
         })
     }
 }

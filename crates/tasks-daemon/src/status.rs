@@ -4,7 +4,7 @@ use crate::api::{
     DaemonView, JobView, MAX_STATUS_WAITERS, PeerView, PressureView, RunningView, SlotGroupView,
     SlotView, StatusSnapshot, WaiterView,
 };
-use crate::api::{PeerMachineView, PeerSlotView};
+use crate::api::{PeerJobUseView, PeerMachineView, PeerSlotView};
 use crate::queue_estimate::{Queued, starts_in_queue_order};
 use crate::queue_view::{class_note, remote_wait};
 use crate::scheduler::{RunningJob, Scheduler, lock, shorten};
@@ -34,6 +34,7 @@ fn peer_machine_view(s: &tasks_peer::proto::PeerStatus) -> PeerMachineView {
         running: s.queue.running,
         cpu_pct: s.pressure.cpu_pct,
         memory_pct: s.pressure.memory_pct,
+        memory_level: s.pressure.memory_level.clone(),
         io_pct: s.pressure.io_pct,
         pressure_summary: s.pressure.summary.clone(),
         cpu_busy_pct: s.pressure.cpu_busy_pct,
@@ -41,7 +42,28 @@ fn peer_machine_view(s: &tasks_peer::proto::PeerStatus) -> PeerMachineView {
         swap_used: s.pressure.swap_used_bytes,
         swap_in_per_s: s.pressure.swap_in_per_s,
         swap_out_per_s: s.pressure.swap_out_per_s,
+        jobs: s
+            .jobs
+            .iter()
+            .map(|j| PeerJobUseView {
+                id: j.id,
+                owner: j.owner.clone(),
+                cores_milli: j.cores_milli,
+                mem_bytes: j.mem_bytes,
+            })
+            .collect(),
+        cores_in_use_milli: s.cores_in_use_milli,
+        power: s.power.map(|p| power_text(p.on_battery, p.percent)),
     }
+}
+
+/// `on battery 80%` / `on AC`.
+pub(crate) fn power_text(on_battery: bool, percent: Option<u8>) -> String {
+    tasks_platform::PowerReading {
+        on_battery,
+        percent,
+    }
+    .to_string()
 }
 
 /// A job row for the API. The environment is left out on purpose.
@@ -346,6 +368,7 @@ impl Scheduler {
             attribution: self.attribution_line(),
             transfer: self.transfer_view(),
             trips: self.trip_views(crate::attrib::STATUS_TRIPS),
+            power: Some(self.power_view()),
         }
     }
 
@@ -512,6 +535,7 @@ mod peer_view_tests {
             pressure: PressureSummary {
                 cpu_pct: Some(40),
                 memory_pct: None,
+                memory_level: None,
                 io_pct: Some(0),
                 summary: "memory stalls".into(),
                 cpu_busy_pct: Some(61),
@@ -520,6 +544,9 @@ mod peer_view_tests {
                 swap_in_per_s: Some(0),
                 swap_out_per_s: Some(512),
             },
+            jobs: vec![],
+            cores_in_use_milli: None,
+            power: None,
         });
         assert_eq!(
             (v.cores, v.memory_bytes, v.waiting, v.running),
@@ -556,6 +583,9 @@ mod peer_view_tests {
                 slots: vec![],
                 queue: QueueSummary::default(),
                 pressure: PressureSummary::default(),
+                jobs: vec![],
+                cores_in_use_milli: None,
+                power: None,
             }
         });
         assert_eq!(

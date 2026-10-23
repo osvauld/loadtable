@@ -336,6 +336,79 @@ impl Scheduler {
         }
     }
 
+    /// A job whose peer is asleep or away waits for it, up to the grace period (R-600). The
+    /// time the job sat waiting is noted for its log when it is finally placed.
+    fn wait_for_peer(
+        &self,
+        rec: &JobRecord,
+        policy: &MachinePolicy,
+        report: &tasks_placement::Report,
+        line: String,
+    ) -> Placed {
+        use tasks_placement::{Exclusion, Verdict as V};
+        let now_ms = self.clock.now_ms();
+        // the peer the request names, else the first one that is only out of reach
+        let named = match &report.request {
+            tasks_placement::Request::Peer(n) => Some(n.clone()),
+            _ => None,
+        };
+        let Some((peer, exclusions)) = report.machines.iter().find_map(|m| match &m.verdict {
+            V::Excluded(ex)
+                if !m.is_local
+                    && ex.iter().all(Exclusion::is_transient)
+                    && named.as_ref().is_none_or(|n| *n == m.name) =>
+            {
+                Some((m.name.0.clone(), ex))
+            }
+            _ => None,
+        }) else {
+            return Placed::Waiting(line);
+        };
+        let ago_secs = exclusions.iter().find_map(|e| match e {
+            Exclusion::Unreachable { last_seen_ago_secs } => *last_seen_ago_secs,
+            Exclusion::Stale { age_secs, .. } => Some(*age_secs),
+            _ => None,
+        });
+        // fixed at the first pass, so the text does not change with every rounding of the age
+        let last_seen_ms = *lock(&self.state)
+            .peer_seen
+            .entry(rec.id)
+            .or_insert_with(|| {
+                ago_secs.map(|a| now_ms.saturating_sub(i64::try_from(a).unwrap_or(0) * 1000))
+            });
+        let offset = |unix: i64| tasks_platform::local_offset_secs(unix);
+        let verdict = crate::peer_wait::judge(
+            &crate::peer_wait::Waiting {
+                peer: &peer,
+                last_seen_ms,
+                submitted_ms: rec.submitted_at_ms,
+                now_ms,
+                grace: std::time::Duration::from_secs(policy.peer_wait_secs()),
+                timeout: rec
+                    .spec
+                    .timeout_secs
+                    .or(rec.hints.timeout_secs)
+                    .map(std::time::Duration::from_secs),
+            },
+            &offset,
+        );
+        match verdict {
+            crate::peer_wait::Verdict::Wait(text) => {
+                let waited =
+                    u64::try_from(now_ms.saturating_sub(rec.submitted_at_ms) / 1000).unwrap_or(0);
+                lock(&self.state).peer_waited.insert(
+                    rec.id,
+                    format!(
+                        "waited {} for {peer}, which was asleep or unreachable",
+                        crate::peer_wait::dur_text(std::time::Duration::from_secs(waited))
+                    ),
+                );
+                Placed::Waiting(text)
+            }
+            crate::peer_wait::Verdict::GiveUp(text) => Placed::Refused(text),
+        }
+    }
+
     /// Decides where a job runs, and acts on a peer decision.
     pub(crate) fn place(&self, rec: &JobRecord, policy: &MachinePolicy, ctx: &PlaceCtx) -> Placed {
         let facts = self.facts(rec);
@@ -447,6 +520,9 @@ impl Scheduler {
         }
         match &report.decision {
             Decision::Run(name) if name.0 == self.cfg.machine => {
+                if let Some(note) = lock(&self.state).peer_waited.remove(&rec.id) {
+                    line = format!("{line}; {note}");
+                }
                 lock(&self.state).placed.insert(rec.id, line.clone());
                 Placed::Local
             }
@@ -474,7 +550,7 @@ impl Scheduler {
                 }
                 Err(e) => Placed::Waiting(format!("cannot forward to {}: {e}", name.0)),
             },
-            Decision::Wait => Placed::Waiting(line),
+            Decision::Wait => self.wait_for_peer(rec, policy, &report, line),
             Decision::Refuse(_) => Placed::Refused(line),
         }
     }

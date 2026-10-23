@@ -290,6 +290,9 @@ pub struct FakeForwarder {
     pub quality: Mutex<Vec<crate::forwarder::LinkQuality>>,
     /// The classes the scheduler told the forwarder before starting a job.
     pub classes: Mutex<Vec<(JobId, tasks_core::Priority, Option<String>)>>,
+    /// What `remote_metrics` answers, and what it was asked.
+    pub metrics: Mutex<Option<tasks_core::metrics::JobMetricsView>>,
+    pub metrics_asked: Mutex<Vec<(String, i64)>>,
 }
 
 impl FakeForwarder {
@@ -309,6 +312,8 @@ impl FakeForwarder {
             links: Mutex::new(Vec::new()),
             quality: Mutex::new(Vec::new()),
             classes: Mutex::new(Vec::new()),
+            metrics: Mutex::new(None),
+            metrics_asked: Mutex::new(Vec::new()),
         }
     }
     pub fn script(&self, id: JobId, p: ForwardPoll) {
@@ -385,6 +390,16 @@ impl Forwarder for FakeForwarder {
         lock(&self.remote_cancelled).push((peer.0.clone(), remote));
         Ok(())
     }
+    fn remote_metrics(
+        &self,
+        peer: &MachineName,
+        remote: i64,
+    ) -> Result<tasks_core::metrics::JobMetricsView, ForwardError> {
+        lock(&self.metrics_asked).push((peer.0.clone(), remote));
+        lock(&self.metrics)
+            .clone()
+            .ok_or_else(|| ForwardError::Unavailable("no metrics scripted".into()))
+    }
     fn forget(&self, job: JobId) {
         lock(&self.registered).remove(&job);
     }
@@ -410,6 +425,8 @@ pub struct Rig {
     pub cgroups: Arc<tasks_platform::fake::FakeCgroups>,
     /// The process table the rig reports.
     pub table: Arc<tasks_platform::fake::FakePlatform>,
+    /// The scripted power source and sleep guard.
+    pub power: Arc<tasks_platform::fake::FakePower>,
 }
 
 /// The identity the rig signs its audit checkpoints with.
@@ -494,6 +511,7 @@ impl Rig {
         let holders = Arc::new(FakeHolders::default());
         let cgroups = Arc::new(cgroups);
         let table = Arc::new(tasks_platform::fake::FakePlatform::default());
+        let power = Arc::new(tasks_platform::fake::FakePower::default());
         let platform = Platform {
             memory: machine.clone(),
             pressure: machine.clone(),
@@ -507,6 +525,8 @@ impl Rig {
             holders: holders.clone(),
             cgroups: cgroups.clone(),
             table: table.clone(),
+            power: power.clone(),
+            sleep: power.clone(),
         };
         let policy = MachinePolicy::from_text(
             if policy.is_empty() {
@@ -558,6 +578,7 @@ impl Rig {
             audit_store,
             cgroups,
             table,
+            power,
         }
     }
 
@@ -771,6 +792,11 @@ impl PeerWorld {
         );
     }
 
+    /// A fresh receiver over the worker's runner and store, for tests that wrap it.
+    pub fn receiver_for_test(&self) -> tasks_peer::receiver::Receiver {
+        self.receiver()
+    }
+
     fn receiver(&self) -> tasks_peer::receiver::Receiver {
         use tasks_peer::receiver::{AllowAll, Allowlist, Receiver};
         let status = tasks_peer::proto::PeerStatus {
@@ -793,6 +819,9 @@ impl PeerWorld {
                 .collect(),
             queue: Default::default(),
             pressure: Default::default(),
+            jobs: Vec::new(),
+            cores_in_use_milli: None,
+            power: None,
         };
         Receiver::new(
             "nixos",

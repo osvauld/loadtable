@@ -254,6 +254,13 @@ fn r241_roles_parse_and_each_covers_only_what_it_should() {
     assert!(Role::Admin.covers(Need::Submit));
     assert_eq!(need_of(&submit_body()), Need::Submit);
     assert_eq!(need_of(&Body::StatusRequest), Need::Any);
+    // R-622: an observer may read the metrics of its own jobs, like their events
+    assert_eq!(
+        need_of(&Body::JobMetricsRequest {
+            remote: crate::ids::RemoteJobId(1)
+        }),
+        Need::Any
+    );
     assert_eq!(need_of(&Body::Hello(Hello::local("x"))), Need::Any);
 }
 

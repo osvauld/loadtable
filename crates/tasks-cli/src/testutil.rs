@@ -313,6 +313,7 @@ pub fn status_snapshot() -> StatusSnapshot {
         attribution: String::new(),
         transfer: None,
         trips: Vec::new(),
+        power: None,
         alerts: vec![AlertView {
             id: "a".into(),
             level: "warn".into(),

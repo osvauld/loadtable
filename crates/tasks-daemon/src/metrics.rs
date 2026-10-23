@@ -171,12 +171,18 @@ impl MetricsStore {
         });
         h.quality = Some(quality);
         h.ended_ms = None;
-        if h.samples.len() >= MAX_SAMPLES {
+        // a second sample at the same instant replaces the first: rates over a zero-length
+        // interval are unknown, and would hide the last real one (R-575)
+        if h.samples.back().is_some_and(|s| s.t_ms == sample.t_ms) {
+            h.samples.pop_back();
+        } else if h.samples.len() >= MAX_SAMPLES {
             h.samples.pop_front();
         }
         h.samples.push_back(sample);
         if let Some(s) = snap {
-            h.prev = h.cur.take();
+            if h.cur.as_ref().is_none_or(|c| c.at_ms != s.at_ms) {
+                h.prev = h.cur.take();
+            }
             h.cur = Some(s);
         }
     }
@@ -216,6 +222,7 @@ impl MetricsStore {
                 .map(|c| group_procs(h.prev.as_ref(), c))
                 .unwrap_or_default(),
             usual_peak_mem_bytes: None,
+            source: None,
             note: h
                 .ended_ms
                 .map(|_| "the job has ended; these are its last samples".to_string()),
@@ -272,6 +279,36 @@ impl Scheduler {
         Some(ProcSnap::of(now, &rows))
     }
 
+    /// Answers `Request::JobMetrics` for the API: a job forwarded to a peer is asked of that
+    /// peer (bounded; see [`crate::peer_link::metrics`]), any other from this machine's store.
+    pub(crate) fn api_job_metrics(&self, rec: &tasks_ledger::JobRecord) -> JobMetricsView {
+        let Some(fwd) = rec.forward.as_ref() else {
+            return self.job_metrics(rec);
+        };
+        let peer = &fwd.peer.0;
+        let Some(remote) = fwd.remote_job else {
+            let mut v = crate::peer_link::metrics::empty_view(format!(
+                "{peer} has not accepted the job yet"
+            ));
+            v.source = Some(format!("on {peer}"));
+            return v;
+        };
+        if rec.phase.is_terminal() {
+            let mut v = crate::peer_link::metrics::empty_view(
+                "the job has finished and its samples are no longer held".to_string(),
+            );
+            v.source = Some(format!("on {peer}, remote job #{remote}"));
+            return v;
+        }
+        let mut v = match self.forwarder.remote_metrics(&fwd.peer, remote) {
+            Ok(v) => v,
+            Err(e) => crate::peer_link::metrics::empty_view(e.to_string()),
+        };
+        v.source
+            .get_or_insert_with(|| format!("on {peer}, remote job #{remote}"));
+        v
+    }
+
     /// Answers `Request::JobMetrics`.
     pub(crate) fn job_metrics(&self, rec: &tasks_ledger::JobRecord) -> JobMetricsView {
         let now = self.clock.now_ms();
@@ -281,6 +318,7 @@ impl Scheduler {
             samples: Vec::new(),
             procs: Vec::new(),
             usual_peak_mem_bytes: None,
+            source: None,
             note: Some(if rec.phase.is_terminal() {
                 "the job has finished and its samples are no longer held".to_string()
             } else {
@@ -336,6 +374,21 @@ mod tests {
             v.samples.last().map(|s| s.t_ms),
             Some(MAX_SAMPLES as i64 + 49)
         );
+    }
+
+    // R-575
+    #[test]
+    fn r575_a_second_sample_at_the_same_instant_replaces_the_first() {
+        let mut m = MetricsStore::default();
+        let id = JobId(1);
+        let at = |t, cpu| snap(t, vec![row(10, 1, "rustc", 5, cpu)]);
+        let q = Attribution::Cgroup;
+        m.record(id, 0, q, sample(0), Some(at(0, 0)));
+        m.record(id, 2_000, q, sample(2_000), Some(at(2_000, 4_000_000)));
+        m.record(id, 2_000, q, sample(2_000), Some(at(2_000, 4_000_000)));
+        let v = m.view(id, 2_000).unwrap();
+        assert_eq!(v.samples.len(), 2);
+        assert_eq!(v.procs.first().and_then(|g| g.cpu_cores), Some(2.0));
     }
 
     // R-561

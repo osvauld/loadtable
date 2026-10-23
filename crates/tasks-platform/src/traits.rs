@@ -1,8 +1,9 @@
 //! The platform traits.
 
 use crate::{
-    Child, GroupId, InstallPlan, MemorySnapshot, PlatformError, PressureSnapshot,
-    PressureThresholds, ServiceStatus, ServiceUnit, Signal, SlotGuard, SpawnSpec, Usage,
+    Child, GroupId, InhibitGuard, InstallPlan, MemorySnapshot, PlatformError, PowerReading,
+    PressureSnapshot, PressureThresholds, ServiceStatus, ServiceUnit, Signal, SlotGuard, SpawnSpec,
+    Usage,
 };
 use std::path::Path;
 use tasks_core::SlotKind;
@@ -57,4 +58,17 @@ pub trait Service {
 pub trait Disk {
     /// Free bytes on the filesystem holding `path`.
     fn free_bytes(&self, path: &Path) -> Result<u64, PlatformError>;
+}
+
+/// Reads where the machine's power comes from.
+pub trait PowerSource {
+    /// Mains or battery now, with the charge when there is a battery.
+    fn power(&self) -> Result<PowerReading, PlatformError>;
+}
+
+/// Keeps the machine from idle sleep while a guard is held. It changes no system setting: the
+/// hold ends when the guard is dropped or the process exits.
+pub trait SleepGuard {
+    /// Takes the hold, saying why (shown by the OS's own tools). `Err` when this machine cannot.
+    fn keep_awake(&self, why: &str) -> Result<InhibitGuard, PlatformError>;
 }

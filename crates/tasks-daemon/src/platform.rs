@@ -5,7 +5,8 @@ use std::path::Path;
 use std::sync::Arc;
 use tasks_ledger::Store;
 use tasks_platform::{
-    Cgroups, Disk, FlockSlots, Memory, Pressure, ProcessTable, Processes, SlotLocks,
+    Cgroups, Disk, FlockSlots, Memory, PowerSource, Pressure, ProcessTable, Processes, SleepGuard,
+    SlotLocks,
 };
 use tasks_timing::History;
 
@@ -32,6 +33,10 @@ pub struct Platform {
     pub cgroups: Arc<dyn Cgroups>,
     /// The process table: per-job figures without cgroups, and the top processes outside jobs.
     pub table: Arc<dyn ProcessTable>,
+    /// Mains or battery.
+    pub power: Arc<dyn PowerSource + Send + Sync>,
+    /// The hold that keeps the machine from idle sleep.
+    pub sleep: Arc<dyn SleepGuard + Send + Sync>,
 }
 
 impl Platform {
@@ -48,7 +53,9 @@ impl Platform {
             // On Linux this moves the daemon into its `daemon` leaf cgroup when the service
             // unit delegated one; otherwise it says why it did not.
             cgroups: Arc::from(tasks_platform::native_cgroups()),
-            table: native,
+            table: native.clone(),
+            power: native.clone(),
+            sleep: native,
         }
     }
 }

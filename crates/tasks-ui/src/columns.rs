@@ -1,53 +1,34 @@
-//! Table columns and which of them fit (R-205). Pure.
+//! The job list's columns and which of them fit (R-205, R-581). Pure.
+//!
+//! One list serves Running, Waiting and Finished, so the columns are the same for all and
+//! every one carries something for every row: the state cell holds what used to be the
+//! Remote, Class, Limit and Cancel reason columns.
 //!
 //! Every column has a priority. When the window is too narrow the highest-numbered priority
 //! goes first; priority 0 columns are essential and never dropped.
 
-use crate::format::UNKNOWN;
-use crate::model::{JobRow, Section};
+use crate::model::JobRow;
 
-/// A table column.
+/// A list column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Col {
     /// Job id.
     Id,
-    /// Agent: owner up to `@`, with its colour dot.
+    /// Agent: colour stripe, name and, when the name mentions one, the vendor.
     Agent,
     /// The command.
     Command,
-    /// Machine badge.
+    /// Machine chip.
     Machine,
-    /// Phase.
-    Phase,
-    /// Progress bar and `done/total`.
-    Progress,
-    /// ETA and its basis.
-    Eta,
-    /// Queue position.
-    Position,
-    /// What it waits for.
-    Wait,
-    /// The class the queue orders the job by.
-    Class,
-    /// Start estimate.
-    StartEstimate,
-    /// The peer's phase of a forward.
-    RemotePhase,
-    /// Wall-clock limit.
-    Timeout,
-    /// Cancel reason.
-    CancelReason,
-    /// Running time, waiting time or time since finish.
-    Age,
+    /// What the job is doing, in words.
+    State,
 }
 
-/// One column of a table.
+/// One column of the list.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ColSpec {
     /// The column.
     pub col: Col,
-    /// Header text.
-    pub title: &'static str,
     /// Width in points (the command column grows past this when there is room).
     pub width: f32,
     /// 0 is essential; larger numbers drop first.
@@ -55,58 +36,27 @@ pub struct ColSpec {
 }
 
 /// Space between columns, in points.
-pub const GAP: f32 = 8.0;
+pub const GAP: f32 = 12.0;
 /// The narrowest window the layout supports, in points.
 pub const MIN_WINDOW_WIDTH: f32 = 640.0;
-/// Width the action buttons of the details bar need, in points (they wrap, never clip).
-pub const ACTION_BAR_WIDTH: f32 = 420.0;
 
-const fn c(col: Col, title: &'static str, width: f32, priority: u8) -> ColSpec {
+const fn c(col: Col, width: f32, priority: u8) -> ColSpec {
     ColSpec {
         col,
-        title,
         width,
         priority,
     }
 }
 
-/// All columns of a section, in display order.
-pub fn specs(section: Section) -> Vec<ColSpec> {
-    match section {
-        Section::Running => vec![
-            c(Col::Id, "Job", 52.0, 0),
-            c(Col::Agent, "Agent", 96.0, 0),
-            c(Col::Command, "Command", 200.0, 0),
-            c(Col::Machine, "Machine", 72.0, 1),
-            c(Col::Eta, "ETA", 170.0, 2),
-            c(Col::Progress, "Progress", 120.0, 3),
-            c(Col::RemotePhase, "Remote", 80.0, 4),
-            c(Col::Age, "Running", 64.0, 5),
-            c(Col::Timeout, "Limit", 80.0, 6),
-        ],
-        Section::Queued => vec![
-            c(Col::Id, "Job", 52.0, 0),
-            c(Col::Agent, "Agent", 96.0, 0),
-            c(Col::Command, "Command", 200.0, 0),
-            c(Col::Position, "#", 32.0, 1),
-            c(Col::Wait, "Waiting for", 230.0, 2),
-            c(Col::Class, "Class", 84.0, 2),
-            c(Col::StartEstimate, "Starts in", 140.0, 3),
-            c(Col::Machine, "Machine", 72.0, 4),
-            c(Col::Age, "Queued", 64.0, 5),
-            c(Col::Timeout, "Limit", 80.0, 6),
-        ],
-        Section::Recent => vec![
-            c(Col::Id, "Job", 52.0, 0),
-            c(Col::Agent, "Agent", 96.0, 0),
-            c(Col::Command, "Command", 200.0, 0),
-            c(Col::Phase, "Result", 130.0, 0),
-            c(Col::Age, "Finished", 90.0, 2),
-            c(Col::Machine, "Machine", 72.0, 3),
-            c(Col::CancelReason, "Cancel reason", 150.0, 4),
-            c(Col::Timeout, "Limit", 80.0, 5),
-        ],
-    }
+/// All columns, in display order.
+pub fn specs() -> Vec<ColSpec> {
+    vec![
+        c(Col::Id, 44.0, 0),
+        c(Col::Agent, 116.0, 0),
+        c(Col::Command, 120.0, 0),
+        c(Col::Machine, 64.0, 1),
+        c(Col::State, 232.0, 0),
+    ]
 }
 
 /// Total width of `cols` with the gaps between them.
@@ -115,9 +65,9 @@ pub fn total_width(cols: &[ColSpec]) -> f32 {
 }
 
 /// The columns that fit in `available` points, in display order. Least important columns go
-/// first; essential ones stay even when they do not fit (the table then scrolls).
-pub fn visible(section: Section, available: f32) -> Vec<ColSpec> {
-    let mut cols = specs(section);
+/// first; essential ones stay even when they do not fit (the list then scrolls).
+pub fn visible(available: f32) -> Vec<ColSpec> {
+    let mut cols = specs();
     while total_width(&cols) > available {
         // the droppable column with the largest priority number; the later one on a tie
         let worst = cols
@@ -136,111 +86,98 @@ pub fn visible(section: Section, available: f32) -> Vec<ColSpec> {
     cols
 }
 
-/// A row's text in a column. Unknown values read [`UNKNOWN`], never zero (R-128).
+/// A row's text in a column, as plain text (for tooltips and the glyph check).
 pub fn cell(row: &JobRow, col: Col) -> String {
-    let dash = || UNKNOWN.to_string();
     match col {
         Col::Id => format!("#{}", row.id),
-        Col::Agent => row.agent.clone(),
+        Col::Agent => match row.vendor {
+            Some(v) => format!("{} {v}", row.agent),
+            None => row.agent.clone(),
+        },
         Col::Command => row.command.clone(),
         Col::Machine => row.machine.clone(),
-        Col::Phase => row.phase.clone(),
-        Col::Progress => row.progress_text.clone(),
-        Col::Eta => {
-            if row.eta_basis.is_empty() {
-                row.eta.clone()
-            } else {
-                format!("{} ({})", row.eta, row.eta_basis)
-            }
+        Col::State => {
+            let s = &row.state;
+            [s.head.as_str(), s.left.as_str(), s.right.as_str()]
+                .iter()
+                .filter(|t| !t.is_empty())
+                .copied()
+                .collect::<Vec<_>>()
+                .join(" · ")
         }
-        Col::Position => row.position.map_or_else(dash, |p| p.to_string()),
-        Col::Wait => row.wait.clone().unwrap_or_else(dash),
-        Col::Class => {
-            if row.queue_class.is_empty() {
-                dash()
-            } else {
-                row.queue_class.clone()
-            }
-        }
-        Col::StartEstimate => row.start_estimate.clone().unwrap_or_else(dash),
-        Col::RemotePhase => row.remote_phase.clone().unwrap_or_else(dash),
-        Col::Timeout => row.timeout.clone().unwrap_or_else(dash),
-        Col::CancelReason => row.cancel_reason.clone().unwrap_or_else(dash),
-        Col::Age => row.age.clone(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn titles(cols: &[ColSpec]) -> Vec<&'static str> {
-        cols.iter().map(|s| s.title).collect()
-    }
+    use crate::fixtures;
+    use crate::model;
 
     #[test]
     fn r205_column_layout_drops_least_important_columns_first() {
-        for section in [Section::Running, Section::Queued, Section::Recent] {
-            let all = specs(section);
-            let mut width = total_width(&all);
-            let mut kept = all.len();
-            let mut last_dropped_priority = u8::MAX;
-            // shrink the window one point at a time: the visible set only ever loses columns,
-            // and each loss is of the least important column left
-            let mut prev = titles(&all);
-            while width > 100.0 {
-                width -= 1.0;
-                let now = visible(section, width);
-                let now_titles = titles(&now);
-                assert!(now_titles.iter().all(|t| prev.contains(t)), "{section:?}");
-                if now.len() < kept {
-                    let gone: Vec<_> = all
-                        .iter()
-                        .filter(|s| !now_titles.contains(&s.title))
-                        .collect();
-                    let newly: Vec<_> = gone.iter().filter(|s| prev.contains(&s.title)).collect();
-                    assert_eq!(newly.len(), 1, "one column per step");
-                    let dropped = newly[0].priority;
-                    // nothing kept is less important than what was just dropped
-                    assert!(
-                        now.iter().all(|s| s.priority <= dropped),
-                        "{section:?} {now_titles:?}"
-                    );
-                    assert!(dropped <= last_dropped_priority);
-                    last_dropped_priority = dropped;
-                    kept = now.len();
-                }
-                prev = now_titles;
+        let all = specs();
+        let mut width = total_width(&all);
+        let mut kept = all.len();
+        let mut last_dropped_priority = u8::MAX;
+        // shrink the window one point at a time: the visible set only ever loses columns,
+        // and each loss is of the least important column left
+        let mut prev: Vec<Col> = all.iter().map(|s| s.col).collect();
+        while width > 100.0 {
+            width -= 1.0;
+            let now = visible(width);
+            let now_cols: Vec<Col> = now.iter().map(|s| s.col).collect();
+            assert!(now_cols.iter().all(|t| prev.contains(t)));
+            if now.len() < kept {
+                let newly: Vec<_> = all
+                    .iter()
+                    .filter(|s| !now_cols.contains(&s.col) && prev.contains(&s.col))
+                    .collect();
+                assert_eq!(newly.len(), 1, "one column per step");
+                let dropped = newly[0].priority;
+                // nothing kept is less important than what was just dropped
+                assert!(now.iter().all(|s| s.priority <= dropped));
+                assert!(dropped <= last_dropped_priority);
+                last_dropped_priority = dropped;
+                kept = now.len();
             }
+            prev = now_cols;
         }
         // a wide window shows everything
-        assert_eq!(
-            visible(Section::Queued, 5000.0).len(),
-            specs(Section::Queued).len()
-        );
-        // the first column to go is the one with the highest priority number
-        let all = specs(Section::Running);
+        assert_eq!(visible(5000.0).len(), all.len());
+        // the first column to go is the machine chip
         let just_short = total_width(&all) - 1.0;
-        assert!(!titles(&visible(Section::Running, just_short)).contains(&"Limit"));
+        assert!(!visible(just_short).iter().any(|s| s.col == Col::Machine));
     }
 
     #[test]
-    fn r205_essential_columns_and_buttons_fit_without_clipping() {
-        for section in [Section::Running, Section::Queued, Section::Recent] {
-            let narrow = visible(section, MIN_WINDOW_WIDTH);
-            assert!(total_width(&narrow) <= MIN_WINDOW_WIDTH, "{section:?}");
-            let essential: Vec<_> = specs(section)
-                .into_iter()
-                .filter(|s| s.priority == 0)
-                .collect();
-            // even in a window of nothing, essential columns stay
-            let nothing = visible(section, 0.0);
-            assert_eq!(nothing, essential);
-            assert!(total_width(&essential) <= MIN_WINDOW_WIDTH);
-            assert!(narrow.iter().any(|s| s.col == Col::Id));
-            assert!(narrow.iter().any(|s| s.col == Col::Agent));
-            assert!(narrow.iter().any(|s| s.col == Col::Command));
+    fn r205_essential_columns_fit_the_narrowest_window() {
+        let narrow = visible(MIN_WINDOW_WIDTH);
+        assert!(total_width(&narrow) <= MIN_WINDOW_WIDTH);
+        let essential: Vec<_> = specs().into_iter().filter(|s| s.priority == 0).collect();
+        // even in a window of nothing, essential columns stay
+        assert_eq!(visible(0.0), essential);
+        assert!(total_width(&essential) <= MIN_WINDOW_WIDTH);
+        for col in [Col::Id, Col::Agent, Col::Command, Col::State] {
+            assert!(narrow.iter().any(|s| s.col == col), "{col:?}");
         }
-        const { assert!(ACTION_BAR_WIDTH <= MIN_WINDOW_WIDTH) };
+    }
+
+    #[test]
+    fn r581_no_column_of_the_list_is_empty_for_any_row() {
+        for d in [fixtures::busy(), fixtures::offline()] {
+            let vm = model::build(&d, 0);
+            for r in vm.running.iter().chain(&vm.queued).chain(&vm.recent) {
+                for s in specs() {
+                    let text = cell(r, s.col);
+                    assert!(
+                        !text.is_empty() && text != crate::format::UNKNOWN,
+                        "#{} {:?}: {text:?}",
+                        r.id,
+                        s.col
+                    );
+                }
+            }
+        }
     }
 }

@@ -5,7 +5,7 @@
 //! This path is type-checked from Linux but only runs on macOS. The disk figures are per process
 //! and cumulative; the sampler turns them into per-window and per-job numbers.
 
-use super::bsdinfo::bsd_info;
+use super::bsdinfo::bsd_info_for_scan;
 use crate::macos_parse::start_token;
 use crate::sample::clean_program_name;
 use crate::{PlatformError, ProcInfo};
@@ -24,7 +24,7 @@ pub(super) fn snapshot() -> Result<Vec<ProcInfo>, PlatformError> {
             continue;
         };
         // a process that exits mid-read, or one we may not inspect, drops out
-        let Ok(Some(info)) = bsd_info(raw) else {
+        let Ok(Some(info)) = bsd_info_for_scan(raw) else {
             continue;
         };
         if info.zombie {

@@ -1183,6 +1183,7 @@ fn r573_metrics_prints_cores_memory_disk_and_the_top_five_groups() {
         procs,
         usual_peak_mem_bytes: Some(4 << 30),
         note: None,
+        source: None,
     };
     let c = Arc::new(FakeClient::from_fn(move |_| {
         Ok(Response::JobMetrics(view.clone()))
@@ -1200,6 +1201,30 @@ fn r573_metrics_prints_cores_memory_disk_and_the_top_five_groups() {
     );
     let j = Harness::default().run(&c, &["metrics", "7", "--json"]);
     assert!(j.out.contains("\"samples\""), "{}", j.out);
+}
+
+// R-628
+#[test]
+fn r628_metrics_of_a_forwarded_job_says_where_the_numbers_come_from() {
+    use tasks_core::metrics::JobMetricsView;
+    let view = JobMetricsView {
+        quality: None,
+        samples: Vec::new(),
+        procs: Vec::new(),
+        usual_peak_mem_bytes: None,
+        note: Some("mac unreachable".into()),
+        source: Some("on mac, remote job #9".into()),
+    };
+    let c = Arc::new(FakeClient::from_fn(move |_| {
+        Ok(Response::JobMetrics(view.clone()))
+    }));
+    let r = Harness::default().run(&c, &["metrics", "7"]);
+    assert!(
+        r.out.contains("measured on mac, remote job #9"),
+        "{}",
+        r.out
+    );
+    assert!(r.out.contains("note: mac unreachable"), "{}", r.out);
 }
 
 #[test]

@@ -263,6 +263,10 @@ pub struct PressureSummary {
     pub cpu_pct: Option<u8>,
     /// Memory pressure percent, when known.
     pub memory_pct: Option<u8>,
+    /// Memory pressure level (`normal`, `warn`, `critical`) for hosts without PSI percentages,
+    /// such as macOS.
+    #[serde(default)]
+    pub memory_level: Option<String>,
     /// I/O pressure percent, when known.
     pub io_pct: Option<u8>,
     /// One line for humans.
@@ -284,6 +288,24 @@ pub struct PressureSummary {
     pub swap_out_per_s: Option<u64>,
 }
 
+/// One running job on a peer and what it uses now, for the origin's "CPU by job" rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerJobUse {
+    /// The job's id on the peer.
+    pub id: u64,
+    /// Who owns it there.
+    pub owner: String,
+    /// CPU in thousandths of a core over the last sample interval, when two readings exist.
+    #[serde(default)]
+    pub cores_milli: Option<u32>,
+    /// Memory in use now, bytes, when sampled.
+    #[serde(default)]
+    pub mem_bytes: Option<u64>,
+}
+
+/// Most running jobs a status reply lists.
+pub const MAX_STATUS_JOBS: usize = 32;
+
 /// What a peer reports about itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerStatus {
@@ -295,6 +317,24 @@ pub struct PeerStatus {
     pub queue: QueueSummary,
     /// Pressure.
     pub pressure: PressureSummary,
+    /// The running jobs and their use now. Absent from an older peer.
+    #[serde(default)]
+    pub jobs: Vec<PeerJobUse>,
+    /// The whole machine's CPU in use, thousandths of a core. Absent from an older peer.
+    #[serde(default)]
+    pub cores_in_use_milli: Option<u32>,
+    /// Where its power comes from; absent from older peers.
+    #[serde(default)]
+    pub power: Option<PowerSummary>,
+}
+
+/// A peer's power state, shown next to its link state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PowerSummary {
+    /// Running on a battery.
+    pub on_battery: bool,
+    /// Battery charge, when there is a battery.
+    pub percent: Option<u8>,
 }
 
 /// Run a command on the receiver, in its synced copy of a checkout.
@@ -764,8 +804,28 @@ pub enum Body {
         /// The new token.
         grant: String,
     },
+    /// Ask for the live metrics of one job this peer submitted. An older peer refuses it as an
+    /// unknown message.
+    JobMetricsRequest {
+        /// The job on the receiver.
+        remote: RemoteJobId,
+    },
+    /// The metrics of the job.
+    JobMetrics(tasks_core::metrics::JobMetricsView),
     /// A named refusal.
     Refuse(Refusal),
+}
+
+/// Samples kept when a metrics reply would be over its frame limit.
+pub fn fit_metrics(
+    mut v: tasks_core::metrics::JobMetricsView,
+) -> tasks_core::metrics::JobMetricsView {
+    while encode(&Body::JobMetrics(v.clone())).is_err() && !v.samples.is_empty() {
+        // the oldest quarter goes first: the graph's right edge is what matters
+        let drop = (v.samples.len() / 4).max(1);
+        v.samples.drain(..drop);
+    }
+    v
 }
 
 impl Body {
@@ -774,7 +834,8 @@ impl Body {
         match self {
             Body::Event(JobEvent::Log { .. })
             | Body::SyncPackChunk { .. }
-            | Body::FetchData { .. } => MAX_DATA_FRAME_BYTES,
+            | Body::FetchData { .. }
+            | Body::JobMetrics(_) => MAX_DATA_FRAME_BYTES,
             _ => MAX_CONTROL_BYTES,
         }
     }
@@ -880,12 +941,58 @@ mod tests {
         assert_eq!(decode(&encode(&b).unwrap()).unwrap(), b);
     }
 
+    // R-627
+    #[test]
+    fn r627_status_json_from_an_older_peer_parses_and_a_big_metrics_reply_is_trimmed() {
+        let now = crate::fake::FakeStatus::nixos().0;
+        let mut json = serde_json::to_value(&now).unwrap();
+        // what a peer that predates the fields sends
+        let Some(obj) = json.as_object_mut() else {
+            panic!("not an object")
+        };
+        obj.remove("jobs");
+        obj.remove("cores_in_use_milli");
+        let old = json.to_string();
+        let s: PeerStatus = serde_json::from_str(&old).unwrap();
+        assert!(s.jobs.is_empty() && s.cores_in_use_milli.is_none());
+        let sample = |t: i64| tasks_core::metrics::MetricSample {
+            t_ms: t,
+            cpu_usec: Some(u64::MAX),
+            mem_bytes: Some(u64::MAX),
+            io_read_bytes: Some(u64::MAX),
+            io_write_bytes: Some(u64::MAX),
+            io_some_us: Some(u64::MAX),
+        };
+        let big = tasks_core::metrics::JobMetricsView {
+            quality: None,
+            samples: (0..2000).map(|t| sample(1_700_000_000_000 + t)).collect(),
+            procs: Vec::new(),
+            usual_peak_mem_bytes: None,
+            note: None,
+            source: None,
+        };
+        assert!(encode(&Body::JobMetrics(big.clone())).is_err());
+        let fit = fit_metrics(big.clone());
+        assert!(encode(&Body::JobMetrics(fit.clone())).is_ok());
+        // the newest samples survive
+        assert_eq!(fit.samples.last(), big.samples.last());
+        assert!(!fit.samples.is_empty());
+        let small = tasks_core::metrics::JobMetricsView {
+            samples: vec![sample(1)],
+            ..big
+        };
+        assert_eq!(fit_metrics(small.clone()), small);
+    }
+
     fn every_body() -> Vec<Body> {
         let h = Hash::of(b"x");
         let c = CheckoutId::derive("h", std::path::Path::new("/p"));
         vec![
             Body::Hello(Hello::local("a")),
             Body::StatusRequest,
+            Body::JobMetricsRequest {
+                remote: RemoteJobId(3),
+            },
             Body::Subscribe {
                 remote: RemoteJobId(3),
                 from_offset: 9,

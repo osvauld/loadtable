@@ -17,6 +17,7 @@
 
 mod drive;
 pub mod fetch;
+pub mod metrics;
 pub mod serve;
 
 #[cfg(feature = "iroh")]
@@ -128,6 +129,8 @@ pub struct PeerLinkOptions {
     pub fetch_links: Vec<String>,
     /// Largest output file fetched back.
     pub fetch_max_bytes: u64,
+    /// The longest a request for a forwarded job's metrics may take.
+    pub metrics_timeout: Duration,
 }
 
 impl PeerLinkOptions {
@@ -152,6 +155,7 @@ impl PeerLinkOptions {
             gate: Arc::new(tasks_peer::sync::OpenGate),
             fetch_links: Vec::new(),
             fetch_max_bytes: tasks_peer::outputs::FetchPolicy::default().max_file_bytes,
+            metrics_timeout: Duration::from_secs(2),
         }
     }
 }
@@ -205,6 +209,7 @@ pub(crate) struct Inner<T: Transport> {
     pub locks: Arc<CheckoutLocks>,
     pub jobs: Mutex<BTreeMap<JobId, Arc<Job>>>,
     links: Mutex<BTreeMap<String, LinkInfo>>,
+    metrics_cache: Mutex<BTreeMap<(String, i64), metrics::Cached>>,
     epoch: Instant,
     skew: Mutex<Duration>,
     pub stop: AtomicBool,
@@ -252,6 +257,7 @@ impl<T: Transport + 'static> PeerLink<T> {
             locks: Arc::new(CheckoutLocks::new()),
             jobs: Mutex::new(BTreeMap::new()),
             links: Mutex::new(links),
+            metrics_cache: Mutex::new(BTreeMap::new()),
             epoch: Instant::now(),
             skew: Mutex::new(Duration::ZERO),
             stop: AtomicBool::new(false),
@@ -303,6 +309,13 @@ impl<T: Transport + 'static> PeerLink<T> {
 
     fn job(&self, id: JobId) -> Option<Arc<Job>> {
         lock(&self.inner.jobs).get(&id).cloned()
+    }
+
+    /// True when the last probe of `name` failed (an unprobed link is not "down" yet).
+    fn link_is_down(&self, name: &str) -> bool {
+        lock(&self.inner.links)
+            .get(name)
+            .is_some_and(|l| l.probed && !l.ok)
     }
 
     fn spec_of(&self, name: &str) -> Option<PeerSpec> {
@@ -790,6 +803,14 @@ impl<T: Transport + 'static> Forwarder for PeerLink<T> {
             ))),
             Err(e) => Err(unreachable(e)),
         }
+    }
+
+    fn remote_metrics(
+        &self,
+        peer: &MachineName,
+        remote_job: i64,
+    ) -> Result<tasks_core::metrics::JobMetricsView, ForwardError> {
+        self.remote_metrics_of(peer, remote_job)
     }
 
     fn forget(&self, job: JobId) {
