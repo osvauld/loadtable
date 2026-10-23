@@ -238,6 +238,7 @@ mod tests {
             fixtures::offline(),
             fixtures::idle(),
             fixtures::three_machines(),
+            fixtures::mac(),
         ] {
             let vm = model::build(&d, 0);
             for m in &vm.machines {
@@ -250,7 +251,7 @@ mod tests {
                     m.ram,
                     m.swap,
                     m.pressure,
-                    m.ram_free,
+                    m.ram_used,
                     m.away_note,
                     m.notes
                 ));
@@ -270,6 +271,18 @@ mod tests {
                 for (k, v) in &det.facts {
                     texts.push_str(k);
                     texts.push_str(v);
+                }
+                for v in [fixtures::metrics_running(), fixtures::metrics_forwarded()] {
+                    let panel = crate::resources::panel(
+                        r,
+                        crate::resources::Input {
+                            view: Some(&v),
+                            error: Some("x"),
+                            cores: Some(8.0),
+                            ..Default::default()
+                        },
+                    );
+                    texts.push_str(&format!("{panel:?}"));
                 }
                 if let Some(s) = &det.strip {
                     texts.push_str(&s.times.join(" "));
@@ -296,9 +309,9 @@ mod tests {
         texts.push_str(
             "Log Move up Cancel… Cancel job Keep it running Drain queue… Resume queue Drain \
              Keep going Follow Search Clear Refresh Raw JSON live · connecting… daemon unreachable \
-             Resources Machine Memory stall CPU RAM free Slots ↑↓ select · Enter log · Esc deselect \
+             Resources Processes Machine Memory CPU, by job Slots ↑↓ select · Enter log · Esc deselect \
              updated 3s ago Select a job to see its phases, folder and actions. \
-             Live CPU, memory and disk for this job will show here. last hour · the rest is in History",
+             PROGRAM CPU IN CORES MEMORY usual peak last hour · the rest is in History",
         );
         // the Audit tab: filters, column titles and the rows' own symbols
         texts.push_str("Action Peer Job Apply all name or DID id #101 did:key:z6Mk…EGta");
@@ -338,9 +351,10 @@ mod tests {
         let dir = std::env::var_os("TASKS_UI_SCREENSHOT_DIR").map(std::path::PathBuf::from);
         let history = history();
         let main = |dark: bool| {
-            let mut a = App::fixed(&fixtures::three_machines(), dead_link());
+            let mut a = App::fixed(&fixtures::mac(), dead_link());
             a.select(101);
-            (a, [1400, 900], dark)
+            a.set_metrics(101, fixtures::metrics_running());
+            (a, [1400, 1240], dark)
         };
         let shots: Vec<(&str, App, [usize; 2], bool)> = vec![
             ("main-dark", main(true).0, main(true).1, true),
@@ -368,11 +382,45 @@ mod tests {
             (
                 "narrow-dark",
                 {
-                    let mut a = App::fixed(&fixtures::busy(), dead_link());
+                    let mut a = App::fixed(&fixtures::mac(), dead_link());
                     a.select(101);
+                    a.set_metrics(101, fixtures::metrics_running());
                     a
                 },
-                [700, 1000],
+                [700, 1400],
+                true,
+            ),
+            (
+                "forwarded-dark",
+                {
+                    let mut a = App::fixed(&fixtures::mac(), dead_link());
+                    a.select(104);
+                    a.set_metrics(104, fixtures::metrics_forwarded());
+                    a
+                },
+                [1400, 1240],
+                true,
+            ),
+            (
+                "finished-forward-light",
+                {
+                    let mut a = App::fixed(&fixtures::mac(), dead_link());
+                    a.select(94);
+                    a.set_metrics(94, fixtures::metrics_forwarded());
+                    a
+                },
+                [1400, 1240],
+                false,
+            ),
+            (
+                "metrics-unavailable-dark",
+                {
+                    let mut a = App::fixed(&fixtures::mac(), dead_link());
+                    a.select(102);
+                    a.set_metrics_error(102, "the daemon did not answer");
+                    a
+                },
+                [1400, 900],
                 true,
             ),
             (
@@ -489,6 +537,38 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::NONE,
         }
+    }
+
+    #[test]
+    fn r645_the_window_asks_for_metrics_only_of_a_running_job_and_not_twice_in_a_row() {
+        let link = Arc::new(FakeLink::from_fn(|req| match req {
+            tasks_daemon::api::Request::JobMetrics { .. } => Ok(
+                tasks_daemon::api::Response::JobMetrics(fixtures::metrics_running()),
+            ),
+            _ => Err(LinkError("unexpected".into())),
+        }));
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut app = App::fixed(&fixtures::mac(), link.clone());
+        // a waiting job: nothing is asked
+        app.select(110);
+        for _ in 0..3 {
+            frame(&mut app, &ctx, vec![]);
+        }
+        assert!(link.requests().is_empty());
+        // a running one: one request, however many frames pass before the answer
+        app.select(101);
+        for _ in 0..5 {
+            frame(&mut app, &ctx, vec![]);
+        }
+        let asked = |l: &FakeLink| {
+            l.requests()
+                .iter()
+                .filter(|r| matches!(r, tasks_daemon::api::Request::JobMetrics { .. }))
+                .count()
+        };
+        assert_eq!(asked(&link), 1);
+        assert!(app.metrics_requested());
     }
 
     #[test]

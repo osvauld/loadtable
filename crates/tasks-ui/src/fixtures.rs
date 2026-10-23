@@ -2,7 +2,8 @@
 
 use crate::feed::Dashboard;
 use std::path::PathBuf;
-use tasks_core::{JobId, Kind, MachineName, Placement, SlotKind, WaitReason};
+use tasks_core::metrics::{JobMetricsView, MetricSample, ProcGroup};
+use tasks_core::{Attribution, JobId, Kind, MachineName, Placement, SlotKind, WaitReason};
 use tasks_daemon::api::{
     AlertView, DaemonView, JobView, PeerMachineView, PeerSlotView, PeerView, PressureView,
     RunningView, SlotGroupView, SlotView, StatusSnapshot, WaiterView,
@@ -77,6 +78,7 @@ pub fn job(id: i64, owner: &str, phase: Phase) -> JobView {
         remote_wait: None,
         fetch_paths: Vec::new(),
         fetch: Vec::new(),
+        sync: None,
     }
 }
 
@@ -85,11 +87,13 @@ fn pressure() -> PressureView {
         memory: "normal".into(),
         memory_some: Some(1.5),
         memory_full: Some(0.0),
+        memory_stall_limit: None,
         cpu: Some(12.0),
         io: Some(3.0),
         available_memory: Some(8 << 30),
         memory_total: Some(16 << 30),
         cpu_busy_pct: Some(23.0),
+        cpu_cores: Some(10),
         cores_in_use: Some(3.7),
         swap_total: Some(8 << 30),
         swap_used: Some(1 << 30),
@@ -147,6 +151,7 @@ fn named_peer(name: &str, state: &str, ago: Option<u64>) -> PeerView {
             io_pct: Some(1),
             pressure_summary: String::new(),
             cpu_busy_pct: Some(30),
+            memory_available_bytes: Some(51 << 30),
             swap_total: Some(4 << 30),
             swap_used: Some(0),
             swap_in_per_s: Some(0),
@@ -324,7 +329,7 @@ pub fn busy() -> Dashboard {
             log_bytes: 20_480,
             figures: None,
             cores: Some(2.0),
-            mem_bytes: None,
+            mem_bytes: Some(1_500_000_000),
         },
         RunningView {
             id: JobId(102),
@@ -338,8 +343,8 @@ pub fn busy() -> Dashboard {
             eta_secs: None,
             log_bytes: 512,
             figures: None,
-            cores: None,
-            mem_bytes: None,
+            cores: Some(1.2),
+            mem_bytes: Some(400 << 20),
         },
     ];
     st.waiting = vec![
@@ -432,9 +437,211 @@ pub fn busy() -> Dashboard {
     d
 }
 
+/// What the worker `nixos` says it runs: the forward #103 (its job 1496) and the rest of
+/// its load.
+fn nixos_load(d: &mut Dashboard) {
+    for p in &mut d.status.peers {
+        if p.name != "nixos" {
+            continue;
+        }
+        if let Some(m) = &mut p.machine {
+            m.jobs = vec![tasks_daemon::api::PeerJobUseView {
+                id: 1496,
+                owner: "hard-errors@laptop".into(),
+                cores_milli: Some(4100),
+                mem_bytes: Some(3 << 30),
+            }];
+            // 30% of 16 cores is 4.8: the job and 0.7 outside it
+            m.cores_in_use_milli = Some(4800);
+        }
+    }
+}
+
+/// A Mac worker that is awake: no stall percentage, only a level, and CPU from cores in use.
+fn mac_peer() -> PeerView {
+    let mut p = named_peer("mac", "up", Some(2));
+    if let Some(m) = &mut p.machine {
+        m.cores = 8;
+        m.memory_bytes = 16 << 30;
+        m.memory_pct = None;
+        m.memory_level = Some("warn".into());
+        m.memory_available_bytes = Some(2 << 30);
+        m.cpu_busy_pct = None;
+        m.io_pct = None;
+        m.cpu_pct = Some(60);
+        m.slots = vec![PeerSlotView {
+            kind: "compile".into(),
+            total: 2,
+            used: 1,
+        }];
+        m.running = 1;
+        m.power = Some("on AC".into());
+        m.jobs = vec![tasks_daemon::api::PeerJobUseView {
+            id: 9,
+            owner: "pi-ios@laptop".into(),
+            cores_milli: Some(3100),
+            mem_bytes: Some(2 << 30),
+        }];
+        m.cores_in_use_milli = Some(5000);
+    }
+    p
+}
+
+/// [`busy`] with the worker's load, plus an awake Mac running a forwarded job and a finished
+/// forward whose files came back: three machines, all of them up.
+pub fn mac() -> Dashboard {
+    let mut d = busy();
+    nixos_load(&mut d);
+    d.status.peers.push(mac_peer());
+    let mut m1 = job(104, "pi-ios@laptop", Phase::Running);
+    m1.argv = "./build_core.sh ios"
+        .split(' ')
+        .map(str::to_string)
+        .collect();
+    m1.machine = Some("mac".into());
+    m1.forwarded_to = Some(("mac".into(), Some(9)));
+    m1.remote_phase = Some(Phase::Running);
+    m1.placement = Placement::Peer(MachineName("mac".into()));
+    m1.log_path = None;
+    m1.sync = Some(tasks_daemon::api::SyncView {
+        bytes: 742,
+        files: 318,
+        millis: 400,
+        already_there: false,
+    });
+    let mut m2 = job(94, "pi-ios@laptop", Phase::Passed);
+    m2.argv = "xcodebuild -scheme core"
+        .split(' ')
+        .map(str::to_string)
+        .collect();
+    m2.machine = Some("mac".into());
+    m2.forwarded_to = Some(("mac".into(), Some(7)));
+    m2.placement = Placement::Peer(MachineName("mac".into()));
+    m2.started_at_ms = Some(NOW_MS - 400_000);
+    m2.finished_at_ms = Some(NOW_MS - 240_000);
+    m2.exit = Some(0);
+    m2.sync = Some(tasks_daemon::api::SyncView {
+        bytes: 5 << 20,
+        files: 318,
+        millis: 2_300,
+        already_there: false,
+    });
+    m2.fetch_paths = vec!["build/core.xcframework".into(), "build/core.dSYM".into()];
+    m2.fetch = vec![
+        tasks_core::FetchResult {
+            path: "build/core.xcframework".into(),
+            status: tasks_core::FetchStatus::Fetched {
+                bytes: 38 << 20,
+                sha256: "ab".into(),
+                unchanged: false,
+            },
+        },
+        tasks_core::FetchResult {
+            path: "build/core.dSYM".into(),
+            status: tasks_core::FetchStatus::Missing,
+        },
+    ];
+    d.jobs.push(m1);
+    d.jobs.push(m2);
+    d
+}
+
+/// The samples of the running job #101: two minutes at one reading every two seconds, CPU
+/// around three cores ending at 3.2, memory growing to 1.4 GiB, a little disk traffic.
+pub fn metrics_running() -> JobMetricsView {
+    const STEP_MS: i64 = 2_000;
+    let mut samples = Vec::new();
+    let (mut cpu, mut rd, mut wr, mut stall) = (0u64, 0u64, 0u64, 0u64);
+    for i in 0..60i64 {
+        // a ramp-up, a plateau with wobble, and a last reading of exactly 3.2 cores
+        let cores = match i {
+            0 => 0.0,
+            59 => 3.2,
+            1..=8 => 0.4 * i as f64,
+            _ => 2.6 + ((i * 7) % 11) as f64 / 20.0,
+        };
+        cpu += (cores * 2_000_000.0) as u64;
+        rd += 8 << 20;
+        wr += if i % 9 < 3 { 40 << 20 } else { 2 << 20 };
+        stall += if i == 59 { 20_000 } else { 4_000 };
+        samples.push(MetricSample {
+            t_ms: NOW_MS - (59 - i) * STEP_MS,
+            cpu_usec: Some(cpu),
+            mem_bytes: Some((400 << 20) + (i as u64) * ((1 << 30) / 59)),
+            io_read_bytes: Some(rd),
+            io_write_bytes: Some(wr),
+            io_some_us: Some(stall),
+        });
+    }
+    let g = |name: &str, count, cpu, rss: u64| ProcGroup {
+        name: name.into(),
+        count,
+        cpu_cores: Some(cpu),
+        rss_bytes: rss,
+        others: false,
+    };
+    JobMetricsView {
+        quality: Some(Attribution::Cgroup),
+        samples,
+        procs: vec![
+            g("rustc", 6, 2.4, 1_181_116_006),
+            g("cc", 2, 0.4, 180 << 20),
+            g("ld", 1, 0.2, 410 << 20),
+            g("cargo", 1, 0.1, 96 << 20),
+            ProcGroup {
+                name: "5 others".into(),
+                count: 4,
+                cpu_cores: Some(0.1),
+                rss_bytes: 60 << 20,
+                others: true,
+            },
+        ],
+        usual_peak_mem_bytes: Some(2_254_857_830),
+        note: None,
+        source: None,
+    }
+}
+
+/// The metrics of the forward #104 as the Mac measured them: no cgroup, no history here.
+pub fn metrics_forwarded() -> JobMetricsView {
+    let mut v = metrics_running();
+    v.quality = Some(Attribution::ProcessTree);
+    v.source = Some("on mac, remote job #9".into());
+    v.usual_peak_mem_bytes = None;
+    for s in &mut v.samples {
+        s.io_some_us = None;
+        s.mem_bytes = s.mem_bytes.map(|m| m * 3 / 2);
+    }
+    v.procs = vec![
+        ProcGroup {
+            name: "clang".into(),
+            count: 5,
+            cpu_cores: Some(2.6),
+            rss_bytes: 1 << 30,
+            others: false,
+        },
+        ProcGroup {
+            name: "swift-frontend".into(),
+            count: 1,
+            cpu_cores: Some(0.5),
+            rss_bytes: 780 << 20,
+            others: false,
+        },
+        ProcGroup {
+            name: "xcodebuild".into(),
+            count: 1,
+            cpu_cores: Some(0.0),
+            rss_bytes: 90 << 20,
+            others: false,
+        },
+    ];
+    v
+}
+
 /// [`busy`] plus a second worker that is asleep: three machines, one of them away.
 pub fn three_machines() -> Dashboard {
     let mut d = busy();
+    nixos_load(&mut d);
     d.status
         .peers
         .push(named_peer("air", "offline", Some(4_200)));

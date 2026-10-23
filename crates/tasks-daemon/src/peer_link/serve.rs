@@ -363,6 +363,7 @@ impl StatusSource for DaemonStatus {
                 io_pct: snap.pressure.io.map(pct),
                 summary: snap.pressure.compile_blocker.clone().unwrap_or_default(),
                 cpu_busy_pct: snap.pressure.cpu_busy_pct.map(pct),
+                memory_available_bytes: snap.pressure.available_memory,
                 swap_total_bytes: snap.pressure.swap_total,
                 swap_used_bytes: snap.pressure.swap_used,
                 swap_in_per_s: snap.pressure.swap_in_per_s,
@@ -546,6 +547,14 @@ mod tests {
         let s = DaemonStatus::new(r.sch.clone()).status();
         assert!(s.slots.iter().any(|x| x.total > 0));
         assert_eq!(s.queue.waiting, 0);
+    }
+
+    // R-643
+    #[test]
+    fn r643_a_peers_report_carries_the_memory_it_has_available() {
+        let r = Rig::new();
+        let s = DaemonStatus::new(r.sch.clone()).status();
+        assert_eq!(s.pressure.memory_available_bytes, Some(8 << 30));
     }
 
     // R-523

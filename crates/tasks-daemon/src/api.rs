@@ -753,6 +753,22 @@ pub struct JobView {
     /// What became of each, once the job has ended.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fetch: Vec<tasks_core::FetchResult>,
+    /// What the sync before a forwarded run sent and how long it took, once it has finished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync: Option<SyncView>,
+}
+
+/// The sync of a checkout to a peer before a forwarded job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncView {
+    /// Bytes of pack sent (0 when the peer already had the tree).
+    pub bytes: u64,
+    /// Files in the tree.
+    pub files: u64,
+    /// How long the sync took, milliseconds.
+    pub millis: u64,
+    /// True when the peer already held this tree.
+    pub already_there: bool,
 }
 
 /// One block of grep output.
@@ -936,6 +952,17 @@ pub struct RunningView {
     pub mem_bytes: Option<u64>,
 }
 
+/// The words for a memory level, the same on every surface: `normal` is `ok`, `warn` is
+/// `tight`, `critical` stays `critical`. The stall percentage is detail, not the headline.
+pub fn memory_word(level: &str) -> &'static str {
+    match level {
+        "normal" => "ok",
+        "warn" => "tight",
+        "critical" => "critical",
+        _ => "unknown",
+    }
+}
+
 /// Pressure and disk readings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PressureView {
@@ -945,6 +972,10 @@ pub struct PressureView {
     pub memory_some: Option<f32>,
     /// Memory PSI full avg10.
     pub memory_full: Option<f32>,
+    /// The memory-stall percentage at which the level turns `warn` and a new compile waits
+    /// (the machine policy's `memory.some_warn`); `None` where the machine has no PSI.
+    #[serde(default)]
+    pub memory_stall_limit: Option<f32>,
     /// CPU pressure.
     pub cpu: Option<f32>,
     /// I/O pressure.
@@ -961,6 +992,9 @@ pub struct PressureView {
     /// the jobs' `cores` it is the work outside jobs.
     #[serde(default)]
     pub cores_in_use: Option<f64>,
+    /// Logical cores of this machine, the scale `cores_in_use` and the jobs' `cores` are read on.
+    #[serde(default)]
+    pub cpu_cores: Option<u32>,
     /// Swap size in bytes (0 without swap), when the platform reports it.
     #[serde(default)]
     pub swap_total: Option<u64>,
@@ -1070,6 +1104,9 @@ pub struct PeerMachineView {
     /// Swap in use in bytes.
     #[serde(default)]
     pub swap_used: Option<u64>,
+    /// Memory available to new work now, bytes, when the peer reports it.
+    #[serde(default)]
+    pub memory_available_bytes: Option<u64>,
     /// Swap read-back rate, bytes per second.
     #[serde(default)]
     pub swap_in_per_s: Option<u64>,
@@ -1696,6 +1733,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(p.memory_total, None);
+        assert_eq!(p.memory_stall_limit, None);
+    }
+
+    #[test]
+    fn r641_a_memory_level_reads_ok_tight_or_critical_everywhere() {
+        assert_eq!(memory_word("normal"), "ok");
+        assert_eq!(memory_word("warn"), "tight");
+        assert_eq!(memory_word("critical"), "critical");
+        assert_eq!(memory_word("unknown"), "unknown");
+        assert_eq!(memory_word(""), "unknown");
     }
 
     #[test]

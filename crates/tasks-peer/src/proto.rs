@@ -274,6 +274,9 @@ pub struct PressureSummary {
     /// CPU busy percent (not pressure), when the peer measures it.
     #[serde(default)]
     pub cpu_busy_pct: Option<u8>,
+    /// Memory available to new work now, bytes, when the peer reports it.
+    #[serde(default)]
+    pub memory_available_bytes: Option<u64>,
     /// Swap size in bytes (0 without swap), when the peer reports it.
     #[serde(default)]
     pub swap_total_bytes: Option<u64>,

@@ -526,6 +526,18 @@ fn r220_disk_alerts_warn_below_twice_the_reserve_and_go_critical_below_it() {
     assert_eq!(level(&r), None);
 }
 
+// R-642
+#[test]
+fn r642_the_daemon_reports_the_memory_stall_limit_where_it_measures_stalls() {
+    let r = Rig::new();
+    // a machine without PSI (the fake, like macOS) has no stall figure and so no limit
+    assert_eq!(r.sch.status().pressure.memory_stall_limit, None);
+    r.machine.set_memory_some(Some(3.0));
+    let limit = r.sch.status().pressure.memory_stall_limit;
+    assert_eq!(limit, Some(r.sch.policy().psi().memory_some_warn));
+    assert!(limit.is_some_and(|l| l > 0.0));
+}
+
 // R-222
 #[test]
 fn r222_memory_pressure_must_last_before_it_alerts() {

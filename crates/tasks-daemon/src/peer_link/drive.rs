@@ -142,6 +142,7 @@ fn drive_forward<T: Transport>(inner: &Inner<T>, job: &Job, log_path: &Path) {
             return;
         }
     };
+    let timed = super::sync_note::TimedSync::new(&*inner.opts.sync);
     loop {
         if inner.stop.load(Ordering::SeqCst) {
             return;
@@ -158,10 +159,13 @@ fn drive_forward<T: Transport>(inner: &Inner<T>, job: &Job, log_path: &Path) {
         {
             let mut io = ForwardIo {
                 transport: &inner.transport,
-                sync: &*inner.opts.sync,
+                sync: &timed,
                 log: &mut log,
             };
             fwd.tick(now, &mut io);
+        }
+        if let Some(note) = timed.take() {
+            super::sync_note::write(log_path, &note);
         }
         for n in fwd.take_notes() {
             log.note(&n);

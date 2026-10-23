@@ -66,6 +66,7 @@ pub fn job(id: i64, owner: &str, phase: Phase, cmd: &str) -> JobView {
         remote_wait: None,
         fetch_paths: Vec::new(),
         fetch: Vec::new(),
+        sync: None,
         cancel_reason: None,
         timeout_secs: None,
         remote_phase: None,

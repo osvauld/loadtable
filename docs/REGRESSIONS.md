@@ -638,3 +638,18 @@ Tests of earlier rows whose expectations changed with the redesign, kept and edi
 | R-614 | With `power.peer_jobs_on_battery` false and the machine on battery, jobs received from peers wait with `MACHINE is on battery` and hold no slot; local jobs are unaffected; the setting or AC lets them run. | `r614_*` (daemon) | any |
 | R-615 | A job waiting only on battery does not keep the machine awake. | `r614_a_job_from_a_peer_waits_while_this_machine_is_on_battery` (asserts no hold) | any |
 | R-616 | The local time zone offset used for the clock times in wait texts is read from the system. | `r616_the_offset_is_a_sane_zone_offset` (platform) | unix |
+
+## v2-ui-step2
+
+| ID | Rule | Test | Platforms |
+|---|---|---|---|
+| R-640 | The side panel's Resources block shows CPU in cores of the machine (`3.2 of 10 cores`), memory with the usual peak (`1.4 GiB (usual peak 2.1 GiB)`) and a dashed line at it, disk read/write rates and totals, and processes grouped by program (max 12 + others); it says where a forwarded job was measured and gives empty and failed states in words. | `r640_*` (ui resources) | any |
+| R-641 | A memory level reads ok / tight / critical everywhere (UI, `tasks2 status`, MCP status); the stall percentage is detail. | `r641_a_memory_level_reads_ok_tight_or_critical_everywhere` (daemon api), `r641_memory_reads_ok_tight_or_critical_in_status_for_this_machine_and_peers` (cli) | any |
+| R-642 | The daemon reports the memory-stall limit (`memory.some_warn`) in `PressureView` where it measures stalls; the UI no longer guesses it from text. | `r642_the_daemon_reports_the_memory_stall_limit_where_it_measures_stalls` (daemon) | any |
+| R-643 | A peer reports memory available; machine rows show RAM `used of total` and only what is known. | `r643_*` (daemon status, serve; ui machine) | any |
+| R-644 | Every machine row shows CPU busy % (a peer without a busy figure derives it from cores in use) and a bar split by running job. | `r644_*` (ui machine), `r644_every_machine_row_has_cpu_percent_and_a_bar_by_job` (ui model) | any |
+| R-645 | Metrics are polled every 2 s only while the shown job runs, once more after it ends (up to 5 min), never for a waiting job. | `r645_*` (ui resources, feed, window) | any |
+| R-646 | Memory level words: the machine's own level (macOS normal/warn/critical, Linux derived by the daemon from PSI against `memory.some_warn`/`some_critical`); a bare percentage from an older peer is tight at the limit, critical at three times it. | `r646_the_machines_own_level_decides_and_a_bare_percentage_is_judged_by_its_limit` (ui machine) | any |
+| R-647 | A disk alert says "below its reserve" only when it is, and "filling up" while space is above the reserve. | `r647_a_disk_alert_never_says_low_while_the_space_is_above_the_reserve` (ui model) | any |
+| R-648 | The daemon keeps what the sync before a forwarded run sent and how long it took, and `JobView.sync` carries it. | `r648_the_sync_note_is_kept_next_to_the_log_and_read_back`, `r648_a_forwarded_job_keeps_what_its_sync_sent_and_how_long_it_took` (daemon) | any |
+| R-649 | The phase strip has a sync segment and the facts a Sync line (`synced 742 B in 0.4 s`); fetch results show in the panel. | `r649_*` (ui detail) | any |

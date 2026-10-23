@@ -18,8 +18,10 @@ pub mod fixtures;
 pub mod format;
 pub mod link;
 pub mod logview;
+pub mod machine;
 pub mod mailbox;
 pub mod model;
+pub mod resources;
 pub mod stalls;
 pub mod stats;
 
