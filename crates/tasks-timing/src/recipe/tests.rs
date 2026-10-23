@@ -207,3 +207,21 @@ fn display_is_stable_and_nextest_has_subcommand() {
     assert_eq!(one("cargo nextest run -p a").subcommand, "nextest run");
     assert_eq!(one("cargo nextest run -p a").kind(), Kind::Test);
 }
+
+#[test]
+fn r676_a_chain_is_keyed_by_the_whole_chain_not_its_first_command() {
+    let hk = |s: &str| K::history_key(&["sh".into(), "-c".into(), s.into()], &[]).unwrap();
+    let alone = hk("build_core.sh");
+    let chain = hk("build_core.sh && xcodegen && run_sim.sh");
+    assert_ne!(alone, chain);
+    assert_eq!(alone, "build_core.sh");
+    assert_eq!(chain, "build_core.sh && xcodegen && run_sim.sh");
+    // the same chain spelled with a setup `cd` and other whitespace is the same key
+    assert_eq!(chain, hk("cd /x; build_core.sh  &&  xcodegen\n run_sim.sh"));
+    // a plain command keeps its own recipe string
+    assert_eq!(
+        K::history_key(&a("cargo test -p x"), &[]).unwrap(),
+        one("cargo test -p x").to_string()
+    );
+    assert_eq!(K::history_key(&[], &[]), None);
+}

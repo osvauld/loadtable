@@ -576,28 +576,49 @@ fn state_cell(i: &StateInput) -> StateCell {
                 .map(|s| secs(s, i.now_ms))
                 .or_else(|| i.rv.map(|r| r.elapsed_secs))
                 .unwrap_or(0.0);
+            // a bar is drawn only when something backs it: targets done of expected, or time
+            // against an estimate from passing runs. Otherwise the elapsed time and the reason
+            // (R-671); past the usual time it says so, never "0s left" (R-675).
+            let left_text = |r: &RunningView, e: f64| match &r.eta_rough_from {
+                Some(m) => format!("~{} left (rough, from {m}'s runs)", format::duration(e)),
+                None => format!("~{} left", format::duration(e)),
+            };
             let (bar, left, right) = match i.rv {
-                Some(r) if r.total_targets > 0 => (
-                    r.done_targets as f32 / r.total_targets as f32,
-                    format!("{} of {} targets", r.done_targets, r.total_targets),
-                    r.eta_secs.map_or_else(
-                        || i.age.to_string(),
-                        |e| format!("~{} left", format::duration(e)),
+                Some(r) if r.over_by_secs.is_some() => (
+                    None,
+                    format!(
+                        "over the usual by {}",
+                        format::duration(r.over_by_secs.unwrap_or(0.0))
                     ),
+                    format!("usual {}", format::duration(r.usual_secs.unwrap_or(0.0))),
                 ),
-                Some(RunningView {
-                    eta_secs: Some(e), ..
-                }) => (
-                    (elapsed / (elapsed + e).max(1.0)) as f32,
-                    "estimated from history".to_string(),
-                    format!("~{} left", format::duration(*e)),
+                Some(r) if r.total_targets > 0 => (
+                    Some(r.done_targets as f32 / r.total_targets as f32),
+                    format!("{} of {} targets", r.done_targets, r.total_targets),
+                    r.eta_secs
+                        .map_or_else(|| i.age.to_string(), |e| left_text(r, e)),
                 ),
-                Some(_) => (0.0, "first run, no estimate".to_string(), i.age.to_string()),
+                Some(r) if r.eta_secs.is_some() => {
+                    let e = r.eta_secs.unwrap_or(0.0);
+                    (
+                        Some((elapsed / (elapsed + e).max(1.0)) as f32),
+                        "estimated from passing runs".to_string(),
+                        left_text(r, e),
+                    )
+                }
+                Some(r) => (
+                    None,
+                    format!(
+                        "no estimate: {}",
+                        r.no_eta_why.as_deref().unwrap_or("no passing run yet")
+                    ),
+                    i.age.to_string(),
+                ),
                 // a forward: the peer's progress is not in this ledger
-                None => (0.0, format!("on {}", i.machine), i.age.to_string()),
+                None => (None, format!("on {}", i.machine), i.age.to_string()),
             };
             StateCell {
-                bar: Some(bar.clamp(0.0, 1.0)),
+                bar: bar.map(|b| b.clamp(0.0, 1.0)),
                 head: String::new(),
                 tone: PhaseClass::Running,
                 left,
@@ -741,8 +762,27 @@ fn job_row(
                 format!("~{}", format::duration(e)),
                 format!("targets {}/{}", r.done_targets, r.total_targets),
             ),
-            Some(e) => (format!("~{}", format::duration(e)), "history".to_string()),
-            None => (UNKNOWN.to_string(), "no history".to_string()),
+            Some(e) => (
+                format!("~{}", format::duration(e)),
+                r.eta_rough_from
+                    .as_ref()
+                    .map_or("passing runs".to_string(), |m| {
+                        format!("rough, from {m}'s runs")
+                    }),
+            ),
+            None if r.over_by_secs.is_some() => (
+                format!(
+                    "over by {}",
+                    format::duration(r.over_by_secs.unwrap_or(0.0))
+                ),
+                format!("usual {}", format::duration(r.usual_secs.unwrap_or(0.0))),
+            ),
+            None => (
+                UNKNOWN.to_string(),
+                r.no_eta_why
+                    .clone()
+                    .unwrap_or_else(|| "no passing run yet".to_string()),
+            ),
         },
         None => (UNKNOWN.to_string(), String::new()),
     };
@@ -1695,9 +1735,9 @@ mod tests {
         let b = s(102);
         assert_eq!(
             (b.left.as_str(), b.right.as_str()),
-            ("first run, no estimate", "2m00s")
+            ("no estimate: first run", "2m00s")
         );
-        assert_eq!(b.bar, Some(0.0));
+        assert_eq!(b.bar, None, "no estimate, no bar (R-671)");
         let c = s(103);
         assert_eq!((c.left.as_str(), c.right.as_str()), ("on nixos", "2m00s"));
         // an estimate from history, without targets: the bar is elapsed over elapsed + left
@@ -1707,9 +1747,51 @@ mod tests {
         }
         let vm = build(&d, 0);
         let h = vm.running.iter().find(|r| r.id == 102).expect("row");
-        assert_eq!(h.state.left, "estimated from history");
+        assert_eq!(h.state.left, "estimated from passing runs");
         assert_eq!(h.state.right, "~40s left");
         assert!((h.state.bar.unwrap_or(-1.0) - 0.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn r671_r672_r675_the_state_cell_draws_a_bar_only_for_a_real_estimate_and_never_says_zero_left()
+    {
+        let cell = |f: &dyn Fn(&mut RunningView)| {
+            let mut d = fixtures::busy();
+            for r in d.status.running.iter_mut().filter(|r| r.id.0 == 102) {
+                f(r);
+            }
+            build(&d, 0)
+                .running
+                .iter()
+                .find(|r| r.id == 102)
+                .expect("row")
+                .state
+                .clone()
+        };
+        // no passing run yet: the reason, no bar
+        let c = cell(&|r| r.no_eta_why = Some("no passing run yet".into()));
+        assert_eq!(
+            (c.bar, c.left.as_str()),
+            (None, "no estimate: no passing run yet")
+        );
+        // another machine's runs: a bar, labelled rough
+        let c = cell(&|r| {
+            r.eta_secs = Some(240.0);
+            r.eta_rough_from = Some("nixos".into());
+        });
+        assert!(c.bar.is_some());
+        assert_eq!(c.right, "~4m00s left (rough, from nixos's runs)");
+        // past the usual time: said plainly, no bar implying it is nearly done
+        let c = cell(&|r| {
+            r.eta_secs = None;
+            r.usual_secs = Some(57.0);
+            r.over_by_secs = Some(80.0);
+        });
+        assert_eq!(c.bar, None);
+        assert_eq!(
+            (c.left.as_str(), c.right.as_str()),
+            ("over the usual by 1m20s", "usual 57s")
+        );
     }
 
     #[test]

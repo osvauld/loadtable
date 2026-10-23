@@ -11,7 +11,7 @@ use tasks_core::{
 };
 use tasks_ledger::{AuditLedger, Clock, Finish, LeaseRecord, StartInfo, Store};
 use tasks_placement::RunEstimate;
-use tasks_timing::{Cache, Outcome, RecipeKey, Sample, SampleKey};
+use tasks_timing::{Cache, History, Outcome, RecipeKey, Sample, SampleKey};
 
 const MIN_MS: i64 = 60_000;
 
@@ -735,4 +735,173 @@ fn r370_a_class_changed_while_the_job_waits_is_what_the_peer_is_sent() {
         f.classes.lock().unwrap().last().cloned(),
         Some((id, tasks_core::Priority::Background, None))
     );
+}
+
+// ---------------------------------------------------------------- honest estimates (R-660..R-679)
+
+fn seed_run(r: &Rig, recipe: &str, secs: f64, outcome: Outcome, at_ms: u64) {
+    let key = SampleKey {
+        recipe: recipe.into(),
+        target: None,
+        machine: "testbox".into(),
+    };
+    r.store
+        .record_sample(
+            &key,
+            &Sample {
+                secs,
+                cache: Cache::Cold,
+                outcome,
+                at_ms,
+            },
+        )
+        .unwrap();
+}
+
+fn running_view(r: &Rig, id: JobId) -> RunningView {
+    r.sch
+        .status()
+        .running
+        .into_iter()
+        .find(|j| j.id == id)
+        .expect("running")
+}
+
+fn run_make(r: &Rig, arg: &str) -> JobId {
+    let id = r.submit(&r.spec_in("o", &["make", arg], Kind::Compile, arg));
+    r.tick();
+    r.until_running(id);
+    id
+}
+
+#[test]
+fn r666_a_command_that_never_ran_shows_no_estimate_and_says_first_run() {
+    let r = Rig::new();
+    let v = running_view(&r, run_make(&r, "a"));
+    assert_eq!(
+        (v.eta_secs, v.no_eta_why.as_deref()),
+        (None, Some("first run"))
+    );
+}
+
+#[test]
+fn r667_a_command_that_only_ever_failed_shows_no_estimate_and_says_so() {
+    let r = Rig::new();
+    seed_run(&r, "make b", 57.0, Outcome::Failed, 1);
+    let v = running_view(&r, run_make(&r, "b"));
+    assert_eq!(v.eta_secs, None, "an early failure is no basis for an ETA");
+    assert_eq!(v.no_eta_why.as_deref(), Some("no passing run yet"));
+}
+
+#[test]
+fn r668_a_passing_run_here_gives_an_estimate_and_it_is_not_rough() {
+    let r = Rig::new();
+    seed_run(&r, "make c", 400.0, Outcome::Passed, 1);
+    let v = running_view(&r, run_make(&r, "c"));
+    assert!(v.eta_secs.is_some_and(|e| e > 300.0), "{:?}", v.eta_secs);
+    assert_eq!((v.no_eta_why, v.eta_rough_from), (None, None));
+}
+
+#[test]
+fn r669_the_queue_still_plans_with_a_number_when_nothing_is_shown() {
+    let r = Rig::with_policy("[slots]\ncompile = 1\n");
+    let a = r.submit(&r.spec_in("o", &["make", "a"], Kind::Compile, "a"));
+    r.tick();
+    r.until_running(a);
+    r.submit(&r.spec_in("p", &["make", "b"], Kind::Compile, "b"));
+    r.tick();
+    let st = r.sch.status();
+    // planning figure for ordering and start times, marked rough; the running job shows none
+    assert!(st.waiting[0].start_estimate_secs.is_some() && st.waiting[0].rough);
+    assert_eq!(st.running[0].eta_secs, None);
+}
+
+#[test]
+fn r670_a_forwarded_job_the_peer_holds_back_shows_the_peers_reason_not_starting() {
+    let f = Arc::new(FakeForwarder::new(vec![fast_peer(true)]));
+    let r = Rig::with_forwarder(f);
+    let id = r.submit(&anywhere(&r));
+    // forwarded to the peer but still waiting here, before the peer says anything
+    r.store.set_forward(id, &nixos(), None, Some("k1")).unwrap();
+    let st = r.sch.status();
+    let w = st.waiting.iter().find(|w| w.id == id).expect("waiting");
+    assert_eq!(w.on_peer.as_deref(), Some("nixos"));
+    assert!(
+        w.wait_text.starts_with("waiting on nixos: CPU contended"),
+        "{}",
+        w.wait_text
+    );
+    assert_eq!(w.start_estimate_secs, None, "no start time for a held job");
+}
+
+#[test]
+fn r675_a_run_past_its_usual_time_is_over_the_usual_with_no_time_left() {
+    let r = Rig::new();
+    // usual 0s: any elapsed time is past it
+    seed_run(&r, "make d", 0.0, Outcome::Passed, 1);
+    let v = running_view(&r, run_make(&r, "d"));
+    assert_eq!(v.eta_secs, None, "never 0s left");
+    assert!(v.usual_secs.is_some() && v.over_by_secs.is_some(), "{v:?}");
+}
+
+#[test]
+fn r676_different_sh_chains_keep_separate_history() {
+    let r = Rig::new();
+    seed_run(&r, "build_core.sh", 30.0, Outcome::Passed, 1);
+    let e = |script: &str| match ok(r.sch.handle(Request::Estimate {
+        argv: vec!["sh".into(), "-c".into(), script.into()],
+        kind: None,
+    })) {
+        Response::Estimate(e) => e,
+        other => panic!("{other:?}"),
+    };
+    assert!(e("build_core.sh").median_secs.is_some());
+    let chain = e("build_core.sh && xcodegen && run_sim.sh");
+    assert_eq!(chain.median_secs, None);
+    assert_eq!(chain.why_not.as_deref(), Some("first run"));
+}
+
+#[test]
+fn r662_the_estimate_request_says_which_case_applies() {
+    let r = Rig::new();
+    let ask = |a: &str| match ok(r.sch.handle(Request::Estimate {
+        argv: vec!["make".into(), a.into()],
+        kind: Some(Kind::Compile),
+    })) {
+        Response::Estimate(e) => e,
+        other => panic!("{other:?}"),
+    };
+    // no built-in default even when the client names a kind
+    let e = ask("x");
+    assert_eq!(
+        (e.median_secs, e.why_not.as_deref()),
+        (None, Some("first run"))
+    );
+    seed_run(&r, "make y", 9.0, Outcome::Failed, 1);
+    assert_eq!(ask("y").why_not.as_deref(), Some("no passing run yet"));
+    seed_run(&r, "make z", 90.0, Outcome::Passed, 1);
+    assert_eq!(ask("z").median_secs, Some(90.0));
+}
+
+#[test]
+fn r665_a_finished_run_is_stamped_cold_until_this_machine_has_passed_it() {
+    let r = Rig::new();
+    r.procs.auto_exit(0);
+    let mut stamps = Vec::new();
+    for _ in 0..2 {
+        let id = r.submit(&r.spec("o", &["make", "stamp"], Kind::Run));
+        r.tick();
+        r.until_done(id);
+        let key = SampleKey {
+            recipe: "make stamp".into(),
+            target: None,
+            machine: "testbox".into(),
+        };
+        let n = stamps.len() + 1;
+        r.until("sample filed", || r.store.samples(&key).unwrap().len() == n);
+        let mut got = r.store.samples(&key).unwrap();
+        got.sort_by_key(|s| s.at_ms);
+        stamps = got.iter().map(|s| s.cache).collect();
+    }
+    assert_eq!(stamps, vec![Cache::Cold, Cache::Warm]);
 }

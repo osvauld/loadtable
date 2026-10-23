@@ -446,14 +446,16 @@ fn r219_admission_shows_every_policy_value_with_its_source() {
 fn estimate_and_stats_render() {
     let e = EstimateView {
         recipe: "cargo test pkg=x".into(),
-        median_secs: 116.0,
-        p90_secs: 200.0,
+        median_secs: Some(116.0),
+        p90_secs: Some(200.0),
         samples: 5,
         text: "about 2m on this machine".into(),
+        why_not: None,
+        rough: false,
     };
     let t = estimate(&e);
     assert!(
-        t.starts_with("estimate: median 1m56s, p90 3m20s, 5 sample(s)\n"),
+        t.starts_with("estimate: median 1m56s, p90 3m20s, 5 passing run(s)\n"),
         "{t}"
     );
     let s = stats(&[StatRow {
@@ -813,4 +815,72 @@ fn r523_a_peer_without_psi_shows_its_memory_level_not_a_question_mark() {
     assert_eq!(peer_memory_text(Some(4), Some("normal")), "4%");
     assert_eq!(peer_memory_text(None, Some("warn")), "warn");
     assert_eq!(peer_memory_text(None, None), "?");
+}
+
+fn running(eta: Option<f64>) -> tasks_daemon::api::RunningView {
+    tasks_daemon::api::RunningView {
+        id: tasks_core::JobId(1),
+        owner: "o".into(),
+        command: "cargo build".into(),
+        slot: None,
+        elapsed_secs: 137.0,
+        done_targets: 0,
+        total_targets: 0,
+        current: None,
+        eta_secs: eta,
+        usual_secs: None,
+        over_by_secs: None,
+        eta_rough_from: None,
+        no_eta_why: None,
+        log_bytes: 0,
+        figures: None,
+        cores: None,
+        mem_bytes: None,
+    }
+}
+
+#[test]
+fn r662_tasks2_estimate_says_which_case_applies() {
+    let mut e = EstimateView {
+        recipe: "cargo build".into(),
+        median_secs: None,
+        p90_secs: None,
+        samples: 0,
+        text: "no estimate: first build here".into(),
+        why_not: Some("first build here".into()),
+        rough: false,
+    };
+    let t = estimate(&e);
+    assert!(t.starts_with("no estimate: first build here\n"), "{t}");
+    e.why_not = Some("first run".into());
+    assert!(estimate(&e).starts_with("no estimate: first run\n"));
+    e.median_secs = Some(240.0);
+    e.p90_secs = Some(300.0);
+    e.rough = true;
+    e.why_not = None;
+    assert!(estimate(&e).contains("(rough)"));
+}
+
+#[test]
+fn r663_a_running_job_says_left_rough_or_why_not_never_a_bare_guess() {
+    let mut r = running(Some(240.0));
+    assert_eq!(running_eta_text(&r), ", ~4m left");
+    r.eta_rough_from = Some("nixos".into());
+    assert_eq!(
+        running_eta_text(&r),
+        ", ~4m left (rough, from nixos's runs)"
+    );
+    let mut none = running(None);
+    none.no_eta_why = Some("no passing run yet".into());
+    assert_eq!(running_eta_text(&none), ", no estimate: no passing run yet");
+}
+
+#[test]
+fn r675_a_job_past_its_usual_time_says_so_instead_of_zero_left() {
+    let mut r = running(None);
+    r.usual_secs = Some(57.0);
+    r.over_by_secs = Some(80.0);
+    let t = running_eta_text(&r);
+    assert_eq!(t, ", over the usual by 1m20s (usual 57s)");
+    assert!(!t.contains("0s left"));
 }

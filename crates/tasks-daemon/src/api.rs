@@ -921,8 +921,20 @@ pub struct RunningView {
     pub total_targets: usize,
     /// Running target.
     pub current: Option<String>,
-    /// Estimated seconds left.
+    /// Estimated seconds left; only when passing runs back it (R-660..R-665).
     pub eta_secs: Option<f64>,
+    /// The usual (median) seconds, when the run has gone past them.
+    #[serde(default)]
+    pub usual_secs: Option<f64>,
+    /// Seconds past the usual: shown as "over the usual by", never as "0s left".
+    #[serde(default)]
+    pub over_by_secs: Option<f64>,
+    /// The machine whose runs the estimate rests on, when it is not this one (a rough ETA).
+    #[serde(default)]
+    pub eta_rough_from: Option<String>,
+    /// Why there is no estimate: `first run`, `no passing run yet`, `first build here`.
+    #[serde(default)]
+    pub no_eta_why: Option<String>,
     /// Log size in bytes.
     pub log_bytes: u64,
     /// What it has cost the machine so far (sampled every few seconds).
@@ -1407,14 +1419,20 @@ impl TripDetails {
 pub struct EstimateView {
     /// The recipe the history is keyed by.
     pub recipe: String,
-    /// Median seconds.
-    pub median_secs: f64,
+    /// Median seconds; `None` when there is no estimate to show (see `why_not`).
+    pub median_secs: Option<f64>,
     /// 90th percentile seconds.
-    pub p90_secs: f64,
-    /// Samples behind it.
+    pub p90_secs: Option<f64>,
+    /// Passing runs behind it.
     pub samples: usize,
-    /// One line with its provenance.
+    /// One line with its provenance, or the reason there is no estimate.
     pub text: String,
+    /// Why there is no estimate (`first run`, `no passing run yet`, `first build here`).
+    #[serde(default)]
+    pub why_not: Option<String>,
+    /// True when it rests on another machine's runs.
+    #[serde(default)]
+    pub rough: bool,
 }
 
 /// One measured duration as the history API shows it.

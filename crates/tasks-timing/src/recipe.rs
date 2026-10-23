@@ -94,6 +94,19 @@ impl RecipeKey {
         }]
     }
 
+    /// The string a command's history is stored under: its recipe, or for a `sh -c "a && b"`
+    /// chain every command's recipe joined by ` && `, so `build.sh` and `build.sh && test.sh`
+    /// do not share durations. `None` for an empty command.
+    pub fn history_key(argv: &[String], env: &[(String, String)]) -> Option<String> {
+        let keys = RecipeKey::from_argv(argv, env);
+        (!keys.is_empty()).then(|| {
+            keys.iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" && ")
+        })
+    }
+
     /// The job kind this recipe implies. Probes (`true`, `echo`, `sleep N`, `exit N`) are `Probe`.
     pub fn kind(&self) -> Kind {
         let sel = self.selection.join(" ").to_ascii_lowercase();

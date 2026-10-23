@@ -74,7 +74,10 @@ pub(crate) struct RunningJob {
     pub estimates: Estimates,
     pub kill_reason: Mutex<Option<String>>,
     pub stuck: Mutex<StuckDetector>,
+    /// The planning median (queue arithmetic only; never shown).
     pub est_median: Option<f64>,
+    /// What may be shown as its duration.
+    pub shown: tasks_timing::Shown,
     /// The latest sample of what the job costs the machine.
     pub figures: Mutex<Option<tasks_core::JobFigures>>,
 }
@@ -809,9 +812,8 @@ impl Scheduler {
             estimates: self.build_estimates(&facts),
             kill_reason: Mutex::new(None),
             stuck: Mutex::new(StuckDetector::new(policy.stuck_window_secs())),
-            est_median: facts
-                .known_median
-                .or(facts.est.as_ref().map(|e| e.median_secs)),
+            est_median: Some(facts.plan.median_secs),
+            shown: facts.shown.clone(),
             figures: Mutex::new(None),
         });
         // the spec's own limit, else a plan step's hint (older rows), capped by the machine's

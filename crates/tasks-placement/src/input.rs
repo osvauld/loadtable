@@ -4,7 +4,7 @@ use crate::error::PlacementError;
 use std::collections::BTreeMap;
 use std::fmt;
 use tasks_core::{Kind, Machine, MachineName, Placement, Requirements, SlotKind, StepHints};
-use tasks_timing::Estimate;
+use tasks_timing::{Estimate, Planning};
 
 /// What the submitter asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,6 +107,16 @@ impl From<&Estimate> for RunEstimate {
             median_secs: e.median_secs,
             p90_secs: e.p90_secs,
             samples: e.samples,
+        }
+    }
+}
+
+impl From<&Planning> for RunEstimate {
+    fn from(p: &Planning) -> Self {
+        RunEstimate {
+            median_secs: p.median_secs,
+            p90_secs: p.p90_secs,
+            samples: p.samples,
         }
     }
 }
