@@ -578,6 +578,7 @@ New in v2 (the earlier release's `--fetch REL` ported onto the peer link). A job
 | R-572 | The usual peak memory is the median peak of this command's past runs on this machine. | `r572_the_usual_peak_is_the_median_of_past_runs_on_this_machine` (daemon); `the_median_peak_skips_unmeasured_runs` (core) | any |
 | R-573 | `tasks2 metrics ID [--json]` prints cores, memory, disk rate and the top five groups. | `r573_metrics_prints_cores_memory_disk_and_the_top_five_groups` (cli) | any |
 | R-574 | The cgroup read and the tree meter report the memory in use now apart from the peak. | `r574_the_current_memory_is_read_apart_from_the_peak` (platform); `r327_the_tree_meter_keeps_what_exited_processes_had_done` (platform) | any |
+| R-575 | Two samples of a job at the same instant keep one: the later replaces the earlier, so CPU rates never cover a zero-length interval (the runner's tick and another recorder can land in the same millisecond). | `r575_a_second_sample_at_the_same_instant_replaces_the_first`; `r568_a_running_jobs_tree_is_grouped_by_program_and_outside_processes_are_left_out` (no longer races the runner) | any |
 
 ## v2-ui-redesign
 

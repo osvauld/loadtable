@@ -171,12 +171,18 @@ impl MetricsStore {
         });
         h.quality = Some(quality);
         h.ended_ms = None;
-        if h.samples.len() >= MAX_SAMPLES {
+        // a second sample at the same instant replaces the first: rates over a zero-length
+        // interval are unknown, and would hide the last real one (R-575)
+        if h.samples.back().is_some_and(|s| s.t_ms == sample.t_ms) {
+            h.samples.pop_back();
+        } else if h.samples.len() >= MAX_SAMPLES {
             h.samples.pop_front();
         }
         h.samples.push_back(sample);
         if let Some(s) = snap {
-            h.prev = h.cur.take();
+            if h.cur.as_ref().is_none_or(|c| c.at_ms != s.at_ms) {
+                h.prev = h.cur.take();
+            }
             h.cur = Some(s);
         }
     }
@@ -368,6 +374,21 @@ mod tests {
             v.samples.last().map(|s| s.t_ms),
             Some(MAX_SAMPLES as i64 + 49)
         );
+    }
+
+    // R-575
+    #[test]
+    fn r575_a_second_sample_at_the_same_instant_replaces_the_first() {
+        let mut m = MetricsStore::default();
+        let id = JobId(1);
+        let at = |t, cpu| snap(t, vec![row(10, 1, "rustc", 5, cpu)]);
+        let q = Attribution::Cgroup;
+        m.record(id, 0, q, sample(0), Some(at(0, 0)));
+        m.record(id, 2_000, q, sample(2_000), Some(at(2_000, 4_000_000)));
+        m.record(id, 2_000, q, sample(2_000), Some(at(2_000, 4_000_000)));
+        let v = m.view(id, 2_000).unwrap();
+        assert_eq!(v.samples.len(), 2);
+        assert_eq!(v.procs.first().and_then(|g| g.cpu_cores), Some(2.0));
     }
 
     // R-561
