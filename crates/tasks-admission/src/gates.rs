@@ -126,6 +126,7 @@ mod tests {
             SlotKind::Compile,
             SlotKind::Run,
             SlotKind::Offload,
+            SlotKind::Transfer,
             SlotKind::Device,
         ] {
             assert_eq!(check_gates(k, Lane::Normal, true, &r, &t), None);
@@ -311,6 +312,61 @@ mod tests {
             check_gates(SlotKind::Offload, Lane::Normal, false, &r, &t),
             None
         );
+    }
+
+    // R-332
+    #[test]
+    fn r332_transfer_waits_for_the_io_gate_unlike_offload() {
+        let t = thresholds();
+        let mut r = readings();
+        r.pressure.io = Some(40.0);
+        assert_eq!(
+            check_gates(SlotKind::Transfer, Lane::Normal, false, &r, &t),
+            None,
+            "at the limit is still admitted"
+        );
+        r.pressure.io = Some(41.0);
+        assert!(matches!(
+            check_gates(SlotKind::Transfer, Lane::Normal, false, &r, &t),
+            Some(WaitReason::Io {
+                kind: SlotKind::Transfer,
+                ..
+            })
+        ));
+        assert_eq!(
+            check_gates(SlotKind::Offload, Lane::Normal, false, &r, &t),
+            None,
+            "the offload slot ignores I/O"
+        );
+        // a missing reading fails closed, like every other I/O gate
+        r.pressure.io = None;
+        assert_eq!(
+            check_gates(SlotKind::Transfer, Lane::Normal, false, &r, &t),
+            Some(WaitReason::IoUnavailable(SlotKind::Transfer))
+        );
+    }
+
+    // R-332
+    #[test]
+    fn r332_transfer_ignores_cpu_but_keeps_memory_and_the_state_reserve() {
+        let t = thresholds();
+        let mut r = readings();
+        r.pressure.cpu = Some(99.0);
+        assert_eq!(
+            check_gates(SlotKind::Transfer, Lane::Normal, false, &r, &t),
+            None
+        );
+        r.available_memory = GIB;
+        assert!(matches!(
+            check_gates(SlotKind::Transfer, Lane::Normal, false, &r, &t),
+            Some(WaitReason::MemoryLow { .. })
+        ));
+        r.available_memory = 8 * GIB;
+        r.state_free = 0;
+        assert!(matches!(
+            check_gates(SlotKind::Transfer, Lane::Normal, false, &r, &t),
+            Some(WaitReason::Disk { .. })
+        ));
     }
 
     #[test]

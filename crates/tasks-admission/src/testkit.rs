@@ -24,6 +24,10 @@ pub fn thresholds() -> Thresholds {
         compile: gate,
         run: gate,
         offload: gate,
+        transfer: Gate {
+            max_cpu: None,
+            ..gate
+        },
         cache_reserve_bytes: 20 * GIB,
         state_reserve_bytes: GIB,
         short_job_max_secs: 60.0,

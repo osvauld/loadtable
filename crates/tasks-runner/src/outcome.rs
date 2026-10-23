@@ -2,7 +2,7 @@
 
 use crate::Lease;
 use std::time::Duration;
-use tasks_core::Phase;
+use tasks_core::{JobFigures, Phase};
 use tasks_platform::Usage;
 
 /// How the run ended.
@@ -37,6 +37,9 @@ pub struct Outcome {
     pub wall: Duration,
     /// The lease the group ran under.
     pub lease: Lease,
+    /// What the job cost, read after the last process was gone; `None` when nothing could be
+    /// measured (no attribution configured).
+    pub figures: Option<JobFigures>,
 }
 
 impl Outcome {

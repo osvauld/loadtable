@@ -72,6 +72,8 @@ pub(crate) struct FakeProcs {
     /// When true the strays ignore `Term` and only `Kill` stops them.
     pub(crate) strays_ignore_term: bool,
     pub(crate) signals: Mutex<Vec<Signal>>,
+    /// The `cgroup.procs` file the last spawn was told to join.
+    pub(crate) joined: Mutex<Option<PathBuf>>,
     state: Mutex<FakeState>,
 }
 
@@ -99,6 +101,7 @@ impl FakeProcs {
             strays: 0,
             strays_ignore_term: false,
             signals: Mutex::new(Vec::new()),
+            joined: Mutex::new(None),
             state: Mutex::new(FakeState::default()),
         }
     }
@@ -112,6 +115,7 @@ impl Processes for FakeProcs {
     fn spawn_group(&self, cmd: &SpawnSpec) -> Result<Child, PlatformError> {
         let mut st = self.state.lock().unwrap();
         st.log = Some(cmd.log_path.clone());
+        *self.joined.lock().unwrap() = cmd.cgroup_procs.clone();
         st.strays = self.strays;
         drop(st);
         std::fs::File::create(&cmd.log_path).unwrap();

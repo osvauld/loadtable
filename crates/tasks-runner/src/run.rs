@@ -1,7 +1,8 @@
 //! The supervision loop: spawn, follow the log, enforce policy, cancel, report.
 
+use crate::meter::Meter;
 use crate::{
-    CancelState, CancelToken, Clock, End, EnvPolicy, Lease, LineSplitter, Outcome, Policy,
+    Attrib, CancelState, CancelToken, Clock, End, EnvPolicy, Lease, LineSplitter, Outcome, Policy,
     RunEvents, RunnerError, SplitLimits, TimedLine, build_env,
 };
 use std::fs::{File, OpenOptions};
@@ -46,6 +47,7 @@ pub fn build_spawn_spec(
         cwd: job.cwd.clone(),
         env: build_env(job.job, parent_env, &job.env, env_policy),
         log_path: job.log_path.clone(),
+        cgroup_procs: None,
     })
 }
 
@@ -57,6 +59,7 @@ pub struct Runner<'a> {
     env_policy: EnvPolicy,
     parent_env: Vec<(String, String)>,
     max_line_bytes: usize,
+    attrib: Option<Attrib<'a>>,
 }
 
 /// Follows an append-only log file and splits it into timed lines.
@@ -168,7 +171,15 @@ impl<'a> Runner<'a> {
             env_policy,
             parent_env,
             max_line_bytes: 64 * 1024,
+            attrib: None,
         }
+    }
+
+    /// Measures every job: in its own cgroup when the platform has them, otherwise by summing its
+    /// process tree. Without this the runner spawns plain process groups and reports no figures.
+    pub fn with_attribution(mut self, attrib: Attrib<'a>) -> Runner<'a> {
+        self.attrib = Some(attrib);
+        self
     }
 
     /// Spawns the job, supervises it to the end and reports to `events`.
@@ -181,11 +192,27 @@ impl<'a> Runner<'a> {
         events: &mut dyn RunEvents,
     ) -> Result<Outcome, RunnerError> {
         self.policy.validate()?;
-        let spec = build_spawn_spec(job, self.parent_env.clone(), &self.env_policy)?;
+        let mut spec = build_spawn_spec(job, self.parent_env.clone(), &self.env_policy)?;
         let mut follower = Follower::new(job, self.max_line_bytes)?;
+        let mut meter = self.attrib.map(|a| {
+            let (m, procs) = Meter::new(a, job.job);
+            spec.cgroup_procs = procs;
+            m
+        });
         let t0 = self.clock.now();
-        let child = self.procs.spawn_group(&spec).map_err(RunnerError::Spawn)?;
+        let child = match self.procs.spawn_group(&spec) {
+            Ok(c) => c,
+            Err(e) => {
+                if let Some(m) = &meter {
+                    m.remove();
+                }
+                return Err(RunnerError::Spawn(e));
+            }
+        };
         let lease = Lease::new(child.group);
+        if let Some(m) = meter.as_mut() {
+            m.started(&child);
+        }
         events.started(&child, &lease);
         let mut live = Live {
             child,
@@ -211,16 +238,32 @@ impl<'a> Runner<'a> {
             if let Ok(u) = self.procs.usage(live.child.group) {
                 live.usage = Some(u);
             }
+            if let Some(m) = meter.as_mut()
+                && let Some(f) = m.tick(now.saturating_sub(t0), live.usage.as_ref())
+            {
+                events.figures(&f);
+            }
             if let Some(why) = self.stop_reason(cancel, now, t0, last_activity) {
-                self.terminate(&mut live);
+                self.terminate(&mut live, meter.as_ref());
                 break why;
             }
             self.clock.sleep(self.policy.poll);
         };
         if live.exit.is_some() {
             self.clean_descendants(&live);
+            if let Some(m) = &meter {
+                self.sweep_cgroup(m, &live);
+            }
             // The status came from `peek_exit`; reaping only frees the leader.
             let _ = self.procs.try_wait(&live.child);
+        }
+        // read after the last process is gone and before the cgroup goes away
+        let figures = meter.as_mut().and_then(|m| m.sample(live.usage.as_ref()));
+        if let Some(f) = &figures {
+            events.figures(f);
+        }
+        if let Some(m) = &meter {
+            m.remove();
         }
         let wall = self.clock.now().saturating_sub(t0);
         follower.drain(wall, events)?;
@@ -235,6 +278,7 @@ impl<'a> Runner<'a> {
             usage: live.usage,
             wall,
             lease,
+            figures,
         };
         events.finished(&outcome);
         Ok(outcome)
@@ -272,7 +316,7 @@ impl<'a> Runner<'a> {
     /// Term the whole group, wait the grace, then Kill and wait once more.
     /// Idempotent: nothing is signalled once the exit status is known, and a
     /// `Gone` group counts as already stopped (R-074, R-078).
-    fn terminate(&self, live: &mut Live) {
+    fn terminate(&self, live: &mut Live, meter: Option<&Meter<'_>>) {
         for sig in [Signal::Term, Signal::Kill] {
             if live.exit.is_some() {
                 return;
@@ -298,6 +342,21 @@ impl<'a> Runner<'a> {
                 self.clock.sleep(self.policy.poll);
             }
         }
+        // Last resort: the group kill did not stop the leader. `cgroup.kill` reaches every
+        // process in the job's cgroup, including ones that left the process group.
+        if live.exit.is_none()
+            && let Some(m) = meter.filter(|m| m.has_cgroup())
+        {
+            m.kill();
+            let deadline = self.clock.now() + self.policy.cancel_grace;
+            while self.clock.now() < deadline {
+                if let Ok(Some(code)) = self.procs.peek_exit(&live.child) {
+                    live.exit = Some(code);
+                    return;
+                }
+                self.clock.sleep(self.policy.poll);
+            }
+        }
     }
 }
 
@@ -317,6 +376,20 @@ impl Runner<'_> {
             while !self.group_empty(live) && self.clock.now() < deadline {
                 self.clock.sleep(self.policy.poll);
             }
+        }
+    }
+
+    /// After the group kill: anything still in the job's cgroup (a child that called `setsid`
+    /// or double-forked out of the process group) is killed through the cgroup, then given the
+    /// grace to disappear. The leader is excluded: a zombie leader stays listed until reaped.
+    fn sweep_cgroup(&self, meter: &Meter<'_>, live: &Live) {
+        if meter.escapees(live.child.pid).is_empty() {
+            return;
+        }
+        meter.kill();
+        let deadline = self.clock.now() + self.policy.cancel_grace;
+        while !meter.escapees(live.child.pid).is_empty() && self.clock.now() < deadline {
+            self.clock.sleep(self.policy.poll);
         }
     }
 

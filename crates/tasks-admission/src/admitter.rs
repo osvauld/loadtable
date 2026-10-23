@@ -29,6 +29,7 @@ impl Layout {
                 (SlotKind::Compile, compile_slots.clamp(1, 8)),
                 (SlotKind::Run, 4),
                 (SlotKind::Offload, 4),
+                (SlotKind::Transfer, 1),
             ]),
             ..Layout::default()
         }
@@ -222,6 +223,7 @@ mod tests {
         assert_eq!(Layout::standard(99).counts[&SlotKind::Compile], 8);
         assert_eq!(Layout::standard(3).counts[&SlotKind::Run], 4);
         assert_eq!(Layout::standard(3).counts[&SlotKind::Offload], 4);
+        assert_eq!(Layout::standard(3).counts[&SlotKind::Transfer], 1);
     }
 
     #[test]

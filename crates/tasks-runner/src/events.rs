@@ -2,6 +2,7 @@
 
 use crate::{Lease, Outcome};
 use std::time::Duration;
+use tasks_core::JobFigures;
 use tasks_platform::Child;
 
 /// One output line with its monotonic offset from the job start.
@@ -31,6 +32,9 @@ pub trait RunEvents {
     fn started(&mut self, child: &Child, lease: &Lease);
     /// New complete lines were read from the log.
     fn lines(&mut self, lines: &[TimedLine]);
+    /// A fresh sample of what the job costs the machine (every couple of seconds, and once more
+    /// before `finished`). The default ignores it.
+    fn figures(&mut self, _figures: &JobFigures) {}
     /// The job ended; called exactly once.
     fn finished(&mut self, outcome: &Outcome);
 }

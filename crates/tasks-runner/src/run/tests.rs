@@ -451,3 +451,157 @@ fn r090_real_job_sees_only_allowlisted_env() {
     assert_eq!(out.phase(), Phase::Passed);
     assert_eq!(ev.lines[0].text, "5|unset|2");
 }
+
+// ---- attribution (design §9)
+
+mod attribution {
+    use super::*;
+    use crate::Attrib;
+    use tasks_core::{Attribution, JobFigures};
+    use tasks_platform::fake::{FakeCgroups, FakePlatform};
+    use tasks_platform::{CgroupName, ProcInfo};
+
+    const JOB: CgroupName = CgroupName::Job(5);
+
+    fn run_with(f: &Fx, p: Policy, cg: &FakeCgroups, plat: &FakePlatform) -> (Outcome, RecEvents) {
+        let runner =
+            Runner::new(&f.procs, &*f.clock, p, env_policy(), vec![]).with_attribution(Attrib {
+                cgroups: cg,
+                table: plat,
+            });
+        let mut ev = RecEvents::default();
+        let out = runner
+            .run(&job(&f.dir, &["true"]), &CancelToken::new(), &mut ev)
+            .unwrap();
+        (out, ev)
+    }
+
+    fn cgroup_figures() -> JobFigures {
+        let mut fig = JobFigures::empty(Attribution::Cgroup);
+        fig.io_write_bytes = Some(25 << 30);
+        fig.cpu_usec = Some(3_000_000);
+        fig
+    }
+
+    // R-323
+    #[test]
+    fn r323_the_child_is_told_to_join_the_jobs_cgroup() {
+        let mut f = fx();
+        f.procs.exit_at = Some((MS(100), 0));
+        let cg = FakeCgroups::delegated();
+        cg.set_figures(JOB, cgroup_figures());
+        let plat = FakePlatform::default();
+        let (out, _) = run_with(&f, policy(), &cg, &plat);
+        assert_eq!(
+            f.procs.joined.lock().unwrap().as_deref(),
+            Some(std::path::Path::new("/fake/tasks.slice/job-5/cgroup.procs"))
+        );
+        let fig = out.figures.unwrap();
+        assert_eq!(fig.quality, Attribution::Cgroup);
+        assert_eq!(fig.io_write_bytes, Some(25 << 30));
+    }
+
+    // R-329
+    #[test]
+    fn r329_the_jobs_cgroup_is_removed_when_it_ends() {
+        let mut f = fx();
+        f.procs.exit_at = Some((MS(100), 0));
+        let cg = FakeCgroups::delegated();
+        cg.set_figures(JOB, cgroup_figures());
+        let plat = FakePlatform::default();
+        run_with(&f, policy(), &cg, &plat);
+        assert_eq!(cg.removed(), [JOB]);
+        assert!(!cg.exists(JOB));
+    }
+
+    // R-328
+    #[test]
+    fn r328_cgroup_kill_follows_the_group_kill_when_a_child_escaped_the_group() {
+        let mut f = fx();
+        f.procs.exit_at = Some((MS(100), 0));
+        let cg = FakeCgroups::delegated();
+        cg.set_figures(JOB, cgroup_figures());
+        // the zombie leader and a daemonised child that left the process group
+        cg.set_pids(JOB, vec![4242, 9001]);
+        let plat = FakePlatform::default();
+        let (out, _) = run_with(&f, policy(), &cg, &plat);
+        assert_eq!(cg.kills(), [JOB], "the cgroup is the last resort");
+        assert_eq!(
+            out.phase(),
+            Phase::Passed,
+            "the command's own status is kept"
+        );
+        assert_eq!(cg.removed(), [JOB], "empty after the kill, so removed");
+    }
+
+    // R-328
+    #[test]
+    fn r328_no_cgroup_kill_when_only_the_leader_remains() {
+        let mut f = fx();
+        f.procs.exit_at = Some((MS(100), 0));
+        let cg = FakeCgroups::delegated();
+        cg.set_figures(JOB, cgroup_figures());
+        cg.set_pids(JOB, vec![4242]);
+        let plat = FakePlatform::default();
+        run_with(&f, policy(), &cg, &plat);
+        assert!(cg.kills().is_empty());
+    }
+
+    // R-326
+    #[test]
+    fn r326_without_delegation_the_job_runs_in_a_process_group_and_says_so() {
+        let mut f = fx();
+        f.procs.exit_at = Some((MS(2500), 0));
+        let cg = FakeCgroups::unavailable("not running under systemd");
+        let plat = FakePlatform::default();
+        *plat.table.lock().unwrap() = vec![
+            ProcInfo {
+                pid: 4242,
+                ppid: 1,
+                pgid: 4242,
+                start: 7,
+                name: "cargo".into(),
+                rss_bytes: 100,
+                cpu_usec: 0,
+                io_read: Some(10),
+                io_write: Some(20),
+            },
+            ProcInfo {
+                pid: 4300,
+                ppid: 4242,
+                pgid: 4242,
+                start: 8,
+                name: "rustc".into(),
+                rss_bytes: 900,
+                cpu_usec: 0,
+                io_read: Some(1000),
+                io_write: Some(2000),
+            },
+            ProcInfo {
+                pid: 77,
+                ppid: 1,
+                pgid: 77,
+                start: 3,
+                name: "firefox".into(),
+                rss_bytes: 5000,
+                cpu_usec: 0,
+                io_read: Some(999_999),
+                io_write: Some(999_999),
+            },
+        ];
+        let (out, ev) = run_with(&f, policy(), &cg, &plat);
+        assert_eq!(*f.procs.joined.lock().unwrap(), None);
+        let fig = out.figures.unwrap();
+        assert_eq!(fig.quality, Attribution::ProcessTree);
+        assert_eq!(fig.io_read_bytes, Some(1010));
+        assert_eq!(fig.io_write_bytes, Some(2020));
+        assert_eq!(
+            fig.mem_peak_bytes,
+            Some(1000),
+            "firefox is not part of the job"
+        );
+        assert_eq!(fig.io_some_us, None, "stall times need a cgroup");
+        assert!(cg.removed().is_empty());
+        assert!(ev.finished.len() == 1);
+    }
+}

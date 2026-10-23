@@ -101,6 +101,7 @@ pub fn kind_name(k: SlotKind) -> &'static str {
         SlotKind::Run => "run",
         SlotKind::Offload => "offload",
         SlotKind::Device => "device",
+        SlotKind::Transfer => "transfer",
     }
 }
 

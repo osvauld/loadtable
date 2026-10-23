@@ -32,6 +32,9 @@ pub struct Thresholds {
     pub run: Gate,
     /// Limits for offload jobs; only `max_memory` is used.
     pub offload: Gate,
+    /// Limits for transfers (checkout sync): the I/O limit and the memory level apply, the CPU
+    /// limit is off. A sync is local disk work, so unlike offload it waits for the I/O gate.
+    pub transfer: Gate,
     /// Free bytes required on the cache filesystem for a job that creates new output.
     pub cache_reserve_bytes: u64,
     /// Free bytes required on the state filesystem.
@@ -48,6 +51,7 @@ impl Thresholds {
         match kind {
             SlotKind::Compile => self.compile,
             SlotKind::Offload => self.offload,
+            SlotKind::Transfer => self.transfer,
             SlotKind::Run | SlotKind::Device => self.run,
         }
     }
