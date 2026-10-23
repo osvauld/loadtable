@@ -618,6 +618,7 @@ fn r356_status_lists_each_peer_with_state_path_latencies_roles_and_its_last_repo
                 io_pct: Some(1),
                 pressure_summary: String::new(),
                 cpu_busy_pct: Some(41),
+                memory_available_bytes: None,
                 swap_total: Some(8 << 30),
                 swap_used: Some(1 << 30),
                 swap_in_per_s: Some(0),
@@ -794,6 +795,7 @@ fn r611_a_peers_power_is_shown_with_its_last_report() {
                 io_pct: None,
                 pressure_summary: String::new(),
                 cpu_busy_pct: None,
+                memory_available_bytes: None,
                 swap_total: None,
                 swap_used: None,
                 swap_in_per_s: None,
@@ -812,9 +814,28 @@ fn r611_a_peers_power_is_shown_with_its_last_report() {
 // R-523
 #[test]
 fn r523_a_peer_without_psi_shows_its_memory_level_not_a_question_mark() {
-    assert_eq!(peer_memory_text(Some(4), Some("normal")), "4%");
-    assert_eq!(peer_memory_text(None, Some("warn")), "warn");
+    assert_eq!(peer_memory_text(None, Some("warn")), "tight");
     assert_eq!(peer_memory_text(None, None), "?");
+}
+
+#[test]
+fn r641_memory_reads_ok_tight_or_critical_in_status_for_this_machine_and_peers() {
+    assert_eq!(peer_memory_text(Some(4), Some("normal")), "ok (stalled 4%)");
+    assert_eq!(peer_memory_text(None, Some("critical")), "critical");
+    assert_eq!(peer_memory_text(Some(12), None), "stalled 12%");
+    let mut p = crate::testutil::status_snapshot().pressure;
+    p.memory = "warn".into();
+    p.memory_some = Some(12.0);
+    p.memory_full = Some(0.0);
+    p.memory_stall_limit = Some(10.0);
+    assert_eq!(
+        memory_line(&p),
+        "memory tight (stalled 12%, fully stalled 0%, tight from 10%)"
+    );
+    // macOS: a level and no percentages
+    p.memory = "normal".into();
+    p.memory_some = None;
+    assert_eq!(memory_line(&p), "memory ok");
 }
 
 fn running(eta: Option<f64>) -> tasks_daemon::api::RunningView {

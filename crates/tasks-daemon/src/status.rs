@@ -38,6 +38,7 @@ fn peer_machine_view(s: &tasks_peer::proto::PeerStatus) -> PeerMachineView {
         io_pct: s.pressure.io_pct,
         pressure_summary: s.pressure.summary.clone(),
         cpu_busy_pct: s.pressure.cpu_busy_pct,
+        memory_available_bytes: s.pressure.memory_available_bytes,
         swap_total: s.pressure.swap_total_bytes,
         swap_used: s.pressure.swap_used_bytes,
         swap_in_per_s: s.pressure.swap_in_per_s,
@@ -97,6 +98,15 @@ pub fn job_view(r: &JobRecord) -> JobView {
         remote_wait: remote_wait(r),
         fetch_paths: r.spec.fetch.clone(),
         fetch: fetch_results(r),
+        sync: sync_view(r),
+    }
+}
+
+/// The sync before a forwarded run, when it has happened (R-648).
+fn sync_view(r: &JobRecord) -> Option<crate::api::SyncView> {
+    match (&r.log_path, &r.forward) {
+        (Some(log), Some(_)) => crate::peer_link::sync_note::read(log),
+        _ => None,
     }
 }
 
@@ -492,11 +502,16 @@ impl Scheduler {
                 memory: level_name(r.pressure.memory).to_string(),
                 memory_some: r.pressure.memory_some,
                 memory_full: r.pressure.memory_full,
+                memory_stall_limit: r
+                    .pressure
+                    .memory_some
+                    .map(|_| policy.psi().memory_some_warn),
                 cpu: r.pressure.cpu,
                 io: r.pressure.io,
                 available_memory: Some(r.available_memory),
                 memory_total: mem.map(|m| m.total_bytes),
                 cpu_busy_pct: rates.cpu_pct,
+                cpu_cores: Some(self.cores),
                 cores_in_use: rates
                     .cpu_pct
                     .map(|p| f64::from(p) / 100.0 * f64::from(self.cores)),
@@ -520,12 +535,14 @@ impl Scheduler {
                 memory: "unknown".to_string(),
                 memory_some: None,
                 memory_full: None,
+                memory_stall_limit: None,
                 cpu: None,
                 io: None,
                 available_memory: None,
                 memory_total: None,
                 cpu_busy_pct: None,
                 cores_in_use: None,
+                cpu_cores: Some(self.cores),
                 swap_total: None,
                 swap_used: None,
                 swap_in_per_s: None,
@@ -545,7 +562,7 @@ mod peer_view_tests {
     use tasks_peer::proto::{PeerStatus, PressureSummary, QueueSummary, SlotStatus};
 
     #[test]
-    fn a_peers_last_report_reaches_the_status_view() {
+    fn r643_a_peers_last_report_reaches_the_status_view() {
         let machine = tasks_core::Machine {
             name: tasks_core::MachineName("nixos".into()),
             os: tasks_core::Os::Linux,
@@ -573,6 +590,7 @@ mod peer_view_tests {
                 io_pct: Some(0),
                 summary: "memory stalls".into(),
                 cpu_busy_pct: Some(61),
+                memory_available_bytes: Some(51 << 30),
                 swap_total_bytes: Some(4 << 30),
                 swap_used_bytes: Some(1 << 30),
                 swap_in_per_s: Some(0),
@@ -590,6 +608,8 @@ mod peer_view_tests {
             (v.slots[0].kind.as_str(), v.slots[0].total, v.slots[0].used),
             ("compile", 4, 3)
         );
+        // R-643: what the peer has free reaches the origin's view
+        assert_eq!(v.memory_available_bytes, Some(51 << 30));
         // unknown stays unknown; a measured zero stays zero
         assert_eq!(
             (v.cpu_pct, v.memory_pct, v.io_pct),

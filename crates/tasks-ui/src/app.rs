@@ -12,6 +12,7 @@ use crate::logview::{LogSnapshot, SearchHits};
 use crate::mailbox::Mailbox;
 use crate::model::{self, JobRow, NoticeLevel, Online, Section, Tab, ViewModel};
 use crate::paint;
+use crate::resources;
 use crate::stalls::{self, StallData};
 use crate::stats;
 use crate::theme::{self, LABEL, Palette, SECONDARY};
@@ -23,6 +24,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tasks_core::JobId;
+use tasks_core::metrics::JobMetricsView;
 use tasks_daemon::api::HistoryView;
 
 const REFRESH: Duration = Duration::from_secs(1);
@@ -48,6 +50,37 @@ struct LogWindow {
     follow: bool,
     _feed: Feed,
 }
+
+/// The live metrics of the job the side panel shows.
+struct MetricsState {
+    job: i64,
+    /// The newest good answer.
+    view: Option<JobMetricsView>,
+    /// Why the newest request failed.
+    error: Option<String>,
+    /// When the last request went out.
+    asked_at: Option<Instant>,
+    /// Whether the job still ran when it did.
+    asked_live: bool,
+    /// A request is out.
+    inflight: bool,
+}
+
+impl MetricsState {
+    fn new(job: i64) -> MetricsState {
+        MetricsState {
+            job,
+            view: None,
+            error: None,
+            asked_at: None,
+            asked_live: false,
+            inflight: false,
+        }
+    }
+}
+
+/// An answer to a metrics request, with the job it was for.
+type MetricsReply = (i64, Result<JobMetricsView, String>);
 
 /// The window's state.
 pub struct App {
@@ -82,6 +115,8 @@ pub struct App {
     stalls: Option<Result<StallData, String>>,
     stalls_loading: bool,
     stalls_asked: bool,
+    metrics_box: Arc<Mailbox<MetricsReply>>,
+    metrics: Option<MetricsState>,
     tz: jiff::tz::TimeZone,
     home: Option<PathBuf>,
 }
@@ -136,6 +171,8 @@ impl App {
             stalls: None,
             stalls_loading: false,
             stalls_asked: false,
+            metrics_box: Arc::new(Mailbox::new()),
+            metrics: None,
             tz: jiff::tz::TimeZone::system(),
             home: std::env::var_os("HOME").map(PathBuf::from),
         }
@@ -180,6 +217,28 @@ impl App {
     pub fn set_stalls(&mut self, data: StallData) {
         self.stalls = Some(Ok(data));
         self.stalls_asked = true;
+    }
+
+    /// Gives the side panel the live metrics of a job (for screenshots and tests).
+    pub fn set_metrics(&mut self, id: i64, view: JobMetricsView) {
+        let live = self
+            .vm
+            .as_ref()
+            .and_then(|vm| vm.find(id))
+            .is_some_and(|r| r.section == Section::Running);
+        let mut st = MetricsState::new(id);
+        st.view = Some(view);
+        st.asked_at = Some(Instant::now());
+        st.asked_live = live;
+        self.metrics = Some(st);
+    }
+
+    /// Makes the side panel show that the metrics request for a job failed (for screenshots).
+    pub fn set_metrics_error(&mut self, id: i64, error: &str) {
+        let mut st = MetricsState::new(id);
+        st.error = Some(error.to_string());
+        st.asked_at = Some(Instant::now());
+        self.metrics = Some(st);
     }
 
     /// Opens the cancel dialog for a job (for screenshots).
@@ -235,6 +294,18 @@ impl App {
                 Err(e) => (false, format!("{} refused: {e}", o.what)),
             });
         }
+        if let Some((id, res)) = self.metrics_box.take()
+            && let Some(m) = self.metrics.as_mut().filter(|m| m.job == id)
+        {
+            m.inflight = false;
+            match res {
+                Ok(v) => {
+                    m.view = Some(v);
+                    m.error = None;
+                }
+                Err(e) => m.error = Some(e),
+            }
+        }
         if let Some(h) = self.history_box.take() {
             self.history = Some(h);
             self.history_loading = false;
@@ -258,6 +329,37 @@ impl App {
                 });
             }
         }
+    }
+
+    /// Asks for the shown job's metrics when it is time: every two seconds while it runs, and
+    /// for a job that just ended once more. Nothing is asked for any other job (R-645).
+    fn poll_metrics(&mut self, row: &JobRow) {
+        if self.metrics.as_ref().is_none_or(|m| m.job != row.id) {
+            self.metrics = Some(MetricsState::new(row.id));
+        }
+        let Some(m) = self.metrics.as_mut() else {
+            return;
+        };
+        let wants = resources::wants(row);
+        if m.inflight || !resources::due(wants, m.asked_at.map(|t| t.elapsed()), m.asked_live) {
+            return;
+        }
+        m.inflight = true;
+        m.asked_at = Some(Instant::now());
+        m.asked_live = wants == resources::Wants::Live;
+        let link = Arc::clone(&self.link);
+        let id = JobId(row.id);
+        let n = row.id;
+        feed::spawn_once(
+            Arc::clone(&self.metrics_box),
+            Arc::clone(&self.wake),
+            move || (n, feed::fetch_metrics(link.as_ref(), id)),
+        );
+    }
+
+    /// How many metrics requests are out or answered for the shown job (for tests).
+    pub fn metrics_requested(&self) -> bool {
+        self.metrics.as_ref().is_some_and(|m| m.asked_at.is_some())
     }
 
     fn open_cancel(&mut self, id: i64) {
@@ -723,6 +825,25 @@ impl App {
         let now_ms = self.vm.as_ref().map_or(0, |vm| vm.now_ms);
         let listed = self.vm.as_ref().is_some_and(|vm| vm.find(row.id).is_some());
         let d = detail::detail(&row, now_ms, &self.tz, self.home.as_deref());
+        self.poll_metrics(&row);
+        let cores = self.vm.as_ref().and_then(|vm| {
+            vm.machines
+                .iter()
+                .find(|m| m.name == row.machine)
+                .and_then(|m| m.cpu_load.cores)
+        });
+        let panel = resources::panel(
+            &row,
+            self.metrics
+                .as_ref()
+                .filter(|m| m.job == row.id)
+                .map_or_else(resources::Input::default, |m| resources::Input {
+                    view: m.view.as_ref(),
+                    error: m.error.as_deref(),
+                    loading: m.inflight && m.view.is_none(),
+                    cores,
+                }),
+        );
         let mut open_log = false;
         let mut open_cancel = false;
         let mut move_up = false;
@@ -849,12 +970,11 @@ impl App {
                             });
                     });
                 rule(ui, p);
-                // the live metrics (step 2) go here: graphs, then the process table
                 egui::Frame::new()
-                    .inner_margin(Margin::symmetric(16, 0))
+                    .inner_margin(Margin::symmetric(16, 12))
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        paint::resources_placeholder(ui, p);
+                        paint::resources(ui, p, &panel);
                     });
                 rule(ui, p);
                 egui::Frame::new().inner_margin(pad).show(ui, |ui| {

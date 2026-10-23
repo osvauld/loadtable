@@ -4,6 +4,7 @@
 use crate::actions::{Actions, actions_for, queue_banner};
 use crate::feed::Dashboard;
 use crate::format::{self, UNKNOWN};
+use crate::machine::{self, CpuLoad, CpuShare, MemLevel};
 use std::collections::BTreeMap;
 use tasks_core::{Phase, WaitReason};
 use tasks_daemon::api::{AlertView, JobView, PeerView, RunningView, StatusSnapshot, WaiterView};
@@ -225,14 +226,16 @@ pub struct MachineCard {
     pub greyed: bool,
     /// For a dimmed row, the one line that replaces the gauges (R-582).
     pub away_note: Option<String>,
-    /// Memory stall (PSI some, percent), when measured.
+    /// Memory stall (PSI some, percent), when measured; the tooltip says it, the row does not.
     pub stall: Option<f32>,
-    /// The stall percentage above which a new compile waits.
-    pub stall_limit: f32,
+    /// The memory level in the words everyone reads: ok, tight, critical (R-646).
+    pub mem_level: MemLevel,
     /// CPU busy percent, when measured.
     pub cpu_busy: Option<f32>,
-    /// `8.0 / 16 GiB` free of total, or `- / 64 GiB` when only the size is known.
-    pub ram_free: String,
+    /// How the busy cores split between the running jobs and the rest (R-644).
+    pub cpu_load: CpuLoad,
+    /// `8.0 of 16 GiB used`, or `64 GiB total` when only the size is known (R-643).
+    pub ram_used: String,
     /// CPU line, for the gauge's tooltip.
     pub cpu: String,
     /// RAM line, for the tooltip.
@@ -385,20 +388,24 @@ pub fn alert_notice(a: &AlertView, machine: &str) -> Notice {
             "state" => "State",
             other => other,
         };
-        let text = if msg.contains("below its reserve") {
-            format!(
-                "{free} free, reserve is {reserve}. New builds that write output here wait until space is freed."
+        // the title says what the numbers say: below the reserve, or still above it but
+        // closing in (R-647)
+        let (title, text) = if msg.contains("below its reserve") {
+            (
+                format!("{what} disk is below its reserve on {machine}"),
+                format!(
+                    "{free} free, reserve is {reserve}. New builds that write output here wait until space is freed."
+                ),
             )
         } else {
-            format!(
-                "{free} free, reserve is {reserve}. Builds that write output here will wait if it drops below that."
+            (
+                format!("{what} disk is filling up on {machine}"),
+                format!(
+                    "{free} free, reserve is {reserve}. Builds that write output here will wait if it drops below that."
+                ),
             )
         };
-        return Notice {
-            level,
-            title: format!("{what} disk low on {machine}"),
-            text,
-        };
+        return Notice { level, title, text };
     }
     if a.id == "memory-pressure" {
         return Notice {
@@ -940,13 +947,14 @@ fn local_card(
         greyed: false,
         away_note: None,
         stall: p.memory_some,
-        stall_limit: stall_limit(p.compile_blocker.as_deref()),
+        mem_level: machine::memory_level(
+            Some(p.memory.as_str()),
+            p.memory_some,
+            p.memory_stall_limit,
+        ),
         cpu_busy: p.cpu_busy_pct,
-        ram_free: match (p.available_memory, p.memory_total) {
-            (Some(a), Some(t)) => format!("{} / {}", gib_free(a), gib_short(t)),
-            (Some(a), None) => format!("{} / {UNKNOWN}", gib_free(a)),
-            _ => UNKNOWN.to_string(),
-        },
+        cpu_load: local_cpu_load(st, &here),
+        ram_used: machine::ram_used(p.memory_total, p.available_memory),
         cpu: format!(
             "{}CPU pressure {} ({})",
             busy_prefix(p.cpu_busy_pct),
@@ -962,12 +970,12 @@ fn local_card(
             p.swap_out_per_s,
             "not reported by the daemon",
         ),
-        pressure: format!(
-            "memory {} (some {}, full {}), io {}",
-            p.memory,
-            format::percent(p.memory_some),
-            format::percent(p.memory_full),
-            format::pressure_word(p.io)
+        pressure: memory_tip(
+            machine::memory_level(Some(p.memory.as_str()), p.memory_some, p.memory_stall_limit),
+            p.memory_some,
+            p.memory_full,
+            p.memory_stall_limit,
+            format::pressure_word(p.io),
         ),
         blocker: p.compile_blocker.clone(),
         slots: st
@@ -1007,38 +1015,94 @@ fn local_card(
     }
 }
 
-/// The memory-stall percentage above which a new compile waits. The daemon does not report
-/// its policy limit yet, so this is read from the blocker text (`... 12% over 10%`) and falls
-/// back to the shipped default.
-pub const STALL_LIMIT_DEFAULT: f32 = 10.0;
-
-fn stall_limit(blocker: Option<&str>) -> f32 {
-    blocker
-        .and_then(|b| b.rsplit_once(" over "))
-        .and_then(|(_, rest)| rest.strip_suffix('%'))
-        .and_then(|n| n.trim().parse::<f32>().ok())
-        .filter(|n| *n > 0.0)
-        .unwrap_or(STALL_LIMIT_DEFAULT)
+/// The tooltip of the memory cell: the level, and the stall figures behind it, which are
+/// detail and not the headline (R-646).
+fn memory_tip(
+    level: MemLevel,
+    some: Option<f32>,
+    full: Option<f32>,
+    limit: Option<f32>,
+    io: &str,
+) -> String {
+    let mut s = format!("Memory is {}.", level.word());
+    if let Some(some) = some {
+        s.push_str(&format!(
+            "\nTasks waited on memory {some:.0}% of the last 10 s"
+        ));
+        if let Some(f) = full {
+            s.push_str(&format!(" (all of them stalled {f:.0}%)"));
+        }
+        s.push('.');
+        if let Some(l) = limit {
+            s.push_str(&format!("\nNew compile jobs wait from {l:.0}%."));
+        }
+    } else {
+        s.push_str("\nThis machine reports a level, not a stall percentage.");
+    }
+    s.push_str(&format!("\nDisk pressure: {io}."));
+    s
 }
 
-/// Memory in GiB for the RAM column: `8.0`, `16`, `64`; below 1 GiB in MiB.
-fn gib_short(b: u64) -> String {
-    let g = b as f64 / (1u64 << 30) as f64;
-    if g < 1.0 {
-        format!("{:.0} MiB", b as f64 / (1u64 << 20) as f64)
-    } else if (g - g.round()).abs() < 0.05 {
-        format!("{g:.0} GiB")
-    } else {
-        format!("{g:.1} GiB")
+/// This machine's cores split between its running jobs and the rest.
+fn local_cpu_load(st: &StatusSnapshot, here: &[&JobRow]) -> CpuLoad {
+    let mut jobs: Vec<CpuShare> = here
+        .iter()
+        .filter_map(|r| {
+            let cores = st.running.iter().find(|v| v.id.0 == r.id)?.cores?;
+            Some(CpuShare {
+                label: format!("#{} {}", r.id, r.agent),
+                hue: Some(r.hue),
+                cores,
+            })
+        })
+        .collect();
+    jobs.sort_by(|a, b| b.cores.total_cmp(&a.cores));
+    CpuLoad {
+        outside: machine::outside_jobs(st.pressure.cores_in_use, &jobs),
+        jobs,
+        cores: st.pressure.cpu_cores.map(f64::from),
     }
 }
 
-/// The free-memory figure of the RAM column: `8.0`, or `512 MiB` when under a GiB.
-fn gib_free(b: u64) -> String {
-    if b < 1 << 30 {
-        gib_short(b)
-    } else {
-        format!("{:.1}", b as f64 / (1u64 << 30) as f64)
+/// A peer's cores split between the jobs it runs and the rest. A job this machine forwarded
+/// there is named by its row here; another origin's job by its owner and its id on the peer.
+fn peer_cpu_load(peer: &PeerView, rows: &[JobRow]) -> CpuLoad {
+    let Some(m) = &peer.machine else {
+        return CpuLoad::default();
+    };
+    let mut jobs: Vec<CpuShare> = m
+        .jobs
+        .iter()
+        .filter_map(|j| {
+            let cores = f64::from(j.cores_milli?) / 1000.0;
+            let ours = rows.iter().find(|r| {
+                r.machine == peer.name
+                    && r.job
+                        .forwarded_to
+                        .as_ref()
+                        .and_then(|f| f.1)
+                        .is_some_and(|id| id == i64::try_from(j.id).unwrap_or(-1))
+            });
+            Some(match ours {
+                Some(r) => CpuShare {
+                    label: format!("#{} {}", r.id, r.agent),
+                    hue: Some(r.hue),
+                    cores,
+                },
+                None => CpuShare {
+                    label: format!("{} (job {} there)", format::agent_of(&j.owner), j.id),
+                    hue: None,
+                    cores,
+                },
+            })
+        })
+        .collect();
+    jobs.sort_by(|a, b| b.cores.total_cmp(&a.cores));
+    let cores = f64::from(m.cores);
+    CpuLoad {
+        outside: machine::outside_jobs(m.cores_in_use_milli.map(|c| f64::from(c) / 1000.0), &jobs),
+        jobs,
+        cores: Some(cores),
     }
 }
 
@@ -1078,6 +1142,18 @@ fn swap_text(
     }
 }
 
+/// A peer's CPU busy percent: what it measured, else its cores in use over its cores. The
+/// second matters for a Mac that sends cores in use but no busy figure.
+fn peer_cpu_busy(peer: &PeerView) -> Option<f32> {
+    let m = peer.machine.as_ref()?;
+    m.cpu_busy_pct.map(f32::from).or_else(|| {
+        machine::busy_from_cores(
+            m.cores_in_use_milli.map(|c| f64::from(c) / 1000.0),
+            Some(f64::from(m.cores)),
+        )
+    })
+}
+
 fn peer_card(peer: &PeerView, rows: &[JobRow]) -> MachineCard {
     let online = match peer.state.as_str() {
         "up" => Online::Online,
@@ -1113,15 +1189,27 @@ fn peer_card(peer: &PeerView, rows: &[JobRow]) -> MachineCard {
                 format::pressure_word(m.cpu_pct.map(f32::from)),
                 m.cores
             ),
+            match m.memory_available_bytes {
+                Some(a) => format!(
+                    "{old}RAM {} available of {}",
+                    format::bytes(a),
+                    format::bytes(m.memory_bytes)
+                ),
+                None => format!("{old}RAM {} in all", format::bytes(m.memory_bytes)),
+            },
             format!(
-                "{old}RAM {} total, memory pressure {}",
-                format::bytes(m.memory_bytes),
-                format::percent(m.memory_pct.map(f32::from))
-            ),
-            format!(
-                "{old}memory {}, io {}",
-                format::pressure_word(m.memory_pct.map(f32::from)),
-                format::pressure_word(m.io_pct.map(f32::from))
+                "{old}{}",
+                memory_tip(
+                    machine::memory_level(
+                        m.memory_level.as_deref(),
+                        m.memory_pct.map(f32::from),
+                        None
+                    ),
+                    m.memory_pct.map(f32::from),
+                    None,
+                    None,
+                    format::pressure_word(m.io_pct.map(f32::from)),
+                )
             ),
             Some(m.pressure_summary.clone()).filter(|s| !s.is_empty()),
             m.slots
@@ -1171,14 +1259,14 @@ fn peer_card(peer: &PeerView, rows: &[JobRow]) -> MachineCard {
             .machine
             .as_ref()
             .and_then(|m| m.memory_pct.map(f32::from)),
-        stall_limit: stall_limit(blocker.as_deref()),
-        cpu_busy: peer
-            .machine
-            .as_ref()
-            .and_then(|m| m.cpu_busy_pct.map(f32::from)),
-        ram_free: peer.machine.as_ref().map_or_else(
+        mem_level: peer.machine.as_ref().map_or(MemLevel::Unknown, |m| {
+            machine::memory_level(m.memory_level.as_deref(), m.memory_pct.map(f32::from), None)
+        }),
+        cpu_busy: peer_cpu_busy(peer),
+        cpu_load: peer_cpu_load(peer, rows),
+        ram_used: peer.machine.as_ref().map_or_else(
             || UNKNOWN.to_string(),
-            |m| format!("{UNKNOWN} / {}", gib_short(m.memory_bytes)),
+            |m| machine::ram_used(Some(m.memory_bytes), m.memory_available_bytes),
         ),
         cpu,
         ram,
@@ -1486,6 +1574,7 @@ mod tests {
         d.status.pressure.available_memory = None;
         d.status.pressure.memory_total = None;
         d.status.pressure.memory_some = None;
+        d.status.pressure.memory = "unknown".into();
         d.status.pressure.swap_total = None;
         d.status.pressure.cpu_busy_pct = None;
         let vm = build(&d, 0);
@@ -1493,9 +1582,14 @@ mod tests {
         assert_eq!(m.cpu, "CPU pressure - (unknown)");
         assert_eq!(m.ram, "RAM -");
         assert_eq!((m.stall, m.cpu_busy), (None, None));
-        assert_eq!(m.ram_free, UNKNOWN);
+        assert_eq!(m.ram_used, UNKNOWN);
         assert!(m.swap.starts_with("swap -"));
-        assert!(m.pressure.contains("some -"));
+        assert_eq!(m.mem_level, MemLevel::Unknown);
+        assert!(
+            m.pressure.starts_with("Memory is unknown."),
+            "{}",
+            m.pressure
+        );
     }
 
     #[test]
@@ -1634,7 +1728,7 @@ mod tests {
         assert!(q.text.contains("Resume"), "{}", q.text);
         let disk = &vm.notices[1];
         assert_eq!(disk.level, NoticeLevel::Warn);
-        assert_eq!(disk.title, "Cache disk low on laptop");
+        assert_eq!(disk.title, "Cache disk is filling up on laptop");
         assert_eq!(
             disk.text,
             "280 GiB free, reserve is 150 GiB. Builds that write output here will wait if it drops below that."
@@ -1645,6 +1739,33 @@ mod tests {
                 "{n:?}"
             );
         }
+    }
+
+    #[test]
+    fn r647_a_disk_alert_never_says_low_while_the_space_is_above_the_reserve() {
+        let alert = |level: &str, message: &str| AlertView {
+            id: "disk-state".into(),
+            level: level.into(),
+            message: message.into(),
+            since_ms: 0,
+        };
+        let above = alert_notice(
+            &alert(
+                "warn",
+                "/s has 200.0 GiB free, under twice its reserve of 150.0 GiB",
+            ),
+            "mac",
+        );
+        assert_eq!(above.title, "State disk is filling up on mac");
+        assert!(!above.title.contains("low"), "{}", above.title);
+        let below = alert_notice(
+            &alert(
+                "critical",
+                "/s has 100.0 GiB free, below its reserve of 150.0 GiB",
+            ),
+            "mac",
+        );
+        assert_eq!(below.title, "State disk is below its reserve on mac");
     }
 
     #[test]
@@ -1664,7 +1785,7 @@ mod tests {
             "laptop",
         );
         assert_eq!(below.level, NoticeLevel::Critical);
-        assert_eq!(below.title, "Cache disk low on laptop");
+        assert_eq!(below.title, "Cache disk is below its reserve on laptop");
         assert_eq!(
             below.text,
             "120 GiB free, reserve is 150 GiB. New builds that write output here wait until space is freed."
@@ -1903,21 +2024,51 @@ mod tests {
         assert_eq!(vm.machines.len(), 3);
         let laptop = &vm.machines[0];
         assert_eq!((laptop.role, laptop.stall), ("this machine", Some(12.0)));
-        assert_eq!(laptop.stall_limit, 10.0, "read from the blocker text");
-        assert_eq!(laptop.ram_free, "8.0 / 16 GiB");
+        assert_eq!(laptop.mem_level, MemLevel::Tight);
+        assert_eq!(laptop.ram_used, "8.0 of 16 GiB used");
         let nixos = &vm.machines[1];
         assert_eq!((nixos.role, nixos.cpu_busy), ("worker", Some(30.0)));
-        assert_eq!(nixos.ram_free, "- / 64 GiB");
+        assert_eq!(nixos.mem_level, MemLevel::Ok);
+        assert_eq!(nixos.ram_used, "13.0 of 64 GiB used");
         let air = &vm.machines[2];
         assert!(air.greyed);
         assert_eq!(
             air.away_note.as_deref(),
             Some("Offline · last seen 1 h ago · its jobs wait or move")
         );
-        assert_eq!(stall_limit(None), STALL_LIMIT_DEFAULT);
-        assert_eq!(stall_limit(Some("memory stalls 12% over 25%")), 25.0);
-        assert_eq!(gib_short(512 << 20), "512 MiB");
-        assert_eq!(gib_short(3 << 29), "1.5 GiB");
+    }
+
+    #[test]
+    fn r644_every_machine_row_has_cpu_percent_and_a_bar_by_job() {
+        let vm = build(&fixtures::mac(), 0);
+        let laptop = &vm.machines[0];
+        let names: Vec<_> = laptop
+            .cpu_load
+            .jobs
+            .iter()
+            .map(|j| j.label.as_str())
+            .collect();
+        assert_eq!(names, vec!["#101 ui-claude", "#102 core-codex"]);
+        assert_eq!(laptop.cpu_load.cores, Some(10.0));
+        assert!(
+            laptop
+                .cpu_load
+                .outside
+                .is_some_and(|o| (o - 0.5).abs() < 1e-9)
+        );
+        let nixos = &vm.machines[1];
+        assert_eq!(nixos.cpu_load.jobs[0].label, "#103 hard-errors");
+        let mac = &vm.machines[2];
+        // the Mac sends cores in use and no busy figure: 5 of 8 cores is 62.5 %
+        assert_eq!(mac.cpu_busy, Some(62.5));
+        assert_eq!(mac.cpu_load.jobs[0].label, "#104 pi-ios");
+        assert_eq!(mac.mem_level, MemLevel::Tight);
+        assert_eq!(mac.ram_used, "14.0 of 16 GiB used");
+        assert!(
+            mac.pressure.starts_with("Memory is tight."),
+            "{}",
+            mac.pressure
+        );
     }
 
     #[test]

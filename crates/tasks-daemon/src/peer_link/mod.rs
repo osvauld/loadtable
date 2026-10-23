@@ -19,6 +19,7 @@ mod drive;
 pub mod fetch;
 pub mod metrics;
 pub mod serve;
+pub mod sync_note;
 
 #[cfg(feature = "iroh")]
 pub mod iroh_host;

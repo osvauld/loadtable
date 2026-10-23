@@ -154,6 +154,18 @@ fn r505_a_passed_forwarded_job_brings_its_file_back_with_the_right_hash() {
     assert_eq!(names, ["app-debug.apk"]);
 }
 
+// R-648
+#[test]
+fn r648_a_forwarded_job_keeps_what_its_sync_sent_and_how_long_it_took() {
+    let w = PeerWorld::new();
+    let link = w.link();
+    let ran = run(&w, &link, &[APK], 0, |tree, _| put(tree, APK, b"x"));
+    assert_eq!(ran.end.phase, Phase::Passed);
+    let note = crate::peer_link::sync_note::read(&ran.log).expect("a sync note");
+    assert!(note.files > 0, "{note:?}");
+    assert!(note.bytes > 0 || note.already_there, "{note:?}");
+}
+
 // R-506
 #[test]
 fn r506_a_missing_path_is_reported_and_the_other_files_still_arrive() {

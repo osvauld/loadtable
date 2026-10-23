@@ -64,6 +64,18 @@ pub fn fetch_history(link: &dyn DaemonLink) -> Result<HistoryView, String> {
     }
 }
 
+/// Asks for the live metrics of one job.
+pub fn fetch_metrics(
+    link: &dyn DaemonLink,
+    id: tasks_core::JobId,
+) -> Result<tasks_core::metrics::JobMetricsView, String> {
+    match link.call(&Request::JobMetrics { id }) {
+        Ok(Response::JobMetrics(v)) => Ok(v),
+        Ok(other) => Err(format!("unexpected reply to metrics: {}", kind_of(&other))),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// A short name for a reply kind, for error text.
 pub fn kind_of(r: &Response) -> &'static str {
     match r {
@@ -314,6 +326,21 @@ mod tests {
             }),
             _ => Err(LinkError("unexpected".into())),
         })
+    }
+
+    #[test]
+    fn r645_metrics_are_one_job_metrics_request_and_a_refusal_comes_back_in_words() {
+        let ok = FakeLink::from_fn(|_| Ok(Response::JobMetrics(fixtures::metrics_running())));
+        let v = fetch_metrics(&ok, JobId(101)).expect("view");
+        assert_eq!(v.samples.len(), 60);
+        assert_eq!(ok.requests(), vec![Request::JobMetrics { id: JobId(101) }]);
+        let no = FakeLink::from_fn(|_| Err(LinkError("daemon is down".into())));
+        assert_eq!(fetch_metrics(&no, JobId(1)), Err("daemon is down".into()));
+        let odd = FakeLink::from_fn(|_| Ok(Response::Ack));
+        assert_eq!(
+            fetch_metrics(&odd, JobId(1)),
+            Err("unexpected reply to metrics: ack".into())
+        );
     }
 
     #[test]

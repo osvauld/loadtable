@@ -1349,11 +1349,17 @@ fn status_text(s: &StatusSnapshot) -> String {
     }
     let p = &s.pressure;
     let pct = |v: Option<f32>| v.map_or("?".to_string(), |v| format!("{v:.0}%"));
+    let word = tasks_daemon::api::memory_word(&p.memory);
+    let memory = match p.memory_some {
+        Some(some) => format!(
+            "memory {word} (stalled {}, fully stalled {})",
+            pct(Some(some)),
+            pct(p.memory_full)
+        ),
+        None => format!("memory {word}"),
+    };
     t.push_str(&format!(
-        "pressure: memory {} (some {}, full {}), cpu {}, io {}\n",
-        p.memory,
-        pct(p.memory_some),
-        pct(p.memory_full),
+        "pressure: {memory}, cpu {}, io {}\n",
         pct(p.cpu),
         pct(p.io)
     ));

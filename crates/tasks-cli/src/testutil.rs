@@ -59,6 +59,7 @@ pub fn job(id: i64, owner: &str, cwd: &str, phase: Phase, cmd: &str) -> JobView 
         remote_wait: None,
         fetch_paths: Vec::new(),
         fetch: Vec::new(),
+        sync: None,
     }
 }
 
@@ -298,11 +299,13 @@ pub fn status_snapshot() -> StatusSnapshot {
             memory: "ok".into(),
             memory_some: Some(1.5),
             memory_full: None,
+            memory_stall_limit: None,
             cpu: Some(40.0),
             io: None,
             memory_total: None,
             available_memory: Some(8 << 30),
             cpu_busy_pct: None,
+            cpu_cores: None,
             cores_in_use: None,
             swap_total: None,
             swap_used: None,

@@ -721,10 +721,8 @@ pub fn status(s: &StatusSnapshot) -> String {
     let p = &s.pressure;
     let _ = writeln!(
         out,
-        "pressure: memory {} (some {}, full {}), cpu {}, io {}",
-        p.memory,
-        pct(p.memory_some),
-        pct(p.memory_full),
+        "pressure: {}, cpu {}, io {}",
+        memory_line(p),
         pct(p.cpu),
         pct(p.io)
     );
@@ -781,12 +779,31 @@ pub fn status(s: &StatusSnapshot) -> String {
     out
 }
 
-/// A peer's memory pressure: the PSI percentage where it has one, else its native level
-/// (macOS), else `?` (R-523).
+/// This machine's memory in words: the level as `ok`, `tight` or `critical`, with the stall
+/// figures behind it when the machine measures them (R-641).
+pub fn memory_line(p: &tasks_daemon::api::PressureView) -> String {
+    let word = tasks_daemon::api::memory_word(&p.memory);
+    let Some(some) = p.memory_some else {
+        return format!("memory {word}");
+    };
+    let limit = p
+        .memory_stall_limit
+        .map_or(String::new(), |l| format!(", tight from {l:.0}%"));
+    format!(
+        "memory {word} (stalled {some:.0}%, fully stalled {}{limit})",
+        p.memory_full
+            .map_or("?".to_string(), |f| format!("{f:.0}%"))
+    )
+}
+
+/// A peer's memory in words: its level as `ok`, `tight` or `critical` (the peer's own level,
+/// which macOS has and Linux derives from PSI), with the stall percentage when it has one;
+/// `?` only when it sent neither (R-523, R-641).
 fn peer_memory_text(pct: Option<u8>, level: Option<&str>) -> String {
     match (pct, level) {
-        (Some(p), _) => format!("{p}%"),
-        (None, Some(l)) => l.to_string(),
+        (Some(p), Some(l)) => format!("{} (stalled {p}%)", tasks_daemon::api::memory_word(l)),
+        (Some(p), None) => format!("stalled {p}%"),
+        (None, Some(l)) => tasks_daemon::api::memory_word(l).to_string(),
         (None, None) => "?".to_string(),
     }
 }
