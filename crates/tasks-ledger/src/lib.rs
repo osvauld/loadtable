@@ -141,6 +141,9 @@ pub trait Store {
     /// Records what the job cost the machine (latest sample while it runs, the final figures when
     /// it ends). Allowed in any phase: figures describe the past and change no outcome.
     fn set_figures(&self, id: JobId, figures: &JobFigures) -> Result<()>;
+    /// Replaces the one-line outcome of a job. Allowed in any phase: it changes the words, never
+    /// the outcome (the daemon uses it to say what a retry alone found).
+    fn set_summary(&self, id: JobId, summary: &str) -> Result<()>;
     /// Changes the queue class of a job that has not started (`prioritize`). A `blocking` class
     /// needs a reason. A running or finished job is refused with `NotQueued`: priority orders
     /// the queue and never preempts. Returns the class the job had.

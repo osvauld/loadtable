@@ -908,6 +908,15 @@ fn r665_a_finished_run_is_stamped_cold_until_this_machine_has_passed_it() {
 
 // ---------------------------------------------------------------- isolate
 
+/// Ticks until the job runs: the job that held the machine is gone from the scheduler a moment
+/// after its terminal write, so one tick may still see it.
+fn tick_until_running(r: &Rig, id: JobId) {
+    r.until("the job starts", || {
+        r.tick();
+        r.phase(id) == Phase::Running
+    });
+}
+
 fn isolated(r: &Rig, name: &str, kind: Kind) -> JobId {
     let mut s = r.spec_in("o", &["make", name], kind, name);
     s.isolate = true;
@@ -931,7 +940,7 @@ fn r712_an_isolate_job_waits_for_the_running_job_and_starts_when_the_machine_is_
     );
     r.procs.exit(r.procs.pgid(0), 0);
     r.until_done(a);
-    r.until_running(b);
+    tick_until_running(&r, b);
 }
 
 // R-712, R-713
@@ -950,7 +959,7 @@ fn r712_while_an_isolate_job_runs_nothing_else_starts_and_r713_the_job_behind_it
     );
     r.procs.exit(r.procs.pgid(0), 0);
     r.until_done(a);
-    r.until_running(b);
+    tick_until_running(&r, b);
 }
 
 // R-713
@@ -974,7 +983,7 @@ fn r713_an_isolate_job_first_in_line_is_not_starved_by_the_jobs_behind_it() {
     );
     r.procs.exit(r.procs.pgid(0), 0);
     r.until_done(a);
-    r.until_running(iso);
+    tick_until_running(&r, iso);
     assert!(matches!(r.phase(later), Phase::Waiting(_)));
 }
 
@@ -1037,4 +1046,218 @@ fn r715_a_light_job_gets_the_tests_cpu_share_not_a_builds() {
     r.tick();
     assert_eq!(r.until_done(id), Phase::Passed);
     assert_eq!(r.cgroups.cpu_weight(tasks_platform::CgroupName::Job(id.0)), Some(200));
+}
+
+// ---------------------------------------------------------------- retry alone
+
+const FAILED_LOG: &[u8] = b"running 2 tests\n\
+test glare::one_call ... FAILED\n\
+test shards::clock_ahead ... FAILED\n\
+\n\
+failures:\n\
+\n\
+---- glare::one_call stdout ----\n\
+panicked\n\
+\n\
+failures:\n\
+    glare::one_call\n\
+    shards::clock_ahead\n\
+\n\
+test result: FAILED. 0 passed; 2 failed\n";
+
+fn retry_job(r: &Rig, original: JobId) -> Option<tasks_ledger::JobRecord> {
+    r.store
+        .list(&tasks_ledger::ListFilter::default())
+        .unwrap()
+        .into_iter()
+        .find(|j| j.hints.retry_of == Some(original.0))
+}
+
+/// A `retry_alone` test job that fails with `FAILED_LOG`; the follow-up's run is `retry`.
+fn failing_test_job(r: &Rig, retry: (&[u8], i32)) -> JobId {
+    r.procs.script_spawns(&[(FAILED_LOG, 101), retry]);
+    let mut s = r.spec(
+        "o",
+        &["cargo", "test", "-p", "p2pcore", "--test", "calls"],
+        Kind::Test,
+    );
+    s.retry_alone = true;
+    let id = r.submit(&s);
+    r.tick();
+    r.until_done(id);
+    id
+}
+
+// R-716, R-717
+#[test]
+fn r716_a_failed_retry_alone_job_queues_one_isolated_follow_up_and_says_what_passed_alone() {
+    let r = Rig::new();
+    // the follow-up passes
+    let id = failing_test_job(&r, (b"test result: ok. 2 passed\n", 0));
+    r.until("the follow-up is queued", || retry_job(&r, id).is_some());
+    let retry = retry_job(&r, id).unwrap();
+    let argv = &retry.spec.argv;
+    assert_eq!(
+        argv[..7],
+        ["cargo", "test", "-p", "p2pcore", "--test", "calls", "--"]
+    );
+    assert_eq!(
+        argv[7..],
+        [
+            "--exact",
+            "glare::one_call",
+            "shards::clock_ahead",
+            "--test-threads=1"
+        ]
+    );
+    assert!(retry.spec.isolate && !retry.spec.retry_alone, "one retry at most");
+    assert_eq!(retry.hints.retry_of, Some(id.0));
+    // the original keeps its failed exit and says a retry is under way (or already, what it
+    // found: the follow-up is quick)
+    let orig = r.record(id);
+    assert_eq!(orig.phase, Phase::Failed { exit: Some(101) });
+    let text = orig.summary.unwrap();
+    assert!(
+        text.contains("2 tests failed, retrying alone as job #") || text.contains("passed alone"),
+        "{text}"
+    );
+    r.until("the outcome is settled", || {
+        r.tick();
+        r.record(id)
+            .summary
+            .is_some_and(|s| s.contains("passed alone"))
+    });
+    let orig = r.record(id);
+    assert_eq!(orig.phase, Phase::Failed { exit: Some(101) });
+    assert_eq!(
+        orig.summary.unwrap(),
+        format!(
+            "2 tests failed under load and passed alone: glare::one_call, shards::clock_ahead (retry: job #{})",
+            retry.id.0
+        )
+    );
+    assert!(retry_job(&r, retry.id).is_none(), "never a retry of the retry");
+}
+
+// R-717
+#[test]
+fn r717_a_test_that_fails_again_alone_is_named_as_failing_again() {
+    let r = Rig::new();
+    // the same log, the same exit: both fail again
+    let id = failing_test_job(&r, (FAILED_LOG, 101));
+    r.until("the follow-up is queued", || retry_job(&r, id).is_some());
+    r.until("the outcome is settled", || {
+        r.tick();
+        r.record(id)
+            .summary
+            .is_some_and(|s| s.starts_with("failed again alone"))
+    });
+    let text = r.record(id).summary.unwrap();
+    assert!(
+        text.starts_with("failed again alone: glare::one_call, shards::clock_ahead (retry: job #"),
+        "{text}"
+    );
+    assert_eq!(r.record(id).phase, Phase::Failed { exit: Some(101) });
+}
+
+// R-718
+#[test]
+fn r718_no_retry_without_the_flag_without_a_failures_list_or_after_a_cancel_or_a_timeout() {
+    // no flag
+    let r = Rig::new();
+    r.procs.output(FAILED_LOG);
+    r.procs.auto_exit(101);
+    let plain = r.submit(&r.spec("o", &["cargo", "test"], Kind::Test));
+    r.tick();
+    r.until_done(plain);
+    // a build error has no failures list
+    let mut s = r.spec_in("o", &["cargo", "test"], Kind::Test, "b");
+    s.retry_alone = true;
+    r.procs.output(b"error: could not compile `x`\n");
+    let build = r.submit(&s);
+    r.tick();
+    r.until_done(build);
+    // not cargo test
+    r.procs.output(FAILED_LOG);
+    let mut s = r.spec_in("o", &["make", "check"], Kind::Test, "m");
+    s.retry_alone = true;
+    let make = r.submit(&s);
+    r.tick();
+    r.until_done(make);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    for id in [plain, build, make] {
+        assert!(retry_job(&r, id).is_none(), "job {}", id.0);
+        assert!(!r.record(id).summary.unwrap_or_default().contains("retrying"));
+    }
+}
+
+// R-718
+#[test]
+fn r718_a_job_that_was_killed_or_cancelled_is_not_retried_and_a_peers_job_is_left_to_its_origin()
+{
+    let r = Rig::new();
+    r.procs.output(FAILED_LOG);
+    let mut s = r.spec("o", &["cargo", "test"], Kind::Test);
+    s.retry_alone = true;
+    let id = r.submit(&s);
+    r.tick();
+    r.until_running(id);
+    r.sch.handle(Request::Cancel {
+        id,
+        who: "o".into(),
+        reason: None,
+    });
+    r.until_done(id);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert!(matches!(r.phase(id), Phase::Cancelled | Phase::Failed { .. }));
+    assert!(retry_job(&r, id).is_none());
+}
+
+// R-716
+#[test]
+fn r716_a_job_that_failed_on_a_peer_is_retried_by_its_origin_from_the_mirrored_log() {
+    use crate::forwarder::ForwardEnd;
+    let f = Arc::new(FakeForwarder::new(vec![]));
+    let r = Rig::with_forwarder(f.clone());
+    let mut spec = anywhere(&r);
+    spec.argv = ["cargo", "test", "-p", "p2pcore", "--test", "calls"]
+        .map(String::from)
+        .to_vec();
+    spec.kind = Kind::Test;
+    spec.retry_alone = true;
+    let id = r.submit(&spec);
+    r.store.set_forward(id, &nixos(), None, Some("k1")).unwrap();
+    f.script(id, accepted(Phase::Running));
+    r.until("started", || {
+        r.tick();
+        r.phase(id) == Phase::Running
+    });
+    // the forward mirrors the peer's log into the local one
+    std::fs::create_dir_all(r.cfg.log_path(id).parent().unwrap()).unwrap();
+    std::fs::write(r.cfg.log_path(id), FAILED_LOG).unwrap();
+    f.script(
+        id,
+        ForwardPoll::Done(ForwardEnd {
+            phase: Phase::Failed { exit: Some(101) },
+            reason: "exit code 101 on nixos".into(),
+            exit_code: Some(101),
+            signal: None,
+            remote_job: Some(1),
+            nothing_submitted: false,
+            samples: vec![],
+            fetch: vec![],
+        }),
+    );
+    r.until_done(id);
+    r.until("the follow-up is queued", || retry_job(&r, id).is_some());
+    let retry = retry_job(&r, id).unwrap();
+    assert_eq!(retry.spec.placement, spec.placement, "retried where it was sent");
+    assert!(retry.spec.isolate && !retry.spec.retry_alone);
+    assert!(
+        retry
+            .spec
+            .argv
+            .ends_with(&["--test-threads=1".to_string()])
+    );
+    assert_eq!(r.record(id).phase, Phase::Failed { exit: Some(101) });
 }

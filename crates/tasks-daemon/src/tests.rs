@@ -1230,6 +1230,9 @@ impl Store for Flaky {
     fn set_figures(&self, id: JobId, figures: &tasks_core::JobFigures) -> tasks_ledger::Result<()> {
         self.inner.set_figures(id, figures)
     }
+    fn set_summary(&self, id: JobId, summary: &str) -> tasks_ledger::Result<()> {
+        self.inner.set_summary(id, summary)
+    }
     fn find_recent_spec(
         &self,
         owner: &str,

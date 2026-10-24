@@ -124,6 +124,8 @@ struct ProcState {
     signals: Vec<(i32, Signal)>,
     auto_exit: Option<i32>,
     output: Option<Vec<u8>>,
+    /// Per spawn, in order: the log text and the exit code; used before `auto_exit`/`output`.
+    script: std::collections::VecDeque<(Vec<u8>, i32)>,
     fail_spawn: Option<String>,
 }
 
@@ -146,6 +148,13 @@ impl FakeProcs {
     /// Text appended to the log of every spawned process.
     pub fn output(&self, bytes: &[u8]) {
         lock(&self.inner).output = Some(bytes.to_vec());
+    }
+    /// The next spawns, in order, each write this text to its log and exit with this code at
+    /// once; after the script the `auto_exit` and `output` settings apply again.
+    pub fn script_spawns(&self, spawns: &[(&[u8], i32)]) {
+        lock(&self.inner)
+            .script
+            .extend(spawns.iter().map(|(t, c)| (t.to_vec(), *c)));
     }
     pub fn fail_spawn(&self, why: &str) {
         lock(&self.inner).fail_spawn = Some(why.to_string());
@@ -194,7 +203,8 @@ impl Processes for FakeProcs {
         }
         let pgid = 1000 + st.next;
         st.next += 1;
-        let exit = st.auto_exit;
+        let scripted = st.script.pop_front();
+        let exit = scripted.as_ref().map(|s| s.1).or(st.auto_exit);
         st.procs.insert(
             pgid,
             Proc {
@@ -204,7 +214,8 @@ impl Processes for FakeProcs {
             },
         );
         st.spawned.push(cmd.clone());
-        if let Some(out) = &st.output {
+        let out = scripted.map(|s| s.0).or_else(|| st.output.clone());
+        if let Some(out) = &out {
             use std::io::Write;
             let mut f = std::fs::OpenOptions::new()
                 .create(true)

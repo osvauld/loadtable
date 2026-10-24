@@ -314,6 +314,7 @@ impl Scheduler {
             Ok(()) | Err(LedgerError::IllegalTransition { .. } | LedgerError::NotFound(_)) => {}
             Err(e) => self.note_error(&format!("finish forwarded job {}: {e}", id.0)),
         }
+        self.retry_alone_after(id);
         for (k, s) in &end.samples {
             let _ = retry_busy(&retry, &sleep, || self.ledger.record_sample(k, s));
         }

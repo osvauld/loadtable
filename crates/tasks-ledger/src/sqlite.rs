@@ -625,6 +625,13 @@ impl Store for SqliteStore {
         })
     }
 
+    fn set_summary(&self, id: JobId, summary: &str) -> Result<()> {
+        self.modify(id, |r, _| {
+            r.summary = Some(summary.to_string());
+            Ok(())
+        })
+    }
+
     fn find_running(&self) -> Result<Vec<JobRecord>> {
         let conn = self.lock()?;
         query_records(

@@ -176,6 +176,7 @@ pub fn expand(
                 long: note.is_some_and(|n| n.long),
                 light: def.light || note.is_some_and(|n| n.light),
                 retry_alone: def.retry_alone || note.is_some_and(|n| n.retry_alone),
+                retry_of: None,
                 tools: suite.tools.clone(),
                 priority: def.priority.filter(|p| *p != tasks_core::Priority::Normal),
                 // set by `split_cargo_test`; the suite's hints must not lose it

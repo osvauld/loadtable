@@ -127,6 +127,9 @@ pub(crate) struct TickState {
     pub battery_held: BTreeSet<JobId>,
     /// The power source at the start of the last tick.
     pub power: Option<tasks_platform::PowerReading>,
+    /// Follow-up jobs queued to run failed tests alone, with the job each one retries; the
+    /// original's outcome is settled when the follow-up ends. Forgotten on restart.
+    pub retries: BTreeMap<JobId, JobId>,
 }
 
 /// What one tick did.
@@ -392,6 +395,7 @@ impl Scheduler {
             rep.cancelled_blocked = ids;
         }
         self.sync_cancels();
+        self.settle_retries();
         self.refresh_power();
         self.supervise(&policy, now);
         self.admit(&policy, &mut rep);
