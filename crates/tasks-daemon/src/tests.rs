@@ -1050,6 +1050,9 @@ fn the_socket_serves_requests_refuses_bad_ones_and_survives_a_closed_client() {
         priority: tasks_core::Priority::Normal,
         priority_reason: None,
         fetch: Vec::new(),
+        isolate: false,
+        light: false,
+        retry_alone: false,
     };
     {
         let mut s = UnixStream::connect(&sock).unwrap();
@@ -1098,6 +1101,9 @@ fn startup_reconciles_the_ledger_and_honours_the_persisted_execution_intent() {
             priority: tasks_core::Priority::Normal,
             priority_reason: None,
             fetch: Vec::new(),
+            isolate: false,
+            light: false,
+            retry_alone: false,
         };
         let id = store.submit(&spec).unwrap();
         store

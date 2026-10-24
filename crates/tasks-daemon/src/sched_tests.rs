@@ -905,3 +905,75 @@ fn r665_a_finished_run_is_stamped_cold_until_this_machine_has_passed_it() {
     }
     assert_eq!(stamps, vec![Cache::Cold, Cache::Warm]);
 }
+
+// ---------------------------------------------------------------- isolate
+
+fn isolated(r: &Rig, name: &str, kind: Kind) -> JobId {
+    let mut s = r.spec_in("o", &["make", name], kind, name);
+    s.isolate = true;
+    r.submit(&s)
+}
+
+// R-712
+#[test]
+fn r712_an_isolate_job_waits_for_the_running_job_and_starts_when_the_machine_is_idle() {
+    let r = Rig::new();
+    let a = r.submit(&r.spec_in("o", &["make", "a"], Kind::Compile, "a"));
+    r.tick();
+    r.until_running(a);
+    let b = isolated(&r, "b", Kind::Test);
+    r.tick();
+    assert!(matches!(r.phase(b), Phase::Waiting(_)), "{:?}", r.phase(b));
+    let why = r.record(b).wait_text.unwrap();
+    assert!(
+        why.contains("runs alone (isolate)") && why.contains(&format!("#{}", a.0)),
+        "{why}"
+    );
+    r.procs.exit(r.procs.pgid(0), 0);
+    r.until_done(a);
+    r.until_running(b);
+}
+
+// R-712, R-713
+#[test]
+fn r712_while_an_isolate_job_runs_nothing_else_starts_and_r713_the_job_behind_it_says_why() {
+    let r = Rig::new();
+    let a = isolated(&r, "a", Kind::Test);
+    r.tick();
+    r.until_running(a);
+    let b = r.submit(&r.spec_in("o", &["make", "b"], Kind::Compile, "b"));
+    r.tick();
+    assert!(matches!(r.phase(b), Phase::Waiting(_)), "{:?}", r.phase(b));
+    assert_eq!(
+        r.record(b).wait_text.unwrap(),
+        format!("job #{} runs alone (isolate)", a.0)
+    );
+    r.procs.exit(r.procs.pgid(0), 0);
+    r.until_done(a);
+    r.until_running(b);
+}
+
+// R-713
+#[test]
+fn r713_an_isolate_job_first_in_line_is_not_starved_by_the_jobs_behind_it() {
+    let r = Rig::new();
+    let a = r.submit(&r.spec_in("o", &["make", "a"], Kind::Compile, "a"));
+    r.tick();
+    r.until_running(a);
+    let iso = isolated(&r, "iso", Kind::Test);
+    let later = r.submit(&r.spec_in("o", &["make", "later"], Kind::Test, "later"));
+    r.tick();
+    assert!(matches!(r.phase(iso), Phase::Waiting(_)));
+    assert!(
+        matches!(r.phase(later), Phase::Waiting(_)),
+        "a later job must not start while the isolate job is first in line"
+    );
+    assert_eq!(
+        r.record(later).wait_text.unwrap(),
+        format!("job #{} runs alone (isolate)", iso.0)
+    );
+    r.procs.exit(r.procs.pgid(0), 0);
+    r.until_done(a);
+    r.until_running(iso);
+    assert!(matches!(r.phase(later), Phase::Waiting(_)));
+}

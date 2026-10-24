@@ -141,6 +141,18 @@ pub struct JobSpec {
     /// (`--fetch`). Older senders omit it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fetch: Vec<String>,
+    /// Runs only when nothing else runs on its machine, and nothing starts beside it
+    /// (`isolate`, R-712). Carried on the spec so a peer that receives the job enforces it too.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub isolate: bool,
+    /// Uses little CPU but runs long (`--light`): ignores the CPU pressure gate and takes a
+    /// place in the small light pool instead of a run slot (R-714). Not with `isolate`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub light: bool,
+    /// When this `cargo test` job fails under load, the daemon runs the failed tests once more,
+    /// alone (`--retry-alone`, R-716).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retry_alone: bool,
 }
 
 /// Checks one `--fetch` path: relative to the checkout, no `.`/`..`/empty component, no `.git`.
@@ -207,6 +219,9 @@ impl JobSpec {
         for p in &self.fetch {
             check_fetch_path(p)?;
         }
+        if self.light && self.isolate {
+            return Err(CoreError::LightAndIsolate);
+        }
         crate::check_reason(self.priority, self.priority_reason.as_deref())?;
         for d in DENIED_DEVICES {
             if self.argv.iter().any(|a| a.contains(d)) {
@@ -237,6 +252,9 @@ pub(crate) mod tests {
             priority: Priority::Normal,
             priority_reason: None,
             fetch: Vec::new(),
+            isolate: false,
+            light: false,
+            retry_alone: false,
         }
     }
 
@@ -417,5 +435,20 @@ pub(crate) mod tests {
         assert_eq!(Kind::Run.cpu_class(), CpuClass::Run);
         assert_eq!(Kind::Device.cpu_class(), CpuClass::Normal);
         assert_eq!(Kind::Probe.cpu_class(), CpuClass::Normal);
+    }
+
+    // R-714
+    #[test]
+    fn r714_a_job_cannot_be_both_light_and_isolate() {
+        let mut s = spec();
+        s.light = true;
+        assert_eq!(s.validate(), Ok(()));
+        s.isolate = true;
+        assert_eq!(s.validate(), Err(CoreError::LightAndIsolate));
+        assert!(
+            CoreError::LightAndIsolate
+                .to_string()
+                .contains("both light and isolate")
+        );
     }
 }

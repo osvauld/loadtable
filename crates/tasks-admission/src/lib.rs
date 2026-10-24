@@ -26,7 +26,7 @@ pub use input::{
     AdmissionInput, DeviceState, Gate, OFFLOAD_FLOOR_CAP_BYTES, SHORT_LANE_BASE, SlotState,
     Thresholds,
 };
-pub use model::{Decision, Hold, Lane, Verdict, Waiter};
+pub use model::{Decision, Hold, Lane, Running, Verdict, Waiter};
 pub use order::{Effective, effective, sequence};
 pub use reason::{DiskKind, WaitReason, gib, kind_name};
 pub use tasks_core::Priority;

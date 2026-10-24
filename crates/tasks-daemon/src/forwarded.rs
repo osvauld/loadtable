@@ -97,6 +97,7 @@ impl Scheduler {
             est_median: None,
             shown: tasks_timing::Shown::Absent(tasks_timing::NoEstimate::OnPeer),
             figures: Mutex::new(None),
+            isolate: false,
         })
     }
 

@@ -1,6 +1,6 @@
 //! The values `decide` works on. Nothing here reads a clock, file or environment variable.
 
-use crate::Waiter;
+use crate::{Running, Waiter};
 use std::collections::BTreeMap;
 use tasks_core::{DeviceId, JobId, SlotKind};
 use tasks_platform::{Level, PressureSnapshot};
@@ -104,6 +104,8 @@ pub struct AdmissionInput {
     pub now_ms: u64,
     /// When each owner last started a job, ms; owners with none are served first.
     pub last_started: BTreeMap<String, u64>,
+    /// Jobs running on this machine now (not offloaded ones), for `isolate`.
+    pub running: Vec<Running>,
     /// Waiting jobs, in any order; `decide` orders them ([`crate::sequence`]).
     pub waiters: Vec<Waiter>,
 }

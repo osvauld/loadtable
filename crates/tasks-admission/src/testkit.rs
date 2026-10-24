@@ -88,6 +88,7 @@ pub fn input(free: u32, waiters: Vec<Waiter>) -> AdmissionInput {
         thresholds: thresholds(),
         now_ms: 0,
         last_started: BTreeMap::new(),
+        running: Vec::new(),
         waiters,
     }
 }

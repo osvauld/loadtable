@@ -74,6 +74,10 @@ const CASES: &[Case] = &[
         "r095_a_plan_steps_timeout_hint_fills_the_spec_and_the_escape_is_carried",
         r095_plan_timeout_fills_spec,
     ),
+    (
+        "r712_a_plan_steps_isolate_light_and_retry_hints_fill_the_spec",
+        r712_plan_flags_fill_spec,
+    ),
     ("sample_keys_enumerate_history", sample_keys_enumerate),
     (
         "r108_a_cancel_keeps_its_requester_and_reason",
@@ -123,6 +127,9 @@ fn spec(owner: &str, after: Vec<JobId>) -> JobSpec {
         priority: tasks_core::Priority::Normal,
         priority_reason: None,
         fetch: Vec::new(),
+        isolate: false,
+        light: false,
+        retry_alone: false,
     }
 }
 
@@ -623,6 +630,34 @@ fn r095_plan_timeout_fills_spec(e: &Env) {
     own.timeout_secs = Some(5);
     let id = s.submit(&own).unwrap();
     assert_eq!(s.get(id).unwrap().unwrap().spec.timeout_secs, Some(5));
+}
+
+// A step's isolate, light and retry_alone hints become the spec's flags, so the daemon (and a
+// peer that receives the job) acts on the spec alone.
+fn r712_plan_flags_fill_spec(e: &Env) {
+    let s = &*e.store;
+    let mut alone = step("alone", &[]);
+    alone.hints.isolate = true;
+    alone.hints.retry_alone = true;
+    let mut light = step("light", &[]);
+    light.hints.light = true;
+    let plain = step("plain", &[]);
+    let plan = Plan {
+        steps: vec![alone, light, plain],
+    };
+    let mut c = ctx();
+    c.broad_test_escape = true;
+    let done = s.submit_plan(&c, &plan).unwrap();
+    let get = |name: &str| {
+        let id = done.jobs.iter().find(|(n, _)| n == name).unwrap().1;
+        s.get(id).unwrap().unwrap().spec
+    };
+    let a = get("alone");
+    assert!(a.isolate && a.retry_alone && !a.light);
+    let l = get("light");
+    assert!(l.light && !l.isolate && !l.retry_alone);
+    let p = get("plain");
+    assert!(!p.isolate && !p.light && !p.retry_alone);
 }
 
 // Requirements 6.12: cancelling a waiting job must not take admission or start the command.

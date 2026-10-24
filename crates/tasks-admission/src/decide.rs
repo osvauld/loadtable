@@ -39,6 +39,12 @@ struct Walk {
     ahead: BTreeMap<SlotKind, Vec<JobId>>,
     devices_taken: BTreeMap<DeviceId, JobId>,
     checkouts: BTreeMap<String, JobId>,
+    /// Jobs admitted so far in this walk that run on this machine.
+    started: Vec<JobId>,
+    /// An `isolate` job admitted in this walk: nothing behind it starts.
+    isolated: Option<JobId>,
+    /// The first `isolate` job still waiting: it goes first, so nothing behind it starts.
+    isolate_first: Option<JobId>,
 }
 
 impl Walk {
@@ -68,6 +74,9 @@ impl Walk {
             ahead: BTreeMap::new(),
             devices_taken: BTreeMap::new(),
             checkouts: BTreeMap::new(),
+            started: Vec::new(),
+            isolated: None,
+            isolate_first: None,
         }
     }
 
@@ -89,10 +98,51 @@ impl Walk {
         if let Some(p) = pred {
             return Verdict::Wait(WaitReason::BehindCheckout(p));
         }
-        if w.kind == SlotKind::Device {
-            return self.device(input, w);
+        if let Some(r) = self.alone(input, w) {
+            if w.isolate {
+                self.isolate_first.get_or_insert(w.job);
+            }
+            return Verdict::Wait(r);
         }
-        self.slot(input, w)
+        let verdict = if w.kind == SlotKind::Device {
+            self.device(input, w)
+        } else {
+            self.slot(input, w)
+        };
+        let local = !matches!(w.kind, SlotKind::Offload | SlotKind::Transfer);
+        match &verdict {
+            Verdict::Admit { .. } if local => {
+                self.started.push(w.job);
+                if w.isolate {
+                    self.isolated = Some(w.job);
+                }
+            }
+            Verdict::Wait(_) if w.isolate => {
+                self.isolate_first.get_or_insert(w.job);
+            }
+            _ => {}
+        }
+        verdict
+    }
+
+    /// The `isolate` rule (R-712). Nothing starts beside a running or just admitted isolate job;
+    /// an isolate job waiting ahead of this one holds everything behind it back, so a stream
+    /// of small jobs cannot starve it; an isolate job itself starts only on an idle machine.
+    fn alone(&self, input: &AdmissionInput, w: &Waiter) -> Option<WaitReason> {
+        if let Some(r) = input.running.iter().find(|r| r.isolate) {
+            return Some(WaitReason::RunsAlone(r.job));
+        }
+        if let Some(j) = self.isolated.or(self.isolate_first) {
+            return Some(WaitReason::RunsAlone(j));
+        }
+        if w.isolate {
+            let mut others: Vec<JobId> = input.running.iter().map(|r| r.job).collect();
+            others.extend(self.started.iter().copied());
+            if !others.is_empty() {
+                return Some(WaitReason::WaitsToRunAlone(others));
+            }
+        }
+        None
     }
 
     fn device(&mut self, input: &AdmissionInput, w: &Waiter) -> Verdict {

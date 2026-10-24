@@ -19,6 +19,10 @@ pub enum DiskKind {
 pub enum WaitReason {
     /// An extra hold on the waiter.
     Held(Hold),
+    /// A job that runs alone (`isolate`) is running, or starts first: nothing else starts.
+    RunsAlone(JobId),
+    /// An `isolate` job waits for these jobs to finish so that it can run alone.
+    WaitsToRunAlone(Vec<JobId>),
     /// An earlier waiter on the same checkout goes first.
     BehindCheckout(JobId),
     /// Every slot of the kind is busy.
@@ -141,6 +145,11 @@ impl fmt::Display for WaitReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             WaitReason::Held(h) => write!(f, "held: {h}"),
+            WaitReason::RunsAlone(j) => write!(f, "job #{} runs alone (isolate)", j.0),
+            WaitReason::WaitsToRunAlone(jobs) => {
+                let who: Vec<String> = jobs.iter().map(|j| format!("#{}", j.0)).collect();
+                write!(f, "runs alone (isolate): waiting for {} to finish", who.join(", "))
+            }
             WaitReason::BehindCheckout(j) => write!(f, "behind #{} (same checkout)", j.0),
             WaitReason::SlotsBusy {
                 kind,

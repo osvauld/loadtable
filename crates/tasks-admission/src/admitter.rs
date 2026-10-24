@@ -2,7 +2,7 @@
 
 use crate::gates::{Readings, check_gates};
 use crate::{
-    AdmissionError, AdmissionInput, Decision, DeviceState, Lane, SHORT_LANE_BASE, SlotState,
+    AdmissionError, AdmissionInput, Decision, DeviceState, Lane, Running, SHORT_LANE_BASE, SlotState,
     Thresholds, WaitReason, Waiter, decide,
 };
 use std::collections::BTreeMap;
@@ -43,6 +43,8 @@ pub struct Queue {
     pub now_ms: u64,
     /// When each owner last started a job, ms; owners with none go first.
     pub last_started: BTreeMap<String, u64>,
+    /// The jobs running on this machine now (not offloaded ones): `isolate` waits for them.
+    pub running: Vec<Running>,
 }
 
 /// Result of trying to start a job.
@@ -146,6 +148,7 @@ impl Admitter<'_> {
             thresholds: self.thresholds.clone(),
             now_ms: queue.now_ms,
             last_started: queue.last_started.clone(),
+            running: queue.running.clone(),
             waiters,
         }))
     }
