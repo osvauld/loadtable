@@ -6,7 +6,7 @@ use crate::{JobRecord, LedgerError, Result};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use tasks_core::plan::Plan;
-use tasks_core::{JobId, JobSpec, Phase, Priority, WaitReason};
+use tasks_core::{JobId, JobSpec, Kind, Phase, Priority, Requirements, WaitReason};
 use tasks_timing::Sample;
 
 /// Builds the queued record for a new job.
@@ -197,7 +197,13 @@ pub(crate) fn plan_jobs(
                 cwd: ctx.cwd.clone(),
                 env: ctx.env.clone(),
                 kind: step.kind,
-                requirements: step.requirements.clone(),
+                requirements: Requirements {
+                    // a test step that waits for others only reads what they built (R-700);
+                    // whether the copy it reads is current is checked where it is forwarded
+                    shared_checkout: step.requirements.shared_checkout
+                        || (step.kind == Kind::Test && !step.after.is_empty()),
+                    ..step.requirements.clone()
+                },
                 placement: ctx.placement.clone(),
                 after,
                 // the step's own hint fills the spec's limit (R-095's sibling)

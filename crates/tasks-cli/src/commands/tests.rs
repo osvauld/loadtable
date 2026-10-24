@@ -1969,3 +1969,69 @@ fn r517_a_fetch_path_outside_the_checkout_is_refused_before_anything_is_sent() {
         assert_eq!(submits(&c), 0);
     }
 }
+
+const SPLIT_POLICY: &str = r#"version = 1
+[suites.core]
+[[suites.core.steps]]
+name = "tests"
+command = ["cargo", "test", "-p", "p2pcore", "--test", "calls", "--test", "vault"]
+split = "cargo-test"
+"#;
+
+const SPLIT_METADATA: &str = r#"{"workspace_members":["p2pcore 0.1.0"],"packages":[
+  {"name":"p2pcore","id":"p2pcore 0.1.0","features":{},"targets":[
+    {"name":"p2pcore","kind":["lib"],"test":true},
+    {"name":"calls","kind":["test"],"test":true},
+    {"name":"vault","kind":["test"],"test":true},
+    {"name":"link","kind":["test"],"test":true}]}]}"#;
+
+fn suite_request(h: &mut Harness) -> (Vec<Request>, String) {
+    let c = Arc::new(FakeClient::from_fn(|req| match req {
+        Request::SubmitSuite { .. } => Ok(Response::PlanSubmitted {
+            plan_id: 1,
+            jobs: vec![("tests".into(), JobId(1))],
+        }),
+        other => Err(ClientError::BadReply(format!("{other:?}"))),
+    }));
+    h.fs.files.insert(
+        PathBuf::from("/w/repo/.tasks/run-policy.toml"),
+        SPLIT_POLICY.into(),
+    );
+    h.fs.files
+        .insert(PathBuf::from("/w/repo/.git"), String::new());
+    let r = h.run(&c, &["suite", "run", "core"]);
+    assert_eq!(r.code, 0, "{}", r.err);
+    (c.requests(), r.err)
+}
+
+// R-706
+#[test]
+fn r706_suite_run_sends_the_test_targets_read_from_cargo_metadata() {
+    let mut h = Harness::default();
+    h.fs.metadata = Some(SPLIT_METADATA.into());
+    let (reqs, err) = suite_request(&mut h);
+    let Some(Request::SubmitSuite { executables, .. }) = reqs.into_iter().next() else {
+        panic!()
+    };
+    let names: Vec<&str> = executables["tests"]
+        .iter()
+        .map(|e| e.name.as_str())
+        .collect();
+    assert_eq!(names, ["calls", "vault"], "only the tests the step names");
+    assert!(err.is_empty(), "{err}");
+}
+
+// R-706
+#[test]
+fn r706_when_cargo_metadata_fails_the_step_is_sent_whole_with_a_note() {
+    let mut h = Harness::default();
+    let (reqs, err) = suite_request(&mut h);
+    let Some(Request::SubmitSuite { executables, .. }) = reqs.into_iter().next() else {
+        panic!()
+    };
+    assert!(executables.is_empty());
+    assert!(
+        err.contains("step \"tests\" stays whole") && err.contains("cargo metadata failed"),
+        "{err}"
+    );
+}

@@ -905,3 +905,33 @@ fn r665_a_finished_run_is_stamped_cold_until_this_machine_has_passed_it() {
     }
     assert_eq!(stamps, vec![Cache::Cold, Cache::Warm]);
 }
+
+// R-709: a peer's test step that only reads the synced copy does not wait behind another job of
+// the copy; jobs that may change it still go one at a time.
+#[test]
+fn r709_peer_steps_that_only_read_the_copy_start_together_and_other_jobs_still_queue() {
+    let from_peer = |r: &Rig, key: &str, shared: bool| {
+        let mut spec = r.spec("origin-owner", &["cargo", "test"], Kind::Test);
+        spec.requirements.shared_checkout = shared;
+        let mut job = tasks_ledger::NewJob::new(spec);
+        job.origin = Some(tasks_ledger::Origin {
+            peer: "laptop-node".into(),
+            key: key.into(),
+        });
+        r.ledger.submit_job(&job).unwrap()
+    };
+    let r = Rig::with_policy("[slots]\ncompile = 3\n");
+    let (a, b) = (from_peer(&r, "k1", true), from_peer(&r, "k2", true));
+    let started = r.tick().started;
+    assert!(started.contains(&a) && started.contains(&b), "{started:?}");
+
+    let r = Rig::with_policy("[slots]\ncompile = 3\n");
+    let (a, b) = (from_peer(&r, "k1", false), from_peer(&r, "k2", false));
+    let started = r.tick().started;
+    assert_eq!(
+        started,
+        vec![a],
+        "the second waits for the copy: {started:?}"
+    );
+    assert!(r.record(b).wait_text.is_some());
+}

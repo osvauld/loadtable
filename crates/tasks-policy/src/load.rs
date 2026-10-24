@@ -15,6 +15,75 @@ pub trait PolicyFs {
     fn read_to_string(&self, path: &Path) -> io::Result<String>;
     /// True if the path exists (file or directory).
     fn exists(&self, path: &Path) -> bool;
+    /// The JSON of `cargo metadata --no-deps --format-version 1` run in `cwd`, to split a
+    /// `cargo test` step into its test targets without building (R-704). A file system that
+    /// cannot run cargo says so; the step then stays whole.
+    fn cargo_metadata(&self, cwd: &Path) -> io::Result<String> {
+        let _ = cwd;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "cargo metadata is not available here",
+        ))
+    }
+}
+
+/// How long `cargo metadata` may take before the step is left whole. It reads manifests only;
+/// more than this means cargo is installing a toolchain or waiting on a lock.
+const METADATA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn run_cargo_metadata(cwd: &Path) -> io::Result<String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("cargo")
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    // read both pipes while waiting, or a big answer fills the pipe and cargo blocks on it
+    let mut out = child.stdout.take();
+    let mut err = child.stderr.take();
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        if let Some(o) = out.as_mut() {
+            let _ = o.read_to_string(&mut text);
+        }
+        text
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        if let Some(e) = err.as_mut() {
+            let _ = e.read_to_string(&mut text);
+        }
+        text
+    });
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(st) = child.try_wait()? {
+            break st;
+        }
+        if started.elapsed() > METADATA_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "cargo metadata took more than {}s",
+                    METADATA_TIMEOUT.as_secs()
+                ),
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let text = reader.join().unwrap_or_default();
+    let why = err_reader.join().unwrap_or_default();
+    if status.success() {
+        Ok(text)
+    } else {
+        let first = why.lines().next().unwrap_or("no message");
+        Err(io::Error::other(format!("cargo metadata failed: {first}")))
+    }
 }
 
 /// The real file system.
@@ -27,6 +96,9 @@ impl PolicyFs for RealFs {
     }
     fn exists(&self, path: &Path) -> bool {
         path.exists()
+    }
+    fn cargo_metadata(&self, cwd: &Path) -> io::Result<String> {
+        run_cargo_metadata(cwd)
     }
 }
 
@@ -77,8 +149,15 @@ pub(crate) mod fake {
     pub struct FakeFs {
         pub files: BTreeMap<PathBuf, String>,
         pub dirs: Vec<PathBuf>,
+        /// What `cargo metadata` prints; `None` makes it fail.
+        pub metadata: Option<String>,
     }
     impl PolicyFs for FakeFs {
+        fn cargo_metadata(&self, _cwd: &Path) -> io::Result<String> {
+            self.metadata
+                .clone()
+                .ok_or_else(|| io::Error::other("cargo metadata failed: no manifest"))
+        }
         fn read_to_string(&self, path: &Path) -> io::Result<String> {
             self.files
                 .get(path)

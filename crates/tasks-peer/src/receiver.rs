@@ -206,6 +206,8 @@ impl Receiver {
         }
         let mut spec = job.spec;
         spec.cwd = cwd;
+        // only the field decides: a flag inside the spec is the sender's claim about itself
+        spec.requirements.shared_checkout = job.shared_checkout;
         // Placement was the origin's decision; the job runs here and must not
         // be forwarded again. Dependencies are the origin's ordering, already met.
         spec.placement = Placement::Here;

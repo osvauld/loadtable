@@ -790,6 +790,7 @@ fn suites_expand_from_the_repo_policy_and_unknown_ones_are_refused() {
         env: vec![],
         placement: Placement::Here,
         quick: false,
+        executables: Default::default(),
         broad_test: false,
         priority: Default::default(),
         priority_reason: None,

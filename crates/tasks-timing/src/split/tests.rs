@@ -163,16 +163,34 @@ fn plan5() -> Plan {
 }
 
 #[test]
-fn r012_longest_first_with_unknown_as_long() {
+fn r707_longest_first_with_an_unknown_step_after_the_known_long_ones() {
     let mut est_map = BTreeMap::new();
     est_map.insert("test:short".to_string(), est(5.0));
     est_map.insert("test-long".to_string(), est(300.0));
     est_map.insert("test:mid".to_string(), est(60.0));
     let p = order_longest_first(&plan5(), &est_map).unwrap();
     p.validate().unwrap();
+    // `new` has no figure: it counts as typical (60 s), so it follows `long` and `mid` (tied,
+    // declared first) and goes before `short`
     assert_eq!(
         names(&p),
-        ["build", "test-new", "test-long", "test-mid", "test-short"]
+        ["build", "test-long", "test-mid", "test-new", "test-short"]
+    );
+}
+
+#[test]
+fn r707_a_step_hinted_long_goes_before_a_longer_estimate() {
+    let mut plan = plan5();
+    for s in &mut plan.steps {
+        s.hints.long = s.name == "test-short";
+    }
+    let mut est_map = BTreeMap::new();
+    est_map.insert("test:short".to_string(), est(5.0));
+    est_map.insert("test-long".to_string(), est(300.0));
+    let p = order_longest_first(&plan, &est_map).unwrap();
+    assert_eq!(
+        names(&p),
+        ["build", "test-short", "test-long", "test-mid", "test-new"]
     );
 }
 

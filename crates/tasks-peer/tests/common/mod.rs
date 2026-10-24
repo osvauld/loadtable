@@ -164,6 +164,21 @@ impl World {
         Forward::new(job, policy, Arc::clone(&self.locks), Duration::ZERO)
     }
 
+    /// A forward of a job that only reads the synced checkout (a test step after its build).
+    pub fn forward_shared(&self, id: i64, policy: ForwardPolicy) -> Forward {
+        let mut spec = self.spec("");
+        spec.requirements.shared_checkout = true;
+        let job = ForwardJob {
+            local_id: id,
+            spec,
+            root: self.root.clone(),
+            origin_host: "laptop".into(),
+            peer: self.nixos.clone(),
+            key: ForwardJob::default_key("laptop", id).unwrap(),
+        };
+        Forward::new(job, policy, Arc::clone(&self.locks), Duration::ZERO)
+    }
+
     pub fn tick(&self, f: &mut Forward, now: Duration, log: &mut Vec<u8>) {
         let mut io = ForwardIo {
             transport: &self.transport,
