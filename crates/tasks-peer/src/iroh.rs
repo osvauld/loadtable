@@ -113,10 +113,8 @@ fn endpoint_addr(peer: &PeerId, hints: &DialHints) -> Result<EndpointAddr, PeerE
             addr = addr.with_ip_addr(sa);
         }
     }
-    if let Some(r) = &hints.relay {
-        if let Ok(u) = r.parse::<RelayUrl>() {
-            addr = addr.with_relay_url(u);
-        }
+    if let Some(Ok(u)) = hints.relay.as_ref().map(|r| r.parse::<RelayUrl>()) {
+        addr = addr.with_relay_url(u);
     }
     Ok(addr)
 }
