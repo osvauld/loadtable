@@ -2064,3 +2064,127 @@ fn r714_light_and_retry_alone_travel_on_the_spec_and_default_to_off() {
     let s = submitted_spec(&c);
     assert!(!s.light && !s.retry_alone);
 }
+
+// ---------------------------------------------------------------- wait
+
+/// A daemon whose job `id` answers `get` with each phase of `phases` in turn (the last one
+/// repeats) and serves `tail` as its log tail.
+fn waited(id: i64, phases: Vec<Phase>, tail: &[&str]) -> Arc<FakeClient> {
+    let phases = Mutex::new(
+        phases
+            .into_iter()
+            .collect::<std::collections::VecDeque<_>>(),
+    );
+    let tail: Vec<String> = tail.iter().map(|l| l.to_string()).collect();
+    Arc::new(FakeClient::from_fn(move |req| match req {
+        Request::Get { id: JobId(asked) } if *asked == id => {
+            let mut q = phases
+                .lock()
+                .map_err(|_| ClientError::BadReply("poisoned".into()))?;
+            let phase = if q.len() > 1 {
+                q.pop_front()
+            } else {
+                q.front().cloned()
+            };
+            Ok(Response::Job {
+                job: Box::new(finished(id, phase.unwrap_or(Phase::Running))),
+            })
+        }
+        Request::Logs { .. } => Ok(Response::LogTail {
+            lines: tail.clone(),
+            running: false,
+            end_offset: None,
+        }),
+        other => Err(ClientError::BadReply(format!("unexpected {other:?}"))),
+    }))
+}
+
+// R-720
+#[test]
+fn r720_wait_blocks_until_the_job_ends_then_prints_its_tail_and_result_read_only() {
+    let c = waited(
+        7,
+        vec![Phase::Queued, Phase::Running, Phase::Running, Phase::Passed],
+        &["test a ... ok", "test result: ok. 1 passed"],
+    );
+    let r = Harness::default().run(&c, &["wait", "7"]);
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(r.out.contains("test result: ok. 1 passed"), "{}", r.out);
+    let last = r.out.lines().last().unwrap_or_default();
+    assert!(
+        last.contains("job 7") && last.contains("passed"),
+        "{}",
+        r.out
+    );
+    let gets = c
+        .requests()
+        .iter()
+        .filter(|q| matches!(q, Request::Get { .. }))
+        .count();
+    assert_eq!(gets, 4, "one get per poll until the job ended");
+    assert!(c.requests().iter().all(is_read_only));
+}
+
+// R-721
+#[test]
+fn r721_wait_exits_with_the_jobs_code_like_run_and_tail_0_prints_only_the_result() {
+    let c = waited(8, vec![Phase::Failed { exit: Some(3) }], &["boom"]);
+    let r = Harness::default().run(&c, &["wait", "--tail", "0", "8"]);
+    let failed = finished(8, Phase::Failed { exit: Some(3) });
+    assert_eq!(r.code, render::job_exit_code(&failed));
+    assert!(!r.out.contains("boom"), "{}", r.out);
+    assert_eq!(r.out.trim(), render::summary_line(&failed));
+}
+
+// R-721
+#[test]
+fn r721_waiting_on_several_jobs_reports_each_and_exits_with_the_first_failure() {
+    let c = Arc::new(FakeClient::from_fn(|req| match req {
+        Request::Get { id } => Ok(Response::Job {
+            job: Box::new(finished(
+                id.0,
+                if id.0 == 2 {
+                    Phase::Failed { exit: Some(101) }
+                } else {
+                    Phase::Passed
+                },
+            )),
+        }),
+        Request::Logs { .. } => Ok(Response::LogTail {
+            lines: vec![],
+            running: false,
+            end_offset: None,
+        }),
+        other => Err(ClientError::BadReply(format!("unexpected {other:?}"))),
+    }));
+    let r = Harness::default().run(&c, &["wait", "1", "2", "3", "2"]);
+    assert_eq!(r.code, 101);
+    for id in [1, 2, 3] {
+        assert_eq!(
+            r.out
+                .lines()
+                .filter(|l| l.contains(&format!("job {id} ")))
+                .count(),
+            1,
+            "{}",
+            r.out
+        );
+    }
+}
+
+// R-722
+#[test]
+fn r722_wait_gives_up_after_its_timeout_with_124_and_leaves_the_job_alone() {
+    let c = waited(9, vec![Phase::Running], &[]);
+    let r = Harness::default().run(&c, &["wait", "--timeout", "3", "9"]);
+    assert_eq!(r.code, crate::error::EXIT_TIMED_OUT);
+    assert!(r.err.contains("job 9 is untouched"), "{}", r.err);
+    assert!(r.err.contains("tasks2 logs 9"), "{}", r.err);
+    assert!(c.requests().iter().all(is_read_only));
+    let gets = c
+        .requests()
+        .iter()
+        .filter(|q| matches!(q, Request::Get { .. }))
+        .count();
+    assert_eq!(gets, 4, "polls at 0, 1, 2 and 3 s, then gives up");
+}
