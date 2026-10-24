@@ -115,6 +115,10 @@ pub struct StepHints {
     /// When a `cargo test` step fails under load, run the failed tests once more, alone.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub retry_alone: bool,
+    /// Set on the follow-up job the daemon queues for a failed `retry_alone` job: the id of the
+    /// job whose failed tests it runs again, alone. Lets the outcome find its way back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_of: Option<i64>,
     /// Tools the step needs on the machine.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
