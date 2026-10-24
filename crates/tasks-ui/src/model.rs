@@ -168,6 +168,10 @@ pub struct JobRow {
     pub summary: Option<String>,
     /// Which buttons work (R-206).
     pub actions: Actions,
+    /// A plan step's name without the plan prefix (`test-calls`); `None` for a plain job.
+    pub step: Option<String>,
+    /// Small tags of a plan step: `light`, `isolate`, `retry`.
+    pub tags: Vec<String>,
     /// The job as the daemon sent it, for the details view.
     pub job: JobView,
 }
@@ -273,6 +277,8 @@ pub struct ViewModel {
     pub queued: Vec<JobRow>,
     /// Recent table, newest first.
     pub recent: Vec<JobRow>,
+    /// Plans, each one row with its steps; the steps are not in the three tables (R-740).
+    pub plans: Vec<crate::plans::PlanRow>,
     /// The queue-held banner (R-189), then the daemon's alerts and policy problems: one
     /// full-width row each, worst first (R-582).
     pub notices: Vec<Notice>,
@@ -316,6 +322,7 @@ impl ViewModel {
             .iter()
             .chain(&self.queued)
             .chain(&self.recent)
+            .chain(self.plans.iter().flat_map(|p| &p.steps))
             .find(|r| r.id == id)
     }
 
@@ -330,19 +337,15 @@ impl ViewModel {
             .collect()
     }
 
-    /// Jobs running or waiting: the number on the Queue tab.
+    /// Rows running or waiting, a plan counting once: the number on the Queue tab.
     pub fn open_jobs(&self) -> usize {
-        self.running.len() + self.queued.len()
-    }
-
-    /// The ids of the Queue tab's rows from top to bottom, for the arrow keys.
-    pub fn queue_ids(&self) -> Vec<i64> {
-        self.running
-            .iter()
-            .chain(&self.queued)
-            .chain(self.finished_recently())
-            .map(|r| r.id)
-            .collect()
+        self.running.len()
+            + self.queued.len()
+            + self
+                .plans
+                .iter()
+                .filter(|p| p.summary.running + p.summary.waiting > 0)
+                .count()
     }
 }
 
@@ -885,6 +888,8 @@ fn job_row(
         cancel_reason: j.cancel_reason.clone(),
         summary: j.summary.clone(),
         actions: actions_for(j, local),
+        step: j.plan.as_ref().map(|(_, n)| crate::plans::step_label(n)),
+        tags: j.tags.clone(),
         job: j.clone(),
     }
 }
@@ -1341,7 +1346,9 @@ pub fn build_in(d: &Dashboard, fallback_now_ms: i64, tz: &jiff::tz::TimeZone) ->
     let mut running_rows: Vec<JobRow> = Vec::new();
     let mut queued_rows: Vec<JobRow> = Vec::new();
     let mut recent_rows: Vec<JobRow> = Vec::new();
-    for r in rows.iter().cloned() {
+    let plans = crate::plans::build(&rows, &running, &waiting, now_ms);
+    // a plan's steps live under its row, not in the tables
+    for r in rows.iter().filter(|r| r.job.plan.is_none()).cloned() {
         match r.section {
             Section::Running => running_rows.push(r),
             Section::Queued => queued_rows.push(r),
@@ -1365,6 +1372,7 @@ pub fn build_in(d: &Dashboard, fallback_now_ms: i64, tz: &jiff::tz::TimeZone) ->
         running: running_rows,
         queued: queued_rows,
         recent: recent_rows,
+        plans,
         notices: notices(st),
         draining: st.daemon.draining,
         truncated: d.jobs_truncated,
@@ -1380,6 +1388,7 @@ pub fn prune_open(open: &mut std::collections::BTreeSet<i64>, vm: &ViewModel) {
         .iter()
         .chain(&vm.queued)
         .chain(&vm.recent)
+        .chain(vm.plans.iter().flat_map(|p| &p.steps))
         .map(|r| r.id)
         .collect();
     open.retain(|id| live.contains(id));
@@ -2053,7 +2062,7 @@ mod tests {
         assert!(vm.recent.iter().any(|r| r.id == 85), "History keeps it");
         assert_eq!(vm.open_jobs(), vm.running.len() + vm.queued.len());
         // top to bottom: running, waiting, finished
-        let ids = vm.queue_ids();
+        let ids = crate::plans::visible_ids(&vm, Tab::Queue, &|_| false);
         assert_eq!(&ids[..3], &[101, 102, 103]);
         assert_eq!(ids.last(), Some(&93));
         assert_eq!(Section::Queued.title(), "Waiting");

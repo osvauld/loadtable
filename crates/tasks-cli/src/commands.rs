@@ -555,7 +555,11 @@ fn list(ctx: &mut Ctx<'_>, a: &ListArgs) -> Result<i32, CliError> {
         (ctx.now_ms)(),
         home.as_deref(),
         &w,
-        render::TableOptions { brief: a.brief },
+        render::TableOptions {
+            brief: a.brief,
+            flat: a.flat,
+            all_steps: a.all_steps,
+        },
     );
     ctx.out.write_all(table.as_bytes())?;
     if truncated {

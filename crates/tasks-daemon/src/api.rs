@@ -745,6 +745,13 @@ pub struct JobView {
     pub remote_phase: Option<Phase>,
     /// Plan and step name for plan steps.
     pub plan: Option<(i64, String)>,
+    /// The suite a plan step came from (`core-split`), when the daemon knows it. The ledger
+    /// does not store it yet, so this is empty until it does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suite: Option<String>,
+    /// Scheduling flags of a plan step, as words: `light`, `isolate`, `retry`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
     /// Log file path.
     pub log_path: Option<PathBuf>,
     /// What the job cost the machine and how exact that is (design §9).

@@ -11,7 +11,8 @@ use crate::link::DaemonLink;
 use crate::logview::{LogSnapshot, SearchHits};
 use crate::mailbox::Mailbox;
 use crate::model::{self, JobRow, NoticeLevel, Online, Section, Tab, ViewModel};
-use crate::paint;
+use crate::paint::{self, PlanClick};
+use crate::plans::{self, Entry, PlanRow};
 use crate::resources;
 use crate::stalls::{self, StallData};
 use crate::stats;
@@ -19,7 +20,7 @@ use crate::theme::{self, LABEL, Palette, SECONDARY};
 use eframe::egui::{
     self, Align, Color32, Key, Layout, Margin, Modifiers, RichText, Sense, Stroke, vec2,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -101,6 +102,10 @@ pub struct App {
     selected_row: Option<JobRow>,
     scroll_to_selected: bool,
     raw_open: BTreeSet<i64>,
+    /// Plans the user opened or closed, by plan id; the rest follow `open_by_default`.
+    plan_open: BTreeMap<i64, bool>,
+    /// Where each row was drawn last frame, by selection key (a job id or a plan key).
+    row_rects: BTreeMap<i64, egui::Rect>,
     cancel: Option<CancelDialog>,
     confirm_drain: bool,
     action_box: Arc<Mailbox<ActionOutcome>>,
@@ -157,6 +162,8 @@ impl App {
             selected_row: None,
             scroll_to_selected: false,
             raw_open: BTreeSet::new(),
+            plan_open: BTreeMap::new(),
+            row_rects: BTreeMap::new(),
             cancel: None,
             confirm_drain: false,
             action_box: Arc::new(Mailbox::new()),
@@ -203,6 +210,50 @@ impl App {
     pub fn select(&mut self, id: i64) {
         self.selected = Some(id);
         self.refresh_selected_row();
+    }
+
+    /// Selects a plan's parent row so the side panel shows the plan (for screenshots).
+    pub fn select_plan(&mut self, plan_id: i64) {
+        self.selected = Some(plans::plan_key(plan_id));
+        self.refresh_selected_row();
+    }
+
+    /// Opens or closes a plan's steps.
+    pub fn set_plan_open(&mut self, plan_id: i64, open: bool) {
+        self.plan_open.insert(plan_id, open);
+    }
+
+    fn is_open(&self, plan: &PlanRow) -> bool {
+        self.plan_open
+            .get(&plan.plan_id)
+            .copied()
+            .unwrap_or(plan.open_by_default)
+    }
+
+    /// Where the row with this selection key was drawn in the last frame.
+    pub fn row_rect(&self, key: i64) -> Option<egui::Rect> {
+        self.row_rects.get(&key).copied()
+    }
+
+    /// Selects a step of a plan from the side panel, opening the plan so the row is on screen.
+    fn select_step(&mut self, id: i64) {
+        if let Some(pid) = self
+            .vm
+            .as_ref()
+            .and_then(|vm| vm.plan_of_job(id))
+            .map(|p| p.plan_id)
+        {
+            self.plan_open.insert(pid, true);
+        }
+        self.selected = Some(id);
+        self.scroll_to_selected = true;
+        self.refresh_selected_row();
+    }
+
+    /// The plan the selection stands for, when it is a plan's parent row.
+    fn selected_plan(&self) -> Option<&PlanRow> {
+        let pid = plans::plan_of_key(self.selected?)?;
+        self.vm.as_ref()?.plan(pid)
     }
 
     /// Gives the Timings tab a history (for screenshots).
@@ -272,7 +323,9 @@ impl App {
         let Some(vm) = &self.vm else {
             return;
         };
-        if let Some(r) = vm.find(id) {
+        if plans::plan_of_key(id).is_some() {
+            self.selected_row = None;
+        } else if let Some(r) = vm.find(id) {
             self.selected_row = Some(r.clone());
         }
     }
@@ -459,7 +512,7 @@ impl App {
                     .resizable(true)
                     .frame(frame)
                     .show(ctx, |ui| self.side_panel(ui, p));
-            } else if self.selected_row.is_some() {
+            } else if self.selected_row.is_some() || self.selected_plan().is_some() {
                 egui::TopBottomPanel::bottom("detail-below")
                     .resizable(true)
                     .default_height(330.0)
@@ -497,25 +550,41 @@ impl App {
         {
             return;
         }
-        let (down, up, enter, esc) = ctx.input_mut(|i| {
+        let (down, up, enter, esc, right, left) = ctx.input_mut(|i| {
             (
                 i.consume_key(Modifiers::NONE, Key::ArrowDown),
                 i.consume_key(Modifiers::NONE, Key::ArrowUp),
                 i.consume_key(Modifiers::NONE, Key::Enter),
                 i.consume_key(Modifiers::NONE, Key::Escape),
+                i.consume_key(Modifiers::NONE, Key::ArrowRight),
+                i.consume_key(Modifiers::NONE, Key::ArrowLeft),
             )
         });
         if down || up {
             if let Some(vm) = &self.vm {
-                let ids = if self.tab == Tab::History {
-                    vm.recent.iter().map(|r| r.id).collect()
-                } else {
-                    vm.queue_ids()
-                };
+                // only the rows on screen: the steps of a closed plan are skipped
+                let ids = plans::visible_ids(vm, self.tab, &|p| self.is_open(p));
                 self.selected = model::step_selection(&ids, self.selected, if up { -1 } else { 1 });
                 self.scroll_to_selected = true;
             }
             self.refresh_selected_row();
+        }
+        if right && let Some(pid) = self.selected_plan().map(|p| p.plan_id) {
+            self.plan_open.insert(pid, true);
+        }
+        if left {
+            // closing a plan, or from one of its steps back up to it
+            if let Some(pid) = self.selected_plan().map(|p| p.plan_id) {
+                self.plan_open.insert(pid, false);
+            } else if let Some(pid) = self
+                .selected
+                .and_then(|id| self.vm.as_ref()?.plan_of_job(id))
+                .map(|p| p.plan_id)
+            {
+                self.selected = Some(plans::plan_key(pid));
+                self.scroll_to_selected = true;
+                self.refresh_selected_row();
+            }
         }
         if esc {
             self.selected = None;
@@ -742,11 +811,11 @@ impl App {
             });
             return;
         };
-        let groups: Vec<(Section, &str, Vec<&JobRow>, String)> = if self.tab == Tab::History {
+        let groups: Vec<(Section, &str, Vec<Entry<'_>>, String)> = if self.tab == Tab::History {
             vec![(
                 Section::Recent,
                 "Finished",
-                vm.recent.iter().collect(),
+                vm.entries(Tab::History, Section::Recent),
                 "newest first".to_string(),
             )]
         } else {
@@ -754,24 +823,26 @@ impl App {
                 (
                     Section::Running,
                     "Running",
-                    vm.running.iter().collect(),
+                    vm.entries(Tab::Queue, Section::Running),
                     String::new(),
                 ),
                 (
                     Section::Queued,
                     "Waiting",
-                    vm.queued.iter().collect(),
+                    vm.entries(Tab::Queue, Section::Queued),
                     "in start order".to_string(),
                 ),
                 (
                     Section::Recent,
                     "Finished",
-                    vm.finished_recently(),
+                    vm.entries(Tab::Queue, Section::Recent),
                     "last hour · the rest is in History".to_string(),
                 ),
             ]
         };
         let mut click: Option<i64> = None;
+        let mut toggle: Option<i64> = None;
+        let mut rects: BTreeMap<i64, egui::Rect> = BTreeMap::new();
         let selected = self.selected;
         let scroll_to = std::mem::take(&mut self.scroll_to_selected);
         egui::ScrollArea::vertical()
@@ -781,27 +852,65 @@ impl App {
                 let cols =
                     columns::visible(ui.available_width().max(MIN_WINDOW_WIDTH) - 2.0 * paint::PAD);
                 let mut any = false;
-                for (_, title, rows, note) in &groups {
-                    if rows.is_empty() {
+                for (_, title, entries, note) in &groups {
+                    if entries.is_empty() {
                         continue;
                     }
                     any = true;
-                    paint::group_header(ui, p, title, rows.len(), note);
-                    for row in rows {
-                        let sel = selected == Some(row.id);
-                        let resp = ui
-                            .scope(|ui| {
-                                if row.stale {
-                                    ui.set_opacity(0.55);
+                    paint::group_header(ui, p, title, entries.len(), note);
+                    for entry in entries {
+                        match entry {
+                            Entry::Job(row) => {
+                                let sel = selected == Some(row.id);
+                                let resp = ui
+                                    .scope(|ui| {
+                                        if row.stale {
+                                            ui.set_opacity(0.55);
+                                        }
+                                        paint::job_row(ui, p, row, &cols, sel)
+                                    })
+                                    .inner;
+                                rects.insert(row.id, resp.rect);
+                                if sel && scroll_to {
+                                    resp.scroll_to_me(None);
                                 }
-                                paint::job_row(ui, p, row, &cols, sel)
-                            })
-                            .inner;
-                        if sel && scroll_to {
-                            resp.scroll_to_me(None);
-                        }
-                        if resp.clicked() {
-                            click = Some(row.id);
+                                if resp.clicked() {
+                                    click = Some(row.id);
+                                }
+                            }
+                            Entry::Plan(plan) => {
+                                let key = plans::plan_key(plan.plan_id);
+                                let sel = selected == Some(key);
+                                let open = self
+                                    .plan_open
+                                    .get(&plan.plan_id)
+                                    .copied()
+                                    .unwrap_or(plan.open_by_default);
+                                let (resp, hit) = paint::plan_row(ui, p, plan, &cols, sel, open);
+                                rects.insert(key, resp.rect);
+                                if sel && scroll_to {
+                                    resp.scroll_to_me(None);
+                                }
+                                match hit {
+                                    PlanClick::Select => click = Some(key),
+                                    PlanClick::Toggle => toggle = Some(plan.plan_id),
+                                    PlanClick::None => {}
+                                }
+                                if !open {
+                                    continue;
+                                }
+                                for step in &plan.steps {
+                                    let sel = selected == Some(step.id);
+                                    let resp = paint::step_row(ui, p, step, &cols, sel);
+                                    rects.insert(step.id, resp.rect);
+                                    if sel && scroll_to {
+                                        resp.scroll_to_me(None);
+                                    }
+                                    if resp.clicked() {
+                                        click = Some(step.id);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -828,6 +937,15 @@ impl App {
                     );
                 }
             });
+        self.row_rects = rects;
+        if let Some(pid) = toggle {
+            let now = self
+                .vm
+                .as_ref()
+                .and_then(|vm| vm.plan(pid))
+                .is_some_and(|p| self.is_open(p));
+            self.plan_open.insert(pid, !now);
+        }
         if let Some(id) = click {
             self.selected = Some(id);
             self.refresh_selected_row();
@@ -836,6 +954,10 @@ impl App {
 
     /// One job in depth: who and how it is going, what it can do, when, and the facts.
     fn side_panel(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        if let Some(plan) = self.selected_plan().cloned() {
+            self.plan_panel(ui, p, &plan);
+            return;
+        }
         let Some(row) = self.selected_row.clone() else {
             ui.add_space(40.0);
             ui.vertical_centered(|ui| {
@@ -910,6 +1032,18 @@ impl App {
                         .selectable(true)
                         .wrap(),
                     );
+                    if let Some((pid, _)) = &row.job.plan {
+                        let suite = row
+                            .job
+                            .suite
+                            .as_ref()
+                            .map_or(String::new(), |s| format!(" (suite {s})"));
+                        ui.label(
+                            RichText::new(format!("step of plan {pid}{suite}"))
+                                .font(theme::sans(SECONDARY))
+                                .color(p.dim),
+                        );
+                    }
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
@@ -1039,6 +1173,132 @@ impl App {
         if move_up && let Some(to) = actions::class_above(row.job.priority) {
             let owner = row.job.owner.clone();
             self.spawn_action(move |l| feed::move_up(l, JobId(row.id), &owner, to));
+        }
+    }
+
+    /// One plan: what it is, how far it got and its steps, the ones needing a look first.
+    fn plan_panel(&mut self, ui: &mut egui::Ui, p: &Palette, plan: &PlanRow) {
+        let now_ms = self.vm.as_ref().map_or(0, |vm| vm.now_ms);
+        let lines = plan.step_lines(now_ms);
+        let facts = plan.facts(now_ms);
+        let mut pick: Option<i64> = None;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
+                egui::Frame::new()
+                    .inner_margin(Margin::symmetric(16, 14))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!("plan {}", plan.plan_id))
+                                    .font(theme::mono(theme::BODY - 0.5))
+                                    .color(p.faint),
+                            );
+                            let (r, _) = ui.allocate_exact_size(vec2(3.0, 16.0), Sense::hover());
+                            ui.painter().rect_filled(
+                                r,
+                                egui::CornerRadius::same(2),
+                                p.agent(plan.hue),
+                            );
+                            ui.add_space(-2.0);
+                            ui.label(
+                                RichText::new(&plan.agent)
+                                    .font(theme::sans_medium(theme::BODY))
+                                    .color(p.ink),
+                            )
+                            .on_hover_text(&plan.owner);
+                            if let Some(v) = plan.vendor {
+                                ui.label(
+                                    RichText::new(v)
+                                        .font(theme::sans(LABEL + 0.5))
+                                        .color(p.faint),
+                                );
+                            }
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                let st = &plan.state;
+                                let head = if st.head.is_empty() {
+                                    format!("{} · {}", st.left, st.right)
+                                } else {
+                                    st.head.clone()
+                                };
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(head)
+                                            .font(theme::sans_medium(SECONDARY))
+                                            .color(paint::tone_color(p, st.tone)),
+                                    )
+                                    .truncate(),
+                                );
+                            });
+                        });
+                        ui.add_space(4.0);
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(&plan.title)
+                                    .font(theme::sans_semibold(theme::BODY + 1.0))
+                                    .color(p.ink),
+                            )
+                            .wrap(),
+                        );
+                        ui.add_space(2.0);
+                        ui.label(
+                            RichText::new(&plan.progress_text)
+                                .font(theme::sans(SECONDARY))
+                                .color(p.dim),
+                        );
+                        ui.add_space(6.0);
+                        paint::plan_bar(ui, p, plan);
+                    });
+                rule(ui, p);
+                egui::Frame::new()
+                    .inner_margin(Margin::symmetric(16, 12))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        egui::Grid::new("plan-facts")
+                            .num_columns(2)
+                            .min_col_width(92.0)
+                            .spacing(vec2(12.0, 6.0))
+                            .show(ui, |ui| {
+                                for (k, v) in &facts {
+                                    ui.label(
+                                        RichText::new(*k)
+                                            .font(theme::sans(SECONDARY))
+                                            .color(p.faint),
+                                    );
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(v)
+                                                .font(theme::sans(SECONDARY))
+                                                .color(p.ink),
+                                        )
+                                        .wrap(),
+                                    );
+                                    ui.end_row();
+                                }
+                            });
+                    });
+                rule(ui, p);
+                egui::Frame::new()
+                    .inner_margin(Margin::symmetric(16, 12))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(
+                            RichText::new("Steps")
+                                .font(theme::sans_semibold(theme::BODY - 0.5))
+                                .color(p.ink),
+                        );
+                        ui.add_space(4.0);
+                        for l in &lines {
+                            if paint::step_line(ui, p, l).clicked() {
+                                pick = Some(l.id);
+                            }
+                        }
+                    });
+            });
+        if let Some(id) = pick {
+            self.select_step(id);
         }
     }
 
