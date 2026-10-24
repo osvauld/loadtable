@@ -87,6 +87,12 @@ const FIELDS: &[Field] = &[
         "1",
     ),
     f(
+        "slots.light",
+        "TASKS_LIGHT_SLOTS",
+        Ty::Uint(0, 16),
+        "4",
+    ),
+    f(
         "slots.short_lane",
         "TASKS_SHORT_LANE_SLOTS",
         Ty::Uint(0, 4),
@@ -855,6 +861,7 @@ impl MachinePolicy {
             short_job_max_secs: self.fl("slots.short_job_max_secs"),
             short_job_max_memory_bytes: self.u("slots.short_job_max_memory_mib") * MIB,
             short_job_lane_slots: u32::try_from(self.u("slots.short_lane")).unwrap_or(0),
+            light_slots: u32::try_from(self.u("slots.light")).unwrap_or(0),
             aging_ms: self.ou("queue.aging_mins").map_or(0, |m| m * 60_000),
         }
     }

@@ -977,3 +977,64 @@ fn r713_an_isolate_job_first_in_line_is_not_starved_by_the_jobs_behind_it() {
     r.until_running(iso);
     assert!(matches!(r.phase(later), Phase::Waiting(_)));
 }
+
+// ---------------------------------------------------------------- light
+
+fn light_job(r: &Rig, name: &str) -> JobId {
+    let mut s = r.spec_in("o", &["cargo", "test", name], Kind::Test, name);
+    s.light = true;
+    r.submit(&s)
+}
+
+fn slot_index(r: &Rig, id: JobId) -> Option<u32> {
+    r.sch
+        .status()
+        .running
+        .iter()
+        .find(|j| j.id == id)
+        .and_then(|j| j.slot.as_ref().map(|s| s.1))
+}
+
+// R-714, R-715
+#[test]
+fn r714_a_light_job_runs_in_its_own_pool_through_a_closed_cpu_gate_and_a_full_pool_says_so() {
+    let r = Rig::with_policy(
+        "[slots]\ncompile = 1\nlight = 1\n[pressure.compile]\nmax_cpu = 40\n",
+    );
+    r.machine.state.lock().unwrap().pressure.cpu = Some(95.0);
+    let ordinary = r.submit(&r.spec_in("o", &["make", "x"], Kind::Compile, "x"));
+    let first = light_job(&r, "first");
+    let second = light_job(&r, "second");
+    r.tick();
+    r.until_running(first);
+    let slot = slot_index(&r, first).unwrap();
+    assert!(slot >= tasks_admission::LIGHT_LANE_BASE, "{slot}");
+    assert!(
+        r.record(ordinary)
+            .wait_text
+            .unwrap()
+            .contains("CPU contended"),
+        "the ordinary job still meets the gate"
+    );
+    assert_eq!(
+        r.record(second).wait_text.unwrap(),
+        format!("all 1 light slots busy (#{}); you are 1st in line", first.0)
+    );
+    // it holds no compile slot: the status line still shows the compile slot free
+    let st = r.sch.status();
+    let compile = st.slots.iter().find(|g| g.kind == "compile").unwrap();
+    assert_eq!(compile.free, compile.total);
+}
+
+// R-715
+#[test]
+fn r715_a_light_job_gets_the_tests_cpu_share_not_a_builds() {
+    let r = Rig::delegated();
+    r.procs.auto_exit(0);
+    let mut s = r.spec_in("o", &["make", "soak"], Kind::Compile, "soak");
+    s.light = true;
+    let id = r.submit(&s);
+    r.tick();
+    assert_eq!(r.until_done(id), Phase::Passed);
+    assert_eq!(r.cgroups.cpu_weight(tasks_platform::CgroupName::Job(id.0)), Some(200));
+}

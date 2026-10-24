@@ -43,6 +43,9 @@ pub struct Waiter {
     pub holds: Vec<Hold>,
     /// Runs only when nothing else runs on the machine, and nothing starts beside it (R-712).
     pub isolate: bool,
+    /// Uses little CPU but runs long: takes a place in the light pool and ignores the CPU
+    /// gate (R-714).
+    pub light: bool,
 }
 
 /// A job running on this machine now, as far as isolation is concerned (R-712).
@@ -70,6 +73,7 @@ impl Waiter {
             new_output: false,
             holds: Vec::new(),
             isolate: false,
+            light: false,
         }
     }
 
@@ -95,6 +99,8 @@ pub enum Lane {
     Normal,
     /// The small short-job lane.
     Short,
+    /// The light pool, for long jobs that use little CPU.
+    Light,
 }
 
 /// Outcome for one waiter.

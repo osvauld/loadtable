@@ -36,6 +36,15 @@ pub enum WaitReason {
         /// Waiters of the same kind ahead of this one.
         ahead: Vec<JobId>,
     },
+    /// Every place in the light pool is taken.
+    LightBusy {
+        /// Number of places.
+        total: usize,
+        /// Holders; `None` is a holder outside the ledger.
+        holders: Vec<Option<JobId>>,
+        /// Light waiters ahead of this one.
+        ahead: Vec<JobId>,
+    },
     /// The slot was taken between planning and locking.
     SlotTaken(SlotKind, u32),
     /// Another job holds the device.
@@ -173,6 +182,22 @@ impl fmt::Display for WaitReason {
                 write!(
                     f,
                     "{all} ({}); you are {} in line",
+                    who.join(", "),
+                    ordinal(ahead.len() + 1)
+                )
+            }
+            WaitReason::LightBusy {
+                total,
+                holders,
+                ahead,
+            } => {
+                let who: Vec<String> = holders
+                    .iter()
+                    .map(|h| h.map_or("external".to_string(), |j| format!("#{}", j.0)))
+                    .collect();
+                write!(
+                    f,
+                    "all {total} light slots busy ({}); you are {} in line",
                     who.join(", "),
                     ordinal(ahead.len() + 1)
                 )

@@ -2,7 +2,8 @@
 
 use crate::gates::{Readings, check_gates};
 use crate::{
-    AdmissionError, AdmissionInput, Decision, DeviceState, Lane, Running, SHORT_LANE_BASE, SlotState,
+    AdmissionError, AdmissionInput, Decision, DeviceState, LIGHT_LANE_BASE, Lane, Running,
+    SHORT_LANE_BASE, SlotState,
     Thresholds, WaitReason, Waiter, decide,
 };
 use std::collections::BTreeMap;
@@ -124,6 +125,15 @@ impl Admitter<'_> {
                 short_lane.busy.push((i, None));
             }
         }
+        let mut light_lane = SlotState::default();
+        for i in 0..self.thresholds.light_slots {
+            if self.probe(SlotKind::Run, LIGHT_LANE_BASE + i)? {
+                light_lane.free.push(i);
+            } else {
+                let holder = layout.holders.get(&(SlotKind::Run, LIGHT_LANE_BASE + i));
+                light_lane.busy.push((i, holder.copied()));
+            }
+        }
         let mut devices = BTreeMap::new();
         for (id, index) in &layout.devices {
             let free = self.probe(SlotKind::Device, *index)?;
@@ -140,6 +150,7 @@ impl Admitter<'_> {
         Ok(decide(&AdmissionInput {
             slots,
             short_lane,
+            light_lane,
             devices,
             pressure: r.pressure,
             available_memory: r.available_memory,
@@ -163,6 +174,9 @@ impl Admitter<'_> {
     ) -> Result<Attempt, AdmissionError> {
         if lane == Lane::Short && !matches!(slot.0, SlotKind::Compile | SlotKind::Run) {
             return Err(AdmissionError::NoShortLane(slot.0));
+        }
+        if lane == Lane::Light && slot.0 != SlotKind::Run {
+            return Err(AdmissionError::NoLightPool(slot.0));
         }
         let Some(guard) = self.locks.try_acquire(slot.0, slot.1)? else {
             return Ok(Attempt::Wait(WaitReason::SlotTaken(slot.0, slot.1)));

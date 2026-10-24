@@ -2,7 +2,8 @@
 
 use crate::gates::{Readings, check_gates};
 use crate::{
-    AdmissionInput, Decision, Lane, SHORT_LANE_BASE, Verdict, WaitReason, Waiter, sequence,
+    AdmissionInput, Decision, LIGHT_LANE_BASE, Lane, SHORT_LANE_BASE, Verdict, WaitReason, Waiter,
+    sequence,
 };
 use std::collections::BTreeMap;
 use tasks_core::{DeviceId, JobId, SlotKind};
@@ -35,6 +36,10 @@ struct Walk {
     readings: Readings,
     free: BTreeMap<SlotKind, Vec<u32>>,
     short_free: Vec<u32>,
+    light_free: Vec<u32>,
+    /// Light jobs admitted so far and waiting ahead, for the queue position.
+    light_claimed: Vec<JobId>,
+    light_ahead: Vec<JobId>,
     claimed: BTreeMap<SlotKind, Vec<JobId>>,
     ahead: BTreeMap<SlotKind, Vec<JobId>>,
     devices_taken: BTreeMap<DeviceId, JobId>,
@@ -57,6 +62,9 @@ impl Walk {
         let limit = input.thresholds.short_job_lane_slots;
         let mut short_free = sorted(&input.short_lane.free);
         short_free.retain(|i| *i < limit);
+        let light_limit = input.thresholds.light_slots;
+        let mut light_free = sorted(&input.light_lane.free);
+        light_free.retain(|i| *i < light_limit);
         Walk {
             readings: Readings {
                 pressure: input.pressure,
@@ -70,6 +78,9 @@ impl Walk {
                 .map(|(k, s)| (*k, sorted(&s.free)))
                 .collect(),
             short_free,
+            light_free,
+            light_claimed: Vec::new(),
+            light_ahead: Vec::new(),
             claimed: BTreeMap::new(),
             ahead: BTreeMap::new(),
             devices_taken: BTreeMap::new(),
@@ -106,6 +117,11 @@ impl Walk {
         }
         let verdict = if w.kind == SlotKind::Device {
             self.device(input, w)
+        } else if w.light
+            && input.thresholds.light_slots > 0
+            && matches!(w.kind, SlotKind::Compile | SlotKind::Run)
+        {
+            self.light(input, w)
         } else {
             self.slot(input, w)
         };
@@ -169,6 +185,43 @@ impl Walk {
             slot: (SlotKind::Device, st.index),
             lane: Lane::Normal,
         }
+    }
+
+    /// A light job takes a place in the light pool, not a compile or run slot. The pool's locks
+    /// are run-slot files at [`LIGHT_LANE_BASE`] and up; the run gate (minus its CPU limit)
+    /// applies.
+    fn light(&mut self, input: &AdmissionInput, w: &Waiter) -> Verdict {
+        let t = &input.thresholds;
+        let blocked = check_gates(
+            SlotKind::Run,
+            Lane::Light,
+            w.new_output,
+            &self.readings,
+            t,
+        );
+        if let Some(r) = blocked
+            && !self.light_free.is_empty()
+        {
+            self.light_ahead.push(w.job);
+            return Verdict::Wait(r);
+        }
+        if !self.light_free.is_empty() {
+            let index = self.light_free.remove(0);
+            self.light_claimed.push(w.job);
+            return Verdict::Admit {
+                slot: (SlotKind::Run, LIGHT_LANE_BASE + index),
+                lane: Lane::Light,
+            };
+        }
+        let mut holders: Vec<Option<JobId>> = input.light_lane.busy.iter().map(|(_, h)| *h).collect();
+        holders.extend(self.light_claimed.iter().map(|j| Some(*j)));
+        let reason = WaitReason::LightBusy {
+            total: input.light_lane.free.len() + input.light_lane.busy.len(),
+            holders,
+            ahead: self.light_ahead.clone(),
+        };
+        self.light_ahead.push(w.job);
+        Verdict::Wait(reason)
     }
 
     fn slot(&mut self, input: &AdmissionInput, w: &Waiter) -> Verdict {

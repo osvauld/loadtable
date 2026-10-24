@@ -7,6 +7,8 @@ use tasks_platform::{Level, PressureSnapshot};
 
 /// Slot indices of the short lane start here, so they never collide with normal slots.
 pub const SHORT_LANE_BASE: u32 = 1000;
+/// Slot indices of the light pool start here (on the run lock files), clear of the short lane.
+pub const LIGHT_LANE_BASE: u32 = 2000;
 /// Offload jobs only need min(reserve, this) of memory and fetch space (R-060, R-065).
 pub const OFFLOAD_FLOOR_CAP_BYTES: u64 = 2 << 30;
 
@@ -45,6 +47,9 @@ pub struct Thresholds {
     pub short_job_max_memory_bytes: u64,
     /// Size of the short lane.
     pub short_job_lane_slots: u32,
+    /// Size of the light pool: places for long jobs that use little CPU. 0 turns the pool off
+    /// and a `light` job is then an ordinary one.
+    pub light_slots: u32,
     /// A waiting job rises one class after this long, ms; 0 turns aging off.
     pub aging_ms: u64,
 }
@@ -88,6 +93,8 @@ pub struct AdmissionInput {
     pub slots: BTreeMap<SlotKind, SlotState>,
     /// Short lane; indices are `0..short_job_lane_slots`.
     pub short_lane: SlotState,
+    /// Light pool; indices are `0..light_slots`.
+    pub light_lane: SlotState,
     /// Device locks by id.
     pub devices: BTreeMap<DeviceId, DeviceState>,
     /// Current pressure.

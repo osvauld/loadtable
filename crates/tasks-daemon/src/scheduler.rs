@@ -545,6 +545,7 @@ impl Scheduler {
             w.checkout = facts.checkout.clone();
             w.device = rec.spec.requirements.device.clone();
             w.isolate = wants_isolate(&rec);
+            w.light = wants_light(&rec);
             // only a job that would write NEW output on the cache disk waits for its reserve;
             // one whose output links all exist proceeds (R-061, R-404)
             w.new_output = matches!(rec.spec.kind, Kind::Compile | Kind::Test | Kind::Package)
@@ -872,7 +873,12 @@ impl Scheduler {
             env: rewritten.env,
             log_path,
             timed_path: None,
-            cpu: policy.cpu_share(rec.spec.kind.cpu_class()),
+            // a light job is long-running test work: it gets the tests' share, not a build's
+            cpu: policy.cpu_share(if wants_light(&rec) {
+                tasks_core::CpuClass::Run
+            } else {
+                rec.spec.kind.cpu_class()
+            }),
         };
         let meta = JobMeta {
             kind: rec.spec.kind,
@@ -918,6 +924,11 @@ fn wants_isolate(rec: &JobRecord) -> bool {
     rec.spec.isolate || rec.hints.isolate
 }
 
+/// The job asked for the light pool: on its spec, or (older rows) in its plan step's hints.
+fn wants_light(rec: &JobRecord) -> bool {
+    rec.spec.light || rec.hints.light
+}
+
 /// The coarse wait reason stored beside the full text.
 fn coarse(r: &AdmitWait) -> LedgerWait {
     match r {
@@ -934,7 +945,7 @@ fn coarse(r: &AdmitWait) -> LedgerWait {
         }
         AdmitWait::NoDevice => LedgerWait::Device(tasks_core::DeviceId(String::new())),
         AdmitWait::Disk { .. } => LedgerWait::Disk,
-        AdmitWait::RunsAlone(_) | AdmitWait::WaitsToRunAlone(_) => {
+        AdmitWait::RunsAlone(_) | AdmitWait::WaitsToRunAlone(_) | AdmitWait::LightBusy { .. } => {
             LedgerWait::Pressure(r.to_string())
         }
         AdmitWait::Cpu { .. }

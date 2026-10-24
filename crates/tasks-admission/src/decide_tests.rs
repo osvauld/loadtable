@@ -570,3 +570,77 @@ fn r713_offloaded_jobs_neither_wait_for_nor_count_as_the_local_machine() {
     let v = verdicts(&i);
     assert!(is_admit(&v[&1]) && is_admit(&v[&2]));
 }
+
+fn light(job: i64, kind: SlotKind, queued: u64) -> Waiter {
+    let mut w = waiter(job, kind, queued);
+    w.light = true;
+    w
+}
+
+fn slot_of(v: &Verdict) -> (SlotKind, u32, Lane) {
+    match v {
+        Verdict::Admit { slot, lane } => (slot.0, slot.1, *lane),
+        other => panic!("not admitted: {other:?}"),
+    }
+}
+
+#[test]
+fn r714_a_light_job_takes_a_place_in_the_light_pool_and_leaves_the_run_slots_alone() {
+    // every compile and run slot is taken, yet the light job starts
+    let mut i = input(1, vec![light(1, SlotKind::Compile, 1), light(2, SlotKind::Run, 2)]);
+    for k in [SlotKind::Compile, SlotKind::Run] {
+        let st = i.slots.get_mut(&k).unwrap();
+        st.busy = st.free.drain(..).map(|n| (n, None)).collect();
+    }
+    let v = verdicts(&i);
+    assert_eq!(
+        slot_of(&v[&1]),
+        (SlotKind::Run, LIGHT_LANE_BASE, Lane::Light)
+    );
+    assert_eq!(
+        slot_of(&v[&2]),
+        (SlotKind::Run, LIGHT_LANE_BASE + 1, Lane::Light)
+    );
+}
+
+#[test]
+fn r714_a_light_job_ignores_the_cpu_gate_but_not_the_memory_gate() {
+    let mut i = input(1, vec![light(1, SlotKind::Run, 1), waiter(2, SlotKind::Run, 2)]);
+    i.pressure.cpu = Some(99.0);
+    let v = verdicts(&i);
+    assert!(is_admit(&v[&1]), "{:?}", v[&1]);
+    assert!(text(&v[&2]).starts_with("CPU contended"), "ordinary jobs still wait");
+    i.pressure.memory = tasks_platform::Level::Critical;
+    let v = verdicts(&i);
+    assert!(text(&v[&1]).starts_with("memory stalls"), "{}", text(&v[&1]));
+    i.pressure.memory = tasks_platform::Level::Normal;
+    i.available_memory = 0;
+    assert!(text(&verdicts(&i)[&1]).starts_with("memory:"));
+}
+
+#[test]
+fn r715_a_full_light_pool_says_so_and_keeps_its_own_queue() {
+    let ws = vec![
+        light(1, SlotKind::Run, 1),
+        light(2, SlotKind::Run, 2),
+        light(3, SlotKind::Run, 3),
+        waiter(4, SlotKind::Run, 4),
+    ];
+    let v = verdicts(&input(1, ws));
+    assert!(is_admit(&v[&1]) && is_admit(&v[&2]));
+    assert_eq!(
+        text(&v[&3]),
+        "all 2 light slots busy (#1, #2); you are 1st in line"
+    );
+    // a light backlog does not take the ordinary run slot from the job behind it
+    assert!(is_admit(&v[&4]));
+}
+
+#[test]
+fn r715_with_the_pool_switched_off_a_light_job_is_an_ordinary_one() {
+    let mut i = input(1, vec![light(1, SlotKind::Run, 1)]);
+    i.thresholds.light_slots = 0;
+    i.light_lane = SlotState::default();
+    let v = verdicts(&i);
+    assert_eq!(slot_of(&v[&1]), (SlotKind::Run, 0, Lane::Normal));
+}

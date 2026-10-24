@@ -1969,3 +1969,32 @@ fn r517_a_fetch_path_outside_the_checkout_is_refused_before_anything_is_sent() {
         assert_eq!(submits(&c), 0);
     }
 }
+
+// R-714, R-716
+#[test]
+fn r714_light_and_retry_alone_travel_on_the_spec_and_default_to_off() {
+    let c = daemon(1, vec![], finished(1, Phase::Passed));
+    let r = Harness::default().run(
+        &c,
+        &[
+            "enqueue",
+            "--light",
+            "--retry-alone",
+            "--",
+            "cargo",
+            "test",
+            "-p",
+            "x",
+            "--test",
+            "calls",
+        ],
+    );
+    assert_eq!(r.code, 0, "{}", r.err);
+    let s = submitted_spec(&c);
+    assert!(s.light && s.retry_alone && !s.isolate);
+    let c = daemon(1, vec![], finished(1, Phase::Passed));
+    let r = Harness::default().run(&c, &["enqueue", "--", "true"]);
+    assert_eq!(r.code, 0, "{}", r.err);
+    let s = submitted_spec(&c);
+    assert!(!s.light && !s.retry_alone);
+}

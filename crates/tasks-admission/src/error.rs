@@ -13,6 +13,9 @@ pub enum AdmissionError {
     /// The short lane only exists for compile and run jobs.
     #[error("the short lane does not exist for {0:?} slots")]
     NoShortLane(SlotKind),
+    /// The light pool uses the run slot lock files.
+    #[error("the light pool does not exist for {0:?} slots")]
+    NoLightPool(SlotKind),
 }
 
 #[cfg(test)]
