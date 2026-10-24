@@ -39,7 +39,7 @@ use tasks_core::{Arch, JobId, Machine, MachineName, Os, SlotKind};
 use tasks_ledger::JobRecord;
 use tasks_peer::proto::{Body, PeerStatus};
 use tasks_peer::sync::{SyncDriver, SyncGate};
-use tasks_peer::transport::{LinkInfo as PathInfo, PeerError, Transport};
+use tasks_peer::transport::{DialHints, LinkInfo as PathInfo, PeerError, Transport};
 use tasks_peer::{
     CheckoutId, CheckoutLocks, Forward, ForwardJob, ForwardPolicy, LockOwner, PeerId, Refusal,
     RemoteJobId,
@@ -81,7 +81,22 @@ pub enum LinkChange {
 pub trait LinkObserver: Send + Sync {
     /// `peer`'s link changed.
     fn changed(&self, peer: &PeerSpec, change: LinkChange);
+    /// A probe of `peer` failed for a reason other than the last probe's (or the first failure
+    /// after an answer). Every failing probe is not reported, only a new reason.
+    fn failed(&self, peer: &PeerSpec, reason: &str) {
+        let _ = (peer, reason);
+    }
 }
+
+/// Told where a peer was reached while a link to it is up, so the next dial starts from
+/// addresses that are current (the trust layer keeps them).
+pub trait AddrLearner: Send + Sync {
+    /// `peer` answered over a connection whose paths reach it at `hints`.
+    fn learned(&self, peer: &PeerSpec, hints: &DialHints);
+}
+
+/// Saved addresses are refreshed at most this often per peer.
+const ADDR_REFRESH: Duration = Duration::from_secs(600);
 
 /// Reads the files that must travel with a checkout beyond its git working tree from the repo's
 /// run policy (`[sync] extra` in `.tasks/run-policy.toml`). No policy file means none.
@@ -122,6 +137,9 @@ pub struct PeerLinkOptions {
     pub background_status: bool,
     /// Told when a link comes up, goes down or changes path.
     pub observer: Option<Arc<dyn LinkObserver>>,
+    /// Told where an answering peer was reached, at most once per [`ADDR_REFRESH`] and only when
+    /// that changed.
+    pub addr_learner: Option<Arc<dyn AddrLearner>>,
     /// Held while fetched outputs are written into a checkout: the transfer slot and I/O gate
     /// (design: sync and fetch both take a transfer slot).
     pub gate: Arc<dyn SyncGate>,
@@ -153,6 +171,7 @@ impl PeerLinkOptions {
             tick_every: Duration::from_millis(50),
             background_status: true,
             observer: None,
+            addr_learner: None,
             gate: Arc::new(tasks_peer::sync::OpenGate),
             fetch_links: Vec::new(),
             fetch_max_bytes: tasks_peer::outputs::FetchPolicy::default().max_file_bytes,
@@ -202,6 +221,8 @@ struct LinkInfo {
     status: Option<PeerStatus>,
     /// How long the last status request took to be answered.
     reply: Option<Duration>,
+    /// The addresses last handed to the learner and when (since the adapter's epoch).
+    learned: Option<(Duration, DialHints)>,
 }
 
 pub(crate) struct Inner<T: Transport> {
@@ -248,6 +269,7 @@ impl<T: Transport + 'static> PeerLink<T> {
                         error: String::new(),
                         status: None,
                         reply: None,
+                        learned: None,
                     },
                 )
             })
@@ -366,6 +388,7 @@ fn sync_peers<T: Transport>(inner: &Inner<T>) {
                         error: String::new(),
                         status: None,
                         reply: None,
+                        learned: None,
                     },
                 );
             }
@@ -393,12 +416,18 @@ fn probe_all<T: Transport>(inner: &Inner<T>) {
         let result = probe(inner, &spec.node_id);
         let now = inner.now();
         let mut change = None;
+        let mut new_reason = None;
+        let mut learn = None;
         if let Some(l) = lock(&inner.links).get_mut(&spec.name) {
             let was_up = l.probed.then_some(l.ok);
             let old_path = l.path.path.name();
             l.probed = true;
             match result {
-                Ok((status, path, reply)) => {
+                Ok((status, path, reply, hints)) => {
+                    learn = hints.filter(|h| should_learn(l.learned.as_ref(), h, now));
+                    if let Some(h) = &learn {
+                        l.learned = Some((now, h.clone()));
+                    }
                     let new_path = path.path.name();
                     change = if was_up != Some(true) {
                         Some(LinkChange::Up {
@@ -421,13 +450,17 @@ fn probe_all<T: Transport>(inner: &Inner<T>) {
                     l.reply = Some(reply);
                 }
                 Err(e) => {
+                    let reason = e.to_string();
                     if was_up != Some(false) {
                         change = Some(LinkChange::Down {
-                            reason: e.to_string(),
+                            reason: reason.clone(),
                         });
                     }
+                    if l.error != reason {
+                        new_reason = Some(reason.clone());
+                    }
                     l.ok = false;
-                    l.error = e.to_string();
+                    l.error = reason;
                 }
             }
         }
@@ -435,20 +468,37 @@ fn probe_all<T: Transport>(inner: &Inner<T>) {
         if let (Some(c), Some(o)) = (change, &inner.opts.observer) {
             o.changed(&spec, c);
         }
+        if let (Some(r), Some(o)) = (new_reason, &inner.opts.observer) {
+            o.failed(&spec, &r);
+        }
+        if let (Some(h), Some(l)) = (learn, &inner.opts.addr_learner) {
+            l.learned(&spec, &h);
+        }
     }
 }
 
-fn probe<T: Transport>(
-    inner: &Inner<T>,
-    node: &PeerId,
-) -> Result<(PeerStatus, PathInfo, Duration), PeerError> {
+/// True when `now` addresses are worth saving: there are some, and they differ from the last
+/// ones saved and those were saved at least [`ADDR_REFRESH`] ago (or never).
+fn should_learn(last: Option<&(Duration, DialHints)>, now: &DialHints, at: Duration) -> bool {
+    if now.relay.is_none() && now.direct_addrs.is_empty() {
+        return false;
+    }
+    match last {
+        None => true,
+        Some((then, hints)) => hints != now && at.saturating_sub(*then) >= ADDR_REFRESH,
+    }
+}
+
+type Probed = (PeerStatus, PathInfo, Duration, Option<DialHints>);
+
+fn probe<T: Transport>(inner: &Inner<T>, node: &PeerId) -> Result<Probed, PeerError> {
     let mut conn = inner.transport.connect(node, inner.opts.probe_timeout)?;
     // wall time on purpose: the adapter's clock may be a test clock, and this measures the wire
     let sent = std::time::Instant::now();
     let body = conn.request(Body::StatusRequest)?;
     let reply = sent.elapsed();
     match body {
-        Body::Status(s) => Ok((s, conn.link_info(), reply)),
+        Body::Status(s) => Ok((s, conn.link_info(), reply, conn.remote_hints())),
         other => Err(PeerError::Protocol(format!(
             "answered a status request with {}",
             tasks_peer::fake::kind(&other)

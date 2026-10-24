@@ -43,3 +43,38 @@ pub(super) fn status(name: &str) -> Result<ServiceStatus, PlatformError> {
         Err(e) => Err(e),
     }
 }
+
+/// The launchd target of the user agent `name` for user `uid`.
+pub(super) fn target(uid: u32, name: &str) -> String {
+    format!("gui/{uid}/{name}")
+}
+
+/// Starts the agent if launchd has it loaded. A plist that is not loaded is reported, not
+/// bootstrapped: loading it is the operator's decision.
+pub(super) fn start(name: &str) -> Result<(), PlatformError> {
+    validate_name(name)?;
+    let uid = rustix::process::getuid().as_raw();
+    let path = unit_path(&home()?, name, true);
+    run("/bin/launchctl", &["kickstart", &target(uid, name)])
+        .map(|_| ())
+        .map_err(|e| match e {
+            PlatformError::Command { command, detail } => PlatformError::Command {
+                command,
+                detail: format!(
+                    "{detail}; if the agent is not loaded, run `launchctl bootstrap gui/{uid} {}`",
+                    path.display()
+                ),
+            },
+            other => other,
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn r683_the_kickstart_target_is_the_gui_domain_label() {
+        assert_eq!(target(501, "tasks2d"), "gui/501/tasks2d");
+    }
+}

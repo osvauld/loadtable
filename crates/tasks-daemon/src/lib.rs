@@ -18,6 +18,7 @@ mod awake;
 pub mod build_cache;
 pub mod cargo_jobs;
 pub mod config;
+pub mod daemon_log;
 pub mod entry;
 pub mod error;
 #[cfg(test)]

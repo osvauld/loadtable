@@ -905,3 +905,115 @@ fn r675_a_job_past_its_usual_time_says_so_instead_of_zero_left() {
     assert_eq!(t, ", over the usual by 1m20s (usual 57s)");
     assert!(!t.contains("0s left"));
 }
+
+fn offline_mac() -> tasks_daemon::api::PeerView {
+    use tasks_daemon::api::{PeerMachineView, PeerView};
+    PeerView {
+        name: "mac".into(),
+        node_id: "m".into(),
+        state: "offline".into(),
+        last_seen_ago_secs: Some(2700),
+        detail: "connect timed out after 5s".into(),
+        did: String::new(),
+        roles_out: vec![],
+        roles_in: vec![],
+        grant_expires_at: None,
+        path: "unknown".into(),
+        rtt_ms: None,
+        reply_ms: None,
+        machine: Some(PeerMachineView {
+            cores: 10,
+            memory_bytes: 16 << 30,
+            slots: vec![],
+            waiting: 0,
+            running: 0,
+            cpu_pct: None,
+            memory_pct: None,
+            memory_level: None,
+            io_pct: None,
+            pressure_summary: String::new(),
+            cpu_busy_pct: Some(48),
+            memory_available_bytes: None,
+            swap_total: Some(8 << 30),
+            swap_used: Some(1 << 30),
+            swap_in_per_s: Some(58_000_000),
+            swap_out_per_s: Some(0),
+            jobs: Vec::new(),
+            cores_in_use_milli: None,
+            power: None,
+        }),
+    }
+}
+
+// R-695
+#[test]
+fn r695_an_offline_peers_figures_are_marked_as_the_last_known_with_when() {
+    let mut s = crate::testutil::status_snapshot();
+    s.peers = vec![offline_mac()];
+    let t = status(&s);
+    assert!(t.contains("mac offline"), "{t}");
+    assert!(
+        t.contains("    last known (as of ") && t.contains("): 10 cores, "),
+        "{t}"
+    );
+    // an answering peer's figures are plain
+    s.peers[0].state = "up".into();
+    s.peers[0].last_seen_ago_secs = Some(1);
+    let t = status(&s);
+    assert!(
+        t.contains("    10 cores, ") && !t.contains("last known"),
+        "{t}"
+    );
+}
+
+// R-695
+#[test]
+fn r695_the_as_of_time_is_a_local_clock_with_the_date_when_it_is_not_today() {
+    let zone = |_: i64| 2 * 3600;
+    // 2026-10-24 09:03:00 UTC is 11:03 two hours east
+    let at = 1_792_832_580_000;
+    let now = at + 40 * 60 * 1000;
+    assert_eq!(clock_text(at, now, &zone), "11:03");
+    // the day before
+    assert_eq!(clock_text(at, now + 86_400_000, &zone), "2026-10-24 11:03");
+    // across local midnight: 22:30 UTC is already the next day two hours east
+    let late = 1_792_881_000_000;
+    assert_eq!(clock_text(late, late + 1000, &zone), "00:30");
+}
+
+// R-692, R-690
+#[test]
+fn r692_status_prints_this_machines_endpoint_and_a_missing_transport_with_its_alert() {
+    use tasks_daemon::trust_control::EndpointView;
+    let mut s = crate::testutil::status_snapshot();
+    s.endpoint = Some(EndpointView {
+        transport: true,
+        relay: Some("https://aps1-1.relay.n0.iroh.link./".into()),
+        relay_connected: Some(true),
+        relay_error: None,
+        direct_addrs: vec!["192.168.1.25:1234".into()],
+    });
+    let t = status(&s);
+    assert!(
+        t.contains(
+            "this machine: relay https://aps1-1.relay.n0.iroh.link./ (connected), direct 192.168.1.25:1234\n"
+        ),
+        "{t}"
+    );
+    s.endpoint = Some(EndpointView::none());
+    s.alerts = vec![tasks_daemon::api::AlertView {
+        id: "no-peer-transport".into(),
+        level: "warn".into(),
+        message: "this daemon was built without peer transport: paired peers mac, nixos cannot reach it or be reached; run tasks2d (built with --features iroh)".into(),
+        since_ms: 0,
+    }];
+    let t = status(&s);
+    assert!(t.contains("this machine: no peer transport\n"), "{t}");
+    assert!(
+        t.contains("alert [warn] this daemon was built without peer transport"),
+        "{t}"
+    );
+    // an older daemon sends none
+    s.endpoint = None;
+    assert!(!status(&s).contains("this machine:"));
+}

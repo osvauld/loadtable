@@ -30,6 +30,10 @@ use tasks_daemon::api::HistoryView;
 const REFRESH: Duration = Duration::from_secs(1);
 /// Width of the side panel, and the window width from which it sits beside the list.
 const DETAIL_W: f32 = 440.0;
+/// Narrowest the side panel can be dragged to.
+const DETAIL_MIN_W: f32 = 340.0;
+/// Width the job list keeps however wide the side panel is dragged.
+const LIST_MIN_W: f32 = 480.0;
 const SIDE_BY_SIDE_FROM: f32 = 960.0;
 
 struct CancelDialog {
@@ -447,9 +451,12 @@ impl App {
         if listing && self.vm.is_some() {
             let frame = egui::Frame::new().fill(p.panel);
             if wide {
+                // drag the edge to resize; the job list always keeps LIST_MIN_W
+                let max_w = (ctx.content_rect().width() - LIST_MIN_W).max(DETAIL_MIN_W);
                 egui::SidePanel::right("detail")
-                    .exact_width(DETAIL_W)
-                    .resizable(false)
+                    .default_width(DETAIL_W)
+                    .width_range(DETAIL_MIN_W..=max_w)
+                    .resizable(true)
                     .frame(frame)
                     .show(ctx, |ui| self.side_panel(ui, p));
             } else if self.selected_row.is_some() {
@@ -697,6 +704,24 @@ impl App {
                         .font(theme::sans(LABEL + 1.0))
                         .color(p.faint),
                 );
+                // this machine's relay and addresses; a missing transport is worth the warning colour
+                if let Some(vm) = &self.vm
+                    && let Some(line) = &vm.endpoint_line
+                {
+                    let colour = if line.ends_with("no peer transport") {
+                        p.bad
+                    } else {
+                        p.faint
+                    };
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(line)
+                                .font(theme::sans(LABEL + 1.0))
+                                .color(colour),
+                        )
+                        .truncate(),
+                    );
+                }
             });
         });
     }
@@ -862,12 +887,17 @@ impl App {
                                 .color(p.faint),
                         );
                         agent_label(ui, p, &row);
+                        // a long state (a refusal reason) is cut here; it is in full under Outcome
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            ui.label(
-                                RichText::new(&d.state)
-                                    .font(theme::sans_medium(SECONDARY))
-                                    .color(paint::tone_color(p, d.tone)),
-                            );
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&d.state)
+                                        .font(theme::sans_medium(SECONDARY))
+                                        .color(paint::tone_color(p, d.tone)),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(&d.state);
                         });
                     });
                     ui.add_space(4.0);
@@ -1431,13 +1461,6 @@ fn agent_label(ui: &mut egui::Ui, p: &Palette, row: &JobRow) {
                 .color(p.faint),
         );
     }
-}
-
-/// A table header cell.
-fn head(t: &str, p: &Palette) -> RichText {
-    RichText::new(t)
-        .font(theme::sans_medium(SECONDARY))
-        .color(p.dim)
 }
 
 /// A 1px full-width line between side panel blocks.

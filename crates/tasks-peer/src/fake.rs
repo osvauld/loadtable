@@ -24,6 +24,8 @@ struct NetState {
     log: Vec<(PeerId, String)>,
     cut_epoch: u64,
     link: Option<LinkInfo>,
+    /// What every connection reports as the peer's current addresses.
+    remote_hints: Option<DialHints>,
     /// Real time every round trip takes (a request and its reply; an upload's open and end).
     latency: Duration,
     /// Round trips taken so far (requests, upload openings, upload endings).
@@ -101,6 +103,10 @@ impl FakeNet {
     /// What every connection reports as its path and round-trip time.
     pub fn set_link_info(&self, info: Option<LinkInfo>) {
         lock(&self.inner).link = info;
+    }
+    /// What every connection reports as the peer's relay and direct addresses.
+    pub fn set_remote_hints(&self, hints: Option<DialHints>) {
+        lock(&self.inner).remote_hints = hints;
     }
     /// Makes every round trip take `latency` of real time: a request, an upload's opening
     /// handshake and its closing answer. Bytes written to an open upload cost nothing, which is
@@ -287,6 +293,10 @@ impl Connection for FakeConnection {
 
     fn link_info(&self) -> LinkInfo {
         lock(&self.net.inner).link.unwrap_or(LinkInfo::UNKNOWN)
+    }
+
+    fn remote_hints(&self) -> Option<DialHints> {
+        lock(&self.net.inner).remote_hints.clone()
     }
 }
 

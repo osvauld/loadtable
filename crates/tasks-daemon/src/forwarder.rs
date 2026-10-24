@@ -158,6 +158,10 @@ pub trait Forwarder: Send + Sync {
     /// The other machines as placement sees them (`is_local` false), with link state, free
     /// slots and checkout sync facts. Estimates may be left empty; the daemon fills them.
     fn peers(&self) -> Vec<MachineView>;
+    /// False when this daemon can neither dial nor serve peers (a build without the transport).
+    fn has_transport(&self) -> bool {
+        true
+    }
     /// Reachability of every configured peer.
     fn links(&self) -> Vec<LinkReport> {
         Vec::new()
@@ -247,6 +251,9 @@ pub trait Forwarder: Send + Sync {
 pub struct NoForwarder;
 
 impl Forwarder for NoForwarder {
+    fn has_transport(&self) -> bool {
+        false
+    }
     fn peers(&self) -> Vec<MachineView> {
         Vec::new()
     }

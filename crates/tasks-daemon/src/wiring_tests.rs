@@ -552,10 +552,50 @@ fn r222_stale_and_offline_peers_alert_after_the_grace_period_and_clear() {
     assert!(r.sch.status().alerts.is_empty());
 }
 
-// R-259
+// R-690 (replaces the R-259 alert id)
 #[test]
-fn r259_paired_peers_without_a_peer_transport_alert_at_once() {
+fn r690_paired_peers_without_a_peer_transport_alert_at_once() {
     let r = Rig::new();
+    let stub = Arc::new(crate::testkit::StubTrust::default());
+    stub.set_peers(vec![
+        crate::testkit::peer_view("nixos", "did:key:zN", &["submit"], &[]),
+        // paired only inbound: it still cannot reach a daemon that has no transport
+        crate::testkit::peer_view("mac", "did:key:zM", &[], &["submit"]),
+    ]);
+    r.sch.set_trust(stub);
+    r.tick();
+    let st = r.sch.status();
+    let a = st
+        .alerts
+        .iter()
+        .find(|a| a.id == "no-peer-transport")
+        .unwrap_or_else(|| panic!("{:?}", st.alerts));
+    assert!(
+        a.message.contains("built without peer transport")
+            && a.message.contains("nixos, mac")
+            && a.message.contains("--features iroh"),
+        "{}",
+        a.message
+    );
+    // and the endpoint says so too (R-692)
+    assert_eq!(
+        st.endpoint,
+        Some(crate::trust_control::EndpointView::none())
+    );
+}
+
+// R-690
+#[test]
+fn r690_no_alert_without_paired_peers_or_with_a_transport() {
+    // a build without transport but nobody paired: nothing to warn about
+    let r = Rig::new();
+    r.sch
+        .set_trust(Arc::new(crate::testkit::StubTrust::default()));
+    r.tick();
+    assert!(r.sch.status().alerts.is_empty());
+    // a build with a transport and paired peers: no such alert, whatever the links say
+    let f = Arc::new(FakeForwarder::new(vec![]));
+    let r = Rig::with_forwarder(f);
     let stub = Arc::new(crate::testkit::StubTrust::default());
     stub.set_peers(vec![crate::testkit::peer_view(
         "nixos",
@@ -567,9 +607,13 @@ fn r259_paired_peers_without_a_peer_transport_alert_at_once() {
     r.tick();
     let st = r.sch.status();
     assert!(
-        st.alerts.iter().any(|a| a.id == "peers-unavailable"),
+        !st.alerts.iter().any(|a| a.id == "no-peer-transport"),
         "{:?}",
         st.alerts
+    );
+    assert_ne!(
+        st.endpoint,
+        Some(crate::trust_control::EndpointView::none())
     );
 }
 

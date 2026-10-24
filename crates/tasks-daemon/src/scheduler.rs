@@ -331,6 +331,17 @@ impl Scheduler {
         self.shutdown.load(Ordering::SeqCst)
     }
 
+    /// Accepts a shutdown when no job runs, as the `Shutdown` request does; returns whether it
+    /// was accepted.
+    pub fn shutdown_if_idle(&self) -> bool {
+        if self.running_count() > 0 {
+            return false;
+        }
+        self.shutdown.store(true, Ordering::SeqCst);
+        self.wake.notify();
+        true
+    }
+
     /// Number of jobs holding or starting a slot.
     pub fn running_count(&self) -> usize {
         lock(&self.running).len()

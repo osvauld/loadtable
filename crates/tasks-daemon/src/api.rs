@@ -1083,6 +1083,18 @@ pub struct PeerView {
     pub machine: Option<PeerMachineView>,
 }
 
+impl PeerView {
+    /// When the figures in `machine` were taken (ms since the epoch), if they are not current:
+    /// the peer is offline or stale and did answer once. `now_ms` is the daemon's clock.
+    pub fn figures_as_of_ms(&self, now_ms: i64) -> Option<i64> {
+        if self.machine.is_none() || !matches!(self.state.as_str(), "offline" | "stale") {
+            return None;
+        }
+        let ago = i64::try_from(self.last_seen_ago_secs?).ok()?;
+        Some(now_ms.saturating_sub(ago.saturating_mul(1000)))
+    }
+}
+
 /// What a peer last reported about itself: facts, slots, queue depth and pressure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerMachineView {
@@ -1198,6 +1210,10 @@ pub struct StatusSnapshot {
     /// Power source and whether the daemon holds the machine awake; absent from older daemons.
     #[serde(default)]
     pub power: Option<PowerView>,
+    /// This machine's relay connection and addresses, or that it has no peer transport; absent
+    /// from older daemons.
+    #[serde(default)]
+    pub endpoint: Option<crate::trust_control::EndpointView>,
 }
 
 /// This machine's power source and its stay-awake hold.

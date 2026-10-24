@@ -50,9 +50,47 @@ pub(super) fn status(name: &str) -> Result<ServiceStatus, PlatformError> {
     Ok(parse_is_active(&String::from_utf8_lossy(&out.stdout)))
 }
 
+/// The arguments of the command that starts the user service `name`.
+pub(super) fn start_args(name: &str) -> Vec<String> {
+    vec!["--user".into(), "start".into(), format!("{name}.service")]
+}
+
+pub(super) fn start(name: &str) -> Result<(), PlatformError> {
+    validate_name(name)?;
+    let args = start_args(name);
+    let command = format!("systemctl {}", args.join(" "));
+    let out = Command::new("systemctl")
+        .args(&args)
+        .output()
+        .map_err(|e| PlatformError::Command {
+            command: command.clone(),
+            detail: e.to_string(),
+        })?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(PlatformError::Command {
+            command,
+            detail: format!(
+                "{}: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn r683_start_asks_systemd_for_the_user_service() {
+        assert_eq!(
+            start_args("tasks2d"),
+            ["--user", "start", "tasks2d.service"]
+        );
+    }
 
     #[test]
     fn is_active_output_maps_to_status() {

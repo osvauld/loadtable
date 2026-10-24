@@ -137,6 +137,10 @@ pub struct AuditLinks {
     sink: Arc<AuditSink>,
     clock: Arc<dyn tasks_ledger::Clock>,
     throttle: tasks_ledger::Throttle,
+    /// Paces the daemon log lines that name a probe's failure; apart from `throttle` so log
+    /// lines and audit rows do not use each other's allowance.
+    say_throttle: tasks_ledger::Throttle,
+    say: Box<dyn Fn(&str) + Send + Sync>,
 }
 
 impl AuditLinks {
@@ -146,11 +150,35 @@ impl AuditLinks {
             sink,
             clock,
             throttle: tasks_ledger::Throttle::new(LINK_WINDOW_MS, LINK_BURST),
+            say_throttle: tasks_ledger::Throttle::new(LINK_WINDOW_MS, LINK_BURST),
+            say: Box::new(|line| crate::daemon_log::say(line)),
         }
+    }
+
+    /// Sends the failure lines to `say` instead of the daemon log. For tests.
+    #[cfg(test)]
+    pub fn with_say(mut self, say: Box<dyn Fn(&str) + Send + Sync>) -> AuditLinks {
+        self.say = say;
+        self
     }
 }
 
 impl crate::peer_link::LinkObserver for AuditLinks {
+    /// One daemon log line per new reason, so a peer that cannot be reached is explained where
+    /// the operator looks. A peer that flaps between reasons is capped like the audit rows, the
+    /// next line counting what was left out (R-696).
+    fn failed(&self, peer: &crate::peers_config::PeerSpec, reason: &str) {
+        let Some(dropped) = self.say_throttle.admit(&peer.name, self.clock.now_ms()) else {
+            return;
+        };
+        let more = if dropped > 0 {
+            format!(" ({dropped} similar line(s) left out)")
+        } else {
+            String::new()
+        };
+        (self.say)(&format!("peer {} unreachable: {reason}{more}", peer.name));
+    }
+
     fn changed(&self, peer: &crate::peers_config::PeerSpec, change: crate::peer_link::LinkChange) {
         use crate::peer_link::LinkChange as C;
         let Some(dropped) = self.throttle.admit(&peer.name, self.clock.now_ms()) else {

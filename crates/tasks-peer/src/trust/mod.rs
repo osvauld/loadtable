@@ -28,7 +28,7 @@ pub use events::{FanoutEvents, NoEvents, RecordingEvents, Side, TrustEvent, Trus
 pub use handler::TrustedHandler;
 pub use node::{
     AddrSource, AddressBook, ExpiringGrant, PairedPeer, PeerTrust, RevokeReport, RoleExpiry,
-    SelfAddr, TrustNode, TrustPolicy, sanitize_name,
+    SelfAddr, SelfReach, TrustNode, TrustPolicy, sanitize_name,
 };
 pub use role::{Need, Role, allows, need_of};
 pub use ticket::Ticket;

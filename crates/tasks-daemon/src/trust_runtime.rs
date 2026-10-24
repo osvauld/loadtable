@@ -50,7 +50,7 @@ impl TrustEvents for StderrEvents {
             } => format!("refused {} ({code}): {reason}", short(node_id)),
             _ => return,
         };
-        eprintln!("tasks2d: trust: {line}");
+        crate::daemon_log::say(format_args!("trust: {line}"));
     }
 }
 
@@ -66,6 +66,27 @@ pub struct TrustRuntime {
     pub node: Arc<TrustNode>,
     /// True when this start created the keystore.
     pub created: bool,
+}
+
+/// A peer link that is up refreshes the addresses saved for the peer (R-694). Nothing already
+/// known is lost: a connection that shows no relay or no direct path keeps the saved ones.
+impl crate::peer_link::AddrLearner for NodePeers {
+    fn learned(&self, peer: &PeerSpec, hints: &tasks_peer::transport::DialHints) {
+        use tasks_peer::trust::AddressBook;
+        let old = self.0.hints(&peer.node_id).unwrap_or_default();
+        let relay = hints.relay.clone().or(old.relay);
+        let addrs = if hints.direct_addrs.is_empty() {
+            old.direct_addrs
+        } else {
+            hints.direct_addrs.clone()
+        };
+        if let Err(e) = self.0.remember_addrs(peer.node_id.as_str(), relay, addrs) {
+            crate::daemon_log::say(format_args!(
+                "could not save the addresses of peer {}: {e}",
+                peer.name
+            ));
+        }
+    }
 }
 
 /// What the daemon hands a peer runtime: the identity (opened once by the daemon, which also

@@ -321,6 +321,7 @@ pub fn status_snapshot() -> StatusSnapshot {
         transfer: None,
         trips: Vec::new(),
         power: None,
+        endpoint: None,
         alerts: vec![AlertView {
             id: "a".into(),
             level: "warn".into(),

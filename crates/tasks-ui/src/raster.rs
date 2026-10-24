@@ -227,6 +227,78 @@ mod tests {
         }
     }
 
+    /// Job 91 of the busy fixture, refused before it started with a long reason.
+    fn long_refusal() -> App {
+        let mut d = fixtures::busy();
+        for j in &mut d.jobs {
+            if j.id.0 == 91 {
+                j.phase = tasks_core::Phase::NotStarted {
+                    reason: "refused (asked with --peer mac): mac has not answered since this \
+                             daemon started, so there is nothing to wait for; kurukkan excluded: \
+                             not requested, mac excluded: unreachable, never seen"
+                        .into(),
+                };
+            }
+        }
+        let mut a = App::fixed(&d, dead_link());
+        a.show_tab(Tab::History);
+        a.select(91);
+        a
+    }
+
+    #[test]
+    fn r651_a_long_state_is_cut_inside_the_side_panel_not_pushed_over_its_edge() {
+        let size = [1280, 700];
+        let rgb = render(&mut long_refusal(), size, 1.0, true);
+        let px = |x: usize, y: usize| {
+            let i = (y * size[0] + x) * 3;
+            rgb[i..i + 3].to_vec()
+        };
+        // the panel's 16 px left margin holds no text: each pixel row of it is one colour
+        // (background, or a section rule that crosses the whole panel)
+        let edge = size[0] - 440;
+        for y in 90..size[1] - 40 {
+            let first = px(edge + 4, y);
+            for x in edge + 5..edge + 12 {
+                assert_eq!(px(x, y), first, "ink at ({x}, {y}) in the panel's margin");
+            }
+        }
+    }
+
+    #[test]
+    fn r651_dragging_the_side_panels_edge_widens_it() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut app = long_refusal();
+        let id = egui::Id::new("detail");
+        let width = |ctx: &egui::Context| {
+            egui::containers::panel::PanelState::load(ctx, id).map(|s| s.rect.width())
+        };
+        frame(&mut app, &ctx, vec![]);
+        let before = width(&ctx).expect("the side panel was laid out");
+        let edge = 1400.0 - before;
+        let at = |x: f32| egui::pos2(x, 400.0);
+        let button = |x: f32, pressed: bool| egui::Event::PointerButton {
+            pos: at(x),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(&mut app, &ctx, vec![egui::Event::PointerMoved(at(edge))]);
+        frame(&mut app, &ctx, vec![button(edge, true)]);
+        for step in 1..=10 {
+            let x = edge - 20.0 * step as f32;
+            frame(&mut app, &ctx, vec![egui::Event::PointerMoved(at(x))]);
+        }
+        frame(&mut app, &ctx, vec![button(edge - 200.0, false)]);
+        frame(&mut app, &ctx, vec![]);
+        let after = width(&ctx).expect("the side panel was laid out");
+        assert!(
+            after > before + 150.0,
+            "the panel went from {before} to {after} px"
+        );
+    }
+
     #[test]
     fn r205_symbols_used_by_the_window_exist_in_the_embedded_fonts() {
         let ctx = egui::Context::default();
@@ -412,6 +484,7 @@ mod tests {
                 [1400, 1240],
                 false,
             ),
+            ("refused-long-dark", long_refusal(), [1280, 700], true),
             (
                 "metrics-unavailable-dark",
                 {
