@@ -91,6 +91,8 @@ pub fn job_view(r: &JobRecord) -> JobView {
         timeout_secs: r.spec.timeout_secs.or(r.hints.timeout_secs),
         remote_phase: r.remote_phase.clone(),
         plan: r.plan_id.zip(r.step_name.clone()),
+        suite: None,
+        tags: step_tags(r),
         log_path: r.log_path.clone(),
         figures: r.figures.clone(),
         priority: r.spec.priority,
@@ -100,6 +102,20 @@ pub fn job_view(r: &JobRecord) -> JobView {
         fetch: fetch_results(r),
         sync: sync_view(r),
     }
+}
+
+/// The flags of a plan step that change how it is scheduled, as words for a row's small tags.
+fn step_tags(r: &JobRecord) -> Vec<String> {
+    let flags = [
+        ("light", r.spec.light || r.hints.light),
+        ("isolate", r.spec.isolate || r.hints.isolate),
+        ("retry", r.spec.retry_alone || r.hints.retry_alone),
+    ];
+    flags
+        .into_iter()
+        .filter(|(_, on)| *on)
+        .map(|(w, _)| w.to_string())
+        .collect()
 }
 
 /// The sync before a forwarded run, when it has happened (R-648).

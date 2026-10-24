@@ -241,6 +241,10 @@ fn is_waiting(j: &JobView) -> bool {
 pub struct TableOptions {
     /// One short line per job: no cwd column, no notes, no legend.
     pub brief: bool,
+    /// One line per job even for plan steps (`--flat`).
+    pub flat: bool,
+    /// List every step of a plan, passed ones too (`--all-steps`).
+    pub all_steps: bool,
 }
 
 /// Home-relative path for tables.
@@ -317,7 +321,19 @@ pub fn job_table(
             "ID", "PHASE", "EXIT", "OWNER", "AGE", "RUN", "CWD"
         );
     }
+    let mut seen_plans = std::collections::BTreeSet::new();
     for j in jobs {
+        if let Some((pid, _)) = j.plan.as_ref().filter(|_| !opts.flat) {
+            // a plan is one block where its first step is listed (R-747)
+            if seen_plans.insert(*pid) {
+                let steps: Vec<&JobView> = jobs
+                    .iter()
+                    .filter(|s| s.plan.as_ref().is_some_and(|(p, _)| p == pid))
+                    .collect();
+                plan_block(&mut out, *pid, &steps, now_ms, opts.all_steps);
+            }
+            continue;
+        }
         let owner = truncate_end(&j.owner, 20);
         let cmd = truncate_end(&command_display(&j.argv), TABLE_COMMAND);
         if opts.brief {
@@ -354,6 +370,48 @@ pub fn job_table(
         out.push('\n');
     }
     out
+}
+
+/// A plan as one line and its steps under it: failed, running and waiting ones by name, the
+/// passed ones as a count unless `all_steps` (R-747, R-748).
+fn plan_block(out: &mut String, plan_id: i64, steps: &[&JobView], now_ms: i64, all_steps: bool) {
+    let Some(sum) = tasks_daemon::plan_view::summarise(plan_id, steps.iter().copied()) else {
+        return;
+    };
+    let mut head = format!("plan {plan_id}");
+    if let Some(suite) = &sum.suite {
+        let _ = write!(head, "  {suite}");
+    }
+    let owner = sum.owner.split('@').next().unwrap_or(&sum.owner);
+    let _ = write!(head, "  {owner}  {}", sum.counts_text());
+    if !sum.machines.is_empty() {
+        let _ = write!(head, "  {}", sum.machine_text());
+    }
+    let _ = writeln!(out, "{head}");
+    let mut ordered: Vec<&&JobView> = steps.iter().collect();
+    ordered.sort_by_key(|j| (tasks_daemon::plan_view::StepState::of(j).rank(), j.id.0));
+    let mut hidden = 0usize;
+    for j in ordered {
+        let state = tasks_daemon::plan_view::StepState::of(j);
+        if state == tasks_daemon::plan_view::StepState::Passed && !all_steps {
+            hidden += 1;
+            continue;
+        }
+        let name = j
+            .plan
+            .as_ref()
+            .map_or_else(String::new, |(_, n)| tasks_daemon::plan_view::step_label(n));
+        let _ = writeln!(
+            out,
+            "  {:>5} {:<9} {name}  {}",
+            j.id.0,
+            phase_label(j),
+            run_time(j, now_ms)
+        );
+    }
+    if hidden > 0 {
+        let _ = writeln!(out, "  ... {hidden} passed");
+    }
 }
 
 /// The line under the table.

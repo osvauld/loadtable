@@ -69,6 +69,8 @@ pub fn job(id: i64, owner: &str, phase: Phase) -> JobView {
         timeout_secs: None,
         remote_phase: None,
         plan: None,
+        suite: None,
+        tags: Vec::new(),
         log_path: Some(PathBuf::from(format!(
             "/home/demo/.local/state/tasks/logs/{id}.log"
         ))),
@@ -552,6 +554,185 @@ pub fn mac() -> Dashboard {
     ];
     d.jobs.push(m1);
     d.jobs.push(m2);
+    d
+}
+
+/// The step names of the real core-split suite's test plan, in submission order.
+const PLAN_TESTS: [&str; 39] = [
+    "test-calls",
+    "test-link",
+    "test-ledger",
+    "test-sync",
+    "test-queue",
+    "test-chat_shards",
+    "test-policy",
+    "test-peer",
+    "test-iroh",
+    "test-ui",
+    "test-cli",
+    "test-mcp",
+    "test-core",
+    "test-daemon",
+    "test-place",
+    "test-wait",
+    "test-fetch",
+    "test-audit",
+    "test-stalls",
+    "test-timings",
+    "test-logs",
+    "test-grep",
+    "test-cancel",
+    "test-drain",
+    "test-retry",
+    "test-forward",
+    "test-metrics",
+    "test-pressure",
+    "test-slots",
+    "test-hints",
+    "test-split",
+    "test-tools",
+    "test-notes",
+    "test-render",
+    "test-args",
+    "test-config",
+    "test-startup",
+    "test-follow",
+    "test-e2e",
+];
+
+/// Plan 2 of suite `core-split` as the daemon lists it mid-run, beside one ordinary job: the
+/// build and 5 tests passed, 3 tests run on nixos, `test-chat_shards` failed, 30 wait.
+pub fn with_plan() -> Dashboard {
+    let mut d = idle();
+    nixos_load(&mut d);
+    let owner = "lead-p2p@laptop";
+    let age = |secs: i64| NOW_MS - secs * 1000;
+    let mut ordinary = job(101, "ui-claude@laptop", Phase::Running);
+    ordinary.timeout_secs = Some(3600);
+    d.jobs.push(ordinary);
+    d.status.running.push(RunningView {
+        id: JobId(101),
+        owner: "ui-claude@laptop".into(),
+        command: "cargo test -p tasks-ui".into(),
+        slot: Some(("compile".into(), 0)),
+        elapsed_secs: 120.0,
+        done_targets: 3,
+        total_targets: 10,
+        current: Some("test:lifecycle".into()),
+        eta_secs: Some(80.0),
+        usual_secs: None,
+        over_by_secs: None,
+        eta_rough_from: None,
+        no_eta_why: None,
+        log_bytes: 20_480,
+        figures: None,
+        cores: Some(2.0),
+        mem_bytes: Some(1_500_000_000),
+    });
+    let step = |id: i64, name: &str, phase: Phase| {
+        let mut j = job(id, owner, phase.clone());
+        j.argv = [
+            "cargo",
+            "test",
+            "--release",
+            "-p",
+            "tasks-daemon",
+            "--test",
+            name,
+        ]
+        .map(String::from)
+        .to_vec();
+        j.plan = Some((2, format!("tests.{name}")));
+        j.suite = Some("core-split".into());
+        j.machine = Some("nixos".into());
+        j.placement = Placement::Peer(MachineName("nixos".into()));
+        j.submitted_at_ms = age(900);
+        match &phase {
+            Phase::Passed | Phase::Failed { .. } => {
+                j.started_at_ms = Some(age(850));
+                j.finished_at_ms = Some(age(700));
+            }
+            Phase::Running => {
+                j.started_at_ms = Some(age(60));
+                j.finished_at_ms = None;
+            }
+            _ => {
+                j.started_at_ms = None;
+                j.finished_at_ms = None;
+            }
+        }
+        j.exit = match &phase {
+            Phase::Passed => Some(0),
+            Phase::Failed { exit } => *exit,
+            _ => None,
+        };
+        j
+    };
+    let mut build = step(330, "build", Phase::Passed);
+    build.plan = Some((2, "tests.build".into()));
+    build.argv = ["cargo", "build", "--release", "--tests"]
+        .map(String::from)
+        .to_vec();
+    build.started_at_ms = Some(age(900));
+    build.finished_at_ms = Some(age(655));
+    d.jobs.push(build);
+    let mut waits = Vec::new();
+    for (i, name) in PLAN_TESTS.iter().enumerate() {
+        let id = 331 + i as i64;
+        let phase = match i {
+            0..=4 => Phase::Passed,
+            5 => Phase::Failed { exit: Some(101) },
+            6..=8 => Phase::Running,
+            _ => Phase::Waiting(WaitReason::Slot(SlotKind::Run)),
+        };
+        let mut j = step(id, name, phase.clone());
+        if *name == "test-link" || *name == "test-iroh" {
+            j.tags = vec!["light".into()];
+        }
+        if *name == "test-e2e" {
+            j.tags = vec!["isolate".into()];
+        }
+        if *name == "test-chat_shards" {
+            j.tags = vec!["retry".into()];
+            j.summary = Some("2 tests failed".into());
+        }
+        // the failed step is placed by its name; keep the order of the suite otherwise
+        if matches!(phase, Phase::Waiting(_)) {
+            j.wait_text = Some("waiting for a run slot on nixos".into());
+            j.started_at_ms = None;
+            waits.push(waiter(
+                id,
+                owner,
+                "waiting for a run slot on nixos",
+                waits.len() + 1,
+                Some(45.0 + 20.0 * waits.len() as f64),
+                false,
+            ));
+        }
+        if phase == Phase::Running {
+            d.status.running.push(RunningView {
+                id: JobId(id),
+                owner: owner.into(),
+                command: "cargo test".into(),
+                slot: Some(("run".into(), 0)),
+                elapsed_secs: 60.0,
+                done_targets: 0,
+                total_targets: 0,
+                current: None,
+                eta_secs: Some(180.0 + 60.0 * (i % 3) as f64),
+                usual_secs: None,
+                over_by_secs: None,
+                eta_rough_from: None,
+                no_eta_why: None,
+                log_bytes: 4_096,
+                figures: None,
+                cores: Some(1.0),
+                mem_bytes: Some(600 << 20),
+            });
+        }
+        d.jobs.push(j);
+    }
+    d.status.waiting = waits;
     d
 }
 

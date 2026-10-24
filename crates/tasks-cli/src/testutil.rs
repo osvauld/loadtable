@@ -52,6 +52,8 @@ pub fn job(id: i64, owner: &str, cwd: &str, phase: Phase, cmd: &str) -> JobView 
         timeout_secs: None,
         remote_phase: None,
         plan: None,
+        suite: None,
+        tags: Vec::new(),
         log_path: None,
         figures: None,
         priority: Default::default(),
