@@ -129,6 +129,17 @@ impl Cgroups for CgroupTree {
         Ok(file(&dir, "cgroup.procs"))
     }
 
+    fn set_cpu_weight(&self, name: CgroupName, weight: u32) -> Result<bool, PlatformError> {
+        if !self.controllers.iter().any(|c| c == "cpu") {
+            return Ok(false);
+        }
+        let path = file(&self.dir(name), "cpu.weight");
+        self.fs
+            .write(&path, &weight.to_string())
+            .map_err(|e| io_err(&path, e))?;
+        Ok(true)
+    }
+
     fn pids(&self, name: CgroupName) -> Result<Vec<i32>, PlatformError> {
         let path = file(&self.dir(name), "cgroup.procs");
         Ok(read_opt(&*self.fs, &path)?
@@ -413,6 +424,31 @@ mod tests {
         put(&own.join("tasks.slice/job-1"), "cgroup.procs", "10\n11\n");
         assert_eq!(t.pids(CgroupName::Job(1)).unwrap(), [10, 11]);
         assert!(t.pids(CgroupName::Job(99)).unwrap().is_empty());
+    }
+
+    // R-710
+    #[test]
+    fn r710_the_cpu_weight_of_a_job_is_written_when_the_cpu_controller_is_enabled() {
+        let (t, own, fs) = tree("weight", "io memory cpu\n");
+        let job = CgroupName::Job(8);
+        t.create(job).unwrap();
+        assert!(t.set_cpu_weight(job, 50).unwrap());
+        let f = own.join("tasks.slice/job-8/cpu.weight");
+        assert_eq!(std::fs::read_to_string(f).unwrap().trim(), "50");
+        let log = fs.log.lock().unwrap().join("\n");
+        assert!(log.contains("job-8/cpu.weight: 50"), "{log}");
+    }
+
+    // R-710
+    #[test]
+    fn r710_without_the_cpu_controller_no_weight_is_written_and_the_caller_is_told() {
+        let (t, own, _) = tree("noweight", "io memory\n");
+        let job = CgroupName::Job(9);
+        t.create(job).unwrap();
+        assert!(!t.set_cpu_weight(job, 200).unwrap());
+        let f = own.join("tasks.slice/job-9/cpu.weight");
+        assert_eq!(std::fs::read_to_string(f).unwrap().trim(), "");
+        assert!(!crate::NoCgroups::new("none").set_cpu_weight(job, 200).unwrap());
     }
 
     // R-329

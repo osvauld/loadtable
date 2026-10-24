@@ -5,7 +5,7 @@ use crate::testkit::{FakeProcs, ManualClock, RecEvents, TempDir};
 use crate::{CancelToken, SystemClock};
 use std::rc::Rc;
 use tasks_core::Phase;
-use tasks_platform::native;
+use tasks_platform::{CpuShare, native};
 
 const MS: fn(u64) -> Duration = Duration::from_millis;
 
@@ -34,6 +34,7 @@ fn job(dir: &TempDir, argv: &[&str]) -> JobStart {
         env: vec![],
         log_path: dir.path().join("job.log"),
         timed_path: Some(dir.path().join("job.timed")),
+        cpu: CpuShare::default(),
     }
 }
 
@@ -604,5 +605,58 @@ mod attribution {
         assert_eq!(fig.io_some_us, None, "stall times need a cgroup");
         assert!(cg.removed().is_empty());
         assert!(ev.finished.len() == 1);
+    }
+
+    fn run_cpu(f: &Fx, cg: &FakeCgroups, cpu: CpuShare) {
+        let plat = FakePlatform::default();
+        let runner = Runner::new(&f.procs, &*f.clock, policy(), env_policy(), vec![])
+            .with_attribution(Attrib {
+                cgroups: cg,
+                table: &plat,
+            });
+        let mut j = job(&f.dir, &["true"]);
+        j.cpu = cpu;
+        runner
+            .run(&j, &CancelToken::new(), &mut RecEvents::default())
+            .unwrap();
+    }
+
+    // R-710
+    #[test]
+    fn r710_a_job_cgroup_gets_its_cpu_weight_and_the_spawn_is_not_niced() {
+        let mut f = fx();
+        f.procs.exit_at = Some((MS(100), 0));
+        let cg = FakeCgroups::delegated();
+        let share = CpuShare {
+            weight: Some(50),
+            nice: 10,
+        };
+        run_cpu(&f, &cg, share);
+        assert_eq!(cg.cpu_weight(CgroupName::Job(5)), Some(50));
+        assert_eq!(*f.procs.niced.lock().unwrap(), 0);
+    }
+
+    // R-711
+    #[test]
+    fn r711_without_a_cpu_weight_a_compile_job_is_niced_at_spawn() {
+        let mut f = fx();
+        f.procs.exit_at = Some((MS(100), 0));
+        let share = CpuShare {
+            weight: Some(50),
+            nice: 10,
+        };
+        run_cpu(&f, &FakeCgroups::unavailable("no delegation"), share);
+        assert_eq!(*f.procs.niced.lock().unwrap(), 10);
+    }
+
+    // R-710
+    #[test]
+    fn r710_a_job_with_the_default_share_is_neither_weighted_nor_niced() {
+        let mut f = fx();
+        f.procs.exit_at = Some((MS(100), 0));
+        let cg = FakeCgroups::delegated();
+        run_cpu(&f, &cg, CpuShare::default());
+        assert_eq!(cg.cpu_weight(CgroupName::Job(5)), None);
+        assert_eq!(*f.procs.niced.lock().unwrap(), 0);
     }
 }

@@ -195,6 +195,19 @@ pub struct SpawnSpec {
     /// so it and everything it starts are in the cgroup from the first instruction. `None`
     /// spawns directly.
     pub cgroup_procs: Option<PathBuf>,
+    /// Niceness added to the whole process group right after the spawn (0 leaves it). Used for
+    /// compile jobs where the job cgroup has no `cpu.weight` (macOS, no cpu controller).
+    pub nice: i32,
+}
+
+/// How much CPU a job gets against the others on the machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CpuShare {
+    /// `cpu.weight` for the job's cgroup (kernel default 100); `None` leaves the default.
+    pub weight: Option<u32>,
+    /// Niceness added to the job's process group when the weight could not be set (no cgroup,
+    /// or no cpu controller): the only lever macOS has.
+    pub nice: i32,
 }
 
 /// The shell script that places a child in a cgroup and then becomes the real command. `$0` is

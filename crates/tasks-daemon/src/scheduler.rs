@@ -849,6 +849,7 @@ impl Scheduler {
             env: rewritten.env,
             log_path,
             timed_path: None,
+            cpu: policy.cpu_share(rec.spec.kind.cpu_class()),
         };
         let meta = JobMeta {
             kind: rec.spec.kind,
