@@ -50,6 +50,16 @@ pub fn show(
             if let Some(p) = s.priority.filter(|p| !p.is_normal()) {
                 attrs.push(format!("priority {p}"));
             }
+            for (on, flag) in [
+                (s.long, "long"),
+                (s.isolate, "isolate (runs alone)"),
+                (s.light, "light"),
+                (s.retry_alone, "retry alone"),
+            ] {
+                if on {
+                    attrs.push(flag.into());
+                }
+            }
             if !attrs.is_empty() {
                 let _ = writeln!(out, "    {}", attrs.join("; "));
             }
@@ -125,6 +135,15 @@ placement = "nixos"
         assert!(s.contains("step tests: cargo test -p p2pcore") && s.contains("placement nixos"));
         assert!(s.contains("target test:lifecycle: long, isolate"));
         assert!(!s.contains("known:"));
+    }
+
+    // R-750
+    #[test]
+    fn r750_step_flags_are_shown_on_the_step() {
+        let text = "version = 1\n[suites.s]\n[[suites.s.steps]]\nname = \"link\"\ncommand = [\"cargo\", \"test\"]\nlong = true\nisolate = true\n";
+        let p = parse(text, Path::new("p.toml")).unwrap();
+        let s = show(&p, Path::new("p.toml"), None, &Candidates::new()).unwrap();
+        assert!(s.contains("long; isolate (runs alone)"), "{s}");
     }
 
     #[test]

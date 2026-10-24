@@ -765,3 +765,10 @@ Tests of earlier rows whose expectations changed with the redesign, kept and edi
 | R-747 | `tasks2 list` prints a plan as one line `plan 2  core-split  lead-p2p  12/40 done, 3 running, 1 failed  nixos` where its first step would be, then its steps that are not passed, indented, by step name, and `... N passed`. | `r747_a_plan_is_one_line_with_its_unfinished_steps_under_it` (cli render) | any |
 | R-748 | `list --all-steps` also lists the passed steps; `--flat` prints one line per job as before; `--json` is unchanged. | `r748_all_steps_and_flat_choose_how_a_plan_is_listed` (cli render) | any |
 | R-749 | Headless screenshots of plan 2 (collapsed, expanded, plan selected, light, narrow) are made from a fixture; in them the steps sit indented under the plan row and no row draws text past its right edge, at 700 and 1100 points wide. | `r749_steps_sit_indented_under_their_plan_row`, `r749_no_row_draws_past_the_right_edge_even_when_narrow` (raster) | any |
+
+## v2-step-flags
+
+| ID | Rule | Test | Platforms |
+|---|---|---|---|
+| R-750 | A policy step accepts `long` and `isolate` as well as `light` and `retry_alone`; a step that is both `light` and `isolate` is refused with a clear message, and `tasks2 policy show` lists the step's flags on the step. | `r750_a_step_cannot_be_both_light_and_isolate` (validate), `r750_step_flags_are_shown_on_the_step` (show) | any |
+| R-751 | A step's `long` reaches every piece it is split into; its `isolate` or `light` does too, except for a target that sets `light` or `isolate` itself, whose own choice decides for that target. | `r751_step_long_and_isolate_reach_every_piece_unless_a_target_says_otherwise` (expand) | any |

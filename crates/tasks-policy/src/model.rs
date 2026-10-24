@@ -96,7 +96,14 @@ pub struct StepDef {
     /// at submit time.
     #[serde(default)]
     pub priority: Option<tasks_core::Priority>,
+    /// Known to run for a long time: starts first among steps that become ready together.
+    #[serde(default)]
+    pub long: bool,
+    /// Must run alone on its machine (e.g. it binds fixed network ports). Not with `light`.
+    #[serde(default)]
+    pub isolate: bool,
     /// Uses little CPU but runs long: ignores the CPU pressure gate, takes no run slot.
+    /// For a split step, a target's own `light` or `isolate` decides for that target.
     #[serde(default)]
     pub light: bool,
     /// Run the failed tests of this step once more, alone, when it fails under load.
