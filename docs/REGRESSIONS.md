@@ -778,3 +778,9 @@ Tests of earlier rows whose expectations changed with the redesign, kept and edi
 | ID | Rule | Test | Platforms |
 |---|---|---|---|
 | R-760 | A `cargo test` job holds a compile slot while cargo builds; when cargo starts its first test binary (`Running ...`) the job takes a free run slot and gives the compile slot back, so the next build can start, and its log says `slot: tests started after N; compile slot I handed back, now on run slot J`. With no run slot free it keeps the compile slot and tries again each tick. A build, or a test still compiling, keeps its compile slot. | `r760_a_cargo_test_gives_its_compile_slot_back_once_its_tests_run`, `r760_a_build_or_a_test_still_compiling_keeps_its_compile_slot` (sched) | any |
+
+## v2-secret-scan-code
+
+| ID | Rule | Test | Platforms |
+|---|---|---|---|
+| R-770 | A secret-named assignment whose long value is code (followed by `(` or `;`, e.g. `let call_token = added.call_from_node.clone().unwrap();`) is not flagged as a secret, so ordinary source files sync; a quoted literal is still flagged. | `r770_code_assigning_a_secret_named_variable_is_not_flagged` (secrets) | any |
