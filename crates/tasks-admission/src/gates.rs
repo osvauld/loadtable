@@ -27,6 +27,8 @@ pub struct Readings {
 /// - The short lane skips only the CPU gate: it keeps the memory floor, the memory level, the
 ///   I/O gate and the disk reserve. Whether a job gets the lane at all is decided by history
 ///   (`Waiter::is_short`), never here.
+/// - The light pool skips the CPU gate in the same way (a light job barely uses CPU, so a busy
+///   machine is no reason to hold it) and keeps every other gate.
 /// - Compile and run need the cache reserve only when `new_output` (R-061).
 pub fn check_gates(
     kind: SlotKind,
@@ -82,6 +84,7 @@ pub fn check_gates(
     if offload {
         return None;
     }
+    // the short lane and the light pool exist because the CPU gate is the wrong question for them
     if lane == Lane::Normal
         && let Some(max) = gate.max_cpu
     {

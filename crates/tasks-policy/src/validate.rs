@@ -41,7 +41,10 @@ fn check_suite(name: &str, suite: &Suite, out: &mut Vec<Violation>) {
     if suite.steps.is_empty() {
         add(None, Problem::NoSteps);
     }
-    for key in suite.targets.keys() {
+    for (key, note) in &suite.targets {
+        if note.light && note.isolate {
+            add(None, Problem::LightAndIsolate(key.clone()));
+        }
         let ok = key
             .split_once(':')
             .is_some_and(|(k, n)| !k.is_empty() && !n.is_empty());
@@ -300,6 +303,18 @@ mod tests {
                 && e.contains("\"s\"")
                 && e.contains("\"a\"")
                 && e.contains("fix:")
+        );
+    }
+
+    // R-714
+    #[test]
+    fn r714_a_target_cannot_be_both_light_and_isolate() {
+        let t = format!(
+            "{HEAD}[[suites.s.steps]]\nname=\"a\"\ncommand=[\"x\"]\n[suites.s.targets.\"test:calls\"]\nlight=true\nisolate=true\n"
+        );
+        assert_eq!(
+            problems(&t),
+            vec![Problem::LightAndIsolate("test:calls".into())]
         );
     }
 

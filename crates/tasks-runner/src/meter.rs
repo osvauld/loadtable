@@ -4,7 +4,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 use tasks_core::{JobFigures, JobId};
-use tasks_platform::{CgroupName, Cgroups, Child, ProcessTable, TreeMeter, Usage, tree_pids};
+use tasks_platform::{
+    CgroupName, Cgroups, Child, CpuShare, ProcessTable, TreeMeter, Usage, tree_pids,
+};
 
 /// How often figures are sampled while the job runs.
 const SAMPLE_EVERY: Duration = Duration::from_secs(2);
@@ -47,6 +49,18 @@ impl<'a> Meter<'a> {
             last_at: None,
         };
         (meter, procs)
+    }
+
+    /// Gives the job its CPU share and returns the niceness the spawn must add: none when the
+    /// cgroup took the weight, the share's niceness when there is no cgroup or no cpu controller.
+    pub(crate) fn apply_cpu(&self, share: CpuShare) -> i32 {
+        if self.in_cgroup
+            && let Some(w) = share.weight
+            && matches!(self.attrib.cgroups.set_cpu_weight(self.name, w), Ok(true))
+        {
+            return 0;
+        }
+        share.nice
     }
 
     pub(crate) fn started(&mut self, child: &Child) {

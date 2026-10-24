@@ -193,6 +193,9 @@ pub fn build_spec(ctx: &mut Ctx<'_>, a: &RunArgs) -> Result<JobSpec, CliError> {
         priority: Priority::Normal,
         priority_reason: None,
         fetch: a.fetch.clone(),
+        isolate: false,
+        light: a.light,
+        retry_alone: a.retry_alone,
     };
     (spec.priority, spec.priority_reason) = a.class.resolve()?;
     spec.requirements.device = a.device.clone().map(DeviceId);

@@ -72,7 +72,7 @@ pub(crate) mod fake {
     use std::sync::{Arc, Mutex};
 
     /// The control files a new cgroup directory gets.
-    pub(crate) const FILES: [&str; 10] = [
+    pub(crate) const FILES: [&str; 11] = [
         "cgroup.procs",
         "cgroup.controllers",
         "cgroup.subtree_control",
@@ -83,6 +83,7 @@ pub(crate) mod fake {
         "memory.pressure",
         "cpu.stat",
         "cpu.pressure",
+        "cpu.weight",
     ];
 
     #[derive(Debug, Clone, Default)]

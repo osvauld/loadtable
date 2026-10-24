@@ -781,6 +781,9 @@ fn r294_a_real_daemon_audits_to_the_ledger_signs_checkpoints_and_keeps_rows_acro
             priority: tasks_core::Priority::Normal,
             priority_reason: None,
             fetch: Vec::new(),
+            isolate: false,
+            light: false,
+            retry_alone: false,
         }
     };
     let first_rows = {

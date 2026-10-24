@@ -142,6 +142,9 @@ impl World {
             priority: tasks_core::Priority::Normal,
             priority_reason: None,
             fetch: Vec::new(),
+            isolate: false,
+            light: false,
+            retry_alone: false,
         }
     }
 

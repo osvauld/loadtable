@@ -7,12 +7,18 @@
 # run = 4   # env TASKS_RUN_SLOTS
 # offload = 4   # env TASKS_OFFLOAD_SLOTS
 # transfer = 1   # env TASKS_TRANSFER_SLOTS
+# light = 4   # env TASKS_LIGHT_SLOTS
 # short_lane = 1   # env TASKS_SHORT_LANE_SLOTS
 # short_job_max_secs = 60   # env TASKS_SHORT_JOB_MAX_SECS
 # short_job_max_memory_mib = 1024   # env TASKS_SHORT_JOB_MAX_MEMORY_MIB
 
 [queue]
 # aging_mins = 20   # env TASKS_QUEUE_AGING_MINS
+
+[cpu]
+# compile_weight = 50   # env TASKS_CPU_COMPILE_WEIGHT
+# run_weight = 200   # env TASKS_CPU_RUN_WEIGHT
+# compile_nice = 10   # env TASKS_CPU_COMPILE_NICE
 
 [pressure.compile]
 # max_cpu = 40   # env TASKS_COMPILE_MAX_CPU

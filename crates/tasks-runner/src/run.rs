@@ -10,7 +10,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 use tasks_core::JobId;
-use tasks_platform::{Child, PlatformError, Processes, Signal, SpawnSpec, Usage};
+use tasks_platform::{Child, CpuShare, PlatformError, Processes, Signal, SpawnSpec, Usage};
 
 /// Largest read from the log per poll; bounds memory per iteration.
 const READ_CHUNK: usize = 64 * 1024;
@@ -30,6 +30,8 @@ pub struct JobStart {
     pub log_path: PathBuf,
     /// Sidecar receiving the timestamped line stream; `None` disables it.
     pub timed_path: Option<PathBuf>,
+    /// The CPU share against other jobs on the machine.
+    pub cpu: CpuShare,
 }
 
 /// Builds the spawn request: allowlisted environment only (R-090), never the
@@ -48,6 +50,7 @@ pub fn build_spawn_spec(
         env: build_env(job.job, parent_env, &job.env, env_policy),
         log_path: job.log_path.clone(),
         cgroup_procs: None,
+        nice: job.cpu.nice,
     })
 }
 
@@ -197,6 +200,7 @@ impl<'a> Runner<'a> {
         let mut meter = self.attrib.map(|a| {
             let (m, procs) = Meter::new(a, job.job);
             spec.cgroup_procs = procs;
+            spec.nice = m.apply_cpu(job.cpu);
             m
         });
         let t0 = self.clock.now();

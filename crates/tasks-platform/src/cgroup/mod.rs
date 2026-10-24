@@ -100,6 +100,10 @@ pub trait Cgroups: Send + Sync {
     /// Creates the cgroup (an existing one is reused) and returns its `cgroup.procs` file, which
     /// the child writes its own pid into before it execs. `Err` when not delegated.
     fn create(&self, name: CgroupName) -> Result<PathBuf, PlatformError>;
+    /// Sets the cgroup's CPU share (`cpu.weight`, 1..=10000, the kernel default is 100) so that
+    /// competing jobs split the CPU in that proportion. `Ok(true)` when set, `Ok(false)` when
+    /// the cpu controller is not enabled here (the caller falls back to niceness).
+    fn set_cpu_weight(&self, name: CgroupName, weight: u32) -> Result<bool, PlatformError>;
     /// Pids currently in the cgroup (`cgroup.procs`); an absent cgroup has none.
     fn pids(&self, name: CgroupName) -> Result<Vec<i32>, PlatformError>;
     /// Reads the figures: `io.stat`, `memory.peak`, `cpu.stat` and the three pressure totals. A
@@ -137,6 +141,9 @@ impl Cgroups for NoCgroups {
     }
     fn create(&self, _name: CgroupName) -> Result<PathBuf, PlatformError> {
         Err(PlatformError::NoCgroups(self.reason.clone()))
+    }
+    fn set_cpu_weight(&self, _name: CgroupName, _weight: u32) -> Result<bool, PlatformError> {
+        Ok(false)
     }
     fn pids(&self, _name: CgroupName) -> Result<Vec<i32>, PlatformError> {
         Ok(Vec::new())

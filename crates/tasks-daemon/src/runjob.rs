@@ -328,6 +328,10 @@ impl RunEvents for Events {
                 ledger.record_sample(&k, &s)
             });
         }
+        // a failed `retry_alone` test job queues its follow-up before the log is elided
+        if matches!(phase, Phase::Failed { .. }) {
+            self.sch.retry_alone_after(self.rj.id);
+        }
         self.cap_log();
     }
 }

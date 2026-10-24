@@ -196,6 +196,9 @@ pub fn expand(
                     || named_tests(&p.argv)
                         .iter()
                         .any(|l| suite.targets.get(l).is_some_and(|n| n.long)),
+                light: def.light || note.is_some_and(|n| n.light),
+                retry_alone: def.retry_alone || note.is_some_and(|n| n.retry_alone),
+                retry_of: None,
                 tools: suite.tools.clone(),
                 priority: def.priority.filter(|p| *p != tasks_core::Priority::Normal),
                 // set by `split_cargo_test`; the suite's hints must not lose it
@@ -292,6 +295,42 @@ command = ["cargo", "check"]
         };
         assert_eq!(hint("warm"), Some(tasks_core::Priority::Background));
         assert_eq!(hint("check"), None);
+    }
+
+    // R-714, R-716
+    #[test]
+    fn r714_light_and_retry_alone_come_from_the_target_or_the_step() {
+        let text = r#"
+version = 1
+[suites.s]
+[suites.s.targets."test:calls"]
+light = true
+retry_alone = true
+[[suites.s.steps]]
+name = "tests"
+command = ["cargo", "test", "-p", "p2pcore"]
+split = "cargo-test"
+retry_alone = true
+[[suites.s.steps]]
+name = "soak"
+command = ["sleep", "600"]
+light = true
+"#;
+        let pol = parse(text, Path::new("p.toml")).unwrap();
+        let list = ["calls", "video"]
+            .iter()
+            .map(|n| exe(n, ExeKind::Test))
+            .collect();
+        let exes = BTreeMap::from([("tests".to_string(), list)]);
+        let e = expand(&pol, "s", &exes, &ExpandOptions::default()).unwrap();
+        let calls = e.hints("tests.test-calls").unwrap();
+        assert!(calls.light && calls.retry_alone && !calls.isolate);
+        let video = e.hints("tests.test-video").unwrap();
+        assert!(!video.light, "light is the target's, not the step's");
+        assert!(video.retry_alone, "the step's retry applies to every piece");
+        let soak = e.hints("soak").unwrap();
+        assert!(soak.light && !soak.retry_alone);
+        assert_eq!(e.plan.validate(), Ok(()));
     }
 
     #[test]

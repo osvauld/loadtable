@@ -506,6 +506,9 @@ impl Scheduler {
                 priority: ctx.step_priority(&step.hints).0,
                 priority_reason: ctx.step_priority(&step.hints).1,
                 fetch: Vec::new(),
+                isolate: step.hints.isolate,
+                light: step.hints.light,
+                retry_alone: step.hints.retry_alone,
             };
             spec.validate().map_err(|e| {
                 ApiError::new(

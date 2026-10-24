@@ -44,4 +44,9 @@ pub enum CoreError {
     /// More than [`crate::MAX_FETCH_PATHS`] fetch paths.
     #[error("too many fetch paths: {0} (max {max})", max = crate::MAX_FETCH_PATHS)]
     TooManyFetchPaths(usize),
+    /// A job cannot be both `light` and `isolate`.
+    #[error(
+        "a job cannot be both light and isolate: light jobs run beside others, isolate jobs run alone"
+    )]
+    LightAndIsolate,
 }

@@ -33,6 +33,18 @@ pub enum Kind {
     Probe,
 }
 
+/// The CPU share a job gets when jobs compete: compiles yield to tests, which are measuring
+/// timing and must not be starved by a build that happens to run beside them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CpuClass {
+    /// Low priority: builds and packaging.
+    Compile,
+    /// High priority: tests and runs.
+    Run,
+    /// The default share.
+    Normal,
+}
+
 impl Kind {
     /// The kind as a lowercase word, as shown to people.
     pub fn word(&self) -> &'static str {
@@ -43,6 +55,15 @@ impl Kind {
             Kind::Package => "package",
             Kind::Device => "device",
             Kind::Probe => "probe",
+        }
+    }
+
+    /// How much CPU the machine should give a job of this kind when jobs compete (R-710).
+    pub fn cpu_class(&self) -> CpuClass {
+        match self {
+            Kind::Compile | Kind::Package => CpuClass::Compile,
+            Kind::Test | Kind::Run => CpuClass::Run,
+            Kind::Device | Kind::Probe => CpuClass::Normal,
         }
     }
 
@@ -120,6 +141,18 @@ pub struct JobSpec {
     /// (`--fetch`). Older senders omit it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fetch: Vec<String>,
+    /// Runs only when nothing else runs on its machine, and nothing starts beside it
+    /// (`isolate`, R-712). Carried on the spec so a peer that receives the job enforces it too.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub isolate: bool,
+    /// Uses little CPU but runs long (`--light`): ignores the CPU pressure gate and takes a
+    /// place in the small light pool instead of a run slot (R-714). Not with `isolate`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub light: bool,
+    /// When this `cargo test` job fails under load, the daemon runs the failed tests once more,
+    /// alone (`--retry-alone`, R-716).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retry_alone: bool,
 }
 
 /// Checks one `--fetch` path: relative to the checkout, no `.`/`..`/empty component, no `.git`.
@@ -186,6 +219,9 @@ impl JobSpec {
         for p in &self.fetch {
             check_fetch_path(p)?;
         }
+        if self.light && self.isolate {
+            return Err(CoreError::LightAndIsolate);
+        }
         crate::check_reason(self.priority, self.priority_reason.as_deref())?;
         for d in DENIED_DEVICES {
             if self.argv.iter().any(|a| a.contains(d)) {
@@ -216,6 +252,9 @@ pub(crate) mod tests {
             priority: Priority::Normal,
             priority_reason: None,
             fetch: Vec::new(),
+            isolate: false,
+            light: false,
+            retry_alone: false,
         }
     }
 
@@ -385,5 +424,31 @@ pub(crate) mod tests {
         v.as_object_mut().unwrap().remove("fetch");
         let back: JobSpec = serde_json::from_value(v).unwrap();
         assert!(back.fetch.is_empty());
+    }
+
+    // R-710
+    #[test]
+    fn r710_builds_yield_cpu_to_tests_and_runs() {
+        assert_eq!(Kind::Compile.cpu_class(), CpuClass::Compile);
+        assert_eq!(Kind::Package.cpu_class(), CpuClass::Compile);
+        assert_eq!(Kind::Test.cpu_class(), CpuClass::Run);
+        assert_eq!(Kind::Run.cpu_class(), CpuClass::Run);
+        assert_eq!(Kind::Device.cpu_class(), CpuClass::Normal);
+        assert_eq!(Kind::Probe.cpu_class(), CpuClass::Normal);
+    }
+
+    // R-714
+    #[test]
+    fn r714_a_job_cannot_be_both_light_and_isolate() {
+        let mut s = spec();
+        s.light = true;
+        assert_eq!(s.validate(), Ok(()));
+        s.isolate = true;
+        assert_eq!(s.validate(), Err(CoreError::LightAndIsolate));
+        assert!(
+            CoreError::LightAndIsolate
+                .to_string()
+                .contains("both light and isolate")
+        );
     }
 }

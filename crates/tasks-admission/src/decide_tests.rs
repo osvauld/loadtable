@@ -462,3 +462,201 @@ fn r341_one_owners_backlog_does_not_hold_the_only_slot_against_another_owner() {
     let v = verdicts(&i2);
     assert!(is_admit(&v[&100]) && is_admit(&v[&1]) && !is_admit(&v[&2]));
 }
+
+fn alone(job: i64, kind: SlotKind, queued: u64) -> Waiter {
+    let mut w = waiter(job, kind, queued);
+    w.isolate = true;
+    w
+}
+
+fn running(job: i64, isolate: bool) -> Running {
+    Running {
+        job: JobId(job),
+        isolate,
+    }
+}
+
+#[test]
+fn r712_an_isolate_job_starts_on_an_idle_machine_and_nothing_starts_beside_it() {
+    let i = input(
+        2,
+        vec![
+            alone(1, SlotKind::Run, 1),
+            waiter(2, SlotKind::Run, 2),
+            waiter(3, SlotKind::Compile, 3),
+        ],
+    );
+    let v = verdicts(&i);
+    assert!(is_admit(&v[&1]));
+    assert_eq!(text(&v[&2]), "job #1 runs alone (isolate)");
+    assert_eq!(text(&v[&3]), "job #1 runs alone (isolate)");
+}
+
+#[test]
+fn r712_an_isolate_job_waits_for_every_running_job_and_names_them() {
+    let mut i = input(2, vec![alone(1, SlotKind::Run, 1)]);
+    i.running = vec![running(8, false), running(9, false)];
+    let v = verdicts(&i);
+    assert_eq!(
+        text(&v[&1]),
+        "runs alone (isolate): waiting for #8, #9 to finish"
+    );
+    // a job admitted just before it in the same pass counts as running
+    let mut i = input(
+        2,
+        vec![waiter(5, SlotKind::Run, 1), alone(6, SlotKind::Run, 2)],
+    );
+    i.running = vec![];
+    let v = verdicts(&i);
+    assert!(is_admit(&v[&5]));
+    assert_eq!(
+        text(&v[&6]),
+        "runs alone (isolate): waiting for #5 to finish"
+    );
+}
+
+#[test]
+fn r712_while_an_isolate_job_runs_no_other_job_starts() {
+    let mut i = input(
+        3,
+        vec![waiter(2, SlotKind::Run, 1), waiter(3, SlotKind::Compile, 2)],
+    );
+    i.running = vec![running(7, true)];
+    let v = verdicts(&i);
+    assert_eq!(text(&v[&2]), "job #7 runs alone (isolate)");
+    assert_eq!(text(&v[&3]), "job #7 runs alone (isolate)");
+}
+
+#[test]
+fn r713_an_isolate_job_first_in_line_stops_later_jobs_from_starting() {
+    // a job is running, so the isolate job cannot start; the small jobs behind it must not
+    // keep the machine busy forever
+    let mut i = input(
+        3,
+        vec![
+            alone(1, SlotKind::Run, 1),
+            waiter(2, SlotKind::Run, 2),
+            waiter(3, SlotKind::Compile, 3),
+        ],
+    );
+    i.running = vec![running(9, false)];
+    let v = verdicts(&i);
+    assert!(text(&v[&1]).starts_with("runs alone (isolate)"));
+    assert_eq!(text(&v[&2]), "job #1 runs alone (isolate)");
+    assert_eq!(text(&v[&3]), "job #1 runs alone (isolate)");
+}
+
+#[test]
+fn r713_jobs_ahead_of_the_isolate_job_still_start_and_a_held_isolate_job_blocks_nobody() {
+    let mut i = input(
+        3,
+        vec![waiter(2, SlotKind::Run, 1), alone(1, SlotKind::Run, 2)],
+    );
+    i.running = vec![];
+    let v = verdicts(&i);
+    assert!(is_admit(&v[&2]), "ahead of the isolate job");
+    assert!(!is_admit(&v[&1]));
+    // a dependency hold skips the isolate job without making the others wait for it
+    let mut held = alone(1, SlotKind::Run, 1);
+    held.holds.push(Hold::Dependency(JobId(50)));
+    let v = verdicts(&input(3, vec![held, waiter(2, SlotKind::Run, 2)]));
+    assert!(is_admit(&v[&2]));
+}
+
+#[test]
+fn r713_offloaded_jobs_neither_wait_for_nor_count_as_the_local_machine() {
+    // the offload waiter stands for a job that runs on a peer
+    let i = input(
+        2,
+        vec![waiter(1, SlotKind::Offload, 1), alone(2, SlotKind::Run, 2)],
+    );
+    let v = verdicts(&i);
+    assert!(is_admit(&v[&1]) && is_admit(&v[&2]));
+}
+
+fn light(job: i64, kind: SlotKind, queued: u64) -> Waiter {
+    let mut w = waiter(job, kind, queued);
+    w.light = true;
+    w
+}
+
+fn slot_of(v: &Verdict) -> (SlotKind, u32, Lane) {
+    match v {
+        Verdict::Admit { slot, lane } => (slot.0, slot.1, *lane),
+        other => panic!("not admitted: {other:?}"),
+    }
+}
+
+#[test]
+fn r714_a_light_job_takes_a_place_in_the_light_pool_and_leaves_the_run_slots_alone() {
+    // every compile and run slot is taken, yet the light job starts
+    let mut i = input(
+        1,
+        vec![light(1, SlotKind::Compile, 1), light(2, SlotKind::Run, 2)],
+    );
+    for k in [SlotKind::Compile, SlotKind::Run] {
+        let st = i.slots.get_mut(&k).unwrap();
+        st.busy = st.free.drain(..).map(|n| (n, None)).collect();
+    }
+    let v = verdicts(&i);
+    assert_eq!(
+        slot_of(&v[&1]),
+        (SlotKind::Run, LIGHT_LANE_BASE, Lane::Light)
+    );
+    assert_eq!(
+        slot_of(&v[&2]),
+        (SlotKind::Run, LIGHT_LANE_BASE + 1, Lane::Light)
+    );
+}
+
+#[test]
+fn r714_a_light_job_ignores_the_cpu_gate_but_not_the_memory_gate() {
+    let mut i = input(
+        1,
+        vec![light(1, SlotKind::Run, 1), waiter(2, SlotKind::Run, 2)],
+    );
+    i.pressure.cpu = Some(99.0);
+    let v = verdicts(&i);
+    assert!(is_admit(&v[&1]), "{:?}", v[&1]);
+    assert!(
+        text(&v[&2]).starts_with("CPU contended"),
+        "ordinary jobs still wait"
+    );
+    i.pressure.memory = tasks_platform::Level::Critical;
+    let v = verdicts(&i);
+    assert!(
+        text(&v[&1]).starts_with("memory stalls"),
+        "{}",
+        text(&v[&1])
+    );
+    i.pressure.memory = tasks_platform::Level::Normal;
+    i.available_memory = 0;
+    assert!(text(&verdicts(&i)[&1]).starts_with("memory:"));
+}
+
+#[test]
+fn r715_a_full_light_pool_says_so_and_keeps_its_own_queue() {
+    let ws = vec![
+        light(1, SlotKind::Run, 1),
+        light(2, SlotKind::Run, 2),
+        light(3, SlotKind::Run, 3),
+        waiter(4, SlotKind::Run, 4),
+    ];
+    let v = verdicts(&input(1, ws));
+    assert!(is_admit(&v[&1]) && is_admit(&v[&2]));
+    assert_eq!(
+        text(&v[&3]),
+        "all 2 light slots busy (#1, #2); you are 1st in line"
+    );
+    // a light backlog does not take the ordinary run slot from the job behind it
+    assert!(is_admit(&v[&4]));
+}
+
+#[test]
+fn r715_with_the_pool_switched_off_a_light_job_is_an_ordinary_one() {
+    let mut i = input(1, vec![light(1, SlotKind::Run, 1)]);
+    i.thresholds.light_slots = 0;
+    i.light_lane = SlotState::default();
+    let v = verdicts(&i);
+    assert_eq!(slot_of(&v[&1]), (SlotKind::Run, 0, Lane::Normal));
+}

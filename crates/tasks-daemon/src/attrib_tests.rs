@@ -309,6 +309,44 @@ fn r323_a_job_is_placed_in_its_own_cgroup_and_the_cgroup_goes_when_it_ends() {
     );
 }
 
+// R-710
+#[test]
+fn r710_a_compile_job_gets_the_low_cpu_weight_and_a_test_job_the_high_one() {
+    let r = Rig::delegated();
+    r.procs.auto_exit(0);
+    let build = r.submit(&r.spec("o", &["make"], Kind::Compile));
+    let test = r.submit(&r.spec_in("o", &["make", "check"], Kind::Test, "t"));
+    r.tick();
+    assert_eq!(r.until_done(build), tasks_core::Phase::Passed);
+    assert_eq!(r.until_done(test), tasks_core::Phase::Passed);
+    assert_eq!(r.cgroups.cpu_weight(CgroupName::Job(build.0)), Some(50));
+    assert_eq!(r.cgroups.cpu_weight(CgroupName::Job(test.0)), Some(200));
+    assert!(r.procs.spawned().iter().all(|s| s.nice == 0));
+}
+
+// R-711
+#[test]
+fn r711_without_cgroups_a_compile_job_is_niced_and_a_test_job_is_not() {
+    let r = Rig::new();
+    r.procs.auto_exit(0);
+    let build = r.submit(&r.spec("o", &["make"], Kind::Compile));
+    let test = r.submit(&r.spec_in("o", &["make", "check"], Kind::Test, "t"));
+    r.tick();
+    assert_eq!(r.until_done(build), tasks_core::Phase::Passed);
+    assert_eq!(r.until_done(test), tasks_core::Phase::Passed);
+    let mut niceness: Vec<(String, i32)> = r
+        .procs
+        .spawned()
+        .iter()
+        .map(|s| (s.argv.join(" "), s.nice))
+        .collect();
+    niceness.sort();
+    assert_eq!(
+        niceness,
+        [("make".to_string(), 10), ("make check".to_string(), 0)]
+    );
+}
+
 // R-329
 #[test]
 fn r329_stale_job_cgroups_are_swept_at_startup_and_survivors_are_killed_first() {

@@ -39,6 +39,9 @@ fn record(store: &MemoryStore, root: &Path, fetch: &[&str]) -> JobRecord {
         priority: tasks_core::Priority::Normal,
         priority_reason: None,
         fetch: fetch.iter().map(ToString::to_string).collect(),
+        isolate: false,
+        light: false,
+        retry_alone: false,
     };
     let id = store.submit(&spec).unwrap();
     store.get(id).unwrap().unwrap()

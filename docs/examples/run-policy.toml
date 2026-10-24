@@ -43,6 +43,11 @@ note = "median 112 s over 5 runs on nixos"
 isolate = true
 note = "binds fixed local ports; must not overlap other network tests"
 
+[suites.core-tests.targets."test:calls"]
+light = true
+retry_alone = true
+note = "many minutes of timers and network, little CPU; a failure under load is retried alone"
+
 # --- quick check ---------------------------------------------------------------------------
 [suites.check]
 notes = "Fast type check of the whole workspace; use while iterating."

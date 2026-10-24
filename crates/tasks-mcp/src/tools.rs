@@ -544,6 +544,9 @@ impl Tools {
                 .map(job_id)
                 .collect::<Result<_, _>>()?,
             fetch: a.fetch.unwrap_or_default(),
+            isolate: false,
+            light: false,
+            retry_alone: false,
         };
         spec.requirements.device = a.device.map(DeviceId);
         spec.validate()
