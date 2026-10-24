@@ -105,6 +105,13 @@ pub struct StepHints {
     /// The step is known to be long.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub long: bool,
+    /// The step uses little CPU but runs long (timers, network): it ignores the CPU pressure
+    /// gate and takes no run slot from the run pool. Not combinable with `isolate`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub light: bool,
+    /// When a `cargo test` step fails under load, run the failed tests once more, alone.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retry_alone: bool,
     /// Tools the step needs on the machine.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
