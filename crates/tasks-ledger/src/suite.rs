@@ -74,6 +74,14 @@ const CASES: &[Case] = &[
         "r095_a_plan_steps_timeout_hint_fills_the_spec_and_the_escape_is_carried",
         r095_plan_timeout_fills_spec,
     ),
+    (
+        "r717_the_summary_can_be_replaced_after_the_job_ended_without_changing_its_outcome",
+        r717_set_summary_after_finish,
+    ),
+    (
+        "r712_a_plan_steps_isolate_light_and_retry_hints_fill_the_spec",
+        r712_plan_flags_fill_spec,
+    ),
     ("sample_keys_enumerate_history", sample_keys_enumerate),
     (
         "r108_a_cancel_keeps_its_requester_and_reason",
@@ -90,6 +98,10 @@ const CASES: &[Case] = &[
     (
         "r340_a_plans_background_hint_and_the_submitters_class_reach_the_specs",
         r340_plan_priority,
+    ),
+    (
+        "r708_a_test_step_that_waits_for_others_is_marked_as_reading_the_checkout",
+        r708_shared_checkout,
     ),
     (
         "r342_a_finished_job_leaves_its_peak_memory_beside_its_timing_sample",
@@ -123,6 +135,9 @@ fn spec(owner: &str, after: Vec<JobId>) -> JobSpec {
         priority: tasks_core::Priority::Normal,
         priority_reason: None,
         fetch: Vec::new(),
+        isolate: false,
+        light: false,
+        retry_alone: false,
     }
 }
 
@@ -623,6 +638,60 @@ fn r095_plan_timeout_fills_spec(e: &Env) {
     own.timeout_secs = Some(5);
     let id = s.submit(&own).unwrap();
     assert_eq!(s.get(id).unwrap().unwrap().spec.timeout_secs, Some(5));
+}
+
+// A step's isolate, light and retry_alone hints become the spec's flags, so the daemon (and a
+// peer that receives the job) acts on the spec alone.
+fn r712_plan_flags_fill_spec(e: &Env) {
+    let s = &*e.store;
+    let mut alone = step("alone", &[]);
+    alone.hints.isolate = true;
+    alone.hints.retry_alone = true;
+    let mut light = step("light", &[]);
+    light.hints.light = true;
+    let plain = step("plain", &[]);
+    let plan = Plan {
+        steps: vec![alone, light, plain],
+    };
+    let mut c = ctx();
+    c.broad_test_escape = true;
+    let done = s.submit_plan(&c, &plan).unwrap();
+    let get = |name: &str| {
+        let id = done.jobs.iter().find(|(n, _)| n == name).unwrap().1;
+        s.get(id).unwrap().unwrap().spec
+    };
+    let a = get("alone");
+    assert!(a.isolate && a.retry_alone && !a.light);
+    let l = get("light");
+    assert!(l.light && !l.isolate && !l.retry_alone);
+    let p = get("plain");
+    assert!(!p.isolate && !p.light && !p.retry_alone);
+}
+
+// The daemon rewrites a failed job's one-line outcome when its retry alone ended; the phase,
+// exit code and finish time stay as they were.
+fn r717_set_summary_after_finish(e: &Env) {
+    let s = &*e.store;
+    let id = s.submit(&spec("a", vec![])).unwrap();
+    s.start(id, &info()).unwrap();
+    let mut fin = Finish::from_phase(Phase::Failed { exit: Some(101) });
+    fin.summary = Some("exit code 101".into());
+    s.finish(id, &fin).unwrap();
+    let before = s.get(id).unwrap().unwrap();
+    s.set_summary(id, "2 tests failed under load and passed alone: a, b")
+        .unwrap();
+    let after = s.get(id).unwrap().unwrap();
+    assert_eq!(
+        after.summary.as_deref(),
+        Some("2 tests failed under load and passed alone: a, b")
+    );
+    assert_eq!(after.phase, before.phase);
+    assert_eq!(after.exit_code, before.exit_code);
+    assert_eq!(after.finished_at_ms, before.finished_at_ms);
+    assert!(matches!(
+        s.set_summary(JobId(9999), "x"),
+        Err(LedgerError::NotFound(_))
+    ));
 }
 
 // Requirements 6.12: cancelling a waiting job must not take admission or start the command.
@@ -1315,6 +1384,44 @@ fn r340_plan_priority(e: &Env) {
         assert_eq!(r.spec.priority, tasks_core::Priority::Blocking);
         assert_eq!(r.spec.priority_reason.as_deref(), Some("agent waiting"));
     }
+}
+
+// R-708: a test step that waits for other steps only reads what they built, so its job says it
+// may share the remote copy; a first step, a build and a plain submit do not.
+fn r708_shared_checkout(e: &Env) {
+    let s = &*e.store;
+    let mut build = step("build", &[]);
+    build.kind = Kind::Compile;
+    let mut first = step("first", &[]);
+    first.kind = Kind::Test;
+    let mut calls = step("calls", &["build"]);
+    calls.kind = Kind::Test;
+    let mut report = step("report", &["build"]);
+    report.kind = Kind::Run;
+    let plan = Plan {
+        steps: vec![build, first, calls, report],
+    };
+    let done = s.submit_plan(&ctx(), &plan).unwrap();
+    let shared = |name: &str| {
+        let id = done.jobs.iter().find(|(n, _)| n == name).unwrap().1;
+        s.get(id)
+            .unwrap()
+            .unwrap()
+            .spec
+            .requirements
+            .shared_checkout
+    };
+    assert!(shared("calls"));
+    assert!(!shared("build") && !shared("first") && !shared("report"));
+    let plain = s.submit(&spec("a", vec![])).unwrap();
+    assert!(
+        !s.get(plain)
+            .unwrap()
+            .unwrap()
+            .spec
+            .requirements
+            .shared_checkout
+    );
 }
 
 // R-342: a whole-job sample keeps the peak memory the job's figures ended with, newest first;

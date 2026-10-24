@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 use tasks_admission::{
-    Admitter, Attempt, Hold, Layout, Queue, Verdict, WaitReason as AdmitWait, Waiter,
+    Admitter, Attempt, Hold, Layout, Queue, Running, Verdict, WaitReason as AdmitWait, Waiter,
 };
 use tasks_core::{Arch, JobId, Kind, Os, Phase, SlotKind, WaitReason as LedgerWait};
 use tasks_ledger::{Clock, Finish, JobRecord, LedgerError};
@@ -80,6 +80,8 @@ pub(crate) struct RunningJob {
     pub shown: tasks_timing::Shown,
     /// The latest sample of what the job costs the machine.
     pub figures: Mutex<Option<tasks_core::JobFigures>>,
+    /// Started with `isolate`: nothing else starts while it runs (R-712).
+    pub isolate: bool,
 }
 
 /// Per-tick bookkeeping that survives between ticks.
@@ -125,6 +127,9 @@ pub(crate) struct TickState {
     pub battery_held: BTreeSet<JobId>,
     /// The power source at the start of the last tick.
     pub power: Option<tasks_platform::PowerReading>,
+    /// Follow-up jobs queued to run failed tests alone, with the job each one retries; the
+    /// original's outcome is settled when the follow-up ends. Forgotten on restart.
+    pub retries: BTreeMap<JobId, JobId>,
 }
 
 /// What one tick did.
@@ -390,6 +395,7 @@ impl Scheduler {
             rep.cancelled_blocked = ids;
         }
         self.sync_cancels();
+        self.settle_retries();
         self.refresh_power();
         self.supervise(&policy, now);
         self.admit(&policy, &mut rep);
@@ -542,6 +548,8 @@ impl Scheduler {
             w.predicted_peak_memory = facts.peak_memory;
             w.checkout = facts.checkout.clone();
             w.device = rec.spec.requirements.device.clone();
+            w.isolate = wants_isolate(&rec);
+            w.light = wants_light(&rec);
             // only a job that would write NEW output on the cache disk waits for its reserve;
             // one whose output links all exist proceeds (R-061, R-404)
             w.new_output = matches!(rec.spec.kind, Kind::Compile | Kind::Test | Kind::Package)
@@ -581,6 +589,7 @@ impl Scheduler {
         let queue = Queue {
             now_ms: u64::try_from(self.clock.now_ms()).unwrap_or(0),
             last_started: lock(&self.state).last_started.clone(),
+            running: self.running_here(),
         };
         let decisions = match &readings {
             Ok(_) => admitter
@@ -635,6 +644,24 @@ impl Scheduler {
                 }
             }
         }
+    }
+
+    /// The jobs running on this machine, for `isolate`: those holding a compile, run or device
+    /// slot. An offloaded job runs on a peer and a transfer is not a job.
+    fn running_here(&self) -> Vec<Running> {
+        lock(&self.running)
+            .values()
+            .filter(|r| {
+                matches!(
+                    r.slot_kind,
+                    Some(SlotKind::Compile | SlotKind::Run | SlotKind::Device)
+                )
+            })
+            .map(|r| Running {
+                job: r.id,
+                isolate: r.isolate,
+            })
+            .collect()
     }
 
     /// Drain and the execution intent hold every waiter without blocking others' order.
@@ -826,6 +853,7 @@ impl Scheduler {
             est_median: Some(facts.plan.median_secs),
             shown: facts.shown.clone(),
             figures: Mutex::new(None),
+            isolate: wants_isolate(&rec),
         });
         // the spec's own limit, else a plan step's hint (older rows), capped by the machine's
         let wall = crate::machine_policy::effective_wall_timeout(
@@ -849,6 +877,12 @@ impl Scheduler {
             env: rewritten.env,
             log_path,
             timed_path: None,
+            // a light job is long-running test work: it gets the tests' share, not a build's
+            cpu: policy.cpu_share(if wants_light(&rec) {
+                tasks_core::CpuClass::Run
+            } else {
+                rec.spec.kind.cpu_class()
+            }),
         };
         let meta = JobMeta {
             kind: rec.spec.kind,
@@ -889,6 +923,16 @@ impl Scheduler {
     }
 }
 
+/// The job asked to run alone: on its spec, or (older rows) only in its plan step's hints.
+fn wants_isolate(rec: &JobRecord) -> bool {
+    rec.spec.isolate || rec.hints.isolate
+}
+
+/// The job asked for the light pool: on its spec, or (older rows) in its plan step's hints.
+fn wants_light(rec: &JobRecord) -> bool {
+    rec.spec.light || rec.hints.light
+}
+
 /// The coarse wait reason stored beside the full text.
 fn coarse(r: &AdmitWait) -> LedgerWait {
     match r {
@@ -905,6 +949,9 @@ fn coarse(r: &AdmitWait) -> LedgerWait {
         }
         AdmitWait::NoDevice => LedgerWait::Device(tasks_core::DeviceId(String::new())),
         AdmitWait::Disk { .. } => LedgerWait::Disk,
+        AdmitWait::RunsAlone(_) | AdmitWait::WaitsToRunAlone(_) | AdmitWait::LightBusy { .. } => {
+            LedgerWait::Pressure(r.to_string())
+        }
         AdmitWait::Cpu { .. }
         | AdmitWait::CpuUnavailable(_)
         | AdmitWait::Io { .. }

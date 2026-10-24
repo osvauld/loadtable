@@ -578,6 +578,10 @@ impl Store for AuditedLedger {
         self.inner.set_figures(id, figures)
     }
 
+    fn set_summary(&self, id: JobId, summary: &str) -> Result<()> {
+        self.inner.set_summary(id, summary)
+    }
+
     fn find_running(&self) -> Result<Vec<JobRecord>> {
         self.inner.find_running()
     }

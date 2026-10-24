@@ -57,6 +57,11 @@ pub enum PlanError {
     /// A step hints `blocking`, which a plan cannot claim.
     #[error("step {0:?} hints priority blocking; only a submit with --reason can claim it")]
     StepPriority(String),
+    /// A step is both `light` and `isolate`.
+    #[error(
+        "step {0:?} is both light and isolate; light steps run beside others, isolate steps run alone"
+    )]
+    LightAndIsolate(String),
     /// A step's fetch list is not valid.
     #[error("step {step:?}: {error}")]
     BadFetch {
@@ -105,6 +110,17 @@ pub struct StepHints {
     /// The step is known to be long.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub long: bool,
+    /// The step uses little CPU but runs long (timers, network): it ignores the CPU pressure
+    /// gate and takes no run slot from the run pool. Not combinable with `isolate`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub light: bool,
+    /// When a `cargo test` step fails under load, run the failed tests once more, alone.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retry_alone: bool,
+    /// Set on the follow-up job the daemon queues for a failed `retry_alone` job: the id of the
+    /// job whose failed tests it runs again, alone. Lets the outcome find its way back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_of: Option<i64>,
     /// Tools the step needs on the machine.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
@@ -188,6 +204,9 @@ impl Plan {
             }
             if s.hints.priority == Some(crate::Priority::Blocking) {
                 return Err(PlanError::StepPriority(s.name.clone()));
+            }
+            if s.hints.light && s.hints.isolate {
+                return Err(PlanError::LightAndIsolate(s.name.clone()));
             }
             if s.hints.fetch.len() > crate::MAX_FETCH_PATHS {
                 return Err(PlanError::BadFetch {
@@ -460,5 +479,15 @@ mod fetch_tests {
                 "{bad:?}"
             );
         }
+    }
+
+    // R-714
+    #[test]
+    fn r714_a_step_cannot_be_both_light_and_isolate() {
+        let mut p = plan_with(&[]);
+        p.steps[0].hints.light = true;
+        assert_eq!(p.validate(), Ok(()));
+        p.steps[0].hints.isolate = true;
+        assert_eq!(p.validate(), Err(PlanError::LightAndIsolate("apk".into())));
     }
 }

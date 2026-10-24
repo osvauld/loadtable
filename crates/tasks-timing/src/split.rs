@@ -175,34 +175,45 @@ pub fn label_of(step: &str) -> String {
     step.replacen('-', ":", 1)
 }
 
-/// Reorders steps so that, among those whose dependencies are done, the longest run first.
+/// Reorders steps so that, among those whose dependencies are done, the longest start first
+/// (R-707).
 ///
-/// `estimates` is looked up by step name, then by label (`test:lifecycle`). Steps with no estimate
-/// count as longer than any estimate; ties keep their original order. Dependencies always precede
+/// Steps hinted `long` go before all others. Then comes the estimate, longest first, looked up
+/// in `estimates` by step name, then by label (`test:lifecycle`). A step with no estimate is
+/// taken to be of the typical length (the median of the plan's known estimates), so it starts
+/// after the known long ones and before the known short ones; with no estimate at all the
+/// declared order stays. Ties keep their original order. Dependencies always precede
 /// dependents, so the plan stays valid.
 pub fn order_longest_first(
     plan: &Plan,
     estimates: &BTreeMap<String, Estimate>,
 ) -> Result<Plan, TimingError> {
     plan.validate()?;
-    let weight = |name: &str| {
+    let known = |name: &str| {
         estimates
             .get(name)
             .or_else(|| estimates.get(&label_of(name)))
-            .map_or(f64::INFINITY, |e| e.median_secs)
+            .map(|e| e.median_secs)
+            .filter(|m| m.is_finite())
     };
+    let mut medians: Vec<f64> = plan.steps.iter().filter_map(|s| known(&s.name)).collect();
+    medians.sort_by(f64::total_cmp);
+    let typical = medians.get(medians.len() / 2).copied().unwrap_or(0.0);
+    let weight = |s: &Step| (s.hints.long, known(&s.name).unwrap_or(typical));
     let mut done: BTreeSet<&str> = BTreeSet::new();
     let mut out: Vec<Step> = Vec::with_capacity(plan.steps.len());
     while out.len() < plan.steps.len() {
-        let mut best: Option<(&Step, f64)> = None;
+        let mut best: Option<(&Step, (bool, f64))> = None;
         for s in plan
             .steps
             .iter()
             .filter(|s| !done.contains(s.name.as_str()))
         {
             if s.after.iter().all(|d| done.contains(d.as_str())) {
-                let w = weight(&s.name);
-                if best.is_none_or(|(_, bw)| w > bw) {
+                let w = weight(s);
+                let better =
+                    best.is_none_or(|(_, (bl, bw))| (w.0 && !bl) || (w.0 == bl && w.1 > bw));
+                if better {
                     best = Some((s, w));
                 }
             }

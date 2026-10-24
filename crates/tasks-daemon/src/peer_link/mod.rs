@@ -711,8 +711,9 @@ impl<T: Transport + 'static> Forwarder for PeerLink<T> {
     fn wait_reason(&self, job: JobId) -> Option<String> {
         let j = self.job(job)?;
         // name the job that holds the remote copy, as the old checkout gate did (R-161)
-        match self.inner.locks.holder(&j.checkout) {
-            Some(h) if h.0 != job.0 => Some(format!(
+        let holders = self.inner.locks.holders(&j.checkout);
+        match holders.first() {
+            Some(h) if !holders.iter().any(|x| x.0 == job.0) => Some(format!(
                 "waiting for checkout: job #{} is using the remote copy",
                 h.0
             )),
@@ -762,7 +763,12 @@ impl<T: Transport + 'static> Forwarder for PeerLink<T> {
         let root = PathBuf::from(crate::place::checkout_key(&rec.spec.cwd));
         let checkout = CheckoutId::derive(&self.inner.opts.local_name, &root);
         let owner = LockOwner(rec.id.0);
-        self.inner.locks.enqueue(&checkout, owner);
+        let mode = if rec.spec.requirements.shared_checkout {
+            tasks_peer::LockMode::Shared
+        } else {
+            tasks_peer::LockMode::Exclusive
+        };
+        self.inner.locks.enqueue_as(&checkout, owner, mode);
         let _ = self.inner.locks.try_acquire(&checkout, owner);
         let entry = Arc::new(Job {
             id: rec.id,

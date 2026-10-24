@@ -67,6 +67,9 @@ pub(crate) fn spawn(spec: &SpawnSpec, start_time: StartTime) -> Result<Child, Pl
             "child {pid} does not lead its process group"
         )));
     }
+    if spec.nice != 0 {
+        apply_nice(pid, spec.nice);
+    }
     let start = start_time(pid)?.ok_or(PlatformError::Gone { pgid: pid })?;
     Ok(Child {
         pid,
@@ -75,6 +78,15 @@ pub(crate) fn spawn(spec: &SpawnSpec, start_time: StartTime) -> Result<Child, Pl
             start_time: start,
         },
     })
+}
+
+/// Lowers the priority of the whole group `pgid` leads. A failure is ignored: the job runs at
+/// the normal priority, which is only slower for the others, never wrong. Children forked in
+/// the instant before this call keep the old niceness; the leader is still starting then.
+fn apply_nice(pgid: i32, nice: i32) {
+    if let Some(p) = Pid::from_raw(pgid) {
+        let _ = rustix::process::setpriority_pgrp(Some(p), nice);
+    }
 }
 
 /// Fails with `Gone` unless the group leader still has the recorded start time.
@@ -192,6 +204,7 @@ mod tests {
             ],
             log_path: dir.join("log"),
             cgroup_procs: None,
+            nice: 0,
         }
     }
 
@@ -222,6 +235,31 @@ mod tests {
         assert!(log.starts_with("old\n"), "{log}");
         assert!(log.contains("[][bar]"), "{log}");
         assert!(log.contains("err"), "{log}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // R-711
+    #[test]
+    fn r711_a_spawn_with_nice_lowers_the_priority_of_the_group_leader() {
+        let dir = tmpdir("nice");
+        let p = crate::native();
+        let mut sp = spec(&dir, "sleep 5");
+        sp.nice = 7;
+        let c = p.spawn_group(&sp).unwrap();
+        let pid = Pid::from_raw(c.pid);
+        // applied before spawn_group returns, so there is nothing to wait for
+        let ni = rustix::process::getpriority_process(pid).unwrap();
+        assert_eq!(ni, 7);
+        let plain = p.spawn_group(&spec(&dir, "sleep 5")).unwrap();
+        let ni = rustix::process::getpriority_process(Pid::from_raw(plain.pid)).unwrap();
+        assert!(
+            ni < 7,
+            "a spawn without nice keeps the daemon's niceness: {ni}"
+        );
+        p.signal_group(c.group, Signal::Kill).unwrap();
+        p.signal_group(plain.group, Signal::Kill).unwrap();
+        wait_exit(&p, &c);
+        wait_exit(&p, &plain);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

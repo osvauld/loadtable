@@ -621,6 +621,7 @@ fn r191_suites_get_the_same_answer() {
         env: vec![],
         placement: Placement::Here,
         quick: false,
+        executables: Default::default(),
         broad_test,
         priority: Default::default(),
         priority_reason: None,

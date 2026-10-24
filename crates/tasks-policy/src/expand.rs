@@ -39,28 +39,49 @@ pub struct ExpandOptions<'a> {
 /// Executables per split step name, supplied by the caller from `cargo test --no-run` output.
 pub type Executables = BTreeMap<String, Vec<TestExe>>;
 
+/// The estimate of every step that history can give one for, by step name: split pieces under
+/// their own target label, other steps under the recipe of their command.
 fn estimates(
-    sub: &Plan,
-    recipe: &str,
+    plan: &Plan,
     timing: Option<&Timing<'_>>,
 ) -> Result<BTreeMap<String, Estimate>, PolicyError> {
     let mut out = BTreeMap::new();
     let Some(t) = timing else { return Ok(out) };
-    for s in sub.steps.iter().filter(|s| s.name != "build") {
-        let label = label_of(&s.name);
-        if let Some(e) = primary(measure(t, recipe, Some(&label))?) {
+    for s in &plan.steps {
+        let found = match &s.hints.split {
+            Some(o) => measure(t, &o.recipe, Some(&o.target))?,
+            None => match recipe_of(&s.argv) {
+                Some((recipe, _)) if s.name != "build" && !s.name.ends_with(".build") => {
+                    measure(t, &recipe, None)?
+                }
+                _ => Vec::new(),
+            },
+        };
+        if let Some(e) = primary(found) {
             out.insert(s.name.clone(), e);
         }
     }
     Ok(out)
 }
 
+/// Labels (`test:calls`) of the tests a `cargo test` command names with `--test`.
+fn named_tests(argv: &[String]) -> Vec<String> {
+    let end = argv.iter().position(|a| a == "--").unwrap_or(argv.len());
+    let words = argv.get(..end).unwrap_or(argv);
+    let mut out = Vec::new();
+    let mut it = words.iter();
+    while let Some(a) = it.next() {
+        if a == "--test" {
+            out.extend(it.next().map(|n| format!("test:{n}")));
+        } else if let Some(n) = a.strip_prefix("--test=") {
+            out.push(format!("test:{n}"));
+        }
+    }
+    out
+}
+
 /// Pieces of one policy step: (name, step) with dependencies still naming policy steps.
-fn pieces(
-    def: &StepDef,
-    exes: &Executables,
-    opts: &ExpandOptions<'_>,
-) -> Result<Vec<Step>, PolicyError> {
+fn pieces(def: &StepDef, exes: &Executables) -> Result<Vec<Step>, PolicyError> {
     let kind = recipe_of(&def.command).map_or(Kind::Run, |(_, k)| k);
     let plain = |kind| Step {
         name: def.name.clone(),
@@ -75,9 +96,6 @@ fn pieces(
         return Ok(vec![plain(kind)]);
     };
     let sub = split_cargo_test(&def.command, list)?;
-    let recipe = recipe_of(&def.command).map(|(r, _)| r).unwrap_or_default();
-    let ests = estimates(&sub, &recipe, opts.timing.as_ref())?;
-    let sub = order_longest_first(&sub, &ests)?;
     let prefix = |n: &str| format!("{}.{n}", def.name);
     Ok(sub
         .steps
@@ -141,7 +159,7 @@ pub fn expand(
         .iter()
         .filter(|s| !skipped.contains_key(s.name.as_str()))
     {
-        let mut ps = pieces(def, exes, opts)?;
+        let mut ps = pieces(def, exes)?;
         for p in &mut ps {
             p.after = resolve(&p.after);
         }
@@ -173,7 +191,14 @@ pub fn expand(
                 placement: def.placement.clone(),
                 timeout_secs: def.timeout_secs,
                 isolate: note.is_some_and(|n| n.isolate),
-                long: note.is_some_and(|n| n.long),
+                // a step that names a long test in its own command is long too
+                long: note.is_some_and(|n| n.long)
+                    || named_tests(&p.argv)
+                        .iter()
+                        .any(|l| suite.targets.get(l).is_some_and(|n| n.long)),
+                light: def.light || note.is_some_and(|n| n.light),
+                retry_alone: def.retry_alone || note.is_some_and(|n| n.retry_alone),
+                retry_of: None,
                 tools: suite.tools.clone(),
                 priority: def.priority.filter(|p| *p != tasks_core::Priority::Normal),
                 // set by `split_cargo_test`; the suite's hints must not lose it
@@ -185,6 +210,9 @@ pub fn expand(
     }
     let plan = Plan { steps };
     plan.validate()?;
+    // steps that become ready together start longest first (R-707): the order of the plan is
+    // the order the queue takes them in
+    let plan = order_longest_first(&plan, &estimates(&plan, opts.timing.as_ref())?)?;
     Ok(Expansion { plan })
 }
 
@@ -267,6 +295,42 @@ command = ["cargo", "check"]
         };
         assert_eq!(hint("warm"), Some(tasks_core::Priority::Background));
         assert_eq!(hint("check"), None);
+    }
+
+    // R-714, R-716
+    #[test]
+    fn r714_light_and_retry_alone_come_from_the_target_or_the_step() {
+        let text = r#"
+version = 1
+[suites.s]
+[suites.s.targets."test:calls"]
+light = true
+retry_alone = true
+[[suites.s.steps]]
+name = "tests"
+command = ["cargo", "test", "-p", "p2pcore"]
+split = "cargo-test"
+retry_alone = true
+[[suites.s.steps]]
+name = "soak"
+command = ["sleep", "600"]
+light = true
+"#;
+        let pol = parse(text, Path::new("p.toml")).unwrap();
+        let list = ["calls", "video"]
+            .iter()
+            .map(|n| exe(n, ExeKind::Test))
+            .collect();
+        let exes = BTreeMap::from([("tests".to_string(), list)]);
+        let e = expand(&pol, "s", &exes, &ExpandOptions::default()).unwrap();
+        let calls = e.hints("tests.test-calls").unwrap();
+        assert!(calls.light && calls.retry_alone && !calls.isolate);
+        let video = e.hints("tests.test-video").unwrap();
+        assert!(!video.light, "light is the target's, not the step's");
+        assert!(video.retry_alone, "the step's retry applies to every piece");
+        let soak = e.hints("soak").unwrap();
+        assert!(soak.light && !soak.retry_alone);
+        assert_eq!(e.plan.validate(), Ok(()));
     }
 
     #[test]
@@ -363,5 +427,170 @@ command = ["cargo", "check"]
             .find(|s| s.name == "tests.build")
             .unwrap();
         assert!(build.after.is_empty());
+    }
+
+    /// The p2p_chat policy's `core-tests` suite, with the three hand-made groups.
+    const P2P: &str = r#"
+version = 1
+[suites.core-tests]
+tools = ["cargo"]
+[[suites.core-tests.steps]]
+name = "build"
+command = ["cargo", "test", "--release", "-p", "p2pcore", "--features", "dev-tools", "--no-run"]
+placement = "nixos"
+[[suites.core-tests.steps]]
+name = "messaging"
+command = ["cargo", "test", "--release", "-p", "p2pcore", "--features", "dev-tools", "--no-fail-fast", "--test", "chat_shards", "--test", "vault"]
+after = ["build"]
+placement = "nixos"
+[[suites.core-tests.steps]]
+name = "calls"
+command = ["cargo", "test", "--release", "-p", "p2pcore", "--features", "dev-tools", "--no-fail-fast", "--test", "calls", "--test", "gcall"]
+after = ["build"]
+placement = "nixos"
+[[suites.core-tests.steps]]
+name = "devices-accounts"
+command = ["cargo", "test", "--release", "-p", "p2pcore", "--features", "dev-tools", "--no-fail-fast", "--test", "devices", "--test", "link"]
+after = ["build"]
+placement = "nixos"
+[suites.core-tests.targets."test:calls"]
+long = true
+
+[suites.core-split]
+tools = ["cargo"]
+[[suites.core-split.steps]]
+name = "tests"
+command = ["cargo", "test", "--release", "-p", "p2pcore", "--features", "dev-tools", "--no-fail-fast"]
+split = "cargo-test"
+placement = "nixos"
+[suites.core-split.targets."test:calls"]
+long = true
+[suites.core-split.targets."test:link"]
+isolate = true
+"#;
+
+    const P2P_META: &str = r#"{
+      "workspace_members": ["p2pcore 0.1.0"], "workspace_default_members": ["p2pcore 0.1.0"],
+      "packages": [{"name":"p2pcore","id":"p2pcore 0.1.0","features":{"dev-tools":[]},
+        "targets":[
+          {"name":"p2pcore","kind":["lib"],"test":true},
+          {"name":"chat_shards","kind":["test"],"test":true},
+          {"name":"vault","kind":["test"],"test":true},
+          {"name":"calls","kind":["test"],"test":true,"required-features":["dev-tools"]},
+          {"name":"gcall","kind":["test"],"test":true},
+          {"name":"devices","kind":["test"],"test":true},
+          {"name":"link","kind":["test"],"test":true}]}]}"#;
+
+    fn p2p() -> Policy {
+        parse(P2P, Path::new("p.toml")).unwrap()
+    }
+
+    // R-707
+    #[test]
+    fn r707_a_step_that_names_a_long_test_starts_before_the_others_that_are_ready_with_it() {
+        let e = expand(
+            &p2p(),
+            "core-tests",
+            &Executables::new(),
+            &ExpandOptions::default(),
+        )
+        .unwrap();
+        // declared messaging, calls, devices-accounts: `calls` names test:calls, which is long
+        assert_eq!(
+            names(&e),
+            ["build", "calls", "messaging", "devices-accounts"]
+        );
+        assert!(e.hints("calls").unwrap().long);
+        assert!(!e.hints("messaging").unwrap().long);
+        assert_eq!(e.plan.validate(), Ok(()));
+    }
+
+    // R-704, R-707: what `tasks2 suite run core-split` submits for the p2p workload, with the
+    // targets read from `cargo metadata` before anything is built.
+    #[test]
+    fn r704_a_split_suite_becomes_one_build_and_one_step_per_test_target_longest_first() {
+        use crate::load::fake::FakeFs;
+        let fs = FakeFs {
+            metadata: Some(P2P_META.to_string()),
+            ..FakeFs::default()
+        };
+        let pol = p2p();
+        let t = crate::targets::suite_targets(&fs, Path::new("/r"), &pol, "core-split");
+        assert!(t.notes.is_empty(), "{:?}", t.notes);
+        // the figures of an earlier run of the same command, in release
+        let mut h = tasks_timing::MemHistory::new();
+        for (target, secs) in crate::timing::fixture::T4254 {
+            let recipe = "cargo test pkg=p2pcore feat=dev-tools profile=release flags=no-fail-fast";
+            crate::timing::fixture::seed(&mut h, recipe, Some(target), "nixos", *secs, 5);
+        }
+        let m = vec!["nixos".to_string()];
+        let opts = ExpandOptions {
+            quick: false,
+            timing: Some(Timing {
+                history: &h,
+                machines: &m,
+            }),
+        };
+        let e = expand(&pol, "core-split", &t.executables, &opts).unwrap();
+        for s in &e.plan.steps {
+            println!(
+                "{:<22} after {:<14} long={:<5} isolate={:<5} {}",
+                s.name,
+                s.after.join(","),
+                s.hints.long,
+                s.hints.isolate,
+                s.argv.join(" ")
+            );
+        }
+        let n = names(&e);
+        assert_eq!(n.first(), Some(&"tests.build"));
+        assert_eq!(n.len(), 1 + 7);
+        // `calls` is hinted long, so it leads although link (57 s) has the longer figure; the
+        // targets with no figure count as typical (19.84 s) and go between link and devices
+        assert_eq!(
+            &n[1..],
+            [
+                "tests.test-calls",
+                "tests.test-link",
+                "tests.lib-p2pcore",
+                "tests.test-chat_shards",
+                "tests.test-vault",
+                "tests.test-gcall",
+                "tests.test-devices"
+            ]
+        );
+        // no step builds: every test step is `--test X` and waits for the one build
+        for s in e.plan.steps.iter().filter(|s| s.name != "tests.build") {
+            assert_eq!(s.after, ["tests.build"]);
+            assert!(!s.argv.contains(&"--no-run".to_string()), "{:?}", s.argv);
+        }
+        assert!(e.hints("tests.test-link").unwrap().isolate);
+    }
+
+    // R-704
+    #[test]
+    fn r704_a_step_whose_targets_cannot_be_read_stays_whole_with_a_note() {
+        use crate::load::fake::FakeFs;
+        let fs = FakeFs::default();
+        let t = crate::targets::suite_targets(&fs, Path::new("/r"), &p2p(), "core-split");
+        assert!(t.executables.is_empty());
+        assert!(
+            t.notes
+                .iter()
+                .any(|n| n.contains("\"tests\"") && n.contains("stays whole")),
+            "{:?}",
+            t.notes
+        );
+        let e = expand(
+            &p2p(),
+            "core-split",
+            &t.executables,
+            &ExpandOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(names(&e), ["tests"]);
+        // a suite without split steps never runs cargo metadata
+        let t = crate::targets::suite_targets(&fs, Path::new("/r"), &p2p(), "core-tests");
+        assert_eq!(t, crate::targets::SuiteTargets::default());
     }
 }

@@ -85,6 +85,12 @@ pub fn show(
             if n.isolate {
                 flags.push("isolate (runs alone)");
             }
+            if n.light {
+                flags.push("light");
+            }
+            if n.retry_alone {
+                flags.push("retry alone");
+            }
             let note = n.note.as_deref().unwrap_or("");
             let _ = writeln!(out, "  target {label}: {} {note}", flags.join(", "));
         }

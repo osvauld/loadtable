@@ -96,6 +96,12 @@ pub struct StepDef {
     /// at submit time.
     #[serde(default)]
     pub priority: Option<tasks_core::Priority>,
+    /// Uses little CPU but runs long: ignores the CPU pressure gate, takes no run slot.
+    #[serde(default)]
+    pub light: bool,
+    /// Run the failed tests of this step once more, alone, when it fails under load.
+    #[serde(default)]
+    pub retry_alone: bool,
 }
 
 /// Notes about one test target.
@@ -108,6 +114,13 @@ pub struct TargetNote {
     /// Must run alone (e.g. it binds fixed network ports).
     #[serde(default)]
     pub isolate: bool,
+    /// Uses little CPU but runs long (timers, network): ignores the CPU pressure gate and takes
+    /// no run slot. Not with `isolate`.
+    #[serde(default)]
+    pub light: bool,
+    /// When it fails under load, run the failed tests once more, alone.
+    #[serde(default)]
+    pub retry_alone: bool,
     /// Free text.
     #[serde(default)]
     pub note: Option<String>,

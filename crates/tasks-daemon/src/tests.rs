@@ -790,6 +790,7 @@ fn suites_expand_from_the_repo_policy_and_unknown_ones_are_refused() {
         env: vec![],
         placement: Placement::Here,
         quick: false,
+        executables: Default::default(),
         broad_test: false,
         priority: Default::default(),
         priority_reason: None,
@@ -1050,6 +1051,9 @@ fn the_socket_serves_requests_refuses_bad_ones_and_survives_a_closed_client() {
         priority: tasks_core::Priority::Normal,
         priority_reason: None,
         fetch: Vec::new(),
+        isolate: false,
+        light: false,
+        retry_alone: false,
     };
     {
         let mut s = UnixStream::connect(&sock).unwrap();
@@ -1098,6 +1102,9 @@ fn startup_reconciles_the_ledger_and_honours_the_persisted_execution_intent() {
             priority: tasks_core::Priority::Normal,
             priority_reason: None,
             fetch: Vec::new(),
+            isolate: false,
+            light: false,
+            retry_alone: false,
         };
         let id = store.submit(&spec).unwrap();
         store
@@ -1223,6 +1230,9 @@ impl Store for Flaky {
     }
     fn set_figures(&self, id: JobId, figures: &tasks_core::JobFigures) -> tasks_ledger::Result<()> {
         self.inner.set_figures(id, figures)
+    }
+    fn set_summary(&self, id: JobId, summary: &str) -> tasks_ledger::Result<()> {
+        self.inner.set_summary(id, summary)
     }
     fn find_recent_spec(
         &self,

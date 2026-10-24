@@ -74,6 +74,8 @@ pub(crate) struct FakeProcs {
     pub(crate) signals: Mutex<Vec<Signal>>,
     /// The `cgroup.procs` file the last spawn was told to join.
     pub(crate) joined: Mutex<Option<PathBuf>>,
+    /// The niceness the last spawn was asked to add.
+    pub(crate) niced: Mutex<i32>,
     state: Mutex<FakeState>,
 }
 
@@ -102,6 +104,7 @@ impl FakeProcs {
             strays_ignore_term: false,
             signals: Mutex::new(Vec::new()),
             joined: Mutex::new(None),
+            niced: Mutex::new(0),
             state: Mutex::new(FakeState::default()),
         }
     }
@@ -116,6 +119,7 @@ impl Processes for FakeProcs {
         let mut st = self.state.lock().unwrap();
         st.log = Some(cmd.log_path.clone());
         *self.joined.lock().unwrap() = cmd.cgroup_procs.clone();
+        *self.niced.lock().unwrap() = cmd.nice;
         st.strays = self.strays;
         drop(st);
         std::fs::File::create(&cmd.log_path).unwrap();

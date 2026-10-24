@@ -41,8 +41,9 @@ pub use service::{render_launchd_plist, render_systemd_unit};
 pub use slots::{FlockSlots, SlotGuard, slot_lock_path};
 pub use traits::{Disk, Memory, PowerSource, Pressure, Processes, Service, SleepGuard, SlotLocks};
 pub use types::{
-    Child, GroupId, HostRates, InstallPlan, Level, MemorySnapshot, PLACE_SCRIPT, PressureSnapshot,
-    PressureThresholds, ServiceStatus, ServiceUnit, Signal, SpawnSpec, Usage, place_in_cgroup,
+    Child, CpuShare, GroupId, HostRates, InstallPlan, Level, MemorySnapshot, PLACE_SCRIPT,
+    PressureSnapshot, PressureThresholds, ServiceStatus, ServiceUnit, Signal, SpawnSpec, Usage,
+    place_in_cgroup,
 };
 
 #[cfg(target_os = "linux")]

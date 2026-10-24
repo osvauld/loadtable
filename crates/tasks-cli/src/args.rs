@@ -156,6 +156,14 @@ pub struct RunArgs {
     /// root; repeatable). A job that ran here already has it.
     #[arg(long, value_name = "REL")]
     pub fetch: Vec<String>,
+    /// The job uses little CPU but runs long (timers, network): it ignores the CPU pressure gate
+    /// and takes a place in the small light pool instead of a run slot.
+    #[arg(long)]
+    pub light: bool,
+    /// If this `cargo test` fails because the machine was busy, run the failed tests once more,
+    /// alone, and say whether they passed.
+    #[arg(long)]
+    pub retry_alone: bool,
     /// Submit and print the id; do not follow the log (`run` only).
     #[arg(long)]
     pub detach: bool,

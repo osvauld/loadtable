@@ -32,6 +32,9 @@ fn record(store: &MemoryStore, root: &Path) -> JobRecord {
         priority: tasks_core::Priority::Normal,
         priority_reason: None,
         fetch: Vec::new(),
+        isolate: false,
+        light: false,
+        retry_alone: false,
     };
     let id = store.submit(&spec).unwrap();
     store.get(id).unwrap().unwrap()

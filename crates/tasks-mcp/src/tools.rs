@@ -544,6 +544,9 @@ impl Tools {
                 .map(job_id)
                 .collect::<Result<_, _>>()?,
             fetch: a.fetch.unwrap_or_default(),
+            isolate: false,
+            light: false,
+            retry_alone: false,
         };
         spec.requirements.device = a.device.map(DeviceId);
         spec.validate()
@@ -704,6 +707,12 @@ impl Tools {
         let owner = self.owner(a.who.as_deref())?;
         let cwd = self.cwd(a.cwd.as_deref())?;
         let (priority, priority_reason) = class(a.priority.as_deref(), a.reason.as_deref())?;
+        // targets of split steps come from the checkout's cargo, read here (R-704)
+        let targets = tasks_policy::load(&tasks_policy::RealFs, &cwd)
+            .ok()
+            .map(|l| tasks_policy::suite_targets(&tasks_policy::RealFs, &cwd, &l.policy, &a.name));
+        let (executables, notes) =
+            targets.map_or_else(Default::default, |t| (t.executables, t.notes));
         let resp = self.call_daemon(&Request::SubmitSuite {
             name: a.name.clone(),
             owner: owner.as_str().to_string(),
@@ -711,11 +720,12 @@ impl Tools {
             env: Vec::new(),
             placement,
             quick: a.quick.unwrap_or(false),
+            executables,
             broad_test: a.broad_test.unwrap_or(false),
             priority,
             priority_reason,
         })?;
-        plan_result(resp, &format!("suite {}", a.name), "run_suite", Vec::new())
+        plan_result(resp, &format!("suite {}", a.name), "run_suite", notes)
     }
 
     // -- reading ------------------------------------------------------------------------

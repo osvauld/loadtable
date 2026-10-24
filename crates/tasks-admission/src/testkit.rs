@@ -33,6 +33,7 @@ pub fn thresholds() -> Thresholds {
         short_job_max_secs: 60.0,
         short_job_max_memory_bytes: GIB,
         short_job_lane_slots: 1,
+        light_slots: 2,
         aging_ms: 20 * 60_000,
     }
 }
@@ -80,6 +81,7 @@ pub fn input(free: u32, waiters: Vec<Waiter>) -> AdmissionInput {
             (SlotKind::Offload, state(free)),
         ]),
         short_lane: state(1),
+        light_lane: state(2),
         devices: BTreeMap::new(),
         pressure: r.pressure,
         available_memory: r.available_memory,
@@ -88,6 +90,7 @@ pub fn input(free: u32, waiters: Vec<Waiter>) -> AdmissionInput {
         thresholds: thresholds(),
         now_ms: 0,
         last_started: BTreeMap::new(),
+        running: Vec::new(),
         waiters,
     }
 }

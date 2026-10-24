@@ -45,6 +45,7 @@ pub mod platform;
 pub mod queue_estimate;
 mod queue_view;
 pub mod regex_lite;
+mod retry_alone;
 mod runjob;
 #[cfg(test)]
 mod sched_tests;

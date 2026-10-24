@@ -14,9 +14,12 @@
 //!   says so; an unconfirmed cancel on a lost peer is `Interrupted`.
 //! - The per-checkout lock is held only from the start of the sync to the end
 //!   of the job, and is released when the forward is dropped.
+//! - A job that only reads its checkout (`requirements.shared_checkout`) takes the lock shared
+//!   and skips the sync, but only when the tree it would sync is the one the remote copy holds
+//!   (R-703); otherwise it takes the lock exclusively, as every other job does.
 
 use crate::ids::{CheckoutId, IdError, PeerId, RemoteJobId, SubmitKey};
-use crate::locks::{Acquire, CheckoutLocks, LockOwner};
+use crate::locks::{Acquire, CheckoutLocks, LockMode, LockOwner};
 use crate::proto::{Body, JobEvent, Refusal, SubmitJob, Submitted, WireOutcome};
 use crate::sync::{SyncDriver, SyncError, SyncJob, SyncReport};
 use crate::transport::{Connection, EventStream, PeerError, StreamPoll, Transport};
@@ -203,6 +206,8 @@ pub struct Forward {
     locks: Arc<CheckoutLocks>,
     checkout: CheckoutId,
     owner: LockOwner,
+    /// How the lock is wanted; a shared request becomes exclusive when the tree differs.
+    mode: LockMode,
     state: ForwardState,
     conn: Option<Box<dyn Connection>>,
     stream: Option<Box<dyn EventStream>>,
@@ -232,13 +237,19 @@ impl Forward {
     ) -> Forward {
         let checkout = CheckoutId::derive(&job.origin_host, &job.root);
         let owner = LockOwner(job.local_id);
-        locks.enqueue(&checkout, owner);
+        let mode = if job.spec.requirements.shared_checkout {
+            LockMode::Shared
+        } else {
+            LockMode::Exclusive
+        };
+        locks.enqueue_as(&checkout, owner, mode);
         Forward {
             job,
             policy,
             locks,
             checkout,
             owner,
+            mode,
             state: ForwardState::WaitingCheckout { blocker: None },
             conn: None,
             stream: None,
@@ -364,7 +375,7 @@ impl Forward {
             let before = std::mem::discriminant(&self.state);
             match self.state.clone() {
                 ForwardState::Done(_) => return,
-                ForwardState::WaitingCheckout { .. } => self.step_wait(now),
+                ForwardState::WaitingCheckout { .. } => self.step_wait(now, io),
                 ForwardState::Syncing { attempt } => self.step_sync(now, attempt, io),
                 ForwardState::Submitting => self.step_submit(now, io),
                 ForwardState::Reattaching { .. }
@@ -405,7 +416,24 @@ impl Forward {
         });
     }
 
-    fn step_wait(&mut self, now: Duration) {
+    /// For a shared request that could be granted now: true when the working tree is the one
+    /// the remote copy holds, so no sync is needed. Anything unknown says no.
+    fn copy_is_current(&self, io: &ForwardIo<'_>) -> bool {
+        let Some(copy) = self.locks.copy_tree(&self.checkout) else {
+            return false;
+        };
+        let probe = io.sync.tree_of(&SyncJob {
+            root: &self.job.root,
+            checkout: &self.checkout,
+            origin_host: &self.job.origin_host,
+            peer: &self.job.peer,
+            local_job: self.job.local_id,
+            session: 0,
+        });
+        matches!(probe, Ok(now) if now == copy)
+    }
+
+    fn step_wait(&mut self, now: Duration, io: &ForwardIo<'_>) {
         if self.cancel_requested.is_some() {
             let why = self.cancel_reason.clone().unwrap_or_default();
             self.finish_unsubmitted(
@@ -414,7 +442,23 @@ impl Forward {
             );
             return;
         }
+        // The tree is compared only when the lock could be granted: until then the copy may
+        // still change under the holders ahead. Who holds the line keeps its place.
+        let mut skip_sync = false;
+        if self.mode == LockMode::Shared && self.locks.would_grant(&self.checkout, self.owner) {
+            if self.copy_is_current(io) {
+                skip_sync = true;
+            } else {
+                self.mode = LockMode::Exclusive;
+                self.locks.make_exclusive(&self.checkout, self.owner);
+            }
+        }
         match self.locks.try_acquire(&self.checkout, self.owner) {
+            Acquire::Granted if skip_sync && self.mode == LockMode::Shared => {
+                self.notes
+                    .push("checkout lock acquired (shared); the remote copy has this tree".into());
+                self.state = ForwardState::Submitting;
+            }
             Acquire::Granted => {
                 self.notes.push("checkout lock acquired".to_string());
                 self.state = ForwardState::Syncing { attempt: 1 };
@@ -507,6 +551,8 @@ impl Forward {
             Ok(rep) => {
                 self.busy_since = None;
                 self.notes.push(format!("synced: {}", rep.line()));
+                self.locks
+                    .set_copy_tree(&self.checkout, self.owner, rep.copy_tree());
                 self.sync_report = Some(rep);
                 self.state = ForwardState::Submitting;
             }
@@ -566,11 +612,15 @@ impl Forward {
                 return;
             }
         };
+        // the flag travels beside the spec (see SubmitJob), never in it
+        let mut wire_spec = self.job.spec.clone();
+        wire_spec.requirements.shared_checkout = false;
         let req = Body::Submit(SubmitJob {
             key: self.job.key.clone(),
             checkout: self.checkout.clone(),
             rel_cwd,
-            spec: self.job.spec.clone(),
+            spec: wire_spec,
+            shared_checkout: self.job.spec.requirements.shared_checkout,
         });
         let reply = match self.connect(io) {
             Ok(()) => match self.conn.as_mut() {

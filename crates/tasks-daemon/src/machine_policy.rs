@@ -86,6 +86,7 @@ const FIELDS: &[Field] = &[
         Ty::Uint(1, 4),
         "1",
     ),
+    f("slots.light", "TASKS_LIGHT_SLOTS", Ty::Uint(0, 16), "4"),
     f(
         "slots.short_lane",
         "TASKS_SHORT_LANE_SLOTS",
@@ -109,6 +110,24 @@ const FIELDS: &[Field] = &[
         "TASKS_QUEUE_AGING_MINS",
         Ty::OptUint(1, 10_080),
         "20",
+    ),
+    f(
+        "cpu.compile_weight",
+        "TASKS_CPU_COMPILE_WEIGHT",
+        Ty::Uint(1, 10_000),
+        "50",
+    ),
+    f(
+        "cpu.run_weight",
+        "TASKS_CPU_RUN_WEIGHT",
+        Ty::Uint(1, 10_000),
+        "200",
+    ),
+    f(
+        "cpu.compile_nice",
+        "TASKS_CPU_COMPILE_NICE",
+        Ty::Uint(0, 19),
+        "10",
     ),
     fm(
         "pressure.compile.max_cpu",
@@ -753,6 +772,22 @@ impl MachinePolicy {
         };
         u32::try_from(self.u(key)).unwrap_or(1)
     }
+    /// The CPU share of a job of this class (R-710, R-711): the cgroup `cpu.weight`, and the
+    /// niceness used where a weight cannot be set. Only builds are niced.
+    pub fn cpu_share(&self, class: tasks_core::CpuClass) -> tasks_platform::CpuShare {
+        let weight = |key: &str| u32::try_from(self.u(key)).ok();
+        match class {
+            tasks_core::CpuClass::Compile => tasks_platform::CpuShare {
+                weight: weight("cpu.compile_weight"),
+                nice: i32::try_from(self.u("cpu.compile_nice")).unwrap_or(10),
+            },
+            tasks_core::CpuClass::Run => tasks_platform::CpuShare {
+                weight: weight("cpu.run_weight"),
+                nice: 0,
+            },
+            tasks_core::CpuClass::Normal => tasks_platform::CpuShare::default(),
+        }
+    }
     /// Machine I/O pressure (percent, avg10) at or above which a pressure trip is recorded;
     /// `None` turns the trip off.
     pub fn trip_io_pct(&self) -> Option<f32> {
@@ -821,6 +856,7 @@ impl MachinePolicy {
             short_job_max_secs: self.fl("slots.short_job_max_secs"),
             short_job_max_memory_bytes: self.u("slots.short_job_max_memory_mib") * MIB,
             short_job_lane_slots: u32::try_from(self.u("slots.short_lane")).unwrap_or(0),
+            light_slots: u32::try_from(self.u("slots.light")).unwrap_or(0),
             aging_ms: self.ou("queue.aging_mins").map_or(0, |m| m * 60_000),
         }
     }
@@ -1157,6 +1193,31 @@ mod tests {
         assert_eq!(t.compile.max_cpu, None);
         assert_eq!(t.compile.max_io, None);
         assert_eq!(t.compile.max_memory, Level::Normal);
+    }
+
+    // R-710
+    #[test]
+    fn r710_the_cpu_share_by_class_comes_from_the_policy() {
+        use tasks_core::CpuClass;
+        let d = MachinePolicy::defaults();
+        let c = d.cpu_share(CpuClass::Compile);
+        assert_eq!((c.weight, c.nice), (Some(50), 10));
+        let r = d.cpu_share(CpuClass::Run);
+        assert_eq!((r.weight, r.nice), (Some(200), 0));
+        assert_eq!(
+            d.cpu_share(CpuClass::Normal),
+            tasks_platform::CpuShare::default()
+        );
+        let p = MachinePolicy::from_text(
+            Some("[cpu]\ncompile_weight = 10\nrun_weight = 900\ncompile_nice = 19\n"),
+            &no_env,
+        );
+        assert!(p.problems.is_empty(), "{:?}", p.problems);
+        assert_eq!(p.cpu_share(CpuClass::Compile).weight, Some(10));
+        assert_eq!(p.cpu_share(CpuClass::Compile).nice, 19);
+        assert_eq!(p.cpu_share(CpuClass::Run).weight, Some(900));
+        let bad = MachinePolicy::from_text(Some("[cpu]\nrun_weight = 0\n"), &no_env);
+        assert!(bad.problems.iter().any(|m| m.contains("cpu.run_weight")));
     }
 
     // R-286

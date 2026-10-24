@@ -131,6 +131,7 @@ struct FakeCgState {
     groups: BTreeMap<CgroupName, FakeGroup>,
     kills: Vec<CgroupName>,
     removed: Vec<CgroupName>,
+    weights: BTreeMap<CgroupName, u32>,
 }
 
 /// In-memory [`Cgroups`]: groups appear on `create`, hold the pids a test sets, report the
@@ -203,6 +204,11 @@ impl FakeCgroups {
             .unwrap_or_default()
     }
 
+    /// The `cpu.weight` last set on a cgroup.
+    pub fn cpu_weight(&self, name: CgroupName) -> Option<u32> {
+        self.state.lock().ok()?.weights.get(&name).copied()
+    }
+
     /// True while the cgroup exists.
     pub fn exists(&self, name: CgroupName) -> bool {
         self.state
@@ -242,6 +248,17 @@ impl Cgroups for FakeCgroups {
             "/fake/tasks.slice/{}/cgroup.procs",
             name.dir_name()
         )))
+    }
+    fn set_cpu_weight(&self, name: CgroupName, weight: u32) -> Result<bool, PlatformError> {
+        if !self.delegated {
+            return Ok(false);
+        }
+        self.state
+            .lock()
+            .map_err(poisoned)?
+            .weights
+            .insert(name, weight);
+        Ok(true)
     }
     fn pids(&self, name: CgroupName) -> Result<Vec<i32>, PlatformError> {
         Ok(self

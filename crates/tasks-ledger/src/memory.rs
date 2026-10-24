@@ -302,6 +302,13 @@ impl Store for MemoryStore {
         Ok(())
     }
 
+    fn set_summary(&self, id: JobId, summary: &str) -> Result<()> {
+        let mut s = self.lock()?;
+        s.job(id)?.summary = Some(summary.to_string());
+        s.changes += 1;
+        Ok(())
+    }
+
     fn set_priority(
         &self,
         id: JobId,

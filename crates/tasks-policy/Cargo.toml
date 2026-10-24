@@ -13,5 +13,6 @@ workspace = true
 tasks-core.workspace = true
 tasks-timing.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 toml.workspace = true
 thiserror.workspace = true

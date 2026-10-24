@@ -681,3 +681,77 @@ fn r315_a_worker_daemon_audits_the_snapshot_it_applied() {
     assert!(d["bytes"].as_u64().unwrap() > 0);
     assert_eq!(d["written"], 2);
 }
+
+// R-700, R-708: the real shape of the p2p workload. A plan's build runs on the peer first; its
+// test steps then run in the same remote copy at the same time, instead of one after another.
+#[test]
+fn r700_a_plans_test_steps_run_on_the_peer_together_once_its_build_is_done() {
+    use tasks_core::plan::{Plan, Step};
+    use tasks_core::{Owner, Requirements, StepHints};
+    let w = PeerWorld::new();
+    let (r, _link) = origin(&w, "[slots]\noffload = 3\n");
+    let step = |name: &str, after: &[&str], kind: Kind| Step {
+        name: name.into(),
+        argv: vec!["cargo".into(), "test".into()],
+        after: after.iter().map(|s| s.to_string()).collect(),
+        kind,
+        requirements: Requirements::default(),
+        hints: StepHints::default(),
+    };
+    let plan = Plan {
+        steps: vec![
+            step("build", &[], Kind::Compile),
+            step("messaging", &["build"], Kind::Test),
+            step("calls", &["build"], Kind::Test),
+        ],
+    };
+    let ctx = tasks_ledger::PlanContext {
+        owner: Owner::new("origin-owner").unwrap(),
+        cwd: w.root_a.clone(),
+        env: Vec::new(),
+        placement: Placement::Peer(nixos()),
+        broad_test_escape: false,
+        priority: tasks_core::Priority::Normal,
+        priority_reason: None,
+    };
+    r.ledger.submit_plan(&ctx, &plan).unwrap();
+
+    within("the build is on the peer", || {
+        r.tick();
+        w.runner.submitted().len() == 1
+    });
+    w.runner.finish(RemoteJobId(1), 0, vec![]);
+    within(
+        "both test steps are on the peer, neither synced again",
+        || {
+            r.tick();
+            w.runner.submitted().len() == 3
+        },
+    );
+    use tasks_peer::receiver::JobRunner;
+    for i in [2, 3] {
+        let v = w.runner.view(&w.origin, RemoteJobId(i)).unwrap();
+        assert!(
+            !v.phase.is_terminal(),
+            "step {i} is live together with the other"
+        );
+    }
+    let flags: Vec<bool> = w
+        .runner
+        .submitted()
+        .iter()
+        .map(|(_, s)| s.requirements.shared_checkout)
+        .collect();
+    assert_eq!(
+        flags,
+        [false, true, true],
+        "only the test steps are read-only"
+    );
+    for i in [2, 3] {
+        w.runner.finish(RemoteJobId(i), 0, vec![]);
+    }
+    within("the plan passed", || {
+        r.tick();
+        (1..=3).all(|i| r.phase(JobId(i)) == Phase::Passed)
+    });
+}

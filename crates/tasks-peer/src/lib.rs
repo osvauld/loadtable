@@ -23,7 +23,7 @@ pub use forward::{
     Forward, ForwardIo, ForwardJob, ForwardPolicy, ForwardResult, ForwardState, LogSink,
 };
 pub use ids::{CheckoutId, GitId, Hash, IdError, PeerId, RemoteJobId, SubmitKey};
-pub use locks::{Acquire, CheckoutLocks, LockOwner};
+pub use locks::{Acquire, CheckoutLocks, CopyTree, LockMode, LockOwner};
 pub use proto::{Body, JobEvent, Refusal};
 pub use receiver::{Allowlist, JobRunner, Receiver, StatusSource, SubmitPolicy};
 pub use transport::{Connection, EventStream, Handler, PeerError, StreamPoll, Transport};

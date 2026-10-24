@@ -125,6 +125,8 @@ impl Write for Pieces {
 #[derive(Default)]
 pub struct MemFs {
     pub files: BTreeMap<PathBuf, String>,
+    /// What `cargo metadata` prints here; `None` makes it fail.
+    pub metadata: Option<String>,
 }
 
 impl PolicyFs for MemFs {
@@ -136,6 +138,11 @@ impl PolicyFs for MemFs {
     }
     fn exists(&self, path: &Path) -> bool {
         self.files.contains_key(path)
+    }
+    fn cargo_metadata(&self, _cwd: &Path) -> io::Result<String> {
+        self.metadata
+            .clone()
+            .ok_or_else(|| io::Error::other("cargo metadata failed: no manifest"))
     }
 }
 

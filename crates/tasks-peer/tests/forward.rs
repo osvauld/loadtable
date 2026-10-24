@@ -705,3 +705,164 @@ fn a_busy_peer_is_waited_for_without_burning_sync_attempts_then_is_interrupted_n
     assert!(!r.nothing_submitted && r.reason.contains("busy"), "{r:?}");
     assert_eq!(r.phase, Phase::Interrupted);
 }
+
+/// Runs `f` to its first remote state and returns it ticked once more at `clock`.
+fn start(w: &World, f: &mut Forward, clock: &mut Duration, log: &mut Vec<u8>) {
+    *clock += secs(1);
+    w.tick(f, *clock, log);
+}
+
+/// A plan's build, run and finished: the remote copy now holds the working tree.
+fn built(w: &World, clock: &mut Duration) {
+    let mut build = w.forward(1, fast_policy());
+    let mut log = Vec::new();
+    start(w, &mut build, clock, &mut log);
+    assert!(matches!(build.state(), ForwardState::RemoteQueued { .. }));
+    w.runner.finish(R1, 0, vec![]);
+    w.run(&mut build, &mut log, clock, 5, |_, _| {});
+    assert!(build.is_done());
+}
+
+#[test]
+fn r700_two_test_steps_of_one_plan_run_in_the_remote_copy_together_without_a_sync() {
+    let w = World::new();
+    let mut clock = Duration::ZERO;
+    built(&w, &mut clock);
+    let mut a = w.forward_shared(2, fast_policy());
+    let mut b = w.forward_shared(3, fast_policy());
+    let (mut la, mut lb) = (Vec::new(), Vec::new());
+    start(&w, &mut a, &mut clock, &mut la);
+    start(&w, &mut b, &mut clock, &mut lb);
+    assert!(
+        matches!(a.state(), ForwardState::RemoteQueued { .. }),
+        "{:?}",
+        a.state()
+    );
+    assert!(
+        matches!(b.state(), ForwardState::RemoteQueued { .. }),
+        "{:?}",
+        b.state()
+    );
+    assert_eq!(
+        w.runner.submitted().len(),
+        3,
+        "both are on the peer at once"
+    );
+    assert_eq!(w.locks.holders(a.checkout()).len(), 2);
+    w.runner.finish(RemoteJobId(2), 0, vec![]);
+    w.runner.finish(RemoteJobId(3), 0, vec![]);
+    w.run(&mut a, &mut la, &mut clock, 5, |_, _| {});
+    w.run(&mut b, &mut lb, &mut clock, 5, |_, _| {});
+    for f in [&a, &b] {
+        let r = f.result().unwrap();
+        assert_eq!(r.phase, Phase::Passed);
+        assert!(r.sync.is_none(), "a shared step does not sync");
+    }
+    assert!(w.locks.holders(a.checkout()).is_empty());
+}
+
+#[test]
+fn r701_a_job_with_a_new_tree_waits_for_both_shared_steps_and_then_syncs() {
+    let w = World::new();
+    let mut clock = Duration::ZERO;
+    built(&w, &mut clock);
+    let mut a = w.forward_shared(2, fast_policy());
+    let mut b = w.forward_shared(3, fast_policy());
+    let (mut la, mut lb, mut ln) = (Vec::new(), Vec::new(), Vec::new());
+    start(&w, &mut a, &mut clock, &mut la);
+    start(&w, &mut b, &mut clock, &mut lb);
+    // the next plan's build: the working tree changed
+    write(&w.root, "src/main.rs", "fn main() { println!(); }\n");
+    let mut next = w.forward(4, fast_policy());
+    start(&w, &mut next, &mut clock, &mut ln);
+    assert!(
+        matches!(
+            next.state(),
+            ForwardState::WaitingCheckout { blocker: Some(_) }
+        ),
+        "{:?}",
+        next.state()
+    );
+    assert!(!next.ready_to_start());
+    w.runner.finish(RemoteJobId(2), 0, vec![]);
+    w.run(&mut a, &mut la, &mut clock, 5, |_, _| {});
+    start(&w, &mut next, &mut clock, &mut ln);
+    assert!(
+        matches!(next.state(), ForwardState::WaitingCheckout { .. }),
+        "one shared step is still running: {:?}",
+        next.state()
+    );
+    w.runner.finish(RemoteJobId(3), 0, vec![]);
+    w.run(&mut b, &mut lb, &mut clock, 5, |_, _| {});
+    assert!(next.ready_to_start());
+    start(&w, &mut next, &mut clock, &mut ln);
+    assert!(
+        matches!(next.state(), ForwardState::RemoteQueued { .. }),
+        "{:?}",
+        next.state()
+    );
+    w.runner.finish(RemoteJobId(4), 0, vec![]);
+    w.run(&mut next, &mut ln, &mut clock, 5, |_, _| {});
+    assert!(next.result().unwrap().sync.is_some());
+}
+
+#[test]
+fn r702_a_new_tree_job_queued_first_is_not_overtaken_by_a_later_shared_step() {
+    let w = World::new();
+    let mut clock = Duration::ZERO;
+    built(&w, &mut clock);
+    let mut a = w.forward_shared(2, fast_policy());
+    let (mut la, mut ln, mut lc) = (Vec::new(), Vec::new(), Vec::new());
+    start(&w, &mut a, &mut clock, &mut la);
+    write(&w.root, "src/main.rs", "fn main() { println!(); }\n");
+    let mut next = w.forward(4, fast_policy());
+    let mut late = w.forward_shared(5, fast_policy());
+    start(&w, &mut next, &mut clock, &mut ln);
+    start(&w, &mut late, &mut clock, &mut lc);
+    assert!(
+        matches!(late.state(), ForwardState::WaitingCheckout { .. }),
+        "the shared holder 2 is no reason to let 5 pass 4: {:?}",
+        late.state()
+    );
+    assert!(!late.ready_to_start());
+    w.runner.finish(RemoteJobId(2), 0, vec![]);
+    w.run(&mut a, &mut la, &mut clock, 5, |_, _| {});
+    assert!(next.ready_to_start() && !late.ready_to_start());
+    start(&w, &mut next, &mut clock, &mut ln);
+    start(&w, &mut late, &mut clock, &mut lc);
+    assert!(matches!(next.state(), ForwardState::RemoteQueued { .. }));
+    assert!(matches!(late.state(), ForwardState::WaitingCheckout { .. }));
+    w.runner.finish(RemoteJobId(3), 0, vec![]);
+    w.run(&mut next, &mut ln, &mut clock, 5, |_, _| {});
+    // 4 synced the changed tree, so 5 finds the copy current and shares it
+    assert!(late.ready_to_start());
+    start(&w, &mut late, &mut clock, &mut lc);
+    assert!(matches!(late.state(), ForwardState::RemoteQueued { .. }));
+    w.runner.finish(RemoteJobId(4), 0, vec![]);
+    w.run(&mut late, &mut lc, &mut clock, 5, |_, _| {});
+    assert!(late.result().unwrap().sync.is_none());
+}
+
+#[test]
+fn r703_a_shared_step_syncs_when_its_tree_is_not_the_copys_or_the_copy_is_unknown() {
+    let w = World::new();
+    // never built by this daemon: the copy is unknown, so the step syncs like any job
+    let mut first = w.forward_shared(1, fast_policy());
+    let mut log = Vec::new();
+    let mut clock = Duration::ZERO;
+    start(&w, &mut first, &mut clock, &mut log);
+    assert!(matches!(first.state(), ForwardState::RemoteQueued { .. }));
+    w.runner.finish(R1, 0, vec![]);
+    w.run(&mut first, &mut log, &mut clock, 5, |_, _| {});
+    assert!(first.result().unwrap().sync.is_some());
+
+    // the copy is now current; an edit makes the next shared step sync before it runs
+    write(&w.root, "src/main.rs", "fn main() { 1; }\n");
+    let mut second = w.forward_shared(2, fast_policy());
+    start(&w, &mut second, &mut clock, &mut log);
+    assert!(matches!(second.state(), ForwardState::RemoteQueued { .. }));
+    w.runner.finish(RemoteJobId(2), 0, vec![]);
+    w.run(&mut second, &mut log, &mut clock, 5, |_, _| {});
+    let rep = second.result().unwrap().sync.as_ref().unwrap();
+    assert!(!rep.already_there, "the edited tree was sent");
+}

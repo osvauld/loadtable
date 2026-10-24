@@ -42,6 +42,8 @@ pub enum Problem {
     BadSyncExtra(String),
     /// A step asks for `priority = "blocking"`, which only a submit with a reason can claim.
     BlockingInPolicy,
+    /// A target is both `light` and `isolate`.
+    LightAndIsolate(String),
 }
 
 impl Problem {
@@ -69,6 +71,9 @@ impl Problem {
             Problem::NoSteps => "add a `[[suites.NAME.steps]]` entry or delete the suite".into(),
             Problem::BlockingInPolicy => {
                 "use `priority = \"background\"` (or leave it out); claim blocking with `--priority blocking --reason TEXT` when submitting".into()
+            }
+            Problem::LightAndIsolate(_) => {
+                "keep one: `light` runs beside other jobs, `isolate` runs alone".into()
             }
             Problem::BadSyncExtra(_) => {
                 "list `[sync] extra` entries as relative paths like \"local.properties\" or \"config/*.json\"".into()
@@ -98,6 +103,7 @@ impl fmt::Display for Problem {
             Problem::NoSteps => write!(f, "suite has no steps"),
             Problem::BadSyncExtra(why) => write!(f, "bad [sync] extra entry: {why}"),
             Problem::BlockingInPolicy => write!(f, "priority \"blocking\" in the run policy"),
+            Problem::LightAndIsolate(k) => write!(f, "target {k:?} is both light and isolate"),
         }
     }
 }
