@@ -93,13 +93,38 @@ fn is_daemon_binary(exe: &str) -> bool {
         .is_some_and(|n| n.starts_with(SERVICE_NAME))
 }
 
+/// The `tasks2d` that sits next to `exe` and can run, if any (R-681). The CLI is built without
+/// the peer transport unless asked, so a service should prefer the daemon binary beside it.
+fn sibling_daemon(exe: &std::path::Path) -> Option<String> {
+    use std::os::unix::fs::PermissionsExt;
+    let candidate = exe.parent()?.join(SERVICE_NAME);
+    let meta = std::fs::metadata(&candidate).ok()?;
+    (meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        .then(|| candidate.display().to_string())
+}
+
+/// What `install` should warn about (R-681): a unit that runs the CLI's embedded daemon in a
+/// build without the peer transport can never reach a peer.
+fn install_warning(unit: &ServiceUnit, has_transport: bool) -> Option<String> {
+    let runs_cli = unit.argv.first().is_some_and(|e| !is_daemon_binary(e));
+    (runs_cli && !has_transport).then(|| {
+        "warning: this service cannot reach peers; install tasks2d with --features iroh \
+         and run `tasks2d install`"
+            .to_string()
+    })
+}
+
 /// The service unit for this executable and these directories. Only directories the user
 /// passed explicitly are baked in; the rest resolve from the service's own environment.
 ///
-/// The unit starts `tasks2d serve ...` when `exe` is the daemon binary and
-/// `tasks2 daemon serve ...` when it is the CLI, so the installed unit works whichever of the
-/// two ran `install`.
-pub fn service_unit(exe: &str, args: &ConfigArgs) -> ServiceUnit {
+/// The unit starts `tasks2d serve ...` when `exe` is the daemon binary or when the CLI has a
+/// `tasks2d` beside it (`sibling`), and `tasks2 daemon serve ...` otherwise, so the installed
+/// unit works whichever of the two ran `install`.
+pub fn service_unit(exe: &str, sibling: Option<&str>, args: &ConfigArgs) -> ServiceUnit {
+    let exe = match sibling {
+        Some(d) if !is_daemon_binary(exe) => d,
+        _ => exe,
+    };
     let mut argv = vec![exe.to_string()];
     if !is_daemon_binary(exe) {
         argv.push("daemon".to_string());
@@ -202,7 +227,11 @@ pub fn run(args: &[String]) -> Result<(), DaemonError> {
         Command::Install { args, dry_run } => {
             let exe = std::env::current_exe()
                 .map_err(|e| DaemonError::io(std::path::Path::new("current_exe"), e))?;
-            let unit = service_unit(&exe.display().to_string(), &args);
+            let sibling = sibling_daemon(&exe);
+            let unit = service_unit(&exe.display().to_string(), sibling.as_deref(), &args);
+            if let Some(w) = install_warning(&unit, cfg!(feature = "iroh")) {
+                eprintln!("tasks2d: {w}");
+            }
             let native = tasks_platform::native();
             let text = install_plan(&unit, if dry_run { None } else { Some(&native) })?;
             print!("{text}");
@@ -232,9 +261,72 @@ pub fn run(args: &[String]) -> Result<(), DaemonError> {
                     daemon.startup.interrupted.len()
                 );
             }
+            watch_termination(daemon.scheduler().clone());
             daemon.run()
         }
     }
+}
+
+/// What a termination signal does to a daemon (R-685).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OnSignal {
+    /// Nothing was received.
+    Keep,
+    /// Idle: leave the serve loop, clean up and exit.
+    Shutdown,
+    /// Jobs run: die as an unhandled signal would, leaving them to be marked interrupted by the
+    /// next daemon. A clean stop never abandons running jobs behind the daemon's back.
+    Die,
+}
+
+fn on_signal(pending: Option<i32>, running_jobs: usize) -> OnSignal {
+    match (pending, running_jobs) {
+        (None, _) => OnSignal::Keep,
+        (Some(_), 0) => OnSignal::Shutdown,
+        (Some(_), _) => OnSignal::Die,
+    }
+}
+
+/// Makes SIGTERM and SIGINT stop an idle daemon cleanly. Without this the CLI's embedded daemon
+/// inherited the CLI's flag-only handlers and ignored SIGTERM (R-685); `tasks2d` had no
+/// handler and died with its socket file left behind.
+fn watch_termination(sch: std::sync::Arc<crate::scheduler::Scheduler>) {
+    use signal_hook::consts::{SIGINT, SIGTERM};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let flags: Vec<(i32, std::sync::Arc<AtomicBool>)> = [SIGTERM, SIGINT]
+        .into_iter()
+        .filter_map(|sig| {
+            let f = std::sync::Arc::new(AtomicBool::new(false));
+            signal_hook::flag::register(sig, f.clone()).ok()?;
+            Some((sig, f))
+        })
+        .collect();
+    let _ = std::thread::Builder::new()
+        .name("signals".into())
+        .spawn(move || {
+            while !sch.is_shutdown() {
+                let pending = flags
+                    .iter()
+                    .find(|(_, f)| f.load(Ordering::SeqCst))
+                    .map(|(s, _)| *s);
+                match on_signal(pending, sch.running_count()) {
+                    OnSignal::Keep => {}
+                    OnSignal::Shutdown => {
+                        if sch.shutdown_if_idle() {
+                            return;
+                        }
+                        // a job started between the check and the request: look again
+                    }
+                    OnSignal::Die => {
+                        if let Some(sig) = pending {
+                            let _ = signal_hook::low_level::emulate_default_handler(sig);
+                        }
+                        return;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        });
 }
 
 /// `main` for the `tasks2d` binary.
@@ -286,6 +378,64 @@ mod tests {
     }
 
     #[test]
+    fn r685_a_signal_stops_an_idle_daemon_and_never_abandons_running_jobs() {
+        assert_eq!(on_signal(None, 0), OnSignal::Keep);
+        assert_eq!(on_signal(None, 3), OnSignal::Keep);
+        assert_eq!(on_signal(Some(15), 0), OnSignal::Shutdown);
+        assert_eq!(on_signal(Some(2), 0), OnSignal::Shutdown);
+        assert_eq!(on_signal(Some(15), 2), OnSignal::Die);
+    }
+
+    #[test]
+    fn r681_the_cli_installs_the_daemon_binary_beside_it() {
+        let args = ConfigArgs::default();
+        let beside = service_unit(
+            "/home/u/.local/bin/tasks2",
+            Some("/home/u/.local/bin/tasks2d"),
+            &args,
+        );
+        assert_eq!(beside.argv, ["/home/u/.local/bin/tasks2d", "serve"]);
+        // without one beside it the unit keeps the embedded daemon
+        let alone = service_unit("/home/u/.local/bin/tasks2", None, &args);
+        assert_eq!(alone.argv, ["/home/u/.local/bin/tasks2", "daemon", "serve"]);
+        // the daemon binary ignores any sibling
+        let d = service_unit("/a/tasks2d", Some("/b/tasks2d"), &args);
+        assert_eq!(d.argv, ["/a/tasks2d", "serve"]);
+    }
+
+    #[test]
+    fn r681_a_unit_that_cannot_reach_peers_is_warned_about() {
+        let args = ConfigArgs::default();
+        let cli = service_unit("/bin/tasks2", None, &args);
+        let d = service_unit("/bin/tasks2d", None, &args);
+        assert!(
+            install_warning(&cli, false)
+                .unwrap()
+                .contains("cannot reach peers")
+        );
+        assert!(install_warning(&cli, true).is_none());
+        // tasks2d without the transport warns at its own startup, not here
+        assert!(install_warning(&d, false).is_none());
+    }
+
+    #[test]
+    fn r681_the_sibling_must_exist_and_be_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("r681-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("tasks2");
+        assert_eq!(sibling_daemon(&exe), None);
+        let d = dir.join(SERVICE_NAME);
+        std::fs::write(&d, "x").unwrap();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(sibling_daemon(&exe), None);
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(sibling_daemon(&exe), Some(d.display().to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_unit_starts_the_daemon_whichever_binary_ran_install() {
         let args = ConfigArgs {
             state_dir: Some("/s".into()),
@@ -293,7 +443,7 @@ mod tests {
             ..ConfigArgs::default()
         };
         // the CLI binary: the daemon is its `daemon` subcommand
-        let cli = service_unit("/home/u/.local/bin/tasks2", &args);
+        let cli = service_unit("/home/u/.local/bin/tasks2", None, &args);
         assert_eq!(
             cli.argv,
             [
@@ -307,7 +457,7 @@ mod tests {
             ]
         );
         // the daemon binary takes `serve` itself
-        let d = service_unit("/usr/bin/tasks2d", &args);
+        let d = service_unit("/usr/bin/tasks2d", None, &args);
         assert_eq!(&d.argv[..2], ["/usr/bin/tasks2d", "serve"]);
         // the arguments of the unit parse as the daemon's own command line
         let after_daemon: Vec<String> = cli.argv[2..].to_vec();
@@ -334,7 +484,7 @@ mod tests {
             state_dir: Some("/var/lib/tasks2".into()),
             ..ConfigArgs::default()
         };
-        let unit = service_unit("/usr/local/bin/tasks2d", &args);
+        let unit = service_unit("/usr/local/bin/tasks2d", None, &args);
         assert_eq!(
             unit.argv,
             [

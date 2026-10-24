@@ -84,6 +84,9 @@ impl Service for Native {
     fn status(&self, name: &str) -> Result<ServiceStatus, PlatformError> {
         service::status(name)
     }
+    fn start(&self, name: &str) -> Result<(), PlatformError> {
+        service::start(name)
+    }
 }
 impl Disk for Native {
     fn free_bytes(&self, path: &Path) -> Result<u64, PlatformError> {
