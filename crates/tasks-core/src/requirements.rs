@@ -18,6 +18,11 @@ pub struct Requirements {
     pub device: Option<DeviceId>,
     /// Minimum total memory in bytes.
     pub min_memory_bytes: Option<u64>,
+    /// The job only reads the synced checkout it runs in (a test step that follows its plan's
+    /// build): jobs like it may run in the same remote copy at the same time (R-700). Set when a
+    /// plan is expanded into jobs, never by a submitter.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub shared_checkout: bool,
 }
 
 /// One requirement a machine fails to meet.
@@ -110,6 +115,7 @@ mod tests {
             tools: [Tool("cargo".into())].into(),
             device: Some(DeviceId("abc".into())),
             min_memory_bytes: Some(16 << 30),
+            ..Requirements::default()
         };
         assert_eq!(r.satisfied_by(&machine()), Ok(()));
     }
@@ -122,6 +128,7 @@ mod tests {
             tools: [Tool("cargo".into()), Tool("xcodebuild".into())].into(),
             device: Some(DeviceId("zzz".into())),
             min_memory_bytes: Some(32 << 30),
+            ..Requirements::default()
         };
         let u = r.satisfied_by(&machine()).unwrap_err();
         assert_eq!(

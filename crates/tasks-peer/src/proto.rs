@@ -351,6 +351,11 @@ pub struct SubmitJob {
     pub rel_cwd: String,
     /// The job. Its `cwd`, `placement` and `after` are rewritten by the receiver.
     pub spec: JobSpec,
+    /// The job only reads the synced copy, so the receiver does not queue it behind the other
+    /// jobs of the copy (R-700). Beside the spec, not in it, so a peer that does not know the
+    /// field ignores it instead of refusing the job.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared_checkout: bool,
 }
 
 /// The reply to a submission.

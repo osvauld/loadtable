@@ -160,6 +160,7 @@ impl Scheduler {
                 env,
                 placement,
                 quick,
+                executables,
                 broad_test,
                 priority,
                 priority_reason,
@@ -169,7 +170,7 @@ impl Scheduler {
                     .map_err(|e| {
                         ApiError::new(ErrorCode::Refused, format!("invalid suite: {e}"))
                     })?;
-                self.submit_suite(&name, ctx, quick)
+                self.submit_suite(&name, ctx, quick, &executables)
             }
             Request::List {
                 owner,
@@ -455,7 +456,13 @@ impl Scheduler {
         })
     }
 
-    fn submit_suite(&self, name: &str, ctx: PlanContext, quick: bool) -> Out {
+    fn submit_suite(
+        &self,
+        name: &str,
+        ctx: PlanContext,
+        quick: bool,
+        executables: &Executables,
+    ) -> Out {
         let cwd = ctx.cwd.clone();
         let loaded = tasks_policy::load(&RealFs, &cwd)
             .map_err(|e| ApiError::new(ErrorCode::Refused, e.to_string()))?;
@@ -468,7 +475,7 @@ impl Scheduler {
                 machines: &machines,
             }),
         };
-        let expansion = tasks_policy::expand(&loaded.policy, name, &Executables::new(), &opts)
+        let expansion = tasks_policy::expand(&loaded.policy, name, executables, &opts)
             .map_err(|e| ApiError::new(ErrorCode::Refused, e.to_string()))?;
         self.check_plan(&ctx, &expansion.plan)?;
         let done = retry_busy(&API_RETRY, &sleep, || {

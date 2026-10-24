@@ -38,6 +38,7 @@ fn submit(w: &World, key: &str, rel_cwd: &str) -> Result<Body, PeerError> {
         checkout: CheckoutId::derive("laptop", &w.root),
         rel_cwd: rel_cwd.into(),
         spec: w.spec(rel_cwd),
+        shared_checkout: false,
     }))
 }
 
@@ -148,6 +149,7 @@ fn r153_the_receiver_applies_its_own_policy() {
         checkout: CheckoutId::derive("laptop", &w.root),
         rel_cwd: String::new(),
         spec,
+        shared_checkout: false,
     }));
     assert!(
         matches!(r, Err(PeerError::Refused(Refusal::PolicyDenied { .. }))),
@@ -280,4 +282,51 @@ fn r622_metrics_are_served_for_the_requesters_own_jobs_only() {
         ask(id.0),
         Err(PeerError::Refused(Refusal::UnknownJob { .. }))
     ));
+}
+
+#[test]
+fn r708_the_shared_flag_reaches_the_job_only_from_the_field_beside_the_spec() {
+    let w = synced_world();
+    let send = |key: &str, in_spec: bool, field: bool| {
+        let mut spec = w.spec("");
+        spec.requirements.shared_checkout = in_spec;
+        conn(&w)
+            .request(Body::Submit(SubmitJob {
+                key: SubmitKey::new(key).unwrap(),
+                checkout: CheckoutId::derive("laptop", &w.root),
+                rel_cwd: String::new(),
+                spec,
+                shared_checkout: field,
+            }))
+            .unwrap();
+    };
+    send("laptop:20", false, true);
+    send("laptop:21", true, false);
+    let flags: Vec<(String, bool)> = w
+        .runner
+        .submitted()
+        .iter()
+        .map(|(k, s)| (k.as_str().to_string(), s.requirements.shared_checkout))
+        .collect();
+    assert!(
+        flags.contains(&("laptop:20".to_string(), true)),
+        "{flags:?}"
+    );
+    assert!(
+        flags.contains(&("laptop:21".to_string(), false)),
+        "a claim inside the spec is not believed: {flags:?}"
+    );
+    // an older sender omits the field and a newer one omits it when false: both read as false
+    let job = SubmitJob {
+        key: SubmitKey::new("laptop:22").unwrap(),
+        checkout: CheckoutId::derive("laptop", &w.root),
+        rel_cwd: String::new(),
+        spec: w.spec(""),
+        shared_checkout: false,
+    };
+    let mut json: serde_json::Value = serde_json::to_value(&job).unwrap();
+    assert!(json.get("shared_checkout").is_none());
+    json.as_object_mut().unwrap().remove("shared_checkout");
+    let back: SubmitJob = serde_json::from_value(json).unwrap();
+    assert!(!back.shared_checkout);
 }

@@ -1,10 +1,11 @@
 //! Test executables listed by `cargo test --no-run --message-format=json`.
 
 use crate::error::TimingError;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// What kind of cargo target a test executable belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ExeKind {
     /// Unit tests of a library.
     Lib,
@@ -19,7 +20,7 @@ pub enum ExeKind {
 }
 
 /// One test executable.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TestExe {
     /// Package name.
     pub package: String,
@@ -27,7 +28,8 @@ pub struct TestExe {
     pub name: String,
     /// Target kind.
     pub kind: ExeKind,
-    /// Path of the built executable.
+    /// Path of the built executable; empty when the target came from `cargo metadata`.
+    #[serde(default)]
     pub path: String,
 }
 

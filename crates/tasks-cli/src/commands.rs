@@ -1057,6 +1057,15 @@ fn suite_run(ctx: &mut Ctx<'_>, a: &SuiteRunArgs) -> Result<i32, CliError> {
     let placement = a.place.placement(None)?;
     let (priority, priority_reason) = a.class.resolve()?;
     let owner = resolve_owner(ctx, a.who.as_deref())?;
+    // The checkout and the toolchain are here, so the targets of split steps are read here. A
+    // policy that cannot be read is the daemon's to report, as before.
+    let targets = tasks_policy::load(ctx.policy_fs, &ctx.cwd)
+        .ok()
+        .map(|l| tasks_policy::suite_targets(ctx.policy_fs, &ctx.cwd, &l.policy, &a.name));
+    let (executables, notes) = targets.map_or_else(Default::default, |t| (t.executables, t.notes));
+    for n in &notes {
+        ctx.note(&format!("tasks: {n}"));
+    }
     let resp = ctx.client.call(&Request::SubmitSuite {
         name: a.name.clone(),
         owner: owner.as_str().to_string(),
@@ -1064,6 +1073,7 @@ fn suite_run(ctx: &mut Ctx<'_>, a: &SuiteRunArgs) -> Result<i32, CliError> {
         env: Vec::new(),
         placement,
         quick: a.quick,
+        executables,
         broad_test: a.broad_test,
         priority,
         priority_reason,

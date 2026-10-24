@@ -206,7 +206,12 @@ impl Scheduler {
         });
         let want = self.wanted_cache(&recipe);
         let shown = self.shown_for(&recipe, &info, &peers, want);
-        let checkout = matches!(rec.spec.kind, Kind::Compile | Kind::Test | Kind::Package)
+        // A peer's test step that only reads the synced copy (R-700) does not queue behind the
+        // other jobs of the copy: the origin's checkout lock already orders them against any
+        // job that syncs or builds, and which of the readers run together is the slots' call.
+        let reads_only = rec.origin.is_some() && rec.spec.requirements.shared_checkout;
+        let checkout = (matches!(rec.spec.kind, Kind::Compile | Kind::Test | Kind::Package)
+            && !reads_only)
             .then(|| checkout_key(&rec.spec.cwd));
         let (short_secs, peak_memory) = self.short_facts(&recipe);
         let facts = Arc::new(JobFacts {

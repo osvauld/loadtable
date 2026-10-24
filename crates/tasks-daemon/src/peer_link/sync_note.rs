@@ -75,6 +75,10 @@ impl SyncDriver for TimedSync<'_> {
         }
         Ok(rep)
     }
+
+    fn tree_of(&self, job: &SyncJob<'_>) -> Result<tasks_peer::locks::CopyTree, SyncError> {
+        self.inner.tree_of(job)
+    }
 }
 
 #[cfg(test)]

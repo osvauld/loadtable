@@ -15,6 +15,7 @@ pub mod model;
 pub mod show;
 pub mod submit_rules;
 pub mod suggest;
+pub mod targets;
 pub mod timing;
 pub mod validate;
 
@@ -27,6 +28,7 @@ pub use model::{
 };
 pub use show::show;
 pub use suggest::{Action, SuggestConfig, Suggestion, SuggestionKind, suggest};
+pub use targets::{SuiteTargets, cargo_test_targets, split_steps, suite_targets};
 pub use tasks_core::StepHints;
 pub use timing::{Candidates, Timing, candidate_key};
 pub use validate::{MAX_TIMEOUT_SECS, parse, validate};

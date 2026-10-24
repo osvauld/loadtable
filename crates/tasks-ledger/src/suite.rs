@@ -92,6 +92,10 @@ const CASES: &[Case] = &[
         r340_plan_priority,
     ),
     (
+        "r708_a_test_step_that_waits_for_others_is_marked_as_reading_the_checkout",
+        r708_shared_checkout,
+    ),
+    (
         "r342_a_finished_job_leaves_its_peak_memory_beside_its_timing_sample",
         r342_peak_memory,
     ),
@@ -1315,6 +1319,44 @@ fn r340_plan_priority(e: &Env) {
         assert_eq!(r.spec.priority, tasks_core::Priority::Blocking);
         assert_eq!(r.spec.priority_reason.as_deref(), Some("agent waiting"));
     }
+}
+
+// R-708: a test step that waits for other steps only reads what they built, so its job says it
+// may share the remote copy; a first step, a build and a plain submit do not.
+fn r708_shared_checkout(e: &Env) {
+    let s = &*e.store;
+    let mut build = step("build", &[]);
+    build.kind = Kind::Compile;
+    let mut first = step("first", &[]);
+    first.kind = Kind::Test;
+    let mut calls = step("calls", &["build"]);
+    calls.kind = Kind::Test;
+    let mut report = step("report", &["build"]);
+    report.kind = Kind::Run;
+    let plan = Plan {
+        steps: vec![build, first, calls, report],
+    };
+    let done = s.submit_plan(&ctx(), &plan).unwrap();
+    let shared = |name: &str| {
+        let id = done.jobs.iter().find(|(n, _)| n == name).unwrap().1;
+        s.get(id)
+            .unwrap()
+            .unwrap()
+            .spec
+            .requirements
+            .shared_checkout
+    };
+    assert!(shared("calls"));
+    assert!(!shared("build") && !shared("first") && !shared("report"));
+    let plain = s.submit(&spec("a", vec![])).unwrap();
+    assert!(
+        !s.get(plain)
+            .unwrap()
+            .unwrap()
+            .spec
+            .requirements
+            .shared_checkout
+    );
 }
 
 // R-342: a whole-job sample keeps the peak memory the job's figures ended with, newest first;

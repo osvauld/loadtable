@@ -6,6 +6,7 @@ use super::snapshot::{Snapshot, SnapshotError, SnapshotIo, SnapshotRequest};
 use super::transfer::{PackRequest, PackTransfer};
 use super::{NoObserver, OpenGate, SyncError, SyncEvent, SyncGate, SyncObserver, SyncPhase};
 use crate::ids::{CheckoutId, GitId, Hash, PeerId};
+use crate::locks::CopyTree;
 use crate::proto::{Body, MAX_CHUNK_BYTES, Refusal, SyncApply, SyncSummary};
 use crate::transport::{Connection, PeerError, Upload};
 use serde::{Deserialize, Serialize};
@@ -58,6 +59,17 @@ pub struct SyncReport {
 }
 
 impl SyncReport {
+    /// The key of the tree this sync left on the worker.
+    pub fn copy_tree(&self) -> CopyTree {
+        CopyTree::new(
+            &self.tree.to_string(),
+            self.extras_tree
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+        )
+    }
+
     /// `tree 1a2b3c4d5e6f on 9f8e7d6c5b4a (120 files, 3 differ from HEAD): 1234 bytes sent, ...`.
     pub fn line(&self) -> String {
         format!(
@@ -85,6 +97,14 @@ impl SyncReport {
 pub trait SyncDriver: Send + Sync {
     /// Makes the worker's copy of the checkout match its working tree now.
     fn push(&self, conn: &mut dyn Connection, job: &SyncJob<'_>) -> Result<SyncReport, SyncError>;
+
+    /// The tree the working tree has now, as the copy key a [`push`](Self::push) of it would
+    /// leave on the worker. Reads this machine only: nothing is sent. A driver that cannot say
+    /// returns an error, and the caller then syncs.
+    fn tree_of(&self, job: &SyncJob<'_>) -> Result<CopyTree, SyncError> {
+        let _ = job;
+        Err(SyncError::Unexpected("tree_of"))
+    }
 }
 
 /// The extras allowlist of a checkout, read from its repo run policy.
@@ -299,6 +319,31 @@ impl Write for ChunkSink<'_> {
 }
 
 impl SyncDriver for OriginSync {
+    fn tree_of(&self, job: &SyncJob<'_>) -> Result<CopyTree, SyncError> {
+        let patterns = self
+            .extras
+            .extras(job.root)
+            .map_err(SnapshotError::BadExtras)?;
+        let rules = ExtraRules::new(&patterns).map_err(SnapshotError::BadExtras)?;
+        let snap = {
+            let _g = self.gate.enter(SyncPhase::Snapshot);
+            self.snapshot.snapshot(&SnapshotRequest {
+                root: job.root,
+                checkout: job.checkout,
+                origin_host: job.origin_host,
+                limits: &self.limits,
+                extras: &rules,
+            })?
+        };
+        Ok(CopyTree::new(
+            &snap.tree.to_string(),
+            snap.extras_tree
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+        ))
+    }
+
     fn push(&self, conn: &mut dyn Connection, job: &SyncJob<'_>) -> Result<SyncReport, SyncError> {
         let patterns = self
             .extras

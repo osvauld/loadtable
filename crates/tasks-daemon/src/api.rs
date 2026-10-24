@@ -127,6 +127,11 @@ pub enum Request {
         /// Drop steps marked `skip_in_quick`.
         #[serde(default)]
         quick: bool,
+        /// The test targets of the suite's `split` steps by step name, read from `cargo
+        /// metadata` by the submitter, which has the checkout and the toolchain. A split step
+        /// without an entry stays whole (R-704).
+        #[serde(default)]
+        executables: tasks_policy::Executables,
         /// The submitter passed the broad-test escape for every step (R-191).
         #[serde(default)]
         broad_test: bool,
