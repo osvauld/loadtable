@@ -69,10 +69,34 @@ pub struct SelfAddr {
     pub direct_addrs: Vec<String>,
 }
 
+/// How reachable this machine is now: its addresses, and whether its relay connection is up.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SelfReach {
+    /// The relay this endpoint uses, if it has chosen one.
+    pub relay: Option<String>,
+    /// Whether the connection to that relay is up; `None` when the transport cannot say.
+    pub relay_connected: Option<bool>,
+    /// Why the relay connection is down, when it is and the transport knows.
+    pub relay_error: Option<String>,
+    /// Direct socket addresses.
+    pub direct_addrs: Vec<String>,
+}
+
 /// Where tickets and redemptions get this machine's reachability from.
 pub trait AddrSource: Send + Sync {
     /// The current addresses.
     fn current(&self) -> SelfAddr;
+    /// The addresses plus the state of the relay connection. The default knows only the
+    /// addresses.
+    fn reach(&self) -> SelfReach {
+        let a = self.current();
+        SelfReach {
+            relay: a.relay,
+            relay_connected: None,
+            relay_error: None,
+            direct_addrs: a.direct_addrs,
+        }
+    }
 }
 
 /// A fixed answer, for tests and for hosts without an endpoint.

@@ -298,9 +298,9 @@ impl Scheduler {
         lock(&self.alerts).reconcile(wanted, now_ms);
     }
 
-    /// A stale or offline peer alerts only after the grace period (R-222). A peer that is
-    /// configured while this build has no peer transport alerts at once: nothing will ever be
-    /// forwarded or accepted.
+    /// A stale or offline peer alerts only after the grace period (R-222). Paired peers while
+    /// this build has no peer transport alert at once: nothing will ever be forwarded or
+    /// accepted.
     fn peer_alerts(
         &self,
         policy: &MachinePolicy,
@@ -309,14 +309,22 @@ impl Scheduler {
         use crate::forwarder::LinkState;
         let links = self.forwarder.links();
         let mut out = Vec::new();
-        let paired_out = self.trust().map_or(0, |t| {
-            t.peers().iter().filter(|p| !p.roles_out.is_empty()).count()
+        // R-690: paired machines can neither reach this daemon nor be reached by it
+        let paired: Vec<String> = self.trust().map_or_else(Vec::new, |t| {
+            t.peers()
+                .into_iter()
+                .filter(|p| !p.revoked)
+                .map(|p| p.name)
+                .collect()
         });
-        if links.is_empty() && paired_out > 0 {
+        if !self.forwarder.has_transport() && !paired.is_empty() {
             out.push((
-                "peers-unavailable".to_string(),
+                "no-peer-transport".to_string(),
                 AlertLevel::Warn,
-                format!("{paired_out} peer(s) are paired but this daemon has no peer transport"),
+                format!(
+                    "this daemon was built without peer transport: paired peers {} cannot reach it or be reached; run tasks2d (built with --features iroh)",
+                    paired.join(", ")
+                ),
             ));
         }
         out.extend(self.grant_alerts());

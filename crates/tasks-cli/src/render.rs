@@ -735,7 +735,11 @@ pub fn status(s: &StatusSnapshot) -> String {
     if let Some(w) = &p.warning {
         let _ = writeln!(out, "warning: {w}");
     }
-    peers_section(&mut out, &s.peers);
+    // an older daemon sends no endpoint
+    if let Some(e) = &s.endpoint {
+        let _ = writeln!(out, "{}", e.line());
+    }
+    peers_section(&mut out, &s.peers, s.daemon.now_ms, &local_offset);
     for a in &s.alerts {
         let _ = writeln!(out, "alert [{}] {}", a.level, a.message);
     }
@@ -848,8 +852,33 @@ fn swap_text(
     Some(s)
 }
 
+/// Seconds east of UTC of this machine's zone at `ms`.
+fn local_offset(ms: i64) -> i32 {
+    tasks_platform::local_offset_secs(ms.div_euclid(1000))
+}
+
+/// `11:03`, or `2026-10-23 11:03` when `ms` is not on the same local day as `now_ms` (R-695).
+pub(crate) fn clock_text(ms: i64, now_ms: i64, offset: &dyn Fn(i64) -> i32) -> String {
+    let local = |t: i64| t.div_euclid(1000) + i64::from(offset(t));
+    let (then, now) = (local(ms), local(now_ms));
+    let day = |l: i64| l.div_euclid(86_400);
+    let sod = then.rem_euclid(86_400);
+    let hm = format!("{:02}:{:02}", sod / 3600, sod % 3600 / 60);
+    if day(then) == day(now) {
+        hm
+    } else {
+        let (y, m, d) = tasks_daemon::logs::civil_from_days(day(then));
+        format!("{y:04}-{m:02}-{d:02} {hm}")
+    }
+}
+
 /// One block per peer: name, state, path, the two latencies, roles, and what it last reported.
-fn peers_section(out: &mut String, peers: &[tasks_daemon::api::PeerView]) {
+fn peers_section(
+    out: &mut String,
+    peers: &[tasks_daemon::api::PeerView],
+    now_ms: i64,
+    offset: &dyn Fn(i64) -> i32,
+) {
     if peers.is_empty() {
         return;
     }
@@ -891,6 +920,10 @@ fn peers_section(out: &mut String, peers: &[tasks_daemon::api::PeerView]) {
             );
         }
         if let Some(m) = &p.machine {
+            // an unreachable peer's figures are its last, not its present (R-695)
+            let old = p.figures_as_of_ms(now_ms).map_or(String::new(), |t| {
+                format!("last known (as of {}): ", clock_text(t, now_ms, offset))
+            });
             let slots = m
                 .slots
                 .iter()
@@ -900,7 +933,7 @@ fn peers_section(out: &mut String, peers: &[tasks_daemon::api::PeerView]) {
             let power = m.power.as_ref().map_or(String::new(), |p| format!("; {p}"));
             let _ = writeln!(
                 out,
-                "    {} cores, {}; slots {slots}; {} waiting, {} running{power}",
+                "    {old}{} cores, {}; slots {slots}; {} waiting, {} running{power}",
                 m.cores,
                 fmt_size(m.memory_bytes),
                 m.waiting,

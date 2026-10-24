@@ -1395,6 +1395,9 @@ fn status_text(s: &StatusSnapshot) -> String {
     if let Some(w) = &p.warning {
         t.push_str(&format!("warning: {w}\n"));
     }
+    if let Some(e) = &s.endpoint {
+        t.push_str(&format!("{}\n", e.line()));
+    }
     for a in &s.alerts {
         t.push_str(&format!("alert [{}] {}\n", a.level, a.message));
     }
@@ -1447,8 +1450,13 @@ fn status_text(s: &StatusSnapshot) -> String {
                 .cpu_busy_pct
                 .map_or(String::new(), |c| format!(", cpu busy {c}%"));
             let power = m.power.as_ref().map_or(String::new(), |p| format!(", {p}"));
+            // an unreachable peer's figures are its last, not its present (R-695)
+            let old = match (p.figures_as_of_ms(s.daemon.now_ms), p.last_seen_ago_secs) {
+                (Some(_), Some(ago)) => format!("last known (last seen {} ago): ", dur(ago as f64)),
+                _ => String::new(),
+            };
             t.push_str(&format!(
-                "  {} cores, slots {slots}, {} waiting, {} running{busy}{swap}{power}\n",
+                "  {old}{} cores, slots {slots}, {} waiting, {} running{busy}{swap}{power}\n",
                 m.cores, m.waiting, m.running
             ));
         }

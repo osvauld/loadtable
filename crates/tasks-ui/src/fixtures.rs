@@ -200,6 +200,7 @@ pub fn idle() -> Dashboard {
             transfer: None,
             trips: vec![],
             power: None,
+            endpoint: None,
         },
         jobs,
         jobs_truncated: false,

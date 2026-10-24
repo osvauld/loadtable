@@ -413,6 +413,11 @@ impl Scheduler {
             transfer: self.transfer_view(),
             trips: self.trip_views(crate::attrib::STATUS_TRIPS),
             power: Some(self.power_view()),
+            endpoint: if self.forwarder.has_transport() {
+                self.trust().and_then(|t| t.endpoint())
+            } else {
+                Some(crate::trust_control::EndpointView::none())
+            },
         }
     }
 

@@ -477,3 +477,90 @@ fn r261_a_revoked_peer_goes_inactive_in_the_forwarder_and_shows_why() {
     assert!(link.link_quality().is_empty());
     let _: &dyn TrustControl = &NodeTrust::new(ln, None, Arc::new(SelfAddr::default()));
 }
+
+// R-694
+#[test]
+fn r694_a_live_link_refreshes_the_saved_addresses_of_the_peer_at_most_every_ten_minutes() {
+    use tasks_peer::transport::DialHints;
+    use tasks_peer::trust::AddressBook;
+    let w = PeerWorld::new();
+    let net = w.net.clone();
+    let clock: Arc<dyn tasks_ledger::Clock> = Arc::new(SystemClock);
+    let (wn, wid) = node("nixos", clock.clone());
+    let (ln, lid) = node("kurukkan", clock);
+    let worker = Rig::new();
+    let receiver =
+        crate::peer_link::serve::build_receiver(&worker.sch, worker.dir.path().join("peer-store"));
+    net.serve(
+        &wid,
+        Arc::new(TrustedHandler::new(wn.clone(), receiver)) as Arc<dyn Handler>,
+    );
+    // paired with the addresses of the day the ticket was made
+    let stale = SelfAddr {
+        relay: Some("https://old-relay/".into()),
+        direct_addrs: vec!["192.168.1.4:1".into()],
+    };
+    let t = wn
+        .invite(&[tasks_peer::trust::Role::Submit], false, None, &stale)
+        .unwrap();
+    ln.accept(
+        &t.to_text().unwrap(),
+        &TrustedTransport::new(net.transport(&lid), ln.clone()),
+        &SelfAddr::default(),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    assert_eq!(ln.hints(&wid).unwrap().direct_addrs, ["192.168.1.4:1"]);
+
+    let mut opts = w.options();
+    opts.peers.clear();
+    opts.source = Some(Arc::new(NodePeers(ln.clone())));
+    opts.addr_learner = Some(Arc::new(NodePeers(ln.clone())));
+    let link = PeerLink::new(TrustedTransport::new(net.transport(&lid), ln.clone()), opts);
+    let hints = |relay: &str, addr: &str| DialHints {
+        relay: Some(relay.to_string()),
+        direct_addrs: vec![addr.to_string()],
+    };
+
+    // the first answer replaces what pairing saved
+    net.set_remote_hints(Some(hints("https://new-relay/", "192.168.1.25:7")));
+    link.probe_all();
+    assert_eq!(
+        ln.hints(&wid).unwrap(),
+        hints("https://new-relay/", "192.168.1.25:7")
+    );
+
+    // a change inside ten minutes waits
+    net.set_remote_hints(Some(hints("https://newer-relay/", "192.168.1.26:8")));
+    link.advance_clock(Duration::from_secs(60));
+    link.probe_all();
+    assert_eq!(
+        ln.hints(&wid).unwrap().relay.as_deref(),
+        Some("https://new-relay/")
+    );
+
+    // after ten minutes it is taken
+    link.advance_clock(Duration::from_secs(600));
+    link.probe_all();
+    assert_eq!(
+        ln.hints(&wid).unwrap(),
+        hints("https://newer-relay/", "192.168.1.26:8")
+    );
+
+    // a connection that shows only the relay keeps the saved direct addresses
+    net.set_remote_hints(Some(DialHints {
+        relay: Some("https://third-relay/".into()),
+        direct_addrs: vec![],
+    }));
+    link.advance_clock(Duration::from_secs(700));
+    link.probe_all();
+    let h = ln.hints(&wid).unwrap();
+    assert_eq!(h.relay.as_deref(), Some("https://third-relay/"));
+    assert_eq!(h.direct_addrs, ["192.168.1.26:8"]);
+
+    // a transport that cannot tell changes nothing
+    net.set_remote_hints(None);
+    link.advance_clock(Duration::from_secs(700));
+    link.probe_all();
+    assert_eq!(ln.hints(&wid).unwrap(), h);
+}

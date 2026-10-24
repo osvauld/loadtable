@@ -193,7 +193,17 @@ pub fn run_cli(args: &[String], out: &mut dyn Write, err: &mut dyn Write, deps: 
         Command::Cache => return cache_report(cli.state_dir.as_deref(), deps.env, out, err),
         Command::Identity { action } => {
             let tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
-            return trust::identity(action, cli.state_dir.as_deref(), deps.env, tty, out, err);
+            // building the client starts nothing; `identity` calls it only if a daemon runs
+            let (client, _) = (deps.client_for)(&cli);
+            return trust::identity(
+                action,
+                cli.state_dir.as_deref(),
+                deps.env,
+                Some(client.as_ref()),
+                tty,
+                out,
+                err,
+            );
         }
         Command::Mcp { .. } if MCP_BUILT => return run_mcp(&cli, deps),
         Command::Ui { .. } if UI_BUILT => return run_ui(&cli, deps),

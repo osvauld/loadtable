@@ -6,6 +6,7 @@
 //! to standard output alone so a script can capture them.
 
 use crate::args::{IdentityCommand, PairCommand, PeersCommand};
+use crate::client::Client;
 use crate::commands::Ctx;
 use crate::error::{CliError, EXIT_FAILURE, EXIT_OK, EXIT_USAGE};
 use std::io::Write;
@@ -34,11 +35,26 @@ pub fn parse_ttl(text: &str) -> Result<u64, CliError> {
     n.checked_mul(unit).filter(|s| *s > 0).ok_or_else(bad)
 }
 
-/// `tasks2 identity show`. Returns the exit code.
+/// This machine's reachability from a daemon that is already running; `None` when none is (the
+/// command must not start one) or it is an older build.
+fn running_endpoint(
+    client: Option<&dyn Client>,
+    socket: &Path,
+) -> Option<tasks_daemon::trust_control::EndpointView> {
+    let client = client.filter(|_| socket.exists())?;
+    match client.call(&Request::Status) {
+        Ok(Response::Status(s)) => s.endpoint,
+        _ => None,
+    }
+}
+
+/// `tasks2 identity show`. Returns the exit code. `client` is asked for the endpoint line only
+/// when a daemon is already running.
 pub fn identity(
     action: &IdentityCommand,
     state_dir: Option<&Path>,
     env: &dyn Fn(&str) -> Option<String>,
+    client: Option<&dyn Client>,
     tty: bool,
     out: &mut dyn Write,
     err: &mut dyn Write,
@@ -78,11 +94,13 @@ pub fn identity(
             return EXIT_FAILURE;
         }
     };
+    let endpoint = running_endpoint(client, &cfg.socket_path());
     if *json {
         let v = serde_json::json!({
             "name": cfg.machine,
             "did": info.did,
             "node_id": info.node_id,
+            "endpoint": endpoint,
         });
         let _ = writeln!(out, "{v}");
         return EXIT_OK;
@@ -90,6 +108,9 @@ pub fn identity(
     let _ = writeln!(out, "name     {}", cfg.machine);
     let _ = writeln!(out, "did      {}", info.did);
     let _ = writeln!(out, "node id  {}", info.node_id);
+    if let Some(e) = &endpoint {
+        let _ = writeln!(out, "{}", e.line());
+    }
     if *mnemonic {
         let ks = match Keystore::load(&Keystore::path_in(&cfg.state_dir)) {
             Ok(k) => k,
@@ -604,7 +625,7 @@ mod tests {
         let (cmd, sd) = id_args(d.path(), &[]);
         let (mut out, mut err) = (Vec::new(), Vec::new());
         assert_eq!(
-            identity(&cmd, sd.as_deref(), &env, false, &mut out, &mut err),
+            identity(&cmd, sd.as_deref(), &env, None, false, &mut out, &mut err),
             0
         );
         let out = String::from_utf8(out).unwrap();
@@ -616,7 +637,7 @@ mod tests {
         // JSON
         let (cmd, sd) = id_args(d.path(), &["--json"]);
         let mut out = Vec::new();
-        identity(&cmd, sd.as_deref(), &env, false, &mut out, &mut err);
+        identity(&cmd, sd.as_deref(), &env, None, false, &mut out, &mut err);
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(v["did"], did.as_str());
         assert_eq!(v["node_id"], node.as_str());
@@ -634,7 +655,7 @@ mod tests {
         // not a terminal: refused, nothing printed on stdout
         let (cmd, sd) = id_args(d.path(), &["--mnemonic"]);
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let code = identity(&cmd, sd.as_deref(), &env, false, &mut out, &mut err);
+        let code = identity(&cmd, sd.as_deref(), &env, None, false, &mut out, &mut err);
         assert_eq!(code, 2);
         assert!(out.is_empty());
         assert!(
@@ -645,7 +666,7 @@ mod tests {
         assert!(!String::from_utf8(err).unwrap().contains(&phrase));
         // a terminal: printed, with the warning on stderr
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let code = identity(&cmd, sd.as_deref(), &env, true, &mut out, &mut err);
+        let code = identity(&cmd, sd.as_deref(), &env, None, true, &mut out, &mut err);
         assert_eq!(code, 0);
         assert!(String::from_utf8(out).unwrap().contains(&phrase));
         let err = String::from_utf8(err).unwrap();
@@ -653,7 +674,15 @@ mod tests {
         // never as JSON, even on a terminal
         let (cmd, sd) = id_args(d.path(), &["--mnemonic", "--json"]);
         let mut out = Vec::new();
-        let code = identity(&cmd, sd.as_deref(), &env, true, &mut out, &mut Vec::new());
+        let code = identity(
+            &cmd,
+            sd.as_deref(),
+            &env,
+            None,
+            true,
+            &mut out,
+            &mut Vec::new(),
+        );
         assert_eq!(code, 2);
         assert!(out.is_empty());
         // and the flag is a refusal through the whole command line too (the test's stdout is
@@ -670,6 +699,77 @@ mod tests {
         assert!(client.requests().is_empty(), "identity needs no daemon");
     }
 
+    // R-693
+    #[test]
+    fn r693_identity_show_prints_the_endpoint_line_when_a_daemon_is_running_and_asks_nobody_else() {
+        use tasks_daemon::trust_control::EndpointView;
+        let (d, _) = state_with_identity();
+        let (cmd, sd) = id_args(d.path(), &[]);
+        let cfg = DaemonConfig::resolve(
+            &ConfigArgs {
+                state_dir: sd.clone(),
+                ..ConfigArgs::default()
+            },
+            &|k| env(k),
+        )
+        .unwrap();
+        let client = crate::fake::FakeClient::from_fn(|_| {
+            let mut s = crate::testutil::status_snapshot();
+            s.endpoint = Some(EndpointView {
+                transport: true,
+                relay: Some("https://r/".into()),
+                relay_connected: Some(true),
+                relay_error: None,
+                direct_addrs: vec!["192.168.1.25:1234".into()],
+            });
+            Ok(Response::Status(Box::new(s)))
+        });
+        // no daemon (no socket): the command asks nothing
+        let mut out = Vec::new();
+        identity(
+            &cmd,
+            sd.as_deref(),
+            &env,
+            Some(&client),
+            false,
+            &mut out,
+            &mut Vec::new(),
+        );
+        assert!(!String::from_utf8(out).unwrap().contains("this machine:"));
+        assert!(client.requests().is_empty());
+        // a socket: the line follows the node id
+        std::fs::write(cfg.socket_path(), b"").unwrap();
+        let mut out = Vec::new();
+        identity(
+            &cmd,
+            sd.as_deref(),
+            &env,
+            Some(&client),
+            false,
+            &mut out,
+            &mut Vec::new(),
+        );
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains("this machine: relay https://r/ (connected), direct 192.168.1.25:1234\n"),
+            "{out}"
+        );
+        // JSON carries it as data
+        let (cmd, sd) = id_args(d.path(), &["--json"]);
+        let mut out = Vec::new();
+        identity(
+            &cmd,
+            sd.as_deref(),
+            &env,
+            Some(&client),
+            false,
+            &mut out,
+            &mut Vec::new(),
+        );
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["endpoint"]["relay"], "https://r/");
+    }
+
     fn unreachable_reply() -> Result<Response, crate::client::ClientError> {
         Err(crate::client::ClientError::BadReply(
             "no daemon expected".into(),
@@ -682,7 +782,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let (cmd, sd) = id_args(d.path(), &[]);
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let code = identity(&cmd, sd.as_deref(), &env, false, &mut out, &mut err);
+        let code = identity(&cmd, sd.as_deref(), &env, None, false, &mut out, &mut err);
         assert_eq!(code, 1);
         assert!(out.is_empty());
         assert!(

@@ -704,6 +704,24 @@ impl App {
                         .font(theme::sans(LABEL + 1.0))
                         .color(p.faint),
                 );
+                // this machine's relay and addresses; a missing transport is worth the warning colour
+                if let Some(vm) = &self.vm
+                    && let Some(line) = &vm.endpoint_line
+                {
+                    let colour = if line.ends_with("no peer transport") {
+                        p.bad
+                    } else {
+                        p.faint
+                    };
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(line)
+                                .font(theme::sans(LABEL + 1.0))
+                                .color(colour),
+                        )
+                        .truncate(),
+                    );
+                }
             });
         });
     }

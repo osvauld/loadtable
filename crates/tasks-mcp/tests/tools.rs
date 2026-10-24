@@ -1079,6 +1079,7 @@ fn snapshot() -> tasks_daemon::api::StatusSnapshot {
         transfer: None,
         trips: vec![],
         power: None,
+        endpoint: None,
     }
 }
 
@@ -1458,6 +1459,53 @@ fn r358_status_reports_cpu_busy_swap_and_the_peers_path_and_reply_time() {
         "cpu busy 37%",
         "swap 1.0 GiB of 4.0 GiB used",
         "peer nixos: up (direct; path RTT 3 ms, reply time 87 ms)",
+    ] {
+        assert!(r.text.contains(want), "missing {want:?} in:\n{}", r.text);
+    }
+}
+
+// R-692, R-695
+#[test]
+fn r695_status_says_the_endpoint_and_marks_an_offline_peers_figures_as_old() {
+    use tasks_daemon::api::{PeerMachineView, PeerSlotView};
+    let d = fake(|_| {
+        let mut s = snapshot();
+        s.endpoint = Some(tasks_daemon::trust_control::EndpointView::none());
+        s.peers[0].state = "offline".into();
+        s.peers[0].last_seen_ago_secs = Some(2700);
+        s.peers[0].machine = Some(PeerMachineView {
+            cores: 10,
+            memory_bytes: 16 << 30,
+            slots: vec![PeerSlotView {
+                kind: "compile".into(),
+                total: 4,
+                used: 1,
+            }],
+            waiting: 0,
+            running: 0,
+            cpu_pct: None,
+            memory_pct: None,
+            memory_level: None,
+            io_pct: None,
+            pressure_summary: String::new(),
+            cpu_busy_pct: Some(48),
+            memory_available_bytes: None,
+            swap_total: None,
+            swap_used: None,
+            swap_in_per_s: None,
+            swap_out_per_s: None,
+            jobs: Vec::new(),
+            cores_in_use_milli: None,
+            power: None,
+        });
+        Ok(Response::Status(Box::new(s)))
+    });
+    let r = call(&tools_with(&d), "status", json!({}));
+    assert!(!r.is_error, "{}", r.text);
+    for want in [
+        "this machine: no peer transport",
+        "last known (last seen 45m",
+        "10 cores, slots compile 1/4",
     ] {
         assert!(r.text.contains(want), "missing {want:?} in:\n{}", r.text);
     }

@@ -218,19 +218,19 @@ pub fn run(args: &[String]) -> Result<(), DaemonError> {
                 opts.peer_runtime = Some(Box::new(crate::peer_link::iroh_host::IrohFactory));
             }
             #[cfg(not(feature = "iroh"))]
-            eprintln!(
-                "tasks2d: this build has no peer transport (build with --features iroh); \
-                 identity and pairing tickets work, but every job runs here"
+            crate::daemon_log::say(
+                "this build has no peer transport (build with --features iroh); \
+                 identity and pairing tickets work, but every job runs here",
             );
             let daemon = Daemon::start(opts)?;
             for note in &daemon.startup.notes {
-                eprintln!("tasks2d: startup: {note}");
+                crate::daemon_log::say(format_args!("startup: {note}"));
             }
             if !daemon.startup.interrupted.is_empty() {
-                eprintln!(
-                    "tasks2d: startup: {} job(s) left running by a previous daemon were marked interrupted and not re-run",
+                crate::daemon_log::say(format_args!(
+                    "startup: {} job(s) left running by a previous daemon were marked interrupted and not re-run",
                     daemon.startup.interrupted.len()
-                );
+                ));
             }
             daemon.run()
         }
@@ -243,7 +243,7 @@ pub fn main_from_env() -> ExitCode {
     match run(&args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("tasks2d: {e}");
+            crate::daemon_log::say(&e);
             ExitCode::FAILURE
         }
     }

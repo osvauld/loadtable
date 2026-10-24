@@ -280,6 +280,8 @@ pub struct ViewModel {
     pub draining: bool,
     /// True when the job list was cut.
     pub truncated: bool,
+    /// This machine's relay and addresses in one line, or that it has no peer transport (R-692).
+    pub endpoint_line: Option<String>,
 }
 
 /// How loud a [`Notice`] is.
@@ -1163,7 +1165,12 @@ fn peer_cpu_busy(peer: &PeerView) -> Option<f32> {
     })
 }
 
-fn peer_card(peer: &PeerView, rows: &[JobRow]) -> MachineCard {
+fn peer_card(
+    peer: &PeerView,
+    rows: &[JobRow],
+    now_ms: i64,
+    tz: &jiff::tz::TimeZone,
+) -> MachineCard {
     let online = match peer.state.as_str() {
         "up" => Online::Online,
         "stale" => Online::Stale,
@@ -1171,20 +1178,28 @@ fn peer_card(peer: &PeerView, rows: &[JobRow]) -> MachineCard {
         _ => Online::Unknown,
     };
     let seen = peer.last_seen_ago_secs.map(format::ago);
+    // the figures of an unreachable peer are its last ones: say when they were taken (R-697)
+    let as_of = peer
+        .figures_as_of_ms(now_ms)
+        .map(|t| format::clock_in(t, now_ms, tz));
     let status_text = match (online, &seen) {
         (Online::Online, _) => "online".to_string(),
         (Online::Stale, Some(s)) => format!("stale, last seen {s}"),
-        (Online::Offline, Some(s)) => format!("offline, last seen {s}"),
+        (Online::Offline, Some(s)) => match &as_of {
+            Some(t) => format!("offline, last seen {s} (figures as of {t})"),
+            None => format!("offline, last seen {s}"),
+        },
         (Online::Offline, None) => "offline, never seen".to_string(),
         (Online::Stale, None) => "stale".to_string(),
         (Online::Unknown, _) => "not probed yet".to_string(),
     };
     let greyed = matches!(online, Online::Offline | Online::Unknown);
-    let old = if matches!(online, Online::Online) {
-        ""
-    } else {
-        "last known: "
+    let old = match (&as_of, online) {
+        (Some(t), _) => format!("last known (as of {t}): "),
+        (None, Online::Online) => String::new(),
+        (None, _) => "last known: ".to_string(),
     };
+    let old = old.as_str();
     let here: Vec<&JobRow> = rows
         .iter()
         .filter(|r| r.machine == peer.name && r.section == Section::Running)
@@ -1303,6 +1318,11 @@ fn peer_card(peer: &PeerView, rows: &[JobRow]) -> MachineCard {
 /// Builds the view model of a refresh. `now_ms` is the daemon's clock when it gave one,
 /// else the caller's.
 pub fn build(d: &Dashboard, fallback_now_ms: i64) -> ViewModel {
+    build_in(d, fallback_now_ms, &jiff::tz::TimeZone::system())
+}
+
+/// [`build`] with the zone clock times are written in.
+pub fn build_in(d: &Dashboard, fallback_now_ms: i64, tz: &jiff::tz::TimeZone) -> ViewModel {
     let st = &d.status;
     let now_ms = if st.daemon.now_ms > 0 {
         st.daemon.now_ms
@@ -1336,7 +1356,7 @@ pub fn build(d: &Dashboard, fallback_now_ms: i64) -> ViewModel {
     recent_rows.truncate(RECENT_ROWS);
 
     let mut machines = vec![local_card(st, &jobs, &running, &rows)];
-    machines.extend(st.peers.iter().map(|p| peer_card(p, &rows)));
+    machines.extend(st.peers.iter().map(|p| peer_card(p, &rows, now_ms, tz)));
 
     ViewModel {
         local: st.daemon.machine.clone(),
@@ -1348,6 +1368,7 @@ pub fn build(d: &Dashboard, fallback_now_ms: i64) -> ViewModel {
         notices: notices(st),
         draining: st.daemon.draining,
         truncated: d.jobs_truncated,
+        endpoint_line: st.endpoint.as_ref().map(|e| e.line()),
     }
 }
 
@@ -1535,7 +1556,7 @@ mod tests {
             reply_ms: None,
             machine: None,
         };
-        let c = peer_card(&p, &[]);
+        let c = peer_card(&p, &[], 0, &jiff::tz::TimeZone::UTC);
         assert_eq!(c.online, Online::Unknown);
         assert!(c.greyed);
         assert!(c.cpu.contains(UNKNOWN) && !c.cpu.contains(" 0"));
@@ -2069,6 +2090,45 @@ mod tests {
         assert_eq!(
             air.away_note.as_deref(),
             Some("Offline · last seen 1 h ago · its jobs wait or move")
+        );
+    }
+
+    // R-697
+    #[test]
+    fn r697_an_offline_machine_row_says_when_its_figures_were_taken() {
+        let utc = jiff::tz::TimeZone::UTC;
+        let vm = build_in(&fixtures::three_machines(), 0, &utc);
+        let air = &vm.machines[2];
+        assert_eq!(
+            air.status_text,
+            "offline, last seen 1h10m ago (figures as of 11:12)"
+        );
+        assert!(
+            air.cpu.starts_with("last known (as of 11:12): "),
+            "{}",
+            air.cpu
+        );
+        // an answering machine's figures are plain
+        let nixos = &vm.machines[1];
+        assert_eq!(nixos.status_text, "online");
+        assert!(!nixos.cpu.contains("last known"), "{}", nixos.cpu);
+        // a machine that never answered has no figures to date
+        let mut d = fixtures::three_machines();
+        d.status.peers[1].machine = None;
+        d.status.peers[1].last_seen_ago_secs = None;
+        let vm = build_in(&d, 0, &utc);
+        assert_eq!(vm.machines[2].status_text, "offline, never seen");
+    }
+
+    // R-692
+    #[test]
+    fn r692_the_footer_line_comes_from_the_daemons_endpoint() {
+        let mut d = fixtures::idle();
+        assert_eq!(build(&d, 0).endpoint_line, None);
+        d.status.endpoint = Some(tasks_daemon::trust_control::EndpointView::none());
+        assert_eq!(
+            build(&d, 0).endpoint_line.as_deref(),
+            Some("this machine: no peer transport")
         );
     }
 
