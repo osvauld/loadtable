@@ -70,8 +70,9 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
 }
 
-/// `name = <long opaque value>` where the name says secret. Short values and values with
-/// spaces (prose, `password = changeme`) are not flagged.
+/// `name = <long opaque value>` where the name says secret. Short values, values with
+/// spaces (prose, `password = changeme`) and code (`let token = a.b.clone();`, a value
+/// followed by `(` or `;`) are not flagged.
 fn secret_assignment(line: &[u8]) -> bool {
     let lower = line.to_ascii_lowercase();
     let Some(eq) = lower.iter().position(|b| *b == b'=' || *b == b':') else {
@@ -93,14 +94,19 @@ fn secret_assignment(line: &[u8]) -> bool {
     if !key_hit {
         return false;
     }
-    let value: Vec<u8> = value
+    let mut rest = value
         .iter()
         .skip(1)
         .copied()
-        .skip_while(|b| b.is_ascii_whitespace() || *b == b'"' || *b == b'\'')
-        .take_while(|b| is_token_char(*b))
-        .collect();
-    value.len() >= 20
+        .skip_while(|b| b.is_ascii_whitespace() || *b == b'"' || *b == b'\'');
+    let mut len = 0;
+    let after = loop {
+        match rest.next() {
+            Some(b) if is_token_char(b) => len += 1,
+            other => break other,
+        }
+    };
+    len >= 20 && !matches!(after, Some(b'(' | b';'))
 }
 
 /// Looks for private key blocks, well-known token shapes and long secret-named assignments.
@@ -210,5 +216,20 @@ mod tests {
         ] {
             assert_eq!(secret_content(ok), None, "{}", String::from_utf8_lossy(ok));
         }
+    }
+
+    #[test]
+    fn r770_code_assigning_a_secret_named_variable_is_not_flagged() {
+        for ok in [
+            &b"    let call_token = added.call_from_node.clone().unwrap();\n"[..],
+            b"let secret = proto::new_device_secret_for_this_device();\n",
+            b"const api_key = SOME_LONG_CONSTANT_NAME_HERE;\n",
+        ] {
+            assert_eq!(secret_content(ok), None, "{}", String::from_utf8_lossy(ok));
+        }
+        assert_eq!(
+            secret_content(b"let token = \"abcdefghijklmnopqrstuvwx\";\n"),
+            Some("secret-named assignment with a long value")
+        );
     }
 }
