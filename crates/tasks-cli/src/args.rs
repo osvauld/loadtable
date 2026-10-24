@@ -220,6 +220,20 @@ pub struct LogsArgs {
     pub follow: bool,
 }
 
+/// Arguments of `wait`.
+#[derive(Args, Debug, Clone)]
+pub struct WaitArgs {
+    /// The jobs.
+    #[arg(required = true, value_name = "ID")]
+    pub ids: Vec<i64>,
+    /// Give up after this many seconds (exit 124); the jobs are left alone.
+    #[arg(long, value_name = "SECS")]
+    pub timeout: Option<u64>,
+    /// Log lines to print when a job ends (0 prints none).
+    #[arg(long, value_name = "N", default_value_t = 20)]
+    pub tail: usize,
+}
+
 /// Arguments of `log-search`.
 #[derive(Args, Debug, Clone)]
 pub struct LogSearchArgs {
@@ -477,6 +491,8 @@ pub enum Command {
     List(ListArgs),
     /// Read a job's log.
     Logs(LogsArgs),
+    /// Block until jobs end, then print their last log lines and results; exits like `run`.
+    Wait(WaitArgs),
     /// Search the retained logs of many jobs.
     LogSearch(LogSearchArgs),
     /// Show one job.

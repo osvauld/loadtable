@@ -2,10 +2,10 @@
 
 use crate::args::{
     Command, ExecutionCommand, ListArgs, LogSearchArgs, LogsArgs, PolicyCommand, RunArgs,
-    SplitArgs, StatsArgs, StepsArgs, SuiteCommand, SuiteRunArgs,
+    SplitArgs, StatsArgs, StepsArgs, SuiteCommand, SuiteRunArgs, WaitArgs,
 };
 use crate::client::{Client, ClientError, JSON_LIST_FRAME_CAP};
-use crate::error::{CliError, EXIT_FAILURE, EXIT_OK, EXIT_PIPE};
+use crate::error::{CliError, EXIT_FAILURE, EXIT_OK, EXIT_PIPE, EXIT_TIMED_OUT};
 use crate::render;
 use crate::runtime::{Pacer, Signals};
 use std::collections::BTreeMap;
@@ -30,6 +30,8 @@ const WAIT_NOTE_EVERY: u32 = 10;
 const RECONCILE_RECENT: usize = 30;
 /// A reconciled job must have been submitted no earlier than this long before the attempt.
 const RECONCILE_SLACK_MS: i64 = 5_000;
+/// Pause between the polls of `wait`.
+const WAIT_POLL: Duration = Duration::from_secs(1);
 /// Default tail length of `logs`.
 const DEFAULT_TAIL: usize = 100;
 /// Default number of finished jobs `list` shows.
@@ -90,6 +92,7 @@ fn dispatch(ctx: &mut Ctx<'_>, cmd: &Command) -> Result<i32, CliError> {
         Command::Enqueue(a) => run(ctx, a, false),
         Command::List(a) => list(ctx, a),
         Command::Logs(a) => logs(ctx, a),
+        Command::Wait(a) => wait(ctx, a),
         Command::LogSearch(a) => log_search(ctx, a),
         Command::Get { id, json } => get(ctx, *id, *json),
         Command::Metrics { id, json } => metrics(ctx, *id, *json),
@@ -595,6 +598,102 @@ fn metrics(ctx: &mut Ctx<'_>, id: i64, json: bool) -> Result<i32, CliError> {
         ctx.out.write_all(render::job_metrics(&m).as_bytes())?;
     }
     Ok(EXIT_OK)
+}
+
+/// `wait`: blocks until every job is over, sending only read-only requests (R-720). As each job
+/// ends it prints the job's last log lines and its result line; the exit code is the first
+/// failed job's, as `run` would give it (R-721). `--timeout` gives up with 124 and touches
+/// nothing (R-722). The time waited is counted in polls, so a slow daemon only lengthens it.
+fn wait(ctx: &mut Ctx<'_>, a: &WaitArgs) -> Result<i32, CliError> {
+    if a.tail > MAX_TAIL_LINES {
+        return Err(CliError::Usage(format!(
+            "--tail {} is out of range; use 0 to {MAX_TAIL_LINES}",
+            a.tail
+        )));
+    }
+    let mut left: Vec<JobId> = Vec::new();
+    for id in a.ids.iter().map(|i| JobId(*i)) {
+        if !left.contains(&id) {
+            left.push(id);
+        }
+    }
+    let several = left.len() > 1;
+    let mut code = EXIT_OK;
+    let mut waited = Duration::ZERO;
+    let mut last_wait: BTreeMap<i64, String> = BTreeMap::new();
+    loop {
+        if let Some(sig) = ctx.signals.pending() {
+            for id in &left {
+                ctx.note(&render::still_live(id.0));
+            }
+            return Ok(128 + sig);
+        }
+        let mut still = Vec::new();
+        for id in left {
+            let job = get_job(ctx, id)?;
+            if job.phase.is_terminal() {
+                wait_end(ctx, &job, a.tail, several)?;
+                if code == EXIT_OK {
+                    code = render::job_exit_code(&job);
+                }
+                continue;
+            }
+            if let Some(t) = job.remote_wait.as_ref().or(job.wait_text.as_ref())
+                && last_wait.get(&id.0) != Some(t)
+            {
+                ctx.note(&format!("tasks: job {} waiting: {t}", id.0));
+                last_wait.insert(id.0, t.clone());
+            }
+            still.push(id);
+        }
+        left = still;
+        if left.is_empty() {
+            return Ok(code);
+        }
+        if a.timeout.is_some_and(|t| waited >= Duration::from_secs(t)) {
+            for id in &left {
+                ctx.note(&format!(
+                    "tasks: gave up after waiting {}s; job {} is untouched",
+                    waited.as_secs(),
+                    id.0
+                ));
+                ctx.note(&render::still_live(id.0));
+            }
+            return Ok(EXIT_TIMED_OUT);
+        }
+        ctx.pacer.pause(WAIT_POLL);
+        waited += WAIT_POLL;
+    }
+}
+
+/// The end of one waited job: its last log lines (a job that never started has no log), then
+/// its result line.
+fn wait_end(ctx: &mut Ctx<'_>, job: &JobView, tail: usize, several: bool) -> Result<(), CliError> {
+    if tail > 0 {
+        let reply = ctx.client.call(&Request::Logs {
+            id: job.id,
+            view: LogView::Tail { lines: tail },
+        });
+        match reply {
+            Ok(Response::LogTail { lines, .. }) => {
+                if several && !lines.is_empty() {
+                    ctx.note(&format!("tasks: last lines of job {}", job.id.0));
+                }
+                for l in &lines {
+                    writeln!(ctx.out, "{l}")?;
+                }
+            }
+            Ok(other) => {
+                return Err(CliError::Failed(format!(
+                    "unexpected reply to a log read: {other:?}"
+                )));
+            }
+            Err(ClientError::Daemon(e)) if e.code == ErrorCode::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    writeln!(ctx.out, "{}", render::summary_line(job))?;
+    Ok(())
 }
 
 fn logs(ctx: &mut Ctx<'_>, a: &LogsArgs) -> Result<i32, CliError> {
