@@ -144,6 +144,11 @@ pub trait Connection: Send {
     fn link_info(&self) -> LinkInfo {
         LinkInfo::UNKNOWN
     }
+    /// Where the peer is reachable right now, as this live connection sees it: its relay and the
+    /// direct addresses of its open paths. `None` when the transport cannot tell.
+    fn remote_hints(&self) -> Option<DialHints> {
+        None
+    }
 }
 
 /// Opens links to peers.

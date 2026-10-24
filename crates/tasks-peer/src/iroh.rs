@@ -13,9 +13,9 @@ use crate::transport::{
     Closer, Connection, DialHints, EventStream, Handler, LinkInfo, PathKind, PeerError, StreamPoll,
     Transport, Upload,
 };
-use crate::trust::{AddrSource, AddressBook, SelfAddr};
+use crate::trust::{AddrSource, AddressBook, SelfAddr, SelfReach};
 use iroh::endpoint::{NetReportConfig, PortmapperConfig, RecvStream, SendStream, presets};
-use iroh::{Endpoint, EndpointAddr, PublicKey, RelayMode, RelayUrl, SecretKey};
+use iroh::{Endpoint, EndpointAddr, PublicKey, RelayMode, RelayUrl, SecretKey, Watcher};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver as StdReceiver, TryRecvError, channel};
@@ -132,6 +132,38 @@ impl AddrSource for EndpointAddrs {
             direct_addrs: a.ip_addrs().map(ToString::to_string).collect(),
         }
     }
+
+    fn reach(&self) -> SelfReach {
+        let a = self.current();
+        let mut watch = self.0.home_relay_status();
+        let homes = watch.get();
+        // the relay in the address is the one chosen; its status says whether it is up
+        let home = homes
+            .iter()
+            .find(|r| Some(r.url().to_string()) == a.relay)
+            .or_else(|| homes.first());
+        SelfReach {
+            relay: a.relay.or_else(|| home.map(|r| r.url().to_string())),
+            relay_connected: home.map(|r| r.is_connected()),
+            relay_error: home
+                .filter(|r| !r.is_connected())
+                .and_then(|r| r.last_error().map(ToString::to_string)),
+            direct_addrs: a.direct_addrs,
+        }
+    }
+}
+
+/// The relay and direct addresses a set of open paths reach the peer at.
+fn hints_of_paths(paths: &iroh::endpoint::PathList<'_>) -> DialHints {
+    let mut hints = DialHints::default();
+    for p in paths.iter() {
+        match p.remote_addr() {
+            iroh::TransportAddr::Relay(u) => hints.relay = Some(u.to_string()),
+            iroh::TransportAddr::Ip(sa) => hints.direct_addrs.push(sa.to_string()),
+            _ => {}
+        }
+    }
+    hints
 }
 
 async fn write_frame(send: &mut SendStream, body: &Body) -> Result<(), PeerError> {
@@ -246,6 +278,10 @@ impl Connection for IrohConnection {
             },
             None => LinkInfo::UNKNOWN,
         }
+    }
+
+    fn remote_hints(&self) -> Option<DialHints> {
+        Some(hints_of_paths(&self.conn.paths()))
     }
 
     fn open_upload(&mut self, head: Body) -> Result<Box<dyn Upload>, PeerError> {

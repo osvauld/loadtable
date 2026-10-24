@@ -84,16 +84,19 @@ impl PeerRuntimeFactory for IrohFactory {
     ) -> Result<PeerRuntime, DaemonError> {
         let rt = open_trust(cfg, ctx, Arc::new(SystemClock))?;
         if rt.created {
-            eprintln!("tasks2d: created this machine's identity {}", rt.node.did());
+            crate::daemon_log::say(format_args!(
+                "created this machine's identity {}",
+                rt.node.did()
+            ));
         }
         let secret = rt.identity.device_secret();
         let host = IrohHost::start(&secret, policy.peers())
             .map_err(|e| DaemonError::Peer(e.to_string()))?;
-        eprintln!(
-            "tasks2d: peer node id {} ({})",
+        crate::daemon_log::say(format_args!(
+            "peer node id {} ({})",
             host.node_id(),
             rt.node.did()
-        );
+        ));
         let book: Arc<dyn AddressBook> = rt.node.clone();
         let raw = IrohTransport::new(host.endpoint.clone(), host.rt.handle().clone(), book);
         let trusted = Arc::new(TrustedTransport::new(raw.clone(), rt.node.clone()));
@@ -116,6 +119,7 @@ impl PeerRuntimeFactory for IrohFactory {
         let prune = origin.clone();
         let mut opts = PeerLinkOptions::new(&cfg.machine, Vec::new(), origin);
         opts.source = Some(Arc::new(NodePeers(rt.node.clone())));
+        opts.addr_learner = Some(Arc::new(NodePeers(rt.node.clone())));
         // fetched outputs take a transfer slot and may be written through the placed links
         opts.gate = ctx.transfer_gate.clone();
         opts.fetch_links = crate::build_cache::BuildCache::fetch_policy().allowed_links;

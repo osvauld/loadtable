@@ -848,3 +848,95 @@ fn r294_a_real_daemon_audits_to_the_ledger_signs_checkpoints_and_keeps_rows_acro
     };
     assert_eq!(rows[0].actor, me.did);
 }
+
+// R-696
+#[test]
+fn r696_a_probe_that_fails_for_a_new_reason_writes_one_daemon_log_line() {
+    use std::sync::Mutex;
+    let w = PeerWorld::new();
+    let clock = Arc::new(ManualClock::new(1_000_000));
+    let sink = AuditSink::new(Arc::new(AuditLog::new(
+        Arc::new(MemoryAudit::new()),
+        clock.clone(),
+        "me",
+    )));
+    let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = lines.clone();
+    let observer = AuditLinks::new(sink, clock.clone())
+        .with_say(Box::new(move |l| seen.lock().unwrap().push(l.to_string())));
+    let mut opts = w.options();
+    opts.observer = Some(Arc::new(observer));
+    let link = PeerLink::new(w.net.transport(&w.origin), opts);
+    let count = || lines.lock().unwrap().len();
+
+    // healthy: nothing to say
+    for _ in 0..5 {
+        clock.advance(5_000);
+        link.probe_all();
+    }
+    assert_eq!(count(), 0);
+
+    // down: one line with the peer and the reason, however many probes fail the same way
+    w.net.set_down(&w.nixos, true);
+    for _ in 0..30 {
+        clock.advance(5_000);
+        link.probe_all();
+    }
+    assert_eq!(count(), 1);
+    let first = lines.lock().unwrap()[0].clone();
+    assert!(first.starts_with("peer nixos unreachable: "), "{first}");
+
+    // a different reason is one more line
+    w.net.set_down(&w.nixos, false);
+    w.net.drop_replies_of("status_request", true);
+    for _ in 0..10 {
+        clock.advance(5_000);
+        link.probe_all();
+    }
+    assert_eq!(count(), 2);
+    assert!(
+        lines.lock().unwrap()[1].contains("reply lost"),
+        "{:?}",
+        lines.lock().unwrap()
+    );
+}
+
+// R-696
+#[test]
+fn r696_a_peer_that_flips_between_reasons_cannot_flood_the_log() {
+    use std::sync::Mutex;
+    let w = PeerWorld::new();
+    let clock = Arc::new(ManualClock::new(1_000_000));
+    let sink = AuditSink::new(Arc::new(AuditLog::new(
+        Arc::new(MemoryAudit::new()),
+        clock.clone(),
+        "me",
+    )));
+    let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = lines.clone();
+    let observer = AuditLinks::new(sink, clock.clone())
+        .with_say(Box::new(move |l| seen.lock().unwrap().push(l.to_string())));
+    let mut opts = w.options();
+    opts.observer = Some(Arc::new(observer));
+    let link = PeerLink::new(w.net.transport(&w.origin), opts);
+    for i in 0..40 {
+        w.net.set_down(&w.nixos, i % 2 == 0);
+        w.net.drop_replies_of("status_request", i % 2 == 1);
+        clock.advance(1_000);
+        link.probe_all();
+    }
+    let n = lines.lock().unwrap().len();
+    assert!(n <= 6, "{n} lines for 40 changes inside a minute");
+    // the next line after the window says how many were left out
+    clock.advance(61_000);
+    w.net.set_down(&w.nixos, true);
+    w.net.drop_replies_of("status_request", false);
+    link.probe_all();
+    let all = lines.lock().unwrap();
+    assert!(all.len() > n);
+    assert!(
+        all.last().unwrap().contains("similar line(s) left out"),
+        "{:?}",
+        all.last()
+    );
+}
