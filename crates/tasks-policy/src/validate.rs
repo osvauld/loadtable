@@ -82,6 +82,9 @@ fn check_suite(name: &str, suite: &Suite, out: &mut Vec<Violation>) {
         if s.priority == Some(tasks_core::Priority::Blocking) {
             add(sn, Problem::BlockingInPolicy);
         }
+        if s.light && s.isolate {
+            add(sn, Problem::StepLightAndIsolate);
+        }
         if s.split.is_some() && !is_cargo_test(&s.command) {
             add(sn, Problem::SplitNotCargoTest);
         }
@@ -316,6 +319,20 @@ mod tests {
             problems(&t),
             vec![Problem::LightAndIsolate("test:calls".into())]
         );
+    }
+
+    // R-750
+    #[test]
+    fn r750_a_step_cannot_be_both_light_and_isolate() {
+        let t = format!(
+            "{HEAD}[[suites.s.steps]]\nname=\"a\"\ncommand=[\"x\"]\nlight=true\nisolate=true\n"
+        );
+        assert_eq!(problems(&t), vec![Problem::StepLightAndIsolate]);
+        let ok = format!(
+            "{HEAD}[[suites.s.steps]]\nname=\"a\"\ncommand=[\"x\"]\nlong=true\nisolate=true\n"
+        );
+        let step = &p(&ok).unwrap().suites["s"].steps[0];
+        assert!(step.long && step.isolate);
     }
 
     #[test]

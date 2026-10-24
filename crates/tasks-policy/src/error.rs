@@ -44,6 +44,8 @@ pub enum Problem {
     BlockingInPolicy,
     /// A target is both `light` and `isolate`.
     LightAndIsolate(String),
+    /// A step is both `light` and `isolate`.
+    StepLightAndIsolate,
 }
 
 impl Problem {
@@ -72,7 +74,7 @@ impl Problem {
             Problem::BlockingInPolicy => {
                 "use `priority = \"background\"` (or leave it out); claim blocking with `--priority blocking --reason TEXT` when submitting".into()
             }
-            Problem::LightAndIsolate(_) => {
+            Problem::LightAndIsolate(_) | Problem::StepLightAndIsolate => {
                 "keep one: `light` runs beside other jobs, `isolate` runs alone".into()
             }
             Problem::BadSyncExtra(_) => {
@@ -104,6 +106,7 @@ impl fmt::Display for Problem {
             Problem::BadSyncExtra(why) => write!(f, "bad [sync] extra entry: {why}"),
             Problem::BlockingInPolicy => write!(f, "priority \"blocking\" in the run policy"),
             Problem::LightAndIsolate(k) => write!(f, "target {k:?} is both light and isolate"),
+            Problem::StepLightAndIsolate => write!(f, "step is both light and isolate"),
         }
     }
 }

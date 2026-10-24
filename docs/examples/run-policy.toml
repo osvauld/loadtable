@@ -39,6 +39,8 @@ note = "median 116 s over 5 runs on nixos"
 long = true
 note = "median 112 s over 5 runs on nixos"
 
+# Steps take the same flags (long, isolate, light, retry_alone); a target's own light or isolate
+# overrides the step's for that target.
 [suites.core-tests.targets."test:link"]
 isolate = true
 note = "binds fixed local ports; must not overlap other network tests"

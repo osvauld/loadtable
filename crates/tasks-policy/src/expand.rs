@@ -187,16 +187,23 @@ pub fn expand(
                 .name
                 .strip_prefix(&format!("{}.", def.name))
                 .and_then(|piece| suite.targets.get(&label_of(piece)));
+            // a target that says light or isolate decides between them for itself; otherwise
+            // the step's flag applies to every piece
+            let (isolate, light) = match note {
+                Some(n) if n.isolate || n.light => (n.isolate, n.light),
+                _ => (def.isolate, def.light),
+            };
             p.hints = StepHints {
                 placement: def.placement.clone(),
                 timeout_secs: def.timeout_secs,
-                isolate: note.is_some_and(|n| n.isolate),
+                isolate,
                 // a step that names a long test in its own command is long too
-                long: note.is_some_and(|n| n.long)
+                long: def.long
+                    || note.is_some_and(|n| n.long)
                     || named_tests(&p.argv)
                         .iter()
                         .any(|l| suite.targets.get(l).is_some_and(|n| n.long)),
-                light: def.light || note.is_some_and(|n| n.light),
+                light,
                 retry_alone: def.retry_alone || note.is_some_and(|n| n.retry_alone),
                 retry_of: None,
                 tools: suite.tools.clone(),
@@ -331,6 +338,41 @@ light = true
         let soak = e.hints("soak").unwrap();
         assert!(soak.light && !soak.retry_alone);
         assert_eq!(e.plan.validate(), Ok(()));
+    }
+
+    // R-751
+    #[test]
+    fn r751_step_long_and_isolate_reach_every_piece_unless_a_target_says_otherwise() {
+        let text = r#"
+version = 1
+[suites.s]
+[suites.s.targets."test:calls"]
+light = true
+[[suites.s.steps]]
+name = "tests"
+command = ["cargo", "test", "-p", "p2pcore"]
+split = "cargo-test"
+long = true
+isolate = true
+[[suites.s.steps]]
+name = "ports"
+command = ["cargo", "test", "--test", "link"]
+isolate = true
+"#;
+        let pol = parse(text, Path::new("p.toml")).unwrap();
+        let list = ["calls", "video"]
+            .iter()
+            .map(|n| exe(n, ExeKind::Test))
+            .collect();
+        let exes = BTreeMap::from([("tests".to_string(), list)]);
+        let e = expand(&pol, "s", &exes, &ExpandOptions::default()).unwrap();
+        let video = e.hints("tests.test-video").unwrap();
+        assert!(video.long && video.isolate && !video.light);
+        let calls = e.hints("tests.test-calls").unwrap();
+        assert!(calls.long, "the step's long applies to every piece");
+        assert!(calls.light && !calls.isolate, "the target's light wins");
+        let ports = e.hints("ports").unwrap();
+        assert!(ports.isolate && !ports.long && !ports.light);
     }
 
     #[test]
