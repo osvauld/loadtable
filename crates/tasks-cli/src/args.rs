@@ -41,6 +41,12 @@ pub struct PlaceArgs {
 }
 
 impl PlaceArgs {
+    /// True when the submitter chose a placement, `--here` included (R-730): a plan step's own
+    /// placement hint applies only when none was chosen.
+    pub fn given(&self) -> bool {
+        self.pin || self.peer.is_some() || self.anywhere || self.here
+    }
+
     /// The placement, or the precise conflict and its fix (R-190).
     pub fn placement(&self, device: Option<&str>) -> Result<Placement, CliError> {
         let mut chosen: Vec<(&str, String)> = Vec::new();

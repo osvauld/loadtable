@@ -286,6 +286,7 @@ fn dependents_of_failed_jobs_are_cancelled_and_plans_submit_in_one_call() {
         cwd: r.dir.path().to_path_buf(),
         env: vec![],
         placement: Placement::Here,
+        placement_given: true,
         broad_test: false,
         priority: Default::default(),
         priority_reason: None,
@@ -297,6 +298,70 @@ fn dependents_of_failed_jobs_are_cancelled_and_plans_submit_in_one_call() {
     assert_eq!(r.until_done(a), Phase::Failed { exit: Some(1) });
     r.tick();
     assert_eq!(r.phase(b), Phase::Cancelled);
+}
+
+// R-735: a plan or suite the submitter gave no placement is placed by its steps' own hints.
+#[test]
+fn r735_step_placement_hints_apply_only_when_the_submitter_gave_none() {
+    let r = Rig::new();
+    let plan = Plan::parse(
+        r#"{"steps":[{"name":"far","argv":["make","a"],"hints":{"placement":"nixos"}},{"name":"near","argv":["make","b"],"hints":{"placement":"testbox"}},{"name":"plain","argv":["make","c"]}]}"#,
+    )
+    .unwrap();
+    let submit = |placement: Placement, given: bool| {
+        let Response::PlanSubmitted { jobs, .. } = ok(r.sch.handle(Request::SubmitPlan {
+            plan: plan.clone(),
+            owner: "o".into(),
+            cwd: r.dir.path().to_path_buf(),
+            env: vec![],
+            placement,
+            placement_given: given,
+            broad_test: false,
+            priority: Default::default(),
+            priority_reason: None,
+        })) else {
+            panic!("plan expected");
+        };
+        jobs.iter()
+            .map(|(_, id)| r.record(*id).spec.placement)
+            .collect::<Vec<_>>()
+    };
+    let nixos = Placement::Peer(tasks_core::MachineName("nixos".into()));
+    assert_eq!(
+        submit(Placement::Here, false),
+        [nixos.clone(), Placement::Here, Placement::Here]
+    );
+    assert_eq!(
+        submit(Placement::Here, true),
+        [Placement::Here, Placement::Here, Placement::Here]
+    );
+    assert_eq!(
+        submit(Placement::Pin, true),
+        [Placement::Pin, Placement::Pin, Placement::Pin]
+    );
+    // an older client names no flag, but a placement other than `here` was still its choice
+    assert_eq!(
+        submit(Placement::Pin, false),
+        [Placement::Pin, Placement::Pin, Placement::Pin]
+    );
+}
+
+// R-736: a client of the previous build sends no `placement_given`; only its default `here`
+// yields to a step's hint, a placement it did name is kept.
+#[test]
+fn r736_a_request_without_placement_given_parses_as_not_given() {
+    let old =
+        r#"{"op":"submit_plan","plan":{"steps":[]},"owner":"o","cwd":"/x","placement":"Here"}"#;
+    let parsed = serde_json::from_str::<Request>(old);
+    let Ok(Request::SubmitPlan {
+        placement,
+        placement_given,
+        ..
+    }) = parsed
+    else {
+        panic!("an older request must parse: {parsed:?}");
+    };
+    assert_eq!((placement, placement_given), (Placement::Here, false));
 }
 
 // ---------------------------------------------------------------- not started
@@ -321,6 +386,41 @@ fn a_job_that_cannot_start_ends_not_started_with_the_reason() {
         panic!("not started expected");
     };
     assert!(reason.contains("boom"), "{reason}");
+}
+
+// R-737: a step refused at start is said once; its dependents name that step, not just "failed".
+#[test]
+fn r737_a_dependent_of_a_refused_step_says_which_step_was_refused() {
+    let r = Rig::new();
+    let plan = Plan::parse(
+        r#"{"steps":[{"name":"build","argv":["make","a"],"requirements":{"tools":["no-such-tool-zz"]}},{"name":"test","argv":["make","b"],"after":["build"]},{"name":"lint","argv":["make","c"],"after":["test"]}]}"#,
+    )
+    .unwrap();
+    let Response::PlanSubmitted { jobs, .. } = ok(r.sch.handle(Request::SubmitPlan {
+        plan,
+        owner: "o".into(),
+        cwd: r.dir.path().to_path_buf(),
+        env: vec![],
+        placement: Placement::Here,
+        placement_given: true,
+        broad_test: false,
+        priority: Default::default(),
+        priority_reason: None,
+    })) else {
+        panic!("plan expected");
+    };
+    r.tick();
+    r.tick();
+    let build = jobs[0].1;
+    assert!(matches!(r.phase(build), Phase::NotStarted { .. }));
+    for (name, id) in &jobs[1..] {
+        let rec = r.record(*id);
+        assert_eq!(rec.phase, Phase::Cancelled, "{name}");
+        let text = rec.summary.unwrap_or_default();
+        eprintln!("{name}: {text}");
+        assert!(text.contains("step \"build\""), "{name}: {text}");
+        assert!(text.contains(&format!("job {}", build.0)), "{name}: {text}");
+    }
 }
 
 // ---------------------------------------------------------------- cargo -j
@@ -789,6 +889,7 @@ fn suites_expand_from_the_repo_policy_and_unknown_ones_are_refused() {
         cwd: repo.clone(),
         env: vec![],
         placement: Placement::Here,
+        placement_given: true,
         quick: false,
         executables: Default::default(),
         broad_test: false,

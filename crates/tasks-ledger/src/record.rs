@@ -189,6 +189,33 @@ pub(crate) fn dep_failed(p: &Phase) -> bool {
     p.is_terminal() && *p != Phase::Passed
 }
 
+/// Why a job whose dependency can no longer pass is cancelled, naming the step at fault
+/// (R-737). A dependency that was itself cancelled by this rule passes its own reason on, so
+/// every dependent names the step that started the chain, not its neighbour.
+pub(crate) fn blocked_reason(dep: &JobRecord) -> String {
+    if let Some(c) = &dep.cancel
+        && c.by == BLOCKED_BY
+        && let Some(why) = &c.reason
+    {
+        return why.clone();
+    }
+    let who = match &dep.step_name {
+        Some(step) => format!("step {step:?} (job {})", dep.id.0),
+        None => format!("job {}", dep.id.0),
+    };
+    let what = match &dep.phase {
+        Phase::NotStarted { .. } => "was refused or never started",
+        Phase::Failed { .. } => "failed",
+        Phase::TimedOut { .. } => "timed out",
+        Phase::Cancelled => "was cancelled",
+        _ => "ended without passing",
+    };
+    format!("{who} {what}; see `tasks2 get {}`", dep.id.0)
+}
+
+/// The requester name recorded when a job is cancelled because a dependency cannot pass.
+pub(crate) const BLOCKED_BY: &str = "dependency failed";
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

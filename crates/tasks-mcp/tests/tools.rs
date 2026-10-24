@@ -413,6 +413,28 @@ fn submit_steps_sends_one_plan_and_lists_the_job_ids() {
     assert_eq!(plan.steps[1].kind, Kind::Test);
 }
 
+// R-731: only a placement the caller named stops a step's own hint from applying
+#[test]
+fn r731_run_suite_says_whether_the_caller_named_a_placement() {
+    let given = |args: serde_json::Value| {
+        let d = plan_daemon();
+        let r = call(&tools_with(&d), "run_suite", args);
+        assert!(!r.is_error, "{}", r.text);
+        let reqs = d.requests();
+        let Request::SubmitSuite {
+            placement_given, ..
+        } = &reqs[0]
+        else {
+            panic!("{reqs:?}")
+        };
+        *placement_given
+    };
+    assert!(!given(json!({"name": "core"})));
+    assert!(given(json!({"name": "core", "placement": "here"})));
+    assert!(given(json!({"name": "core", "placement": "anywhere"})));
+    assert!(given(json!({"name": "core", "peer": "mac"})));
+}
+
 // R-193
 #[test]
 fn r193_plan_arguments_are_checked_before_any_daemon_request() {

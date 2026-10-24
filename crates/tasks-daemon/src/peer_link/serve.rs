@@ -332,7 +332,7 @@ impl StatusSource for DaemonStatus {
     fn status(&self) -> PeerStatus {
         let snap = self.sch.status();
         let policy = self.sch.policy();
-        let machine = self.sch.local_machine(&policy, &Default::default());
+        let machine = self.sch.local_machine(&policy, &Default::default(), &[]);
         PeerStatus {
             machine,
             slots: snap

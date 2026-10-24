@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tasks_core::plan::Plan;
-use tasks_core::{JobId, JobSpec, Owner, Placement};
+use tasks_core::{JobId, JobSpec, MachineName, Owner, Placement};
 use tasks_ledger::{
     AuditEvent, AuditQuery, CancelOutcome, JobRecord, LedgerError, ListFilter, PlanContext,
     RetryPolicy, action, retry_busy,
@@ -144,11 +144,13 @@ impl Scheduler {
                 cwd,
                 env,
                 placement,
+                placement_given,
                 broad_test,
                 priority,
                 priority_reason,
             } => {
-                let ctx = Self::plan_context(&owner, cwd, env, placement, broad_test)?
+                let ctx = self
+                    .plan_context(&owner, cwd, env, (placement, placement_given), broad_test)?
                     .with_priority(priority, priority_reason)
                     .map_err(|e| ApiError::new(ErrorCode::Refused, format!("invalid plan: {e}")))?;
                 self.submit_plan(&plan, ctx)
@@ -159,13 +161,15 @@ impl Scheduler {
                 cwd,
                 env,
                 placement,
+                placement_given,
                 quick,
                 executables,
                 broad_test,
                 priority,
                 priority_reason,
             } => {
-                let ctx = Self::plan_context(&owner, cwd, env, placement, broad_test)?
+                let ctx = self
+                    .plan_context(&owner, cwd, env, (placement, placement_given), broad_test)?
                     .with_priority(priority, priority_reason)
                     .map_err(|e| {
                         ApiError::new(ErrorCode::Refused, format!("invalid suite: {e}"))
@@ -428,17 +432,22 @@ impl Scheduler {
 
     /// What a plan's or suite's steps share, with the owner validated.
     fn plan_context(
+        &self,
         owner: &str,
         cwd: PathBuf,
         env: Vec<(String, String)>,
-        placement: Placement,
+        (placement, given): (Placement, bool),
         broad_test: bool,
     ) -> Result<PlanContext, ApiError> {
+        // an older client sends no flag: a placement other than its default `here` was chosen
+        let given = given || placement != Placement::Here;
         Ok(PlanContext {
             owner: Self::owner(owner)?,
             cwd,
             env,
             placement,
+            // a placement the submitter did not give lets the steps' own hints decide (R-730)
+            hints_place_from: (!given).then(|| MachineName(self.cfg.machine.clone())),
             broad_test_escape: broad_test,
             priority: tasks_core::Priority::Normal,
             priority_reason: None,
@@ -499,7 +508,7 @@ impl Scheduler {
                 env: ctx.env.clone(),
                 kind: step.kind,
                 requirements: step.requirements.clone(),
-                placement: ctx.placement.clone(),
+                placement: ctx.step_placement(&step.hints),
                 after: Vec::new(),
                 timeout_secs: step.hints.timeout_secs,
                 broad_test_escape: ctx.broad_test_escape,

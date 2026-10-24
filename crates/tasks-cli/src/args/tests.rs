@@ -354,3 +354,24 @@ fn r336_stalls_takes_since_until_limit_and_json() {
         other => panic!("{other:?}"),
     }
 }
+
+// R-730: a step's own placement hint applies only when the submitter chose nothing
+#[test]
+fn r730_a_placement_flag_of_any_kind_counts_as_given() {
+    let given = |args: &[&str]| match parse(args).unwrap().command {
+        Command::Run(a) | Command::Enqueue(a) => a.place.given(),
+        other => panic!("expected run, got {other:?}"),
+    };
+    assert!(!given(&["run", "--", "true"]));
+    for flag in [
+        &["--here"][..],
+        &["--pin"],
+        &["--anywhere"],
+        &["--peer", "mac"],
+    ] {
+        let mut v = vec!["run"];
+        v.extend_from_slice(flag);
+        v.extend_from_slice(&["--", "true"]);
+        assert!(given(&v), "{flag:?}");
+    }
+}

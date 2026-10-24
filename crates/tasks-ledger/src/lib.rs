@@ -184,7 +184,21 @@ pub trait Store {
                 return Ok(out);
             }
             for id in blocked {
-                if self.request_cancel(id, "dependency failed")? == CancelOutcome::Cancelled {
+                // the first dependency that can no longer pass is the one named (R-737)
+                let mut reason = None;
+                if let Some(rec) = self.get(id)? {
+                    for d in &rec.spec.after {
+                        if let Some(dep) = self.get(*d)?
+                            && record::dep_failed(&dep.phase)
+                        {
+                            reason = Some(record::blocked_reason(&dep));
+                            break;
+                        }
+                    }
+                }
+                if self.request_cancel_with(id, record::BLOCKED_BY, reason.as_deref())?
+                    == CancelOutcome::Cancelled
+                {
                     out.push(id);
                 }
             }

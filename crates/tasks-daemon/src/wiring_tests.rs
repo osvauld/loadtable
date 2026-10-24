@@ -710,6 +710,7 @@ fn r700_a_plans_test_steps_run_on_the_peer_together_once_its_build_is_done() {
         cwd: w.root_a.clone(),
         env: Vec::new(),
         placement: Placement::Peer(nixos()),
+        hints_place_from: None,
         broad_test_escape: false,
         priority: tasks_core::Priority::Normal,
         priority_reason: None,

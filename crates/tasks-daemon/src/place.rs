@@ -21,6 +21,48 @@ use tasks_timing::{Cache, Estimates, History, RecipeKey, SampleKey, progress, wa
 /// Planning figure for a run nothing is known about, seconds.
 pub(crate) const UNKNOWN_RUN_SECS: f64 = 60.0;
 
+/// The directories a job will look for tools in: the `PATH` the job carries, else the daemon's,
+/// then the fallback directories every job's `PATH` gets (R-543). The daemon runs under
+/// systemd or launchd, whose `PATH` lacks `~/.cargo/bin`, so its own `PATH` alone would call
+/// an installed cargo missing (R-732).
+pub(crate) fn job_tool_dirs(
+    spec_env: &[(String, String)],
+    parent_env: &[(String, String)],
+) -> Vec<String> {
+    let path = |env: &[(String, String)]| {
+        env.iter()
+            .find(|(k, _)| k == "PATH")
+            .map(|(_, v)| v.clone())
+    };
+    let mut dirs: Vec<String> = path(spec_env)
+        .or_else(|| path(parent_env))
+        .map(|p| {
+            p.split(':')
+                .filter(|d| !d.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+    for d in crate::build_cache::fallback_tool_dirs(parent_env) {
+        if !dirs.contains(&d) {
+            dirs.push(d);
+        }
+    }
+    dirs
+}
+
+/// True when `tool` is a file in one of `dirs`; `is_file` is the file system, injected.
+pub(crate) fn tool_in_dirs(tool: &str, dirs: &[String], is_file: impl Fn(&Path) -> bool) -> bool {
+    dirs.iter().any(|d| is_file(&Path::new(d).join(tool)))
+}
+
+/// A peer's machine as the origin can know it: peers do not report the tools they have, so
+/// every tool the job wants is assumed present and the peer checks it against its own `PATH`
+/// when the job arrives, refusing by name if it lacks one (R-734).
+pub(crate) fn assume_peer_tools(machine: &mut Machine, wanted: &BTreeSet<String>) {
+    machine.tools.extend(wanted.iter().cloned().map(Tool));
+}
+
 /// What the daemon knows about a job's cost, computed once per job.
 #[derive(Debug)]
 pub(crate) struct JobFacts {
@@ -284,15 +326,18 @@ impl Scheduler {
         }
     }
 
-    /// This machine as placement sees it. Tools the job needs count when they are on `PATH`.
+    /// This machine as placement sees it. Tools the job needs count when they are on the `PATH`
+    /// the job will run with (`spec_env` first, then the daemon's, R-732).
     pub(crate) fn local_machine(
         &self,
         policy: &MachinePolicy,
         wanted: &BTreeSet<String>,
+        spec_env: &[(String, String)],
     ) -> Machine {
         let mut tools: BTreeSet<Tool> = policy.tools().into_iter().map(Tool).collect();
+        let dirs = job_tool_dirs(spec_env, &self.parent_env);
         for t in wanted {
-            if self.on_path(t) {
+            if tool_in_dirs(t, &dirs, |p| p.is_file()) {
                 tools.insert(Tool(t.clone()));
             }
         }
@@ -310,13 +355,6 @@ impl Scheduler {
             tools,
             devices: policy.devices().into_iter().map(DeviceId).collect(),
         }
-    }
-
-    fn on_path(&self, tool: &str) -> bool {
-        self.parent_env
-            .iter()
-            .find(|(k, _)| k == "PATH")
-            .is_some_and(|(_, p)| p.split(':').any(|d| Path::new(d).join(tool).is_file()))
     }
 
     /// Seconds a running job still needs: its progress ETA, else its estimate minus elapsed.
@@ -479,7 +517,7 @@ impl Scheduler {
             .map(|t| t.0.clone())
             .chain(rec.hints.tools.iter().cloned())
             .collect();
-        let local = self.local_machine(policy, &wanted);
+        let local = self.local_machine(policy, &wanted, &rec.spec.env);
         let avoid = lock(&self.state)
             .no_forward
             .get(&rec.id)
@@ -488,6 +526,9 @@ impl Scheduler {
         let mut peers = self.forwarder.peers();
         // a peer this job already failed to reach is not tried again (it runs here instead)
         peers.retain(|p| !avoid.contains(&p.machine.name.0));
+        for p in &mut peers {
+            assume_peer_tools(&mut p.machine, &wanted);
+        }
         let info = MachineInfo {
             name: local.name.0.clone(),
             cores: local.cores,
@@ -615,5 +656,64 @@ impl Scheduler {
             Decision::Wait => self.wait_for_peer(rec, policy, &report, line),
             Decision::Refuse(_) => Placed::Refused(line),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    // R-732: a daemon under systemd has no ~/.cargo/bin on its PATH, yet jobs get it
+    #[test]
+    fn r732_the_tool_check_looks_in_the_fallback_dirs_every_job_gets() {
+        let daemon = env(&[("PATH", "/usr/bin:/bin"), ("HOME", "/home/u")]);
+        let dirs = job_tool_dirs(&[], &daemon);
+        assert_eq!(dirs, ["/usr/bin", "/bin", "/home/u/.cargo/bin"]);
+        let has = |p: &Path| p == Path::new("/home/u/.cargo/bin/cargo");
+        assert!(tool_in_dirs("cargo", &dirs, has));
+        assert!(!tool_in_dirs("gradle", &dirs, has));
+        // without a HOME there is nothing to add
+        assert_eq!(
+            job_tool_dirs(&[], &env(&[("PATH", "/usr/bin")])),
+            ["/usr/bin"]
+        );
+    }
+
+    // R-733: the PATH the job carries is the one it will look in, not the daemon's
+    #[test]
+    fn r733_the_jobs_own_path_replaces_the_daemons() {
+        let daemon = env(&[("PATH", "/usr/bin"), ("HOME", "/h")]);
+        let spec = env(&[("PATH", "/opt/x/bin::/usr/local/bin")]);
+        let dirs = job_tool_dirs(&spec, &daemon);
+        assert_eq!(dirs, ["/opt/x/bin", "/usr/local/bin", "/h/.cargo/bin"]);
+        // a fallback dir already on the path is not repeated
+        let spec = env(&[("PATH", "/h/.cargo/bin")]);
+        assert_eq!(job_tool_dirs(&spec, &daemon), ["/h/.cargo/bin"]);
+        assert!(!tool_in_dirs("cargo", &[], |_| true));
+    }
+
+    // R-734
+    #[test]
+    fn r734_a_peer_is_assumed_to_have_the_tools_a_job_wants() {
+        let mut m = Machine {
+            name: MachineName("nixos".into()),
+            os: tasks_core::Os::Linux,
+            arch: tasks_core::Arch::current(),
+            cores: 4,
+            memory_bytes: 0,
+            tools: [Tool("keep".into())].into(),
+            devices: Default::default(),
+        };
+        let wanted: BTreeSet<String> = ["cargo".to_string()].into();
+        assume_peer_tools(&mut m, &wanted);
+        assert!(m.tools.contains(&Tool("cargo".into())));
+        assert!(m.tools.contains(&Tool("keep".into())));
     }
 }
