@@ -63,8 +63,10 @@ pub(crate) struct RunningJob {
     pub id: JobId,
     pub owner: String,
     pub command: String,
-    pub slot_kind: Option<SlotKind>,
-    pub slot: Option<(SlotKind, u32)>,
+    /// The slot it holds; a `cargo test` trades its compile slot for a run slot (R-760).
+    pub hold: Mutex<SlotHold>,
+    /// cargo started running test binaries: the build is over.
+    pub testing: AtomicBool,
     pub checkout: Option<String>,
     pub token: CancelToken,
     pub started: Instant,
@@ -82,6 +84,37 @@ pub(crate) struct RunningJob {
     pub figures: Mutex<Option<tasks_core::JobFigures>>,
     /// Started with `isolate`: nothing else starts while it runs (R-712).
     pub isolate: bool,
+}
+
+/// The slot a running job holds and the lock that keeps it.
+pub(crate) struct SlotHold {
+    /// The kind of slot it counts against.
+    pub kind: Option<SlotKind>,
+    pub slot: Option<(SlotKind, u32)>,
+    /// Released when the job ends (its runner thread drops it) or on a hand-over.
+    pub guard: Option<SlotGuard>,
+}
+
+impl SlotHold {
+    pub(crate) fn new(
+        kind: Option<SlotKind>,
+        slot: Option<(SlotKind, u32)>,
+        guard: Option<SlotGuard>,
+    ) -> Mutex<SlotHold> {
+        Mutex::new(SlotHold { kind, slot, guard })
+    }
+}
+
+impl RunningJob {
+    /// The slot it holds now.
+    pub(crate) fn slot(&self) -> Option<(SlotKind, u32)> {
+        lock(&self.hold).slot
+    }
+
+    /// The kind of slot it counts against now.
+    pub(crate) fn slot_kind(&self) -> Option<SlotKind> {
+        lock(&self.hold).kind
+    }
 }
 
 /// Per-tick bookkeeping that survives between ticks.
@@ -398,6 +431,7 @@ impl Scheduler {
         self.settle_retries();
         self.refresh_power();
         self.supervise(&policy, now);
+        self.hand_over_tests(&policy);
         self.admit(&policy, &mut rep);
         self.keep_awake(&policy, now, rep.started.len());
         self.psi_trips(&policy);
@@ -421,6 +455,55 @@ impl Scheduler {
         }
     }
 
+    /// A `cargo test` whose test binaries started has finished building: it gives its compile
+    /// slot back for a free run slot, so the next build can start (R-760). With no run slot free
+    /// it keeps the compile slot and tries again next tick.
+    fn hand_over_tests(&self, policy: &MachinePolicy) {
+        let runs = policy
+            .layout()
+            .counts
+            .get(&SlotKind::Run)
+            .copied()
+            .unwrap_or(0);
+        let jobs: Vec<Arc<RunningJob>> = lock(&self.running).values().cloned().collect();
+        for rj in jobs {
+            if !rj.testing.load(Ordering::SeqCst) {
+                continue;
+            }
+            let mut h = lock(&rj.hold);
+            let Some((SlotKind::Compile, from)) = h.slot else {
+                continue;
+            };
+            for i in 0..runs {
+                match self.platform.locks.try_acquire(SlotKind::Run, i) {
+                    Ok(Some(g)) => {
+                        // replacing the guard releases the compile slot
+                        h.guard = Some(g);
+                        h.slot = Some((SlotKind::Run, i));
+                        h.kind = Some(SlotKind::Run);
+                        drop(h);
+                        let _ = LogNotes::new().note(
+                            &rj.log_path,
+                            "hand-over",
+                            &format!(
+                                "slot: tests started after {}; compile slot {from} handed back, \
+                                 now on run slot {i}",
+                                crate::peer_wait::dur_text(rj.started.elapsed())
+                            ),
+                        );
+                        self.wake.notify();
+                        break;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        self.note_error(&format!("hand over job {}: {e}", rj.id.0));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     /// An admitter over the live machine with the current policy.
     pub(crate) fn admitter(&self, policy: &MachinePolicy) -> Admitter<'_> {
         Admitter {
@@ -438,7 +521,7 @@ impl Scheduler {
     pub(crate) fn layout(&self, policy: &MachinePolicy) -> Layout {
         let mut layout = policy.layout();
         for rj in lock(&self.running).values() {
-            if let Some(slot) = rj.slot {
+            if let Some(slot) = rj.slot() {
                 layout.holders.insert(slot, rj.id);
             }
         }
@@ -653,7 +736,7 @@ impl Scheduler {
             .values()
             .filter(|r| {
                 matches!(
-                    r.slot_kind,
+                    r.slot_kind(),
                     Some(SlotKind::Compile | SlotKind::Run | SlotKind::Device)
                 )
             })
@@ -737,7 +820,7 @@ impl Scheduler {
         let facts = self.facts(&rec);
         let busy = lock(&self.running)
             .values()
-            .any(|r| r.slot_kind == Some(SlotKind::Compile));
+            .any(|r| r.slot_kind() == Some(SlotKind::Compile));
         let max = policy.cargo_max_jobs();
         let cj = CargoJobs {
             max,
@@ -839,8 +922,8 @@ impl Scheduler {
             id,
             owner: rec.spec.owner.as_str().to_string(),
             command: shorten(&rec.spec.argv.join(" ")),
-            slot_kind,
-            slot,
+            hold: SlotHold::new(slot_kind, slot, guard),
+            testing: AtomicBool::new(false),
             checkout: facts.checkout.clone(),
             token: CancelToken::new(),
             started: Instant::now(),
@@ -896,7 +979,7 @@ impl Scheduler {
         let sch = self.clone();
         let spawned = std::thread::Builder::new()
             .name(format!("job-{}", id.0))
-            .spawn(move || runjob::run_job(sch, rj, start, guard, run_policy, env_policy, meta));
+            .spawn(move || runjob::run_job(sch, rj, start, run_policy, env_policy, meta));
         if let Err(e) = spawned {
             lock(&self.running).remove(&id);
             self.end_unstarted(id, &format!("cannot start a runner thread: {e}"));

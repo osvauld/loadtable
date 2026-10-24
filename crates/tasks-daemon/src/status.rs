@@ -181,9 +181,9 @@ impl Scheduler {
             let mut busy = Vec::new();
             for rj in running
                 .iter()
-                .filter(|r| r.slot.is_some_and(|s| s.0 == kind))
+                .filter(|r| r.slot().is_some_and(|s| s.0 == kind))
             {
-                if let Some((_, index)) = rj.slot {
+                if let Some((_, index)) = rj.slot() {
                     busy.push(SlotView {
                         index,
                         job: Some(rj.id),
@@ -249,7 +249,7 @@ impl Scheduler {
                     policy.slot_count(*k) as usize,
                     running
                         .iter()
-                        .filter(|r| r.slot_kind == Some(*k))
+                        .filter(|r| r.slot_kind() == Some(*k))
                         .map(|r| self.remaining_secs(r))
                         .collect::<Vec<_>>(),
                 ),
@@ -380,7 +380,7 @@ impl Scheduler {
                     id: rj.id,
                     owner: rj.owner.clone(),
                     command: rj.command.clone(),
-                    slot: rj.slot.map(|(k, i)| (kind_name(k).to_string(), i)),
+                    slot: rj.slot().map(|(k, i)| (kind_name(k).to_string(), i)),
                     elapsed_secs: rj.started.elapsed().as_secs_f64(),
                     done_targets: p.done_targets,
                     total_targets: p.total_targets,
