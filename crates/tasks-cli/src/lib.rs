@@ -23,7 +23,7 @@ mod ui;
 
 use args::{Cli, Command};
 use clap::Parser;
-use client::{Client, ProcessStarter, UnavailableClient, UnixClient};
+use client::{Client, DaemonStarter, ProcessStarter, UnavailableClient, UnixClient};
 use commands::Ctx;
 use runtime::{Pacer, Signals};
 use std::io::Write;
@@ -90,7 +90,26 @@ pub fn real_client(
                 socket: cfg.socket_path(),
                 wait: Duration::from_secs(15),
             };
-            let client = UnixClient::new(cfg.socket_path()).with_starter(Arc::new(starter));
+            let direct = Arc::new(starter);
+            // R-682: behind an installed service, ask the service manager; never run a second
+            // daemon. A custom state directory is not the service's, so it starts directly.
+            let starter: Arc<dyn DaemonStarter> = if cli.state_dir.is_none() {
+                Arc::new(client::ServiceStarter {
+                    service: Arc::new(tasks_platform::native()),
+                    name: tasks_daemon::entry::SERVICE_NAME.to_string(),
+                    manager: if cfg!(target_os = "macos") {
+                        "launchd"
+                    } else {
+                        "systemd"
+                    },
+                    fallback: direct,
+                    socket: cfg.socket_path(),
+                    wait: Duration::from_secs(15),
+                })
+            } else {
+                direct
+            };
+            let client = UnixClient::new(cfg.socket_path()).with_starter(starter);
             (Box::new(client), Some(cfg.lock_dir))
         }
         Err(e) => (
@@ -126,6 +145,8 @@ fn run_mcp(_cli: &Cli, _deps: &Deps<'_>) -> i32 {
 #[cfg(feature = "ui")]
 fn run_ui(cli: &Cli, deps: &Deps<'_>) -> i32 {
     let (client, _) = (deps.client_for)(cli);
+    // R-686: the window loop never reads the flag-only handlers from `real_main`
+    runtime::die_on_termination();
     ui::run(Arc::from(client), deps.env)
 }
 

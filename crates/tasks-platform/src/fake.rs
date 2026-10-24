@@ -36,6 +36,10 @@ pub struct FakePlatform {
     pub table: Mutex<Vec<ProcInfo>>,
     held: Mutex<BTreeSet<(SlotKind, u32)>>,
     status: Mutex<ServiceStatus>,
+    /// Names passed to [`Service::start`], in order.
+    pub service_starts: Mutex<Vec<String>>,
+    /// Error text [`Service::start`] returns when set.
+    pub service_start_error: Mutex<Option<String>>,
 }
 
 impl Default for FakePlatform {
@@ -64,6 +68,8 @@ impl Default for FakePlatform {
             table: Mutex::new(Vec::new()),
             held: Mutex::new(BTreeSet::new()),
             status: Mutex::new(ServiceStatus::NotInstalled),
+            service_starts: Mutex::new(Vec::new()),
+            service_start_error: Mutex::new(None),
         }
     }
 }
@@ -293,6 +299,15 @@ impl Cgroups for FakeCgroups {
     }
 }
 
+impl FakePlatform {
+    /// Sets what [`Service::status`] reports.
+    pub fn set_service_status(&self, s: ServiceStatus) {
+        if let Ok(mut g) = self.status.lock() {
+            *g = s;
+        }
+    }
+}
+
 impl Service for FakePlatform {
     fn install(&self, unit: &ServiceUnit) -> Result<InstallPlan, PlatformError> {
         *self.status.lock().map_err(poisoned)? = ServiceStatus::Stopped;
@@ -304,6 +319,19 @@ impl Service for FakePlatform {
     }
     fn status(&self, _name: &str) -> Result<ServiceStatus, PlatformError> {
         Ok(*self.status.lock().map_err(poisoned)?)
+    }
+    fn start(&self, name: &str) -> Result<(), PlatformError> {
+        self.service_starts
+            .lock()
+            .map_err(poisoned)?
+            .push(name.to_string());
+        match self.service_start_error.lock().map_err(poisoned)?.clone() {
+            Some(detail) => Err(PlatformError::Command {
+                command: format!("fake-start {name}"),
+                detail,
+            }),
+            None => Ok(()),
+        }
     }
 }
 impl SlotLocks for FakePlatform {

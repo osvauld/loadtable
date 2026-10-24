@@ -52,6 +52,9 @@ pub trait Service {
     fn install(&self, unit: &ServiceUnit) -> Result<InstallPlan, PlatformError>;
     /// Reports whether the named service is installed and running.
     fn status(&self, name: &str) -> Result<ServiceStatus, PlatformError>;
+    /// Asks the service manager to start an installed service that is not running. It never
+    /// installs or loads a unit: a unit the manager does not know is an error that says so.
+    fn start(&self, name: &str) -> Result<(), PlatformError>;
 }
 
 /// Reports free disk space.

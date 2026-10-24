@@ -663,3 +663,83 @@ fn the_unavailable_client_fails_every_call_with_its_message() {
     let c = UnavailableClient("no HOME".into());
     assert_eq!(c.call(&Request::Status).unwrap_err().to_string(), "no HOME");
 }
+
+// R-682..684: behind an installed service the daemon is started by the service manager
+fn svc_starter(
+    p: &Arc<tasks_platform::fake::FakePlatform>,
+    fallback: Arc<dyn DaemonStarter>,
+    sock: &Path,
+) -> ServiceStarter<tasks_platform::fake::FakePlatform> {
+    ServiceStarter {
+        service: p.clone(),
+        name: "tasks2d".into(),
+        manager: "systemd",
+        fallback,
+        socket: sock.to_path_buf(),
+        wait: Duration::from_millis(300),
+    }
+}
+
+#[test]
+fn r682_an_installed_stopped_service_is_started_by_the_manager_not_spawned() {
+    let sock = temp("svc-stopped").join("s");
+    let p = Arc::new(tasks_platform::fake::FakePlatform::default());
+    p.set_service_status(ServiceStatus::Stopped);
+    let (fb, fb_calls) = starter(&sock, Ok(()));
+    let _l = UnixListener::bind(&sock).unwrap(); // the service comes up
+    svc_starter(&p, fb, &sock).start().unwrap();
+    assert_eq!(*p.service_starts.lock().unwrap(), ["tasks2d"]);
+    assert_eq!(fb_calls.load(Ordering::SeqCst), 0, "no second daemon");
+}
+
+#[test]
+fn r682_no_installed_service_keeps_starting_the_daemon_directly() {
+    let sock = temp("svc-none").join("s");
+    let p = Arc::new(tasks_platform::fake::FakePlatform::default());
+    let (fb, fb_calls) = starter(&sock, Ok(()));
+    svc_starter(&p, fb, &sock).start().unwrap();
+    assert_eq!(fb_calls.load(Ordering::SeqCst), 1);
+    assert!(p.service_starts.lock().unwrap().is_empty());
+}
+
+#[test]
+fn r683_a_manager_that_refuses_is_said_in_the_error_and_nothing_is_spawned() {
+    let sock = temp("svc-refuse").join("s");
+    let p = Arc::new(tasks_platform::fake::FakePlatform::default());
+    p.set_service_status(ServiceStatus::Stopped);
+    *p.service_start_error.lock().unwrap() = Some("not loaded".into());
+    let (fb, fb_calls) = starter(&sock, Ok(()));
+    let e = svc_starter(&p, fb, &sock).start().unwrap_err();
+    assert!(
+        e.starts_with("daemon down; asked systemd to start it"),
+        "{e}"
+    );
+    assert!(e.contains("not loaded"), "{e}");
+    assert_eq!(fb_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn r684_a_service_that_never_listens_is_reported_and_nothing_is_spawned() {
+    let sock = temp("svc-silent").join("s");
+    let p = Arc::new(tasks_platform::fake::FakePlatform::default());
+    p.set_service_status(ServiceStatus::Stopped);
+    let (fb, fb_calls) = starter(&sock, Ok(()));
+    let e = svc_starter(&p, fb, &sock).start().unwrap_err();
+    assert!(e.contains("daemon down; asked systemd to start it"), "{e}");
+    assert!(e.contains("did not listen"), "{e}");
+    assert_eq!(fb_calls.load(Ordering::SeqCst), 0);
+    // a running service that is only slow to listen is waited for, not started again
+    p.set_service_status(ServiceStatus::Running);
+    assert!(
+        svc_starter(&p, starter(&sock, Ok(())).0, &sock)
+            .start()
+            .is_err()
+    );
+    assert_eq!(p.service_starts.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn r680_the_cli_has_an_iroh_feature_that_turns_on_the_daemons() {
+    let manifest = include_str!("../../Cargo.toml");
+    assert!(manifest.contains("iroh = [\"tasks-daemon/iroh\"]"));
+}

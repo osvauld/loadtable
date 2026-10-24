@@ -18,6 +18,7 @@ use tasks_daemon::api::{
     ApiError, ErrorCode, MAX_REQUEST_BYTES, PROTOCOL_VERSION, ReplyEnvelope, Request,
     RequestEnvelope, Response,
 };
+use tasks_platform::{Service, ServiceStatus};
 
 /// Reply frame cap for ordinary requests. The daemon never sends more than
 /// `MAX_RESPONSE_BYTES` (4 MiB); this leaves room for a newer daemon's slack.
@@ -482,6 +483,64 @@ impl DaemonStarter for ProcessStarter {
                     self.socket.display(),
                     self.wait.as_secs(),
                     self.log.display()
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+/// Starts the daemon through the user's service manager when a service for it is installed, so
+/// that no second daemon runs behind it (R-682); with none installed it defers to `fallback`.
+pub struct ServiceStarter<S: Service> {
+    /// The platform's service manager.
+    pub service: Arc<S>,
+    /// The installed service's name.
+    pub name: String,
+    /// What a person calls the manager in messages ("systemd", "launchd").
+    pub manager: &'static str,
+    /// Starts the daemon directly when no service is installed.
+    pub fallback: Arc<dyn DaemonStarter>,
+    /// The socket to wait for.
+    pub socket: PathBuf,
+    /// How long to wait for the socket after asking.
+    pub wait: Duration,
+}
+
+impl<S: Service + Send + Sync> DaemonStarter for ServiceStarter<S> {
+    fn start(&self) -> Result<(), String> {
+        let status = self.service.status(&self.name).map_err(|e| {
+            format!(
+                "daemon down; cannot ask {} about {}: {e}",
+                self.manager, self.name
+            )
+        })?;
+        match status {
+            ServiceStatus::NotInstalled => return self.fallback.start(),
+            // up but not listening yet: starting it again would be noise
+            ServiceStatus::Running => {}
+            ServiceStatus::Stopped => self
+                .service
+                .start(&self.name)
+                .map_err(|e| format!("daemon down; asked {} to start it: {e}", self.manager))?,
+        }
+        let deadline = Instant::now() + self.wait;
+        loop {
+            if UnixStream::connect(&self.socket).is_ok() {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "daemon down; asked {} to start it, but it did not listen on {} within {}s \
+                     (see `{}` for why)",
+                    self.manager,
+                    self.socket.display(),
+                    self.wait.as_secs(),
+                    if self.manager == "systemd" {
+                        format!("journalctl --user -u {}", self.name)
+                    } else {
+                        "the daemon log in the state directory".to_string()
+                    }
                 ));
             }
             std::thread::sleep(Duration::from_millis(50));
