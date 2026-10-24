@@ -100,6 +100,10 @@ pub enum Request {
         /// Placement of every step.
         #[serde(default = "default_placement")]
         placement: Placement,
+        /// The submitter named a placement (R-730). False lets each step's own placement
+        /// hint apply; an older client sends none, and then only its default `here` yields.
+        #[serde(default)]
+        placement_given: bool,
         /// The submitter passed the broad-test escape for every step (R-191).
         #[serde(default)]
         broad_test: bool,
@@ -124,6 +128,10 @@ pub enum Request {
         /// Placement of every step.
         #[serde(default = "default_placement")]
         placement: Placement,
+        /// The submitter named a placement (R-730). False lets each step's own placement
+        /// hint apply; an older client sends none, and then only its default `here` yields.
+        #[serde(default)]
+        placement_given: bool,
         /// Drop steps marked `skip_in_quick`.
         #[serde(default)]
         quick: bool,

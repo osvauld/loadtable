@@ -205,6 +205,7 @@ fn only_read_only_requests_are_classified_as_safe_to_resend() {
             cwd: "/".into(),
             env: vec![],
             placement: Placement::Here,
+            placement_given: true,
             quick: false,
             executables: Default::default(),
             broad_test: false,

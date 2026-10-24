@@ -82,6 +82,14 @@ const CASES: &[Case] = &[
         "r712_a_plan_steps_isolate_light_and_retry_hints_fill_the_spec",
         r712_plan_flags_fill_spec,
     ),
+    (
+        "r730_r731_a_step_hint_places_the_step_only_when_the_submitter_gave_no_placement",
+        r730_step_placement,
+    ),
+    (
+        "r737_a_dependent_of_a_refused_step_says_which_step_and_why",
+        r737_blocked_reason,
+    ),
     ("sample_keys_enumerate_history", sample_keys_enumerate),
     (
         "r108_a_cancel_keeps_its_requester_and_reason",
@@ -174,6 +182,7 @@ fn ctx() -> PlanContext {
         cwd: PathBuf::from("/work"),
         env: vec![("A".into(), "1".into())],
         placement: Placement::Here,
+        hints_place_from: None,
         broad_test_escape: false,
         priority: tasks_core::Priority::Normal,
         priority_reason: None,
@@ -666,6 +675,81 @@ fn r712_plan_flags_fill_spec(e: &Env) {
     assert!(l.light && !l.isolate && !l.retry_alone);
     let p = get("plain");
     assert!(!p.isolate && !p.light && !p.retry_alone);
+}
+
+// R-730, R-731: the submitter's placement wins; with none given a step's hint places it, and a
+// hint naming the submitting machine means here.
+fn r730_step_placement(e: &Env) {
+    let s = &*e.store;
+    let mut hinted = step("hinted", &[]);
+    hinted.hints.placement = Some("nixos".into());
+    let mut own = step("own", &[]);
+    own.hints.placement = Some("laptop".into());
+    let plain = step("plain", &[]);
+    let plan = Plan {
+        steps: vec![hinted, own, plain],
+    };
+    let placements = |c: &PlanContext| {
+        let done = s.submit_plan(c, &plan).unwrap();
+        ["hinted", "own", "plain"].map(|n| {
+            let id = done.jobs.iter().find(|(m, _)| m == n).unwrap().1;
+            s.get(id).unwrap().unwrap().spec.placement
+        })
+    };
+    let peer = |n: &str| Placement::Peer(tasks_core::MachineName(n.into()));
+    // nothing given: the hints decide
+    let mut c = ctx();
+    c.hints_place_from = Some(tasks_core::MachineName("laptop".into()));
+    assert_eq!(
+        placements(&c),
+        [peer("nixos"), Placement::Here, Placement::Here]
+    );
+    // given (even `here`): the submitter's placement wins for every step
+    c.hints_place_from = None;
+    c.placement = Placement::Pin;
+    assert_eq!(
+        placements(&c),
+        [Placement::Pin, Placement::Pin, Placement::Pin]
+    );
+    c.placement = peer("mac");
+    assert_eq!(placements(&c), [peer("mac"), peer("mac"), peer("mac")]);
+    c.placement = Placement::Here;
+    assert_eq!(
+        placements(&c),
+        [Placement::Here, Placement::Here, Placement::Here]
+    );
+}
+
+// R-737: a step that never ran takes its dependents with it, and each says which step and why.
+fn r737_blocked_reason(e: &Env) {
+    let s = &*e.store;
+    let plan = Plan {
+        steps: vec![
+            step("build", &[]),
+            step("test", &["build"]),
+            step("lint", &["test"]),
+        ],
+    };
+    let done = s.submit_plan(&ctx(), &plan).unwrap();
+    let id = |n: &str| done.jobs.iter().find(|(m, _)| m == n).unwrap().1;
+    s.finish(
+        id("build"),
+        &Finish::from_phase(Phase::NotStarted {
+            reason: "refused".into(),
+        }),
+    )
+    .unwrap();
+    s.cancel_blocked().unwrap();
+    let build = id("build").0;
+    for n in ["test", "lint"] {
+        let r = s.get(id(n)).unwrap().unwrap();
+        assert_eq!(r.phase, Phase::Cancelled);
+        let text = r.summary.unwrap();
+        assert!(text.contains("step \"build\""), "{n}: {text}");
+        assert!(text.contains(&format!("job {build}")), "{n}: {text}");
+        assert!(text.contains("refused"), "{n}: {text}");
+        assert_eq!(r.cancel.unwrap().by, "dependency failed");
+    }
 }
 
 // The daemon rewrites a failed job's one-line outcome when its retry alone ended; the phase,

@@ -41,6 +41,10 @@ pub struct PlanContext {
     pub env: Vec<(String, String)>,
     /// Placement for every step.
     pub placement: Placement,
+    /// Set when the submitter gave no placement: the steps' own placement hints then apply
+    /// (R-730), and this is the name of the machine the submission was made on, so a hint
+    /// naming it means "here".
+    pub hints_place_from: Option<tasks_core::MachineName>,
     /// The submitter passed the broad-test escape; every step's spec carries it (R-191).
     pub broad_test_escape: bool,
     /// The class the submitter asked for every step; `Normal` leaves each step's own hint.
@@ -60,6 +64,22 @@ impl PlanContext {
         self.priority = priority;
         self.priority_reason = reason;
         Ok(self)
+    }
+
+    /// Where a step goes: the submitter's placement when it gave one, else the step's own
+    /// hint from the repo run policy (a hint naming this machine means here).
+    pub fn step_placement(&self, hints: &StepHints) -> Placement {
+        let (Some(me), Some(hint)) = (&self.hints_place_from, hints.placement.as_deref()) else {
+            return self.placement.clone();
+        };
+        match hint.trim() {
+            "" => self.placement.clone(),
+            "local" | "here" => Placement::Here,
+            "pin" => Placement::Pin,
+            "anywhere" => Placement::Anywhere,
+            name if name == me.0 => Placement::Here,
+            name => Placement::Peer(tasks_core::MachineName(name.to_string())),
+        }
     }
 
     /// The class and reason a step is stored with: the submitter's when it asked for one, else
