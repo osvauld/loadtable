@@ -204,7 +204,7 @@ pub(crate) fn plan_jobs(
                         || (step.kind == Kind::Test && !step.after.is_empty()),
                     ..step.requirements.clone()
                 },
-                placement: ctx.placement.clone(),
+                placement: ctx.step_placement(&step.hints),
                 after,
                 // the step's own hint fills the spec's limit (R-095's sibling)
                 timeout_secs: step.hints.timeout_secs,
