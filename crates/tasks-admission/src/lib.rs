@@ -24,8 +24,7 @@ pub use error::AdmissionError;
 pub use gates::{Readings, check_gates};
 pub use input::{
     AdmissionInput, DeviceState, Gate, LIGHT_LANE_BASE, OFFLOAD_FLOOR_CAP_BYTES, SHORT_LANE_BASE,
-    SlotState,
-    Thresholds,
+    SlotState, Thresholds,
 };
 pub use model::{Decision, Hold, Lane, Running, Verdict, Waiter};
 pub use order::{Effective, effective, sequence};

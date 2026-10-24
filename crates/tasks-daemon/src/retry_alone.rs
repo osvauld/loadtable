@@ -377,9 +377,16 @@ error: test failed, to rerun pass `-p p2pcore --test calls`
     #[test]
     fn r716_a_log_without_failures_or_with_only_a_build_error_gives_nothing() {
         assert!(failed_tests("").is_empty());
-        assert!(failed_tests("error[E0425]: cannot find value\nerror: could not compile\n").is_empty());
+        assert!(
+            failed_tests("error[E0425]: cannot find value\nerror: could not compile\n").is_empty()
+        );
         // the summary line and the heading of the captures are not names
-        assert!(failed_tests("test result: FAILED. 0 passed; 1 failed\nfailures:\n\n---- a stdout ----\n").is_empty());
+        assert!(
+            failed_tests(
+                "test result: FAILED. 0 passed; 1 failed\nfailures:\n\n---- a stdout ----\n"
+            )
+            .is_empty()
+        );
     }
 
     // R-716
@@ -409,8 +416,17 @@ error: test failed, to rerun pass `-p p2pcore --test calls`
         assert_eq!(
             got,
             s(&[
-                "cargo", "test", "-p", "p2pcore", "--test", "calls", "--", "--exact", "glare",
-                "other", "--test-threads=1"
+                "cargo",
+                "test",
+                "-p",
+                "p2pcore",
+                "--test",
+                "calls",
+                "--",
+                "--exact",
+                "glare",
+                "other",
+                "--test-threads=1"
             ])
         );
         assert_eq!(retried_names(&got), s(&["glare", "other"]));
@@ -420,14 +436,29 @@ error: test failed, to rerun pass `-p p2pcore --test calls`
     #[test]
     fn r716_libtest_words_after_the_separator_are_replaced_but_output_flags_are_kept() {
         let argv = s(&[
-            "cargo", "+nightly", "test", "--lib", "--", "--nocapture", "--test-threads=8",
-            "--skip", "slow", "glare",
+            "cargo",
+            "+nightly",
+            "test",
+            "--lib",
+            "--",
+            "--nocapture",
+            "--test-threads=8",
+            "--skip",
+            "slow",
+            "glare",
         ]);
         let got = retry_argv(&argv, &s(&["glare"])).unwrap();
         assert_eq!(
             got,
             s(&[
-                "cargo", "+nightly", "test", "--lib", "--", "--nocapture", "--exact", "glare",
+                "cargo",
+                "+nightly",
+                "test",
+                "--lib",
+                "--",
+                "--nocapture",
+                "--exact",
+                "glare",
                 "--test-threads=1"
             ])
         );

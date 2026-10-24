@@ -86,12 +86,7 @@ const FIELDS: &[Field] = &[
         Ty::Uint(1, 4),
         "1",
     ),
-    f(
-        "slots.light",
-        "TASKS_LIGHT_SLOTS",
-        Ty::Uint(0, 16),
-        "4",
-    ),
+    f("slots.light", "TASKS_LIGHT_SLOTS", Ty::Uint(0, 16), "4"),
     f(
         "slots.short_lane",
         "TASKS_SHORT_LANE_SLOTS",
@@ -1209,7 +1204,10 @@ mod tests {
         assert_eq!((c.weight, c.nice), (Some(50), 10));
         let r = d.cpu_share(CpuClass::Run);
         assert_eq!((r.weight, r.nice), (Some(200), 0));
-        assert_eq!(d.cpu_share(CpuClass::Normal), tasks_platform::CpuShare::default());
+        assert_eq!(
+            d.cpu_share(CpuClass::Normal),
+            tasks_platform::CpuShare::default()
+        );
         let p = MachinePolicy::from_text(
             Some("[cpu]\ncompile_weight = 10\nrun_weight = 900\ncompile_nice = 19\n"),
             &no_env,

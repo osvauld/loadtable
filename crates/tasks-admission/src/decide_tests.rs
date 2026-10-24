@@ -502,7 +502,10 @@ fn r712_an_isolate_job_waits_for_every_running_job_and_names_them() {
         "runs alone (isolate): waiting for #8, #9 to finish"
     );
     // a job admitted just before it in the same pass counts as running
-    let mut i = input(2, vec![waiter(5, SlotKind::Run, 1), alone(6, SlotKind::Run, 2)]);
+    let mut i = input(
+        2,
+        vec![waiter(5, SlotKind::Run, 1), alone(6, SlotKind::Run, 2)],
+    );
     i.running = vec![];
     let v = verdicts(&i);
     assert!(is_admit(&v[&5]));
@@ -587,7 +590,10 @@ fn slot_of(v: &Verdict) -> (SlotKind, u32, Lane) {
 #[test]
 fn r714_a_light_job_takes_a_place_in_the_light_pool_and_leaves_the_run_slots_alone() {
     // every compile and run slot is taken, yet the light job starts
-    let mut i = input(1, vec![light(1, SlotKind::Compile, 1), light(2, SlotKind::Run, 2)]);
+    let mut i = input(
+        1,
+        vec![light(1, SlotKind::Compile, 1), light(2, SlotKind::Run, 2)],
+    );
     for k in [SlotKind::Compile, SlotKind::Run] {
         let st = i.slots.get_mut(&k).unwrap();
         st.busy = st.free.drain(..).map(|n| (n, None)).collect();
@@ -605,14 +611,24 @@ fn r714_a_light_job_takes_a_place_in_the_light_pool_and_leaves_the_run_slots_alo
 
 #[test]
 fn r714_a_light_job_ignores_the_cpu_gate_but_not_the_memory_gate() {
-    let mut i = input(1, vec![light(1, SlotKind::Run, 1), waiter(2, SlotKind::Run, 2)]);
+    let mut i = input(
+        1,
+        vec![light(1, SlotKind::Run, 1), waiter(2, SlotKind::Run, 2)],
+    );
     i.pressure.cpu = Some(99.0);
     let v = verdicts(&i);
     assert!(is_admit(&v[&1]), "{:?}", v[&1]);
-    assert!(text(&v[&2]).starts_with("CPU contended"), "ordinary jobs still wait");
+    assert!(
+        text(&v[&2]).starts_with("CPU contended"),
+        "ordinary jobs still wait"
+    );
     i.pressure.memory = tasks_platform::Level::Critical;
     let v = verdicts(&i);
-    assert!(text(&v[&1]).starts_with("memory stalls"), "{}", text(&v[&1]));
+    assert!(
+        text(&v[&1]).starts_with("memory stalls"),
+        "{}",
+        text(&v[&1])
+    );
     i.pressure.memory = tasks_platform::Level::Normal;
     i.available_memory = 0;
     assert!(text(&verdicts(&i)[&1]).starts_with("memory:"));

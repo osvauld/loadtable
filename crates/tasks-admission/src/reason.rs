@@ -157,7 +157,11 @@ impl fmt::Display for WaitReason {
             WaitReason::RunsAlone(j) => write!(f, "job #{} runs alone (isolate)", j.0),
             WaitReason::WaitsToRunAlone(jobs) => {
                 let who: Vec<String> = jobs.iter().map(|j| format!("#{}", j.0)).collect();
-                write!(f, "runs alone (isolate): waiting for {} to finish", who.join(", "))
+                write!(
+                    f,
+                    "runs alone (isolate): waiting for {} to finish",
+                    who.join(", ")
+                )
             }
             WaitReason::BehindCheckout(j) => write!(f, "behind #{} (same checkout)", j.0),
             WaitReason::SlotsBusy {

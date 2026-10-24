@@ -1007,9 +1007,7 @@ fn slot_index(r: &Rig, id: JobId) -> Option<u32> {
 // R-714, R-715
 #[test]
 fn r714_a_light_job_runs_in_its_own_pool_through_a_closed_cpu_gate_and_a_full_pool_says_so() {
-    let r = Rig::with_policy(
-        "[slots]\ncompile = 1\nlight = 1\n[pressure.compile]\nmax_cpu = 40\n",
-    );
+    let r = Rig::with_policy("[slots]\ncompile = 1\nlight = 1\n[pressure.compile]\nmax_cpu = 40\n");
     r.machine.state.lock().unwrap().pressure.cpu = Some(95.0);
     let ordinary = r.submit(&r.spec_in("o", &["make", "x"], Kind::Compile, "x"));
     let first = light_job(&r, "first");
@@ -1045,7 +1043,10 @@ fn r715_a_light_job_gets_the_tests_cpu_share_not_a_builds() {
     let id = r.submit(&s);
     r.tick();
     assert_eq!(r.until_done(id), Phase::Passed);
-    assert_eq!(r.cgroups.cpu_weight(tasks_platform::CgroupName::Job(id.0)), Some(200));
+    assert_eq!(
+        r.cgroups.cpu_weight(tasks_platform::CgroupName::Job(id.0)),
+        Some(200)
+    );
 }
 
 // ---------------------------------------------------------------- retry alone
@@ -1110,7 +1111,10 @@ fn r716_a_failed_retry_alone_job_queues_one_isolated_follow_up_and_says_what_pas
             "--test-threads=1"
         ]
     );
-    assert!(retry.spec.isolate && !retry.spec.retry_alone, "one retry at most");
+    assert!(
+        retry.spec.isolate && !retry.spec.retry_alone,
+        "one retry at most"
+    );
     assert_eq!(retry.hints.retry_of, Some(id.0));
     // the original keeps its failed exit and says a retry is under way (or already, what it
     // found: the follow-up is quick)
@@ -1136,7 +1140,10 @@ fn r716_a_failed_retry_alone_job_queues_one_isolated_follow_up_and_says_what_pas
             retry.id.0
         )
     );
-    assert!(retry_job(&r, retry.id).is_none(), "never a retry of the retry");
+    assert!(
+        retry_job(&r, retry.id).is_none(),
+        "never a retry of the retry"
+    );
 }
 
 // R-717
@@ -1162,7 +1169,8 @@ fn r717_a_test_that_fails_again_alone_is_named_as_failing_again() {
 
 // R-718
 #[test]
-fn r718_no_retry_without_the_flag_without_a_failures_list_or_after_a_cancel_or_a_timeout() {
+fn r718_no_retry_without_the_flag_without_a_failures_list_or_for_a_command_that_is_not_cargo_test()
+{
     // no flag
     let r = Rig::new();
     r.procs.output(FAILED_LOG);
@@ -1187,14 +1195,18 @@ fn r718_no_retry_without_the_flag_without_a_failures_list_or_after_a_cancel_or_a
     std::thread::sleep(std::time::Duration::from_millis(100));
     for id in [plain, build, make] {
         assert!(retry_job(&r, id).is_none(), "job {}", id.0);
-        assert!(!r.record(id).summary.unwrap_or_default().contains("retrying"));
+        assert!(
+            !r.record(id)
+                .summary
+                .unwrap_or_default()
+                .contains("retrying")
+        );
     }
 }
 
 // R-718
 #[test]
-fn r718_a_job_that_was_killed_or_cancelled_is_not_retried_and_a_peers_job_is_left_to_its_origin()
-{
+fn r718_a_cancelled_job_is_not_retried() {
     let r = Rig::new();
     r.procs.output(FAILED_LOG);
     let mut s = r.spec("o", &["cargo", "test"], Kind::Test);
@@ -1209,7 +1221,10 @@ fn r718_a_job_that_was_killed_or_cancelled_is_not_retried_and_a_peers_job_is_lef
     });
     r.until_done(id);
     std::thread::sleep(std::time::Duration::from_millis(100));
-    assert!(matches!(r.phase(id), Phase::Cancelled | Phase::Failed { .. }));
+    assert!(matches!(
+        r.phase(id),
+        Phase::Cancelled | Phase::Failed { .. }
+    ));
     assert!(retry_job(&r, id).is_none());
 }
 
@@ -1251,13 +1266,31 @@ fn r716_a_job_that_failed_on_a_peer_is_retried_by_its_origin_from_the_mirrored_l
     r.until_done(id);
     r.until("the follow-up is queued", || retry_job(&r, id).is_some());
     let retry = retry_job(&r, id).unwrap();
-    assert_eq!(retry.spec.placement, spec.placement, "retried where it was sent");
-    assert!(retry.spec.isolate && !retry.spec.retry_alone);
-    assert!(
-        retry
-            .spec
-            .argv
-            .ends_with(&["--test-threads=1".to_string()])
+    assert_eq!(
+        retry.spec.placement, spec.placement,
+        "retried where it was sent"
     );
+    assert!(retry.spec.isolate && !retry.spec.retry_alone);
+    assert!(retry.spec.argv.ends_with(&["--test-threads=1".to_string()]));
     assert_eq!(r.record(id).phase, Phase::Failed { exit: Some(101) });
+}
+
+// R-718
+#[test]
+fn r718_a_job_a_peer_sent_here_is_left_to_its_origin_to_retry() {
+    let r = Rig::new();
+    r.procs.output(FAILED_LOG);
+    r.procs.auto_exit(101);
+    let mut spec = r.spec("o", &["cargo", "test"], Kind::Test);
+    spec.retry_alone = true;
+    let mut job = tasks_ledger::NewJob::new(spec);
+    job.origin = Some(tasks_ledger::Origin {
+        peer: "laptop".into(),
+        key: "laptop:1".into(),
+    });
+    let id = r.store.submit_job(&job).unwrap();
+    r.tick();
+    r.until_done(id);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert!(retry_job(&r, id).is_none());
 }

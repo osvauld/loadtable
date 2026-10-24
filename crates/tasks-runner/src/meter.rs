@@ -4,7 +4,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 use tasks_core::{JobFigures, JobId};
-use tasks_platform::{CgroupName, Cgroups, Child, CpuShare, ProcessTable, TreeMeter, Usage, tree_pids};
+use tasks_platform::{
+    CgroupName, Cgroups, Child, CpuShare, ProcessTable, TreeMeter, Usage, tree_pids,
+};
 
 /// How often figures are sampled while the job runs.
 const SAMPLE_EVERY: Duration = Duration::from_secs(2);

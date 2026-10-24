@@ -252,7 +252,10 @@ mod tests {
         assert_eq!(ni, 7);
         let plain = p.spawn_group(&spec(&dir, "sleep 5")).unwrap();
         let ni = rustix::process::getpriority_process(Pid::from_raw(plain.pid)).unwrap();
-        assert!(ni < 7, "a spawn without nice keeps the daemon's niceness: {ni}");
+        assert!(
+            ni < 7,
+            "a spawn without nice keeps the daemon's niceness: {ni}"
+        );
         p.signal_group(c.group, Signal::Kill).unwrap();
         p.signal_group(plain.group, Signal::Kill).unwrap();
         wait_exit(&p, &c);

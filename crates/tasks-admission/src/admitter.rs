@@ -3,8 +3,7 @@
 use crate::gates::{Readings, check_gates};
 use crate::{
     AdmissionError, AdmissionInput, Decision, DeviceState, LIGHT_LANE_BASE, Lane, Running,
-    SHORT_LANE_BASE, SlotState,
-    Thresholds, WaitReason, Waiter, decide,
+    SHORT_LANE_BASE, SlotState, Thresholds, WaitReason, Waiter, decide,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;

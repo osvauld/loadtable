@@ -192,13 +192,7 @@ impl Walk {
     /// applies.
     fn light(&mut self, input: &AdmissionInput, w: &Waiter) -> Verdict {
         let t = &input.thresholds;
-        let blocked = check_gates(
-            SlotKind::Run,
-            Lane::Light,
-            w.new_output,
-            &self.readings,
-            t,
-        );
+        let blocked = check_gates(SlotKind::Run, Lane::Light, w.new_output, &self.readings, t);
         if let Some(r) = blocked
             && !self.light_free.is_empty()
         {
@@ -213,7 +207,8 @@ impl Walk {
                 lane: Lane::Light,
             };
         }
-        let mut holders: Vec<Option<JobId>> = input.light_lane.busy.iter().map(|(_, h)| *h).collect();
+        let mut holders: Vec<Option<JobId>> =
+            input.light_lane.busy.iter().map(|(_, h)| *h).collect();
         holders.extend(self.light_claimed.iter().map(|j| Some(*j)));
         let reason = WaitReason::LightBusy {
             total: input.light_lane.free.len() + input.light_lane.busy.len(),

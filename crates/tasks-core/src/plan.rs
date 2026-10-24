@@ -58,7 +58,9 @@ pub enum PlanError {
     #[error("step {0:?} hints priority blocking; only a submit with --reason can claim it")]
     StepPriority(String),
     /// A step is both `light` and `isolate`.
-    #[error("step {0:?} is both light and isolate; light steps run beside others, isolate steps run alone")]
+    #[error(
+        "step {0:?} is both light and isolate; light steps run beside others, isolate steps run alone"
+    )]
     LightAndIsolate(String),
     /// A step's fetch list is not valid.
     #[error("step {step:?}: {error}")]
@@ -486,9 +488,6 @@ mod fetch_tests {
         p.steps[0].hints.light = true;
         assert_eq!(p.validate(), Ok(()));
         p.steps[0].hints.isolate = true;
-        assert_eq!(
-            p.validate(),
-            Err(PlanError::LightAndIsolate("apk".into()))
-        );
+        assert_eq!(p.validate(), Err(PlanError::LightAndIsolate("apk".into())));
     }
 }

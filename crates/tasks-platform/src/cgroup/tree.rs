@@ -448,7 +448,11 @@ mod tests {
         assert!(!t.set_cpu_weight(job, 200).unwrap());
         let f = own.join("tasks.slice/job-9/cpu.weight");
         assert_eq!(std::fs::read_to_string(f).unwrap().trim(), "");
-        assert!(!crate::NoCgroups::new("none").set_cpu_weight(job, 200).unwrap());
+        assert!(
+            !crate::NoCgroups::new("none")
+                .set_cpu_weight(job, 200)
+                .unwrap()
+        );
     }
 
     // R-329
