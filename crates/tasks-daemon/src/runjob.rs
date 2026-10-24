@@ -1,17 +1,19 @@
 //! One job's runner thread and the adapter between the runner's events and the ledger.
 //!
-//! The thread owns the slot guard for the job's whole life. The runner reports `started`
+//! The job's slot guard lives in its [`RunningJob`] (a test may trade it, R-760); the thread
+//! releases it when the job ends. The runner reports `started`
 //! (the lease is persisted with the move to Running), `lines` (parsed into a timeline for
 //! progress and timing samples) and `finished` (the outcome and the timing sample are written
 //! in one ledger transaction).
 
 use crate::scheduler::{RunningJob, Scheduler, lock};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tasks_core::{JobFigures, Kind, MachineName, Phase, SplitOrigin};
 use tasks_ledger::{
     Finish, LeaseRecord, LedgerError, RetryPolicy, StartInfo, TimeoutReason, retry_busy,
 };
-use tasks_platform::{Child, Signal, SlotGuard};
+use tasks_platform::{Child, Signal};
 use tasks_runner::{
     Attrib, ElisionCaps, End, EnvPolicy, JobStart, Lease, Outcome, Policy as RunPolicy, RunEvents,
     Runner, RunnerError, SystemClock, TimedLine, cap_log_file,
@@ -65,7 +67,6 @@ pub(crate) fn run_job(
     sch: Arc<Scheduler>,
     rj: Arc<RunningJob>,
     start: JobStart,
-    guard: Option<SlotGuard>,
     policy: RunPolicy,
     env_policy: EnvPolicy,
     meta: JobMeta,
@@ -95,7 +96,7 @@ pub(crate) fn run_job(
     if let Err(e) = result {
         ev.runner_failed(&e);
     }
-    drop(guard);
+    drop(lock(&rj.hold).guard.take());
     sch.end_metrics(rj.id);
     lock(&sch.running).remove(&rj.id);
     sch.wake.notify();
@@ -240,6 +241,10 @@ impl RunEvents for Events {
         for l in lines {
             let ts = u64::try_from(l.offset.as_millis()).unwrap_or(u64::MAX);
             for e in self.parser.feed(ts, &l.text) {
+                // the first test binary: cargo has built everything it will (R-760)
+                if self.meta.kind == Kind::Test && matches!(e, Event::TargetStarted { .. }) {
+                    self.rj.testing.store(true, Ordering::SeqCst);
+                }
                 tl.record(ts, &e);
             }
         }

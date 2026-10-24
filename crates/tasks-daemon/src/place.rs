@@ -410,7 +410,7 @@ impl Scheduler {
             let total = policy.slot_count(kind);
             let of_kind: Vec<&Arc<RunningJob>> = running
                 .iter()
-                .filter(|r| r.slot_kind == Some(kind))
+                .filter(|r| r.slot_kind() == Some(kind))
                 .collect();
             let used = u32::try_from(of_kind.len()).unwrap_or(u32::MAX);
             free.insert(kind, total.saturating_sub(used));

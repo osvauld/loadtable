@@ -772,3 +772,9 @@ Tests of earlier rows whose expectations changed with the redesign, kept and edi
 |---|---|---|---|
 | R-750 | A policy step accepts `long` and `isolate` as well as `light` and `retry_alone`; a step that is both `light` and `isolate` is refused with a clear message, and `tasks2 policy show` lists the step's flags on the step. | `r750_a_step_cannot_be_both_light_and_isolate` (validate), `r750_step_flags_are_shown_on_the_step` (show) | any |
 | R-751 | A step's `long` reaches every piece it is split into; its `isolate` or `light` does too, except for a target that sets `light` or `isolate` itself, whose own choice decides for that target. | `r751_step_long_and_isolate_reach_every_piece_unless_a_target_says_otherwise` (expand) | any |
+
+## v2-test-slot-handover
+
+| ID | Rule | Test | Platforms |
+|---|---|---|---|
+| R-760 | A `cargo test` job holds a compile slot while cargo builds; when cargo starts its first test binary (`Running ...`) the job takes a free run slot and gives the compile slot back, so the next build can start, and its log says `slot: tests started after N; compile slot I handed back, now on run slot J`. With no run slot free it keeps the compile slot and tries again each tick. A build, or a test still compiling, keeps its compile slot. | `r760_a_cargo_test_gives_its_compile_slot_back_once_its_tests_run`, `r760_a_build_or_a_test_still_compiling_keeps_its_compile_slot` (sched) | any |

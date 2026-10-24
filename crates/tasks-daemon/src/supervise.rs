@@ -119,7 +119,7 @@ impl Scheduler {
         let mut report = Vec::new();
         let tracked: BTreeSet<(SlotKind, u32)> = lock(&self.running)
             .values()
-            .filter_map(|r| r.slot)
+            .filter_map(|r| r.slot())
             .collect();
         let layout = policy.layout();
         for (kind, n) in &layout.counts {
@@ -415,7 +415,7 @@ impl Scheduler {
     ) -> Vec<(String, AlertLevel, String)> {
         let tracked: BTreeSet<(SlotKind, u32)> = lock(&self.running)
             .values()
-            .filter_map(|r| r.slot)
+            .filter_map(|r| r.slot())
             .collect();
         let grace =
             i64::try_from(policy.slot_grace_secs().saturating_mul(1000)).unwrap_or(i64::MAX);

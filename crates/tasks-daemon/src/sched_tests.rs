@@ -1324,3 +1324,73 @@ fn r718_a_job_a_peer_sent_here_is_left_to_its_origin_to_retry() {
     std::thread::sleep(std::time::Duration::from_millis(100));
     assert!(retry_job(&r, id).is_none());
 }
+
+/// The slot a running job holds now, as status shows it.
+fn held_slot(r: &Rig, id: JobId) -> Option<(String, u32)> {
+    r.sch
+        .status()
+        .running
+        .iter()
+        .find(|j| j.id == id)
+        .and_then(|j| j.slot.clone())
+}
+
+const TESTS_STARTED: &[u8] = b"   Compiling p2pcore v0.1.0\n    Finished `release` profile [optimized] target(s) in 40m\n     Running tests/calls.rs (target/release/deps/calls-0123abcd)\n";
+
+// R-760
+#[test]
+fn r760_a_cargo_test_gives_its_compile_slot_back_once_its_tests_run() {
+    let r = Rig::with_policy("[slots]\ncompile = 1\n");
+    r.procs.output(TESTS_STARTED);
+    let test = r.submit(&r.spec_in("o", &["cargo", "test", "-p", "p2pcore"], Kind::Test, "t"));
+    r.tick();
+    r.until_running(test);
+    r.until("the tests to start", || {
+        r.log_text(test).contains("Running tests/calls.rs")
+    });
+    let build = r.submit(&r.spec_in("o", &["cargo", "build"], Kind::Compile, "b"));
+    r.tick();
+    r.until("the hand-over", || {
+        held_slot(&r, test).is_some_and(|s| s.0 == "run")
+    });
+    r.tick();
+    r.until_running(build);
+    assert_eq!(held_slot(&r, build), Some(("compile".to_string(), 0)));
+    assert!(
+        r.log_text(test)
+            .contains("compile slot 0 handed back, now on run slot 0"),
+        "{}",
+        r.log_text(test)
+    );
+    let st = r.sch.status();
+    let used = |k: &str| {
+        st.slots
+            .iter()
+            .find(|g| g.kind == k)
+            .map(|g| g.total - g.free)
+    };
+    assert_eq!((used("compile"), used("run")), (Some(1), Some(1)));
+}
+
+// R-760
+#[test]
+fn r760_a_build_or_a_test_still_compiling_keeps_its_compile_slot() {
+    let r = Rig::with_policy("[slots]\ncompile = 2\n");
+    r.procs.output(b"   Compiling p2pcore v0.1.0\n");
+    let test = r.submit(&r.spec_in("o", &["cargo", "test", "-p", "p2pcore"], Kind::Test, "t"));
+    let build = r.submit(&r.spec_in("o", &["cargo", "build"], Kind::Compile, "b"));
+    r.tick();
+    r.until_running(test);
+    r.until_running(build);
+    r.until("the log", || r.log_text(test).contains("Compiling"));
+    r.tick();
+    r.tick();
+    assert_eq!(
+        held_slot(&r, test).map(|s| s.0),
+        Some("compile".to_string())
+    );
+    assert_eq!(
+        held_slot(&r, build).map(|s| s.0),
+        Some("compile".to_string())
+    );
+}
