@@ -41,6 +41,7 @@ mod peer_sleep_tests;
 mod peer_wait;
 pub mod peers_config;
 mod place;
+pub mod plan_view;
 pub mod platform;
 pub mod queue_estimate;
 mod queue_view;

@@ -193,6 +193,12 @@ pub struct ListArgs {
     /// One short line per job.
     #[arg(long)]
     pub brief: bool,
+    /// One line per job, plan steps too, instead of a plan as one line with its steps.
+    #[arg(long)]
+    pub flat: bool,
+    /// Under each plan list every step, passed ones too.
+    #[arg(long, conflicts_with = "flat")]
+    pub all_steps: bool,
     /// The daemon's reply as JSON.
     #[arg(long)]
     pub json: bool,

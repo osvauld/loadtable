@@ -5,6 +5,7 @@ use crate::columns::{self, Col, ColSpec, GAP};
 use crate::detail::{SegKind, Segment, Strip};
 use crate::machine::MemLevel;
 use crate::model::{JobRow, MachineCard, Online, PhaseClass, Section, SlotLine, StateCell};
+use crate::plans::{self, PlanRow};
 use crate::resources::{self, Graph, Procs};
 use crate::theme::{self, LABEL, Palette, SECONDARY};
 use eframe::egui::{
@@ -529,6 +530,405 @@ pub fn job_row(
         }
         x += w + GAP;
     }
+    resp
+}
+
+/// Height of a plan's step row: smaller than a job row, a step has one line to say.
+pub const STEP_H: f32 = 34.0;
+/// How far a step is pushed in from its plan's marker.
+pub const INDENT: f32 = 16.0;
+
+/// What a click on a plan row meant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanClick {
+    /// Nothing.
+    None,
+    /// The row: select the plan.
+    Select,
+    /// The disclosure marker: open or close it.
+    Toggle,
+}
+
+fn row_back(painter: &Painter, rect: Rect, p: &Palette, selected: bool, hovered: bool, tint: bool) {
+    if selected {
+        painter.rect_filled(rect, 0.0, theme::mix(p.win, p.accent, 14));
+        painter.rect_filled(
+            Rect::from_min_size(rect.min, vec2(2.0, rect.height())),
+            0.0,
+            p.accent,
+        );
+    } else if hovered {
+        painter.rect_filled(rect, 0.0, theme::mix(p.win, p.ink, 4));
+    } else if tint {
+        painter.rect_filled(rect, 0.0, theme::mix(p.win, p.ink, 2));
+    }
+    painter.hline(rect.x_range(), rect.min.y, Stroke::new(1.0_f32, p.line));
+}
+
+fn command_width(width: f32, cols: &[ColSpec]) -> f32 {
+    let fixed: f32 = cols
+        .iter()
+        .filter(|s| s.col != Col::Command)
+        .map(|s| s.width)
+        .sum::<f32>()
+        + GAP * cols.len().saturating_sub(1) as f32
+        + 2.0 * PAD;
+    (width - fixed).max(
+        columns::specs()
+            .iter()
+            .find(|s| s.col == Col::Command)
+            .map_or(120.0, |s| s.width),
+    )
+}
+
+fn chip(painter: &Painter, p: &Palette, x: f32, cy: f32, max_w: f32, text: &str, font: FontId) {
+    let g = painter.layout_no_wrap(text.to_string(), font, p.dim);
+    let chip = Rect::from_min_size(
+        pos2(x, cy - 9.5),
+        vec2((g.size().x + 12.0).min(max_w), 19.0),
+    );
+    painter.rect_stroke(
+        chip,
+        round(3.0),
+        Stroke::new(1.0_f32, p.line),
+        StrokeKind::Inside,
+    );
+    painter.with_clip_rect(chip).galley(
+        pos2(chip.min.x + 6.0, cy - g.size().y / 2.0),
+        g,
+        Color32::PLACEHOLDER,
+    );
+}
+
+/// A plan's parent row: marker, agent, title over the counts, machine and the state cell.
+pub fn plan_row(
+    ui: &mut Ui,
+    p: &Palette,
+    plan: &PlanRow,
+    cols: &[ColSpec],
+    selected: bool,
+    open: bool,
+) -> (egui::Response, PlanClick) {
+    let width = ui.available_width();
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, ROW_H), Sense::click());
+    let painter = ui.painter_at(rect);
+    row_back(&painter, rect, p, selected, resp.hovered(), false);
+    let command_w = command_width(width, cols);
+    let cy = rect.center().y;
+    let mut x = rect.min.x + PAD;
+    let mut toggled = false;
+    for s in cols {
+        let w = if s.col == Col::Command {
+            command_w
+        } else {
+            s.width
+        };
+        let cell = Rect::from_min_size(pos2(x, rect.min.y), vec2(w, ROW_H));
+        match s.col {
+            Col::Id => {
+                let mark = Rect::from_min_size(pos2(x - 4.0, rect.min.y), vec2(w + 4.0, ROW_H));
+                let hit = ui.interact(mark, resp.id.with("marker"), Sense::click());
+                toggled = hit.clicked();
+                let c = if hit.hovered() { p.ink } else { p.dim };
+                let (mx, my) = (x + 5.0, cy);
+                let pts = if open {
+                    vec![
+                        pos2(mx - 4.5, my - 2.5),
+                        pos2(mx + 4.5, my - 2.5),
+                        pos2(mx, my + 3.5),
+                    ]
+                } else {
+                    vec![
+                        pos2(mx - 2.5, my - 4.5),
+                        pos2(mx - 2.5, my + 4.5),
+                        pos2(mx + 3.5, my),
+                    ]
+                };
+                painter.add(egui::Shape::convex_polygon(pts, c, Stroke::NONE));
+                text_at(
+                    &painter,
+                    x + 16.0,
+                    cy,
+                    "plan",
+                    theme::mono(SECONDARY - 1.0),
+                    p.faint,
+                );
+                hit.on_hover_text(if open {
+                    "Hide the steps"
+                } else {
+                    "Show the steps"
+                });
+            }
+            Col::Agent => {
+                painter.rect_filled(
+                    Rect::from_center_size(pos2(x + 1.5, cy), vec2(3.0, 18.0)),
+                    round(2.0),
+                    p.agent(plan.hue),
+                );
+                let name = fit(
+                    &painter,
+                    &plan.agent,
+                    theme::sans_medium(theme::BODY),
+                    p.ink,
+                    w - 10.0,
+                );
+                let name_w = name.size().x;
+                put(&painter, x + 10.0, cy, name);
+                if let Some(v) = plan.vendor {
+                    let room = w - 10.0 - name_w - 6.0;
+                    if room > 24.0 {
+                        put(
+                            &painter,
+                            x + 10.0 + name_w + 6.0,
+                            cy + 1.0,
+                            fit(&painter, v, theme::sans(LABEL + 0.5), p.faint, room),
+                        );
+                    }
+                }
+                ui.interact(cell, resp.id.with("agent"), Sense::hover())
+                    .on_hover_text(&plan.owner);
+            }
+            Col::Command => {
+                put(
+                    &painter,
+                    x,
+                    rect.min.y + 15.0,
+                    fit(
+                        &painter,
+                        &plan.title,
+                        theme::sans_semibold(theme::BODY),
+                        p.ink,
+                        w,
+                    ),
+                );
+                put(
+                    &painter,
+                    x,
+                    rect.min.y + 33.0,
+                    fit(
+                        &painter,
+                        &plan.progress_text,
+                        theme::sans(SECONDARY),
+                        p.dim,
+                        w,
+                    ),
+                );
+            }
+            Col::Machine => {
+                if !plan.machine.is_empty() {
+                    chip(
+                        &painter,
+                        p,
+                        x,
+                        cy,
+                        w,
+                        &plan.machine,
+                        theme::sans(SECONDARY - 0.5),
+                    );
+                }
+            }
+            Col::State => state_cell(&painter, p, cell, &plan.state, plan.section),
+        }
+        x += w + GAP;
+    }
+    let click = if !resp.clicked() && !toggled {
+        PlanClick::None
+    } else if toggled {
+        PlanClick::Toggle
+    } else {
+        PlanClick::Select
+    };
+    (resp, click)
+}
+
+/// One step of a plan, pushed in under its parent: id, step name and flags, machine, state.
+pub fn step_row(
+    ui: &mut Ui,
+    p: &Palette,
+    row: &JobRow,
+    cols: &[ColSpec],
+    selected: bool,
+) -> egui::Response {
+    let width = ui.available_width();
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, STEP_H), Sense::click());
+    let painter = ui.painter_at(rect);
+    row_back(&painter, rect, p, selected, resp.hovered(), true);
+    // the line that ties the steps to their parent
+    let guide = rect.min.x + PAD + 5.0;
+    painter.vline(guide, rect.y_range(), Stroke::new(1.0_f32, p.line));
+    let command_w = command_width(width, cols);
+    let cy = rect.center().y;
+    let mut x = rect.min.x + PAD;
+    // the name starts under the agent column and may run on into the command column
+    let name_room = cols
+        .iter()
+        .filter(|s| matches!(s.col, Col::Agent | Col::Command))
+        .map(|s| {
+            if s.col == Col::Command {
+                command_w
+            } else {
+                s.width
+            }
+        })
+        .sum::<f32>()
+        + GAP;
+    let mut agent_x = x;
+    for s in cols {
+        let w = if s.col == Col::Command {
+            command_w
+        } else {
+            s.width
+        };
+        let cell = Rect::from_min_size(pos2(x, rect.min.y), vec2(w, STEP_H));
+        match s.col {
+            Col::Id => {
+                text_at(
+                    &painter,
+                    x + INDENT,
+                    cy,
+                    &format!("#{}", row.id),
+                    theme::mono(SECONDARY - 0.5),
+                    p.faint,
+                );
+            }
+            Col::Agent => agent_x = x,
+            Col::Command => {
+                let label = row.step.as_deref().unwrap_or(&row.command);
+                // tags come first so a long name is cut, never the flag
+                let tags_w: f32 = row.tags.len() as f32 * 56.0;
+                let g = fit(
+                    &painter,
+                    label,
+                    theme::mono(SECONDARY),
+                    p.ink,
+                    (name_room - 10.0 - tags_w).max(60.0),
+                );
+                let name_w = g.size().x;
+                put(&painter, agent_x + 10.0, cy, g);
+                let mut tx = agent_x + 10.0 + name_w + 8.0;
+                for t in &row.tags {
+                    let g = painter.layout_no_wrap(t.clone(), theme::sans(LABEL), p.dim);
+                    let tag =
+                        Rect::from_min_size(pos2(tx, cy - 8.0), vec2(g.size().x + 10.0, 16.0));
+                    painter.rect_filled(tag, round(3.0), theme::mix(p.win, p.ink, 8));
+                    painter.galley(
+                        pos2(tag.min.x + 5.0, cy - g.size().y / 2.0),
+                        g,
+                        Color32::PLACEHOLDER,
+                    );
+                    tx += tag.width() + 5.0;
+                }
+            }
+            Col::Machine => {
+                chip(
+                    &painter,
+                    p,
+                    x,
+                    cy,
+                    w,
+                    &row.machine,
+                    theme::sans(SECONDARY - 0.5),
+                );
+            }
+            Col::State => {
+                let (head, tone, right) = plans::child_state(row);
+                let right_w = text_right(
+                    &painter,
+                    cell.max.x,
+                    cy,
+                    &right,
+                    theme::sans_medium(SECONDARY),
+                    p.ink,
+                );
+                put(
+                    &painter,
+                    cell.min.x,
+                    cy,
+                    fit(
+                        &painter,
+                        &head,
+                        theme::sans(SECONDARY),
+                        tone_color(p, tone),
+                        (w - right_w - 10.0).max(20.0),
+                    ),
+                );
+            }
+        }
+        x += w + GAP;
+    }
+    resp
+}
+
+/// The plan's progress as one bar: passed, failed and running parts of the whole, with the
+/// counts under it.
+pub fn plan_bar(ui: &mut Ui, p: &Palette, plan: &PlanRow) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 8.0), Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, round(4.0), p.raise);
+    let total = plan.summary.total.max(1) as f32;
+    let mut x = rect.min.x;
+    for (n, color) in [
+        (plan.summary.passed, p.ok),
+        (plan.summary.failed, p.bad),
+        (plan.summary.cancelled, p.dim),
+        (plan.summary.running, p.accent),
+    ] {
+        if n == 0 {
+            continue;
+        }
+        let w = (rect.width() * n as f32 / total).max(3.0);
+        let seg = Rect::from_min_max(
+            pos2(x, rect.min.y),
+            pos2((x + w).min(rect.max.x), rect.max.y),
+        );
+        painter.rect_filled(seg, round(2.0), color);
+        x += w + 1.0;
+    }
+}
+
+/// One line of a plan's step list in the side panel: name, state, time. Clickable.
+pub fn step_line(ui: &mut Ui, p: &Palette, l: &plans::StepLine) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
+    let painter = ui.painter_at(rect);
+    if resp.hovered() {
+        painter.rect_filled(rect, round(3.0), theme::mix(p.panel, p.ink, 6));
+    }
+    let cy = rect.center().y;
+    text_right(
+        &painter,
+        rect.max.x - 6.0,
+        cy,
+        &l.time,
+        theme::sans(SECONDARY),
+        p.dim,
+    );
+    // fixed columns so the states line up whatever the times say
+    let state_w = 64.0;
+    let sx = rect.max.x - 6.0 - 56.0 - 10.0 - state_w;
+    put(
+        &painter,
+        sx,
+        cy,
+        fit(
+            &painter,
+            &l.state,
+            theme::sans_medium(SECONDARY),
+            tone_color(p, l.tone),
+            state_w,
+        ),
+    );
+    put(
+        &painter,
+        rect.min.x + 6.0,
+        cy,
+        fit(
+            &painter,
+            &l.name,
+            theme::mono(SECONDARY),
+            p.ink,
+            (sx - rect.min.x - 18.0).max(20.0),
+        ),
+    );
     resp
 }
 

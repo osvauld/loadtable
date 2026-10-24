@@ -167,7 +167,10 @@ fn r185_table_has_one_line_per_job_with_the_requested_columns() {
         NOW,
         Some("/home/u"),
         &[],
-        TableOptions { brief: true },
+        TableOptions {
+            brief: true,
+            ..TableOptions::default()
+        },
     );
     assert_eq!(brief.lines().count(), 3, "{brief}");
     assert!(!brief.contains("~/wt"));
@@ -1016,4 +1019,75 @@ fn r692_status_prints_this_machines_endpoint_and_a_missing_transport_with_its_al
     // an older daemon sends none
     s.endpoint = None;
     assert!(!status(&s).contains("this machine:"));
+}
+
+fn plan_step(id: i64, name: &str, phase: Phase) -> JobView {
+    let mut j = job(id, "lead-p2p@laptop", "/w", phase, "cargo test --release");
+    j.plan = Some((2, format!("tests.{name}")));
+    j.machine = Some("nixos".into());
+    j
+}
+
+fn sample_plan() -> Vec<JobView> {
+    let mut jobs = vec![job(5, "bob", "/w", Phase::Running, "cargo check")];
+    jobs.push(plan_step(330, "build", Phase::Passed));
+    jobs.push(plan_step(331, "test-a", Phase::Passed));
+    jobs.push(plan_step(332, "test-b", Phase::Failed { exit: Some(101) }));
+    jobs.push(plan_step(333, "test-c", Phase::Running));
+    jobs.push(plan_step(334, "test-d", Phase::Queued));
+    jobs
+}
+
+// R-747
+#[test]
+fn r747_a_plan_is_one_line_with_its_unfinished_steps_under_it() {
+    let t = job_table(&sample_plan(), NOW, None, &[], TableOptions::default());
+    let lines: Vec<&str> = t.lines().collect();
+    // header, bob's job, the plan line, 3 steps, the passed count, legend
+    assert_eq!(lines.len(), 8, "{t}");
+    assert!(lines[1].contains("bob"));
+    assert_eq!(
+        lines[2],
+        "plan 2  lead-p2p  3/5 done, 1 running, 1 waiting, 1 failed  nixos"
+    );
+    assert!(
+        lines[3].starts_with("    332 failed") && lines[3].contains("test-b"),
+        "{t}"
+    );
+    assert!(
+        lines[4].contains("333") && lines[4].contains("running") && lines[4].contains("test-c")
+    );
+    assert!(lines[5].contains("334") && lines[5].contains("test-d"));
+    assert_eq!(lines[6], "  ... 2 passed");
+    assert!(!t.contains("tests.test-b"), "{t}");
+}
+
+// R-748
+#[test]
+fn r748_all_steps_and_flat_choose_how_a_plan_is_listed() {
+    let all = job_table(
+        &sample_plan(),
+        NOW,
+        None,
+        &[],
+        TableOptions {
+            all_steps: true,
+            ..TableOptions::default()
+        },
+    );
+    assert!(all.contains("build") && !all.contains("... "), "{all}");
+    assert_eq!(all.lines().count(), 9, "{all}"); // header, bob, plan, 5 steps, legend
+    let flat = job_table(
+        &sample_plan(),
+        NOW,
+        None,
+        &[],
+        TableOptions {
+            flat: true,
+            ..TableOptions::default()
+        },
+    );
+    assert!(!flat.contains("plan 2"), "{flat}");
+    // header, 6 jobs, legend
+    assert_eq!(flat.lines().count(), 8, "{flat}");
 }

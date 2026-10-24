@@ -416,6 +416,130 @@ mod tests {
         assert!(!texts.is_empty());
     }
 
+    enum Pick {
+        Job(i64),
+        Plan,
+    }
+
+    /// The fixture of plan 2 mid-run, open or closed, with one thing selected.
+    fn plan_app(open: bool, pick: Pick) -> App {
+        let mut a = App::fixed(&fixtures::with_plan(), dead_link());
+        a.set_plan_open(2, open);
+        match pick {
+            Pick::Job(id) => {
+                a.select(id);
+                if id == 101 {
+                    a.set_metrics(101, fixtures::metrics_running());
+                }
+            }
+            Pick::Plan => a.select_plan(2),
+        }
+        a
+    }
+
+    /// Leftmost x in `[0, to)` whose pixel in row `y` differs from the row's own background.
+    fn first_ink(rgb: &[u8], width: usize, y: usize, from: usize, to: usize) -> Option<usize> {
+        let px = |x: usize| rgb[(y * width + x) * 3..(y * width + x) * 3 + 3].to_vec();
+        let bg = px(from);
+        (from..to).find(|x| px(*x) != bg)
+    }
+
+    // R-749
+    #[test]
+    fn r749_steps_sit_indented_under_their_plan_row() {
+        let size = [1400, 1100];
+        let mut app = plan_app(true, Pick::Job(101));
+        let rgb = render(&mut app, size, 1.0, true);
+        let parent = app
+            .row_rect(crate::plans::plan_key(2))
+            .expect("plan row drawn");
+        let child = app.row_rect(336).expect("step row drawn");
+        assert!(child.min.y >= parent.max.y, "the step is under the plan");
+        let cy = |r: egui::Rect| (r.center().y) as usize;
+        // the plan's marker starts at the list's padding; the step's id is pushed in by INDENT
+        let pad = crate::paint::PAD as usize;
+        let p_ink = first_ink(&rgb, size[0], cy(parent), 2, 80).expect("marker ink");
+        assert!(p_ink <= pad + 2, "marker at {p_ink}");
+        // skip the guide line at PAD + 5; the id text starts after it
+        let guide = pad + 5;
+        let c_ink = first_ink(&rgb, size[0], cy(child), guide + 2, 120).expect("id ink");
+        assert!(
+            c_ink >= pad + crate::paint::INDENT as usize - 1,
+            "the step's id starts at {c_ink}"
+        );
+        // and the plan's own text is not that far in
+        let p_text = first_ink(&rgb, size[0], cy(parent), pad + 14, 120).expect("plan text");
+        assert!(c_ink + 2 >= p_text, "id {c_ink} vs plan label {p_text}");
+        // every step of the open plan has a row
+        for id in 330..=369 {
+            assert!(app.row_rect(id).is_some(), "step {id}");
+        }
+    }
+
+    // R-749
+    #[test]
+    fn r749_no_row_draws_past_the_right_edge_even_when_narrow() {
+        for width in [700usize, 1100] {
+            let size = [width, 2400];
+            let mut app = App::fixed(&fixtures::with_plan(), dead_link());
+            app.set_plan_open(2, true);
+            let rgb = render(&mut app, size, 1.0, true);
+            let key_plan = crate::plans::plan_key(2);
+            let mut keys = vec![101, key_plan];
+            keys.extend(330..=369);
+            for key in keys {
+                let r = app.row_rect(key).expect("row drawn");
+                let right = r.max.x as usize;
+                for y in (r.min.y as usize + 2)..(r.max.y as usize - 1) {
+                    let px =
+                        |x: usize| rgb[(y * size[0] + x) * 3..(y * size[0] + x) * 3 + 3].to_vec();
+                    let edge = px(right - 1);
+                    for x in right.saturating_sub(9)..right {
+                        assert_eq!(
+                            px(x),
+                            edge,
+                            "ink at ({x}, {y}) in the margin of row {key} at width {width}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // R-744
+    #[test]
+    fn r744_right_opens_and_left_closes_a_plan_and_left_on_a_step_goes_up() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut app = plan_app(false, Pick::Plan);
+        frame(&mut app, &ctx, vec![]);
+        assert!(
+            app.row_rect(330).is_none(),
+            "plan 2 starts with its steps hidden"
+        );
+        frame(&mut app, &ctx, vec![key(egui::Key::ArrowRight)]);
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.row_rect(330).is_some(), "Right opened it");
+        frame(&mut app, &ctx, vec![key(egui::Key::ArrowDown)]);
+        assert_eq!(
+            app.selected_id(),
+            Some(336),
+            "Down went to the first step shown (the failed one)"
+        );
+        frame(&mut app, &ctx, vec![key(egui::Key::ArrowLeft)]);
+        assert_eq!(
+            app.selected_id(),
+            Some(crate::plans::plan_key(2)),
+            "Left climbed to the plan"
+        );
+        frame(&mut app, &ctx, vec![key(egui::Key::ArrowLeft)]);
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.row_rect(330).is_none(), "Left closed it");
+        // Down from a closed plan skips its steps
+        frame(&mut app, &ctx, vec![key(egui::Key::ArrowDown)]);
+        assert_ne!(app.selected_id(), Some(336));
+    }
+
     /// Writes screenshots when `TASKS_UI_SCREENSHOT_DIR` is set; otherwise only checks that
     /// every view renders.
     #[test]
@@ -483,6 +607,36 @@ mod tests {
                 },
                 [1400, 1240],
                 false,
+            ),
+            (
+                "plan-collapsed-dark",
+                plan_app(false, Pick::Job(101)),
+                [1400, 900],
+                true,
+            ),
+            (
+                "plan-expanded-dark",
+                plan_app(true, Pick::Job(336)),
+                [1400, 1100],
+                true,
+            ),
+            (
+                "plan-detail-dark",
+                plan_app(true, Pick::Plan),
+                [1400, 900],
+                true,
+            ),
+            (
+                "plan-expanded-light",
+                plan_app(true, Pick::Job(336)),
+                [1400, 1100],
+                false,
+            ),
+            (
+                "plan-narrow-dark",
+                plan_app(true, Pick::Plan),
+                [700, 1400],
+                true,
             ),
             ("refused-long-dark", long_refusal(), [1280, 700], true),
             (
