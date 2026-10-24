@@ -35,8 +35,10 @@ iroh = { version = "1.3", optional = true }
 tokio = { version = "1", optional = true, features = ["rt-multi-thread", "time"] }
 
 [features]
-# The real iroh transport for peer forwarding. Off by default: the default build has no async
-# runtime. The adapter keeps any runtime on threads of its own.
+# The real iroh transport for peer forwarding. On by default: a daemon without it cannot reach
+# or be reached by any peer, and a pairing ticket from it carries no address. The adapter keeps
+# its async runtime on threads of its own. `--no-default-features` builds a local-only daemon.
+default = ["iroh"]
 iroh = ["tasks-peer/iroh", "dep:iroh", "dep:tokio"]
 
 [dev-dependencies]
