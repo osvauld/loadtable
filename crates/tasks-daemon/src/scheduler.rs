@@ -120,6 +120,9 @@ impl RunningJob {
 /// Per-tick bookkeeping that survives between ticks.
 #[derive(Default)]
 pub(crate) struct TickState {
+    /// The machine policy file as last seen (modified time, length), `Some(None)` when it was
+    /// missing; `None` until the first look (R-798).
+    pub policy_stamp: Option<Option<(std::time::SystemTime, u64)>>,
     pub placed: BTreeMap<JobId, String>,
     /// The last host counters and the rates computed from them (status).
     pub host_prev: Option<(

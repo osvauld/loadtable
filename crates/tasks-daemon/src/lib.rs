@@ -43,6 +43,7 @@ pub mod peers_config;
 mod place;
 pub mod plan_view;
 pub mod platform;
+mod policy_reload;
 pub mod queue_estimate;
 mod queue_view;
 pub mod regex_lite;

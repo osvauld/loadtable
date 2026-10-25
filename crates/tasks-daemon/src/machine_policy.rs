@@ -567,6 +567,14 @@ fn flatten(prefix: &str, table: &toml::Table, out: &mut Vec<(String, Result<Stri
     }
 }
 
+/// Keys read once when the daemon starts; a reload reports them instead of applying them.
+/// `[peers]` (the endpoint, its bind address and relay) is the same.
+pub const RESTART_ONLY: &[&str] = &[
+    "daemon.nofile_target",
+    "audit.checkpoint_every",
+    "attribution.trip_interval_secs",
+];
+
 /// The effective machine policy.
 #[derive(Debug, Clone)]
 pub struct MachinePolicy {
@@ -615,6 +623,65 @@ impl MachinePolicy {
                 p
             }
         }
+    }
+
+    /// Like [`MachinePolicy::load`], but a file that cannot be read or is refused is an error
+    /// with its problems, so a reload can keep the policy in force (R-798). A missing file is
+    /// the defaults.
+    pub fn load_strict(
+        path: &Path,
+        env: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<MachinePolicy, Vec<String>> {
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => Some(t),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(vec![format!("{}: cannot read: {e}", path.display())]),
+        };
+        let mut policy = MachinePolicy::defaults();
+        if let Some(t) = &text {
+            policy = policy.apply_file(t)?;
+            policy.file_loaded = true;
+        }
+        policy.apply_env(env);
+        Ok(policy)
+    }
+
+    /// Puts back `running`'s values of the keys read only at startup, which a reload must not
+    /// change while the daemon runs (R-798).
+    pub fn keep_restart_only(&mut self, running: &MachinePolicy) {
+        for k in RESTART_ONLY {
+            if let (Some(v), Some(s)) = (running.vals.get(k), running.sources.get(k)) {
+                self.vals.insert(k, v.clone());
+                self.sources.insert(k, *s);
+            }
+        }
+        self.peers = running.peers.clone();
+    }
+
+    /// What differs from `before`, one `key: old -> new` line each, and which of those take
+    /// effect only at the next daemon start.
+    pub fn changes_from(&self, before: &MachinePolicy) -> (Vec<String>, Vec<String>) {
+        let old: BTreeMap<String, String> = before
+            .settings()
+            .into_iter()
+            .map(|s| (s.key, s.value))
+            .collect();
+        let mut changed = Vec::new();
+        let mut restart = Vec::new();
+        for s in self.settings() {
+            let was = old.get(&s.key).cloned().unwrap_or_default();
+            if was != s.value {
+                if RESTART_ONLY.contains(&s.key.as_str()) {
+                    restart.push(s.key.clone());
+                }
+                changed.push(format!("{}: {was} -> {}", s.key, s.value));
+            }
+        }
+        if self.peers != before.peers {
+            changed.push("peers: changed".to_string());
+            restart.push("peers".to_string());
+        }
+        (changed, restart)
     }
 
     /// Builds the policy from file text and an environment.
@@ -713,7 +780,7 @@ impl MachinePolicy {
         out
     }
 
-    fn u(&self, key: &str) -> u64 {
+    pub(crate) fn u(&self, key: &str) -> u64 {
         match self.vals.get(key) {
             Some(Val::U(v)) => *v,
             _ => 0,
