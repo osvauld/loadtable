@@ -24,7 +24,8 @@ pub use error::{PolicyError, Problem, Violation, Violations};
 pub use expand::{Executables, ExpandOptions, Expansion, expand};
 pub use load::{Loaded, POLICY_PATH, PolicyFs, RealFs, find_policy, load};
 pub use model::{
-    MAX_SYNC_EXTRA, Policy, SCHEMA_VERSION, SplitMode, StepDef, Suite, SyncSection, TargetNote,
+    MAX_SYNC_EXTRA, PlacementSection, Policy, PolicyOs, SCHEMA_VERSION, SplitMode, StepDef, Suite,
+    SyncSection, TargetNote,
 };
 pub use show::show;
 pub use suggest::{Action, SuggestConfig, Suggestion, SuggestionKind, suggest};

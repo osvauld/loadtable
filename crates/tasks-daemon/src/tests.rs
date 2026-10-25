@@ -903,6 +903,78 @@ fn suites_expand_from_the_repo_policy_and_unknown_ones_are_refused() {
     assert_eq!(err(r.sch.handle(req("nope"))).code, ErrorCode::Refused);
 }
 
+// R-794: the repo's `[placement] os` keeps anywhere jobs off machines of another OS; a named
+// peer, a step that names a machine, or the job's own OS is left alone.
+#[test]
+fn r794_the_repo_os_keeps_anywhere_jobs_off_other_systems() {
+    let mut mac = peer_view();
+    mac.machine.name = MachineName("mac".into());
+    mac.machine.os = Os::Macos;
+    let mut linux = peer_view();
+    linux.machine.os = Os::Linux;
+    // idle and equal, the two peers tie and "mac" sorts first
+    let f = Arc::new(FakeForwarder::new(vec![mac, linux]));
+    let r = Rig::with_forwarder(f.clone());
+    let repo = r.dir.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::create_dir_all(repo.join(".tasks")).unwrap();
+    std::fs::write(
+        repo.join(".tasks/run-policy.toml"),
+        "version = 1\n[placement]\nos = \"linux\"\n[suites.s]\n\
+         [[suites.s.steps]]\nname=\"build\"\ncommand=[\"make\"]\n\
+         [[suites.s.steps]]\nname=\"ios\"\ncommand=[\"xcodebuild\"]\nplacement=\"mac\"\n",
+    )
+    .unwrap();
+    let submit = |placement: Placement, os: Option<Os>| {
+        let mut s = r.spec("o", &["make", "x"], Kind::Compile);
+        s.cwd = repo.clone();
+        s.placement = placement;
+        s.requirements.os = os;
+        let Response::Submitted { id, .. } = ok(r.sch.handle(Request::Submit { spec: s })) else {
+            panic!("submitted expected")
+        };
+        id
+    };
+    let os_of = |id: JobId| r.record(id).spec.requirements.os;
+    let anywhere = submit(Placement::Anywhere, None);
+    assert_eq!(os_of(anywhere), Some(Os::Linux));
+    r.tick();
+    r.tick();
+    let rec = r.record(anywhere);
+    assert_ne!(
+        rec.forward.as_ref().map(|fw| fw.peer.0.as_str()),
+        Some("mac"),
+        "{:?}",
+        rec.wait_text
+    );
+    let named = submit(Placement::Peer(MachineName("mac".into())), None);
+    assert_eq!(os_of(named), None, "a named peer is the submitter's choice");
+    let own = submit(Placement::Anywhere, Some(Os::Macos));
+    assert_eq!(os_of(own), Some(Os::Macos), "the job's own OS wins");
+    let Response::PlanSubmitted { jobs, .. } = ok(r.sch.handle(Request::SubmitSuite {
+        name: "s".into(),
+        owner: "o".into(),
+        cwd: repo.clone(),
+        env: vec![],
+        placement: Placement::Anywhere,
+        placement_given: true,
+        quick: false,
+        executables: Default::default(),
+        broad_test: false,
+        priority: Default::default(),
+        priority_reason: None,
+    })) else {
+        panic!("plan expected");
+    };
+    let step = |n: &str| os_of(jobs.iter().find(|(name, _)| name == n).unwrap().1);
+    assert_eq!(step("build"), Some(Os::Linux));
+    assert_eq!(
+        step("ios"),
+        None,
+        "a step that names a machine is left alone"
+    );
+}
+
 // ---------------------------------------------------------------- forwarding
 
 pub(crate) fn peer_view() -> MachineView {

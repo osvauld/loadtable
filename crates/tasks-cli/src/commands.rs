@@ -203,6 +203,11 @@ pub fn build_spec(ctx: &mut Ctx<'_>, a: &RunArgs) -> Result<JobSpec, CliError> {
     };
     (spec.priority, spec.priority_reason) = a.class.resolve()?;
     spec.requirements.device = a.device.clone().map(DeviceId);
+    spec.requirements.os =
+        a.os.as_deref()
+            .map(tasks_core::Os::parse)
+            .transpose()
+            .map_err(CliError::Refused)?;
     spec.validate()
         .map_err(|e| CliError::Refused(format!("invalid job: {e}")))?;
     Ok(spec)

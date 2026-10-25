@@ -64,6 +64,34 @@ fn sleep(d: Duration) {
     std::thread::sleep(d);
 }
 
+/// The OS the repo's run policy asks of jobs that may run anywhere (`[placement] os`, R-794).
+/// No policy, or one that does not load, sets nothing.
+fn repo_os(cwd: &std::path::Path) -> Option<tasks_core::Os> {
+    let loaded = tasks_policy::load(&RealFs, cwd).ok()?;
+    loaded.policy.placement.os.map(Into::into)
+}
+
+/// True when the repo's OS applies to this step: it may run anywhere, names no machine in its
+/// hint, and gives no OS of its own.
+fn takes_repo_os(ctx: &PlanContext, step: &tasks_core::plan::Step) -> bool {
+    let hint_names_none = matches!(
+        step.hints.placement.as_deref().map(str::trim),
+        None | Some("" | "anywhere")
+    );
+    step.requirements.os.is_none()
+        && hint_names_none
+        && ctx.step_placement(&step.hints) == Placement::Anywhere
+}
+
+fn with_os(ctx: &PlanContext, plan: &mut Plan, os: Option<tasks_core::Os>) {
+    let Some(os) = os else { return };
+    for step in &mut plan.steps {
+        if takes_repo_os(ctx, step) {
+            step.requirements.os = Some(os);
+        }
+    }
+}
+
 type Out = Result<Response, ApiError>;
 
 impl Scheduler {
@@ -420,8 +448,11 @@ impl Scheduler {
         self.audit(ev);
     }
 
-    fn submit(&self, spec: JobSpec) -> Out {
+    fn submit(&self, mut spec: JobSpec) -> Out {
         Self::owner(spec.owner.as_str())?;
+        if spec.placement == Placement::Anywhere && spec.requirements.os.is_none() {
+            spec.requirements.os = repo_os(&spec.cwd);
+        }
         spec.validate()
             .map_err(|e| ApiError::new(ErrorCode::Refused, format!("invalid job: {e}")))?;
         let warnings = self.rules(&spec, "", None)?;
@@ -456,6 +487,11 @@ impl Scheduler {
     }
 
     fn submit_plan(&self, plan: &Plan, ctx: PlanContext) -> Out {
+        let mut plan = plan.clone();
+        if plan.steps.iter().any(|s| takes_repo_os(&ctx, s)) {
+            with_os(&ctx, &mut plan, repo_os(&ctx.cwd));
+        }
+        let plan = &plan;
         self.check_plan(&ctx, plan)?;
         let done = retry_busy(&API_RETRY, &sleep, || self.ledger.submit_plan(&ctx, plan))
             .map_err(|e| ledger_error(&e))?;
@@ -485,8 +521,13 @@ impl Scheduler {
                 machines: &machines,
             }),
         };
-        let expansion = tasks_policy::expand(&loaded.policy, name, executables, &opts)
+        let mut expansion = tasks_policy::expand(&loaded.policy, name, executables, &opts)
             .map_err(|e| ApiError::new(ErrorCode::Refused, e.to_string()))?;
+        with_os(
+            &ctx,
+            &mut expansion.plan,
+            loaded.policy.placement.os.map(Into::into),
+        );
         self.check_plan(&ctx, &expansion.plan)?;
         let done = retry_busy(&API_RETRY, &sleep, || {
             self.ledger.submit_plan(&ctx, &expansion.plan)

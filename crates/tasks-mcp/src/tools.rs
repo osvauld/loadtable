@@ -223,6 +223,7 @@ struct SubmitArgs {
     placement: Option<String>,
     peer: Option<String>,
     device: Option<String>,
+    os: Option<String>,
     timeout_s: Option<u64>,
     broad_test: Option<bool>,
     allow_script: Option<bool>,
@@ -551,6 +552,11 @@ impl Tools {
             retry_alone: false,
         };
         spec.requirements.device = a.device.map(DeviceId);
+        spec.requirements.os =
+            a.os.as_deref()
+                .map(tasks_core::Os::parse)
+                .transpose()
+                .map_err(ToolError::Refused)?;
         spec.validate()
             .map_err(|e| ToolError::Refused(format!("invalid job: {e}")))?;
         let mut notes: Vec<String> = Vec::new();

@@ -98,6 +98,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     "placement": placement,
                     "peer": peer,
                     "device": {"type": "string", "description": "adb serial of an attached test device; the job holds that device's slot and stays on this machine."},
+                    "os": {"type": "string", "enum": ["linux", "macos"], "description": "Only machines with this OS may run it (e.g. a build whose binary you will run here, or that needs Linux libraries). Without it, a placement \"anywhere\" job takes the repo run policy's [placement] os."},
                     "timeout_s": {"type": "integer", "minimum": 1, "description": "Stop the job after this many seconds (1 s to 7 days; the job ends timed out)."},
                     "broad_test": {"type": "boolean", "description": "Deliberately build every test target of a filtered `cargo test`. Prefer naming the target."},
                     "allow_script": {"type": "boolean", "description": "Run a `sh -c`/`bash -c` script of several commands as one job. Without it such a script is refused: it gets no timing history or estimate. Prefer submit_steps, run_suite, or a script file in the repo."},
