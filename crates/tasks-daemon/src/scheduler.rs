@@ -971,6 +971,7 @@ impl Scheduler {
             kind: rec.spec.kind,
             recipe: facts.recipe.clone(),
             piece: rec.hints.split.clone(),
+            interactive: rec.spec.interactive,
         };
         lock(&self.running).insert(id, rj.clone());
         lock(&self.state).last_wait.remove(&id);

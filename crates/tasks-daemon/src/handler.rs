@@ -561,6 +561,7 @@ impl Scheduler {
                 isolate: step.hints.isolate,
                 light: step.hints.light,
                 retry_alone: step.hints.retry_alone,
+                interactive: false,
             };
             spec.validate().map_err(|e| {
                 ApiError::new(

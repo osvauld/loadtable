@@ -43,6 +43,7 @@ fn record(store: &MemoryStore, root: &Path, fetch: &[&str]) -> JobRecord {
         isolate: false,
         light: false,
         retry_alone: false,
+        interactive: false,
     };
     let id = store.submit(&spec).unwrap();
     store.get(id).unwrap().unwrap()

@@ -159,6 +159,7 @@ mod tests {
             isolate: false,
             light: false,
             retry_alone: false,
+            interactive: false,
         };
         let store = tasks_ledger::MemoryStore::new();
         let id = tasks_ledger::Store::submit(&store, &spec).unwrap();

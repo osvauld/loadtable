@@ -157,6 +157,11 @@ pub struct JobSpec {
     /// alone (`--retry-alone`, R-716).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub retry_alone: bool,
+    /// Opens a window or waits on a person (`--interactive`, R-799): it runs as long as someone
+    /// uses it, so it shows no estimate and no "over the usual" warning, and its runs teach the
+    /// timing history nothing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interactive: bool,
 }
 
 /// Checks one `--fetch` path: relative to the checkout, no `.`/`..`/empty component, no `.git`.
@@ -260,6 +265,7 @@ pub(crate) mod tests {
             isolate: false,
             light: false,
             retry_alone: false,
+            interactive: false,
         }
     }
 

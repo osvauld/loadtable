@@ -1228,6 +1228,7 @@ fn the_socket_serves_requests_refuses_bad_ones_and_survives_a_closed_client() {
         isolate: false,
         light: false,
         retry_alone: false,
+        interactive: false,
     };
     {
         let mut s = UnixStream::connect(&sock).unwrap();
@@ -1280,6 +1281,7 @@ fn startup_reconciles_the_ledger_and_honours_the_persisted_execution_intent() {
             isolate: false,
             light: false,
             retry_alone: false,
+            interactive: false,
         };
         let id = store.submit(&spec).unwrap();
         store

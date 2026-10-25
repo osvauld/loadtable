@@ -25,6 +25,8 @@ pub enum NoEstimate {
     OnPeer,
     /// The timing history could not be read.
     HistoryUnreadable,
+    /// The job is interactive (R-799): it runs as long as someone uses it.
+    Interactive,
 }
 
 impl fmt::Display for NoEstimate {
@@ -35,6 +37,7 @@ impl fmt::Display for NoEstimate {
             NoEstimate::FirstBuildHere => "first build here",
             NoEstimate::OnPeer => "runs on a peer",
             NoEstimate::HistoryUnreadable => "the timing history could not be read",
+            NoEstimate::Interactive => "interactive: runs as long as it is used",
         })
     }
 }

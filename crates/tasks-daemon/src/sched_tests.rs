@@ -845,6 +845,44 @@ fn r675_a_run_past_its_usual_time_is_over_the_usual_with_no_time_left() {
 }
 
 #[test]
+fn r799_an_interactive_job_shows_no_estimate_and_its_runs_teach_no_timings() {
+    let key = SampleKey {
+        recipe: "make gui".into(),
+        target: None,
+        machine: "testbox".into(),
+    };
+    // a passing 0s run would put a plain job over the usual at once (as R-675)
+    let r = Rig::new();
+    seed_run(&r, "make gui", 0.0, Outcome::Passed, 1);
+    let mut s = r.spec_in("o", &["make", "gui"], Kind::Run, "gui");
+    s.interactive = true;
+    let id = r.submit(&s);
+    r.tick();
+    r.until_running(id);
+    let v = running_view(&r, id);
+    assert_eq!(
+        (v.eta_secs, v.usual_secs, v.over_by_secs),
+        (None, None, None)
+    );
+    assert_eq!(
+        v.no_eta_why.as_deref(),
+        Some("interactive: runs as long as it is used")
+    );
+    let tags = crate::status::job_view(&r.store.get(id).unwrap().unwrap()).tags;
+    assert_eq!(tags, vec!["interactive".to_string()]);
+
+    // its finished run files no sample; the job's sample is written with its result
+    let r = Rig::new();
+    r.procs.auto_exit(0);
+    let mut s = r.spec("o", &["make", "gui"], Kind::Run);
+    s.interactive = true;
+    let id = r.submit(&s);
+    r.tick();
+    assert_eq!(r.until_done(id), Phase::Passed);
+    assert!(r.store.samples(&key).unwrap().is_empty());
+}
+
+#[test]
 fn r676_different_sh_chains_keep_separate_history() {
     let r = Rig::new();
     seed_run(&r, "build_core.sh", 30.0, Outcome::Passed, 1);

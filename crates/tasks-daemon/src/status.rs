@@ -110,6 +110,7 @@ fn step_tags(r: &JobRecord) -> Vec<String> {
         ("light", r.spec.light || r.hints.light),
         ("isolate", r.spec.isolate || r.hints.isolate),
         ("retry", r.spec.retry_alone || r.hints.retry_alone),
+        ("interactive", r.spec.interactive),
     ];
     flags
         .into_iter()
