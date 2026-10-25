@@ -158,6 +158,10 @@ pub struct RunArgs {
     /// Allow a `cargo test` with a name filter but no target selector to build every target.
     #[arg(long)]
     pub broad_test: bool,
+    /// Run a `sh -c`/`bash -c` script of several commands as one job instead of having it
+    /// refused (it then gets no timing history or estimate; prefer steps or a suite).
+    #[arg(long)]
+    pub allow_script: bool,
     /// Bring this output file back after the job ran on a peer (path relative to the checkout
     /// root; repeatable). A job that ran here already has it.
     #[arg(long, value_name = "REL")]

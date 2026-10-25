@@ -225,6 +225,7 @@ struct SubmitArgs {
     device: Option<String>,
     timeout_s: Option<u64>,
     broad_test: Option<bool>,
+    allow_script: Option<bool>,
     after: Option<Vec<i64>>,
     priority: Option<String>,
     reason: Option<String>,
@@ -535,6 +536,7 @@ impl Tools {
             placement,
             timeout_secs: a.timeout_s,
             broad_test_escape: a.broad_test.unwrap_or(false),
+            script_escape: a.allow_script.unwrap_or(false),
             priority,
             priority_reason,
             after: a

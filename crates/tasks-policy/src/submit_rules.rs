@@ -166,6 +166,121 @@ pub fn denied_device(argv: &[String]) -> Option<&'static str> {
     })
 }
 
+/// Shells whose `-c SCRIPT` is looked into by [`script_commands`].
+const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash"];
+/// Script words that set the shell up or report rather than do the job's work.
+const SETUP_WORDS: &[&str] = &[
+    "set", "export", "cd", ":", "true", "shopt", "umask", "unset", "trap", "echo", "printf", "exit",
+];
+
+/// The commands of a `sh -c` / `bash -c` script (also `-lc`, `-ec`, after `env` assignments),
+/// split on `;`, `&&`, `||` and newlines outside quotes, without comments and set-up lines
+/// (`set -e`, `export X=1`, `cd dir`, bare assignments). `None` for anything that is not a shell
+/// script. A pipe stays one command.
+pub fn script_commands(argv: &[String]) -> Option<Vec<String>> {
+    let mut i = 0;
+    if argv.first().map(|a| program_name(a)) == Some("env") {
+        i = 1;
+        while argv.get(i).is_some_and(|a| a.contains('=') || a == "--") {
+            i += 1;
+        }
+    }
+    if !SHELLS.contains(&program_name(argv.get(i)?)) {
+        return None;
+    }
+    let mut rest = argv.get(i + 1..)?.iter();
+    let script = loop {
+        let a = rest.next()?;
+        if a.starts_with('-') && !a.starts_with("--") && a.contains('c') {
+            break rest.next()?;
+        }
+        if !a.starts_with('-') && !a.starts_with('+') {
+            return None;
+        }
+        // `-o pipefail` takes a value
+        if a == "-o" || a == "+o" {
+            rest.next()?;
+        }
+    };
+    let mut cmds = Vec::new();
+    let mut cur = String::new();
+    let (mut quote, mut chars) = (None::<char>, script.chars().peekable());
+    let mut flush = |cur: &mut String| {
+        let line = cur.trim().to_string();
+        cur.clear();
+        let first = line.split_whitespace().next().unwrap_or("");
+        let assignment = !first.is_empty()
+            && line
+                .split_whitespace()
+                .all(|w| w.contains('=') && !w.starts_with('='));
+        if !line.is_empty()
+            && !line.starts_with('#')
+            && !SETUP_WORDS.contains(&first)
+            && !assignment
+        {
+            cmds.push(line);
+        }
+    };
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), c) if c == q => {
+                quote = None;
+                cur.push(c);
+            }
+            (Some('"'), '\\') => {
+                cur.push(c);
+                if let Some(n) = chars.next() {
+                    cur.push(n);
+                }
+            }
+            (Some(_), c) => cur.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                cur.push(c);
+            }
+            (None, '\\') => {
+                if let Some(n) = chars.next() {
+                    cur.push(n);
+                }
+            }
+            (None, '#') if cur.trim().is_empty() => {
+                while chars.next_if(|n| *n != '\n').is_some() {}
+            }
+            (None, ';' | '\n') => flush(&mut cur),
+            (None, '&' | '|') if chars.peek() == Some(&c) => {
+                chars.next();
+                flush(&mut cur);
+            }
+            (None, c) => cur.push(c),
+        }
+    }
+    flush(&mut cur);
+    Some(cmds)
+}
+
+fn program_name(a: &str) -> &str {
+    a.rsplit('/').next().unwrap_or(a)
+}
+
+/// The refusal for a script that runs `cmds` (two or more) as one job.
+pub fn script_refusal(cmds: &[String]) -> String {
+    let shown: Vec<String> = cmds
+        .iter()
+        .map(|c| {
+            if c.chars().count() > 60 {
+                format!("{}...", c.chars().take(57).collect::<String>())
+            } else {
+                c.clone()
+            }
+        })
+        .collect();
+    format!(
+        "refused: this shell script runs {} commands as one job ({}), so it gets no timing history and no estimate; submit them as steps (tasks2 steps, MCP submit_steps), run a suite from .tasks/run-policy.toml (tasks2 suite run NAME, MCP run_suite), or put them in a script file in the repo and submit that file; --allow-script (MCP allow_script) runs it as one job anyway",
+        cmds.len(),
+        shown.join("; ")
+    )
+}
+
 /// Which rule refused a submission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rule {
@@ -175,6 +290,8 @@ pub enum Rule {
     DeniedDevice,
     /// R-091.
     CargoJobs,
+    /// R-791.
+    ShellScript,
 }
 
 impl Rule {
@@ -184,6 +301,7 @@ impl Rule {
             Rule::BroadTest => "R-191",
             Rule::DeniedDevice => "R-210",
             Rule::CargoJobs => "R-091",
+            Rule::ShellScript => "R-791",
         }
     }
 }
@@ -210,6 +328,9 @@ pub struct SubmitRules<'a> {
     pub known: Option<&'a KnownTargets>,
     /// The cap on Cargo parallelism, when the caller knows it.
     pub max_cargo_jobs: Option<u32>,
+    /// Refuse a shell script of several commands (R-791): a single job submitted here without
+    /// `--allow-script`. Plan and suite steps and a peer's forwards are not asked.
+    pub refuse_scripts: bool,
 }
 
 /// The verdict: refusals stop the submission, warnings are shown.
@@ -262,6 +383,15 @@ pub fn check(rules: &SubmitRules<'_>) -> Verdict {
             message: format!(
                 "refused: cargo parallelism {n} is above this machine's cap of {cap}; drop -j/--jobs/CARGO_BUILD_JOBS or use {cap} or less (the cap is max_cargo_jobs in the machine policy)"
             ),
+        });
+    }
+    if rules.refuse_scripts
+        && let Some(cmds) = script_commands(rules.argv)
+        && cmds.len() >= 2
+    {
+        v.refusals.push(Refusal {
+            rule: Rule::ShellScript,
+            message: script_refusal(&cmds),
         });
     }
     v
@@ -468,6 +598,87 @@ mod tests {
             broad_mode: mode,
             known: None,
             max_cargo_jobs: None,
+            refuse_scripts: false,
+        }
+    }
+
+    fn sh(script: &str) -> Vec<String> {
+        vec!["bash".into(), "-c".into(), script.into()]
+    }
+
+    // R-791
+    #[test]
+    fn r791_a_script_of_several_commands_is_refused_with_the_commands_and_the_fixes() {
+        let argv = sh(
+            "set -euo pipefail; ios/scripts/build_core.sh; xcodegen generate --spec ios/project.yml; ios/scripts/run_sim.sh",
+        );
+        assert_eq!(
+            script_commands(&argv).unwrap(),
+            vec![
+                "ios/scripts/build_core.sh",
+                "xcodegen generate --spec ios/project.yml",
+                "ios/scripts/run_sim.sh"
+            ]
+        );
+        let mut r = rules(&argv, false, BroadTestMode::Refuse);
+        r.refuse_scripts = true;
+        let verdict = check(&r);
+        assert_eq!(verdict.refusals.len(), 1);
+        let m = &verdict.refusals[0].message;
+        assert_eq!(verdict.refusals[0].rule.id(), "R-791");
+        for want in [
+            "runs 3 commands",
+            "xcodegen generate",
+            "submit_steps",
+            "run_suite",
+            "--allow-script",
+        ] {
+            assert!(m.contains(want), "{want}: {m}");
+        }
+        // plan steps, suites and peers do not ask
+        r.refuse_scripts = false;
+        assert!(check(&r).allowed());
+    }
+
+    #[test]
+    fn r791_one_command_with_set_up_lines_or_a_pipe_is_not_a_chain() {
+        for one in [
+            "set -e; cargo build -p x",
+            "cd android && ./gradlew assembleDebug",
+            "export FOO=1\nmake",
+            "cargo test 2>&1 | tee log # one command",
+            "FOO=1 BAR=2; ./run.sh",
+            "grep 'a; b && c' notes.txt",
+            "echo start; make; echo done; exit 0",
+        ] {
+            assert_eq!(script_commands(&sh(one)).map(|c| c.len()), Some(1), "{one}");
+        }
+        for chain in [
+            "a && b",
+            "a || b",
+            "a\nb",
+            "cargo install --path x && cargo install --path y",
+        ] {
+            assert_eq!(
+                script_commands(&sh(chain)).map(|c| c.len()),
+                Some(2),
+                "{chain}"
+            );
+        }
+        for form in [
+            vec!["sh", "-ec", "a; b"],
+            vec!["/bin/bash", "-o", "pipefail", "-c", "a; b"],
+            vec!["env", "X=1", "zsh", "-lc", "a; b"],
+        ] {
+            let argv: Vec<String> = form.iter().map(|s| s.to_string()).collect();
+            assert_eq!(script_commands(&argv).map(|c| c.len()), Some(2), "{form:?}");
+        }
+        for not_a_script in [
+            v("bash ios/scripts/run_sim.sh"),
+            v("cargo test -p x"),
+            v("sh"),
+        ] {
+            assert_eq!(script_commands(&not_a_script), None, "{not_a_script:?}");
         }
     }
 

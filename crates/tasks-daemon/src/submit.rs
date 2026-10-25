@@ -105,6 +105,18 @@ impl Scheduler {
         via: Via,
         hint: Option<&str>,
     ) -> Result<submit_rules::Verdict, Vec<submit_rules::Refusal>> {
+        self.spec_verdict_as(spec, via, hint, false)
+    }
+
+    /// As `spec_verdict_hinted`; `single` is a job submitted on its own here, the only kind a
+    /// shell script of several commands is refused for (R-791).
+    pub(crate) fn spec_verdict_as(
+        &self,
+        spec: &JobSpec,
+        via: Via,
+        hint: Option<&str>,
+        single: bool,
+    ) -> Result<submit_rules::Verdict, Vec<submit_rules::Refusal>> {
         let policy = self.policy();
         // a denied serial named as the device resource is refused like one in argv (R-210)
         let mut hay = spec.argv.clone();
@@ -126,6 +138,7 @@ impl Scheduler {
                 // job (R-137), or placement, which keeps an over-cap job off this machine (R-541)
                 Via::Local | Via::Peer => None,
             },
+            refuse_scripts: single && via == Via::Local && !spec.script_escape,
         });
         if verdict.allowed() {
             Ok(verdict)

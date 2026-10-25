@@ -89,7 +89,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "submit",
-            description: "Queue one command through the shared build/test queue and return its job id at once (use wait or logs afterwards). Same rules as `tasks2 run`: a broad `cargo test` (name filter without --lib/--test) is refused unless broad_test is true; the personal phone is never used.",
+            description: "Queue one command through the shared build/test queue and return its job id at once (use wait or logs afterwards). Same rules as `tasks2 run`: a broad `cargo test` (name filter without --lib/--test) is refused unless broad_test is true; a `bash -c` script of several commands is refused unless allow_script is true (use submit_steps or run_suite); the personal phone is never used.",
             input_schema: object(
                 json!({
                     "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Program and arguments, e.g. [\"cargo\",\"test\",\"-p\",\"tasks-mcp\"]."},
@@ -100,6 +100,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     "device": {"type": "string", "description": "adb serial of an attached test device; the job holds that device's slot and stays on this machine."},
                     "timeout_s": {"type": "integer", "minimum": 1, "description": "Stop the job after this many seconds (1 s to 7 days; the job ends timed out)."},
                     "broad_test": {"type": "boolean", "description": "Deliberately build every test target of a filtered `cargo test`. Prefer naming the target."},
+                    "allow_script": {"type": "boolean", "description": "Run a `sh -c`/`bash -c` script of several commands as one job. Without it such a script is refused: it gets no timing history or estimate. Prefer submit_steps, run_suite, or a script file in the repo."},
                     "after": {"type": "array", "items": {"type": "integer", "minimum": 1}, "description": "Job ids that must pass before this job may start."},
                     "fetch": {"type": "array", "items": {"type": "string"}, "maxItems": 256, "description": "Output files to bring back to this checkout after the job ran on a peer, as paths relative to the checkout root (e.g. android/app/build/outputs/apk/debug/app-debug.apk). Absolute paths and .. are refused. The result of each is reported by wait/get; a job that ran here already has its files."},
                     "priority": priority.clone(),

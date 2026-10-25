@@ -784,3 +784,10 @@ Tests of earlier rows whose expectations changed with the redesign, kept and edi
 | ID | Rule | Test | Platforms |
 |---|---|---|---|
 | R-770 | A secret-named assignment whose long value is code (followed by `(` or `;`, e.g. `let call_token = added.call_from_node.clone().unwrap();`) is not flagged as a secret, so ordinary source files sync; a quoted literal is still flagged. | `r770_code_assigning_a_secret_named_variable_is_not_flagged` (secrets) | any |
+
+## v2-peer-estimates-and-scripts
+
+| ID | Rule | Test | Platforms |
+|---|---|---|---|
+| R-790 | A job forwarded to a peer shows an estimate from the runs this machine recorded of the same command on that peer (the peer's warmth, not scaled, never another machine's runs); with none it says "first run", not "runs on a peer". | `r790_a_forwarded_job_is_estimated_from_its_commands_runs_on_that_peer` (follow) | any |
+| R-791 | A job submitted on its own whose command is a `sh`/`bash`/`zsh`/`dash -c` script of two or more commands (split on `;`, `&&`, `\|\|`, newlines outside quotes; set-up and report lines such as `set`, `export`, `cd`, assignments, `echo`, `exit` and comments do not count; a pipe is one command) is refused, naming the commands and the fixes (steps, a suite, a script file); `--allow-script` (MCP `allow_script`) runs it as one job. Plan and suite steps and a peer's forwards are not refused. | `r791_a_script_of_several_commands_is_refused_with_the_commands_and_the_fixes`, `r791_one_command_with_set_up_lines_or_a_pipe_is_not_a_chain` (submit_rules) | any |
