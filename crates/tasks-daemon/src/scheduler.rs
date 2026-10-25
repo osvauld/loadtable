@@ -137,8 +137,8 @@ pub(crate) struct TickState {
     pub last_error: Option<(i64, String)>,
     pub readings_error: Option<String>,
     /// Peers a job must not be forwarded to again: a forward to them failed with nothing
-    /// submitted and the job fell back to local placement. Forgotten on restart.
-    pub no_forward: BTreeMap<JobId, BTreeSet<String>>,
+    /// submitted and the job fell back to local placement, with why. Forgotten on restart.
+    pub no_forward: BTreeMap<JobId, BTreeMap<String, String>>,
     /// Why a job runs here though placement chose a peer; appended to its summary at the end.
     pub fallbacks: BTreeMap<JobId, String>,
     /// Since when each peer has been stale or offline, ms.

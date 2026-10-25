@@ -193,6 +193,25 @@ fn insert(dir: &mut Dir, comps: &[&str], mode: Mode, id: ObjectId) {
     }
 }
 
+/// True when `dir` is a linked worktree of `repo`: its `.git` file names a git dir under this
+/// repository's own `worktrees/`. A nested clone or an unrelated repository is not.
+fn is_own_worktree(repo: &gix::Repository, dir: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(dir.join(".git")) else {
+        return false;
+    };
+    let Some(gitdir) = text.trim().strip_prefix("gitdir:") else {
+        return false;
+    };
+    let gitdir = dir.join(gitdir.trim());
+    match (
+        std::fs::canonicalize(&gitdir),
+        std::fs::canonicalize(repo.common_dir().join("worktrees")),
+    ) {
+        (Ok(g), Ok(w)) => g.parent() == Some(w.as_path()),
+        _ => false,
+    }
+}
+
 fn write_dir(repo: &gix::Repository, dir: &Dir) -> Result<ObjectId, SnapshotError> {
     let mut entries: Vec<TreeEntry> = Vec::with_capacity(dir.files.len() + dir.dirs.len());
     for (name, mode, id) in &dir.files {
@@ -584,6 +603,13 @@ impl Snapshot for GixSnapshot {
                 Some(gix::dir::entry::Kind::File | gix::dir::entry::Kind::Symlink) => {
                     untracked.push(entry.rela_path)
                 }
+                // another worktree of this same repository (an agent's checkout placed inside
+                // this one) is a separate checkout, never part of this job: it is left out
+                Some(gix::dir::entry::Kind::Repository)
+                    if is_own_worktree(
+                        &user,
+                        &workdir.join(entry.rela_path.to_str_lossy().as_ref()),
+                    ) => {}
                 Some(gix::dir::entry::Kind::Repository) => {
                     let rel = entry.rela_path.to_str_lossy().into_owned();
                     cx.refuse(&rel, RefuseReason::NestedRepository);

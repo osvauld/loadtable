@@ -230,10 +230,10 @@ impl Scheduler {
         self.forwarder.forget(id);
         {
             let mut st = lock(&self.state);
-            st.no_forward
-                .entry(id)
-                .or_default()
-                .insert(fw.peer.0.clone());
+            st.no_forward.entry(id).or_default().insert(
+                fw.peer.0.clone(),
+                format!("the job was moved off it ({why})"),
+            );
             st.fallbacks.insert(
                 id,
                 format!(
@@ -267,7 +267,10 @@ impl Scheduler {
                 self.forwarder.forget(id);
                 {
                     let mut st = lock(&self.state);
-                    st.no_forward.entry(id).or_default().insert(peer.0.clone());
+                    st.no_forward
+                        .entry(id)
+                        .or_default()
+                        .insert(peer.0.clone(), format!("forwarding failed: {}", end.reason));
                     st.fallbacks.insert(id, note.clone());
                     st.last_wait.remove(&id);
                 }
