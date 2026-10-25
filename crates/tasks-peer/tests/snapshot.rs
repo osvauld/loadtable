@@ -339,6 +339,32 @@ fn r304_lfs_pointers_submodules_nested_repos_and_oversize_files_are_refused_by_n
 }
 
 #[test]
+fn r793_a_worktree_of_the_same_repository_inside_the_checkout_is_left_out() {
+    let f = Fx::new();
+    let before = f.ok();
+    git(&f.root, &["worktree", "add", "-q", "agent-wt"]).unwrap();
+    write_file(&f.root.join("agent-wt"), "wip.txt", "the agent's edit").unwrap();
+    let after = f.ok();
+    assert_eq!(
+        (after.tree, after.files),
+        (before.tree, before.files),
+        "the inner worktree is a separate checkout and adds nothing"
+    );
+    // a nested repository of its own is still refused
+    let other = f.root.join("other");
+    fs::create_dir_all(&other).unwrap();
+    tasks_peer::sync::testrepo::init_repo(&other).unwrap();
+    write_file(&other, "x.txt", "x").unwrap();
+    let Err(SnapshotError::Refused(r)) = f.run() else {
+        panic!("expected a refusal")
+    };
+    assert!(
+        r.has("nested_repository") && r.to_string().contains("other"),
+        "{r}"
+    );
+}
+
+#[test]
 fn r303_secret_looking_files_are_refused_by_name_and_by_content() {
     let mut f = Fx::new();
     // a tracked file that happens to hold a key pattern is already in the repo: not scanned

@@ -499,13 +499,33 @@ pub fn phase_text(p: &Phase) -> (String, PhaseClass) {
         Phase::Failed { exit: Some(c) } => (format!("failed (exit {c})"), PhaseClass::Failed),
         Phase::Failed { exit: None } => ("failed".into(), PhaseClass::Failed),
         Phase::TimedOut { .. } => ("timed out".into(), PhaseClass::Failed),
-        Phase::NotStarted { reason } => (
-            format!("not started: {}", format::truncate(reason, 40)),
-            PhaseClass::Failed,
-        ),
+        Phase::NotStarted { reason } => {
+            let (head, gist) = not_started_words(reason);
+            (
+                format!("{}: {gist}", head.to_lowercase()),
+                PhaseClass::Failed,
+            )
+        }
         Phase::Cancelled => ("cancelled".into(), PhaseClass::Neutral),
         Phase::Interrupted => ("interrupted".into(), PhaseClass::Neutral),
     }
+}
+
+/// A short head ("Refused" or "Not started") and the reason's first clause, without the
+/// placement prefix: a refusal reads `refused (chosen by --anywhere): no machine can run it;
+/// kurukkan excluded: ...`, which no status cell can hold. The whole text is the Outcome row.
+pub fn not_started_words(reason: &str) -> (&'static str, String) {
+    let head = if reason.starts_with("refused") {
+        "Refused"
+    } else {
+        "Not started"
+    };
+    let rest = match reason.split_once("): ") {
+        Some((pre, rest)) if pre.starts_with("refused (") => rest,
+        _ => reason,
+    };
+    let first = rest.split(';').next().unwrap_or(rest).trim();
+    (head, format::truncate(first, 40))
 }
 
 fn section_of(j: &JobView) -> Section {
@@ -726,10 +746,10 @@ fn state_cell(i: &StateInput) -> StateCell {
                     (head, left)
                 }
                 Phase::Interrupted => ("Interrupted".to_string(), "the daemon restarted".into()),
-                Phase::NotStarted { reason } => (
-                    format!("Not started · {}", format::truncate(reason, 60)),
-                    String::new(),
-                ),
+                Phase::NotStarted { reason } => {
+                    let (head, gist) = not_started_words(reason);
+                    (head.to_string(), gist)
+                }
                 // a job that is not finished never reaches this arm
                 other => (phase_text(other).0, String::new()),
             };
@@ -2005,6 +2025,30 @@ mod tests {
         assert_eq!(held.tone, PhaseClass::Neutral);
         assert_eq!(wait_phrase("waiting for a run slot"), "needs a run slot");
         assert_eq!(wait_phrase("low disk space"), "low disk space");
+    }
+
+    #[test]
+    fn r792_a_refusal_shows_a_short_head_and_its_first_clause() {
+        let long = "refused (chosen by --anywhere): no machine can run it; kurukkan excluded: \
+                    cargo parallelism 6 is above this machine's cap of 2";
+        assert_eq!(
+            not_started_words(long),
+            ("Refused", "no machine can run it".to_string())
+        );
+        assert_eq!(
+            phase_text(&Phase::NotStarted {
+                reason: long.into()
+            })
+            .0,
+            "refused: no machine can run it"
+        );
+        assert_eq!(
+            not_started_words("sync to abc refused: 1 file(s) refused; nothing was submitted"),
+            (
+                "Not started",
+                "sync to abc refused: 1 file(s) refused".to_string()
+            )
+        );
     }
 
     #[test]

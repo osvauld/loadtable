@@ -286,6 +286,32 @@ fn an_anywhere_job_whose_peer_was_unreachable_falls_back_to_local_with_a_note() 
     assert_eq!(w.requests("submit"), 0);
 }
 
+// R-792: a peer the job could not be forwarded to stays in the placement report with why, so a
+// refusal that follows names it rather than listing this machine alone.
+#[test]
+fn r792_a_refusal_after_a_failed_forward_names_the_peer_and_why() {
+    let w = PeerWorld::new();
+    let (r, _link) = origin(&w, "[cargo]\nmax_jobs = 2\n");
+    let mut s = r.spec("o", &["cargo", "check", "-j", "6"], Kind::Compile);
+    s.cwd = w.root_a.clone();
+    s.placement = Placement::Anywhere;
+    let id = r.submit(&s);
+    r.store
+        .set_forward(id, &nixos(), None, Some("laptop:k"))
+        .unwrap();
+    w.net.set_down(&w.nixos, true);
+    let end = r.until_done(id);
+    let Phase::NotStarted { reason } = &end else {
+        panic!("{end:?}")
+    };
+    assert!(reason.contains("above this machine's cap"), "{reason}");
+    assert!(
+        reason.contains("nixos excluded") && reason.contains("forwarding failed"),
+        "{reason}"
+    );
+    assert_eq!(r.procs.spawn_count(), 0);
+}
+
 #[test]
 fn a_job_pinned_to_an_unreachable_peer_fails_and_is_never_run_here() {
     let w = PeerWorld::new();

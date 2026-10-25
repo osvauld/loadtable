@@ -547,10 +547,13 @@ impl Scheduler {
             .cloned()
             .unwrap_or_default();
         let mut peers = self.forwarder.peers();
-        // a peer this job already failed to reach is not tried again (it runs here instead)
-        peers.retain(|p| !avoid.contains(&p.machine.name.0));
+        // a peer this job already failed to reach is not tried again (it runs here instead); it
+        // stays in the report with the reason, so a refusal says why the peer was not used
         for p in &mut peers {
             assume_peer_tools(&mut p.machine, &wanted);
+            if let Some(why) = avoid.get(&p.machine.name.0) {
+                p.marks.push(why.clone());
+            }
         }
         let info = MachineInfo {
             name: local.name.0.clone(),
