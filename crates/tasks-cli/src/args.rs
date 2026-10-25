@@ -152,6 +152,10 @@ pub struct RunArgs {
     /// Run on this attached device (adb serial); the job stays on this machine.
     #[arg(long, value_name = "SERIAL")]
     pub device: Option<String>,
+    /// Only machines with this OS may run it (`linux` or `macos`). An `--anywhere` job without
+    /// it takes the repo run policy's `[placement] os`.
+    #[arg(long, value_name = "OS")]
+    pub os: Option<String>,
     /// Stop the job after this many seconds.
     #[arg(long, value_name = "SECS")]
     pub timeout: Option<u64>,

@@ -18,6 +18,46 @@ pub struct Policy {
     /// What travels with a checkout when a job is forwarded to another machine.
     #[serde(default, skip_serializing_if = "SyncSection::is_empty")]
     pub sync: SyncSection,
+    /// Where this repo's jobs may run when the submitter names no machine.
+    #[serde(default, skip_serializing_if = "PlacementSection::is_empty")]
+    pub placement: PlacementSection,
+}
+
+/// `[placement]`: defaults for jobs that may run anywhere.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlacementSection {
+    /// The OS a job submitted `--anywhere` (or a plan step that names no machine) needs: a
+    /// build whose output is used on this OS, or that needs its native libraries. A job that
+    /// names a peer, or gives its own OS, is not changed.
+    #[serde(default)]
+    pub os: Option<PolicyOs>,
+}
+
+impl PlacementSection {
+    /// True when nothing is set.
+    pub fn is_empty(&self) -> bool {
+        self.os.is_none()
+    }
+}
+
+/// An OS as written in the policy: `linux` or `macos`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PolicyOs {
+    /// Linux.
+    Linux,
+    /// macOS.
+    Macos,
+}
+
+impl From<PolicyOs> for tasks_core::Os {
+    fn from(o: PolicyOs) -> Self {
+        match o {
+            PolicyOs::Linux => tasks_core::Os::Linux,
+            PolicyOs::Macos => tasks_core::Os::Macos,
+        }
+    }
 }
 
 /// `[sync]`: files beyond the git working tree that a forwarded job needs.

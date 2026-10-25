@@ -24,6 +24,15 @@ impl Os {
     pub fn current() -> Os {
         Os::Macos
     }
+
+    /// `linux` or `macos` (`mac` too), as typed by a person or an agent.
+    pub fn parse(s: &str) -> Result<Os, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "linux" => Ok(Os::Linux),
+            "macos" | "mac" => Ok(Os::Macos),
+            other => Err(format!("unknown OS {other:?}: use linux or macos")),
+        }
+    }
 }
 
 /// CPU architecture.
