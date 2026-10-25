@@ -1574,3 +1574,44 @@ fn r517_submit_and_steps_take_a_fetch_list_checked_before_any_daemon_request() {
     }
     assert!(never.requests().is_empty());
 }
+
+// R-796: clients that show only structuredContent saw counts but no log lines, and no sign of a
+// requested fetch until the job ended.
+#[test]
+fn r796_logs_and_get_carry_their_text_and_requested_fetches_in_the_structured_result() {
+    let d = fake(|r| match r {
+        Request::Logs {
+            view: LogView::Tail { .. },
+            ..
+        } => Ok(Response::LogTail {
+            lines: vec!["Compiling a".into(), "error: b".into()],
+            running: false,
+            end_offset: None,
+        }),
+        Request::Get { .. } => {
+            let mut j = job(681, "bot", Phase::Running, "cargo build");
+            j.fetch_paths = vec!["target/debug/p2p-desktop".into()];
+            Ok(Response::Job { job: Box::new(j) })
+        }
+        _ => Err(DaemonError::Failed("unexpected".into())),
+    });
+    let r = call(&tools_with(&d), "logs", json!({"id": 682, "tail": 5}));
+    assert_eq!(r.structured["lines"], 2);
+    assert!(
+        r.structured["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("error: b")),
+        "{}",
+        r.structured
+    );
+    let r = call(&tools_with(&d), "get", json!({"id": 681}));
+    assert_eq!(
+        r.structured["fetch_requested"],
+        json!(["target/debug/p2p-desktop"])
+    );
+    assert!(
+        r.text.contains("fetch: requested target/debug/p2p-desktop"),
+        "{}",
+        r.text
+    );
+}

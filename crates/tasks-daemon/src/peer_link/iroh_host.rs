@@ -19,6 +19,7 @@ use tasks_ledger::SystemClock;
 use tasks_peer::iroh::{
     EndpointAddrs, EndpointOptions, IrohError, IrohTransport, RelayChoice, endpoint, serve,
 };
+use tasks_peer::iroh_blobs_shelf::BlobServe;
 use tasks_peer::sync::{GixSnapshot, GixTransfer, OriginRetention, OriginSync, SyncLimits};
 use tasks_peer::trust::{AddressBook, TrustedHandler, TrustedTransport};
 use tasks_peer::{Handler, Receiver};
@@ -131,10 +132,26 @@ impl PeerRuntimeFactory for IrohFactory {
         let node = rt.node.clone();
         let endpoint = host.endpoint.clone();
         let handle = host.rt.handle().clone();
+        let blob_dir = cfg.state_dir.join("blobs");
         let serving: Box<dyn FnOnce(Arc<Receiver>) + Send> = Box::new(move |receiver| {
+            // fetched outputs stream from this store (R-795); without it they go in chunks
+            let blobs = match handle.block_on(BlobServe::open(&blob_dir)) {
+                Ok(b) => {
+                    let b = Arc::new(b);
+                    let protocol = b.protocol();
+                    receiver.set_blobs(b);
+                    Some(protocol)
+                }
+                Err(e) => {
+                    crate::daemon_log::say(format_args!(
+                        "blob store unavailable ({e}); fetched outputs go in chunks"
+                    ));
+                    None
+                }
+            };
             let inner: Arc<dyn Handler> = receiver;
             let gate: Arc<dyn Handler> = Arc::new(TrustedHandler::new(node, inner));
-            handle.spawn(serve(endpoint, gate));
+            handle.spawn(serve(endpoint, gate, blobs));
         });
         Ok(PeerRuntime {
             forwarder: Some(Arc::new(link)),

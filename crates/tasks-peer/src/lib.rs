@@ -18,6 +18,8 @@ pub mod trust;
 
 #[cfg(feature = "iroh")]
 pub mod iroh;
+#[cfg(feature = "iroh")]
+pub mod iroh_blobs_shelf;
 
 pub use forward::{
     Forward, ForwardIo, ForwardJob, ForwardPolicy, ForwardResult, ForwardState, LogSink,

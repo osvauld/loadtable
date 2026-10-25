@@ -125,6 +125,7 @@ pub fn job_json(j: &JobView, now_ms: i64) -> Value {
         "priority_reason": j.priority_reason,
         "remote_wait": j.remote_wait,
         "fetch": j.fetch,
+        "fetch_requested": j.fetch_paths,
         "fetch_failed": tasks_core::any_failed(&j.fetch),
     })
 }
@@ -177,6 +178,10 @@ pub fn job_detail(j: &JobView, now_ms: i64) -> String {
     }
     for r in &j.fetch {
         s.push_str(&format!("fetch: {}\n", r.line()));
+    }
+    // the results come once the job is over; until then the request itself shows
+    if j.fetch.is_empty() && !j.fetch_paths.is_empty() {
+        s.push_str(&format!("fetch: requested {}\n", j.fetch_paths.join(", ")));
     }
     s
 }

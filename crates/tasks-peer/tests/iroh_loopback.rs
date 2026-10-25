@@ -11,6 +11,9 @@ use tasks_ledger::{MemoryTrust, SystemClock};
 use tasks_peer::iroh::{
     EndpointAddrs, EndpointOptions, IrohTransport, RelayChoice, endpoint, serve,
 };
+use tasks_peer::iroh_blobs_shelf::BlobServe;
+use tasks_peer::outputs::{self, FetchPolicy};
+use tasks_peer::proto::FetchEntry;
 use tasks_peer::proto::{Body, Refusal};
 use tasks_peer::transport::{PathKind, PeerError, Transport};
 use tasks_peer::trust::{
@@ -84,6 +87,15 @@ fn side(rt: &tokio::runtime::Runtime, name: &str) -> Side {
 }
 
 fn side_with(rt: &tokio::runtime::Runtime, name: &str, inner: Arc<dyn Handler>) -> Side {
+    side_serving(rt, name, inner, None)
+}
+
+fn side_serving(
+    rt: &tokio::runtime::Runtime,
+    name: &str,
+    inner: Arc<dyn Handler>,
+    blobs: Option<iroh_blobs::BlobsProtocol>,
+) -> Side {
     let (ident, _) = generate().unwrap();
     let ident = Arc::new(ident);
     let node = TrustNode::new(
@@ -106,7 +118,7 @@ fn side_with(rt: &tokio::runtime::Runtime, name: &str, inner: Arc<dyn Handler>) 
     let book: Arc<dyn AddressBook> = node.clone();
     let raw = IrohTransport::new(ep.clone(), rt.handle().clone(), book);
     let gate: Arc<dyn Handler> = Arc::new(TrustedHandler::new(node.clone(), inner));
-    rt.spawn(serve(ep.clone(), gate));
+    rt.spawn(serve(ep.clone(), gate, blobs));
     Side {
         transport: TrustedTransport::new(raw, node.clone()),
         node,
@@ -265,5 +277,174 @@ fn r367_a_pack_crosses_one_raw_iroh_stream_and_an_older_peer_refuses_it_at_the_h
     rt.block_on(async {
         worker.ep.close().await;
         laptop.ep.close().await;
+    });
+}
+
+/// A worker that lists files of one tree, offering them on its blob store, and counts the chunk
+/// requests it serves. `bogus` lists a blob hash it never offered.
+struct Outputs {
+    tree: std::path::PathBuf,
+    shelf: Arc<BlobServe>,
+    chunks: std::sync::atomic::AtomicU64,
+    bogus: bool,
+}
+
+impl Handler for Outputs {
+    fn handle(&self, from: &PeerId, m: Body) -> Body {
+        let policy = FetchPolicy::default();
+        match m {
+            Body::FetchList { paths, .. } => {
+                match outputs::list_offered(&self.tree, &paths, &policy, self.shelf.as_ref(), from)
+                {
+                    Ok(mut entries) => {
+                        if self.bogus {
+                            for e in &mut entries {
+                                if let FetchEntry::Found { blob, .. } = e {
+                                    *blob = Some(iroh_blobs::Hash::new(b"never offered").to_hex());
+                                }
+                            }
+                        }
+                        Body::FetchListing { entries }
+                    }
+                    Err(r) => Body::Refuse(r),
+                }
+            }
+            Body::FetchChunk {
+                path,
+                hash,
+                offset,
+                len,
+                ..
+            } => {
+                self.chunks
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                match outputs::read_chunk(&self.tree, &path, &hash, offset, len, &policy) {
+                    Ok((data, eof)) => Body::FetchData { offset, data, eof },
+                    Err(r) => Body::Refuse(r),
+                }
+            }
+            _ => Body::Ok,
+        }
+    }
+    fn events(
+        &self,
+        _f: &PeerId,
+        remote: RemoteJobId,
+        _o: u64,
+    ) -> Result<Box<dyn tasks_peer::EventStream>, Refusal> {
+        Err(Refusal::UnknownJob { remote })
+    }
+}
+
+// R-795
+#[test]
+fn r795_an_output_comes_back_on_one_verified_blob_stream_and_only_what_was_listed_is_served() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let t = Duration::from_secs(10);
+    let tmp = tempfile::tempdir().unwrap();
+    let tree = tmp.path().join("tree");
+    std::fs::create_dir_all(tree.join("target/debug")).unwrap();
+    // 40 MiB and an odd tail: thousands of chunks the old way
+    let big: Vec<u8> = (0..40 * 1024 * 1024 + 4099u32)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+        .collect();
+    std::fs::write(tree.join("target/debug/app"), &big).unwrap();
+    std::fs::write(tree.join("secret.txt"), b"not listed").unwrap();
+    let checkout = tasks_peer::CheckoutId::derive("h", std::path::Path::new("/p"));
+
+    let serve_with = |name: &str, bogus: bool, store: &str| {
+        let shelf = Arc::new(
+            rt.block_on(BlobServe::open(&tmp.path().join(store)))
+                .unwrap(),
+        );
+        let handler = Arc::new(Outputs {
+            tree: tree.clone(),
+            shelf: Arc::clone(&shelf),
+            chunks: std::sync::atomic::AtomicU64::new(0),
+            bogus,
+        });
+        let side = side_serving(&rt, name, handler.clone(), Some(shelf.protocol()));
+        (side, handler)
+    };
+    let pair = |worker: &Side, laptop: &Side| {
+        let addrs = EndpointAddrs(worker.ep.clone()).current();
+        let ticket = worker
+            .node
+            .invite(&[Role::Submit], false, None, &addrs)
+            .unwrap();
+        laptop
+            .node
+            .accept(
+                &ticket.to_text().unwrap(),
+                &laptop.transport,
+                &SelfAddr::default(),
+                t,
+            )
+            .unwrap();
+        PeerId::new(&worker.node.node_id()).unwrap()
+    };
+
+    let (worker, served) = serve_with("nixos", false, "blobs");
+    let laptop = side(&rt, "kurukkan");
+    let wid = pair(&worker, &laptop);
+    let dest = tmp.path().join("dest");
+    std::fs::create_dir_all(&dest).unwrap();
+    let mut c = laptop.transport.connect(&wid, t).unwrap();
+    let report = outputs::fetch(
+        c.as_mut(),
+        &checkout,
+        &["target/debug/app".to_string()],
+        &dest,
+        u64::MAX,
+    )
+    .unwrap();
+    assert_eq!(report.fetched.len(), 1, "{report:?}");
+    assert_eq!(report.fetched[0].blob_fallback, None, "{report:?}");
+    assert_eq!(std::fs::read(dest.join("target/debug/app")).unwrap(), big);
+    assert_eq!(
+        served.chunks.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "no chunk was asked for"
+    );
+
+    // a hash the worker never listed for us is refused on the blob stream
+    let unlisted = iroh_blobs::Hash::new(b"not listed").to_hex();
+    let mut sink = |_: &[u8]| Ok(());
+    assert!(c.fetch_blob(&unlisted, 10, &mut sink).is_err());
+    // and a paired machine that listed nothing gets nothing, even for a listed hash
+    let other = side(&rt, "mac");
+    let _ = pair(&worker, &other);
+    let mut oc = other.transport.connect(&wid, t).unwrap();
+    let listed = iroh_blobs::Hash::new(&big).to_hex();
+    assert!(oc.fetch_blob(&listed, big.len() as u64, &mut sink).is_err());
+
+    // a blob that cannot be served falls back to chunks and says why
+    let (worker2, served2) = serve_with("nixos2", true, "blobs2");
+    let laptop2 = side(&rt, "kurukkan2");
+    let wid2 = pair(&worker2, &laptop2);
+    let dest2 = tmp.path().join("dest2");
+    std::fs::create_dir_all(&dest2).unwrap();
+    let mut c2 = laptop2.transport.connect(&wid2, t).unwrap();
+    let report = outputs::fetch(
+        c2.as_mut(),
+        &checkout,
+        &["target/debug/app".to_string()],
+        &dest2,
+        u64::MAX,
+    )
+    .unwrap();
+    assert_eq!(report.fetched.len(), 1, "{report:?}");
+    assert!(report.fetched[0].blob_fallback.is_some(), "{report:?}");
+    assert_eq!(std::fs::read(dest2.join("target/debug/app")).unwrap(), big);
+    assert!(served2.chunks.load(std::sync::atomic::Ordering::Relaxed) > 0);
+
+    rt.block_on(async {
+        for s in [&worker, &laptop, &other, &worker2, &laptop2] {
+            s.ep.close().await;
+        }
     });
 }

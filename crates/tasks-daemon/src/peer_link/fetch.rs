@@ -79,13 +79,21 @@ pub(super) fn fetch_outputs<T: Transport>(
     if job.fetch.is_empty() {
         return;
     }
-    let results = if end.phase == Phase::Passed && end.remote_job.is_some() {
+    let (results, notes) = if end.phase == Phase::Passed && end.remote_job.is_some() {
         run(inner, job)
     } else {
         let why = format!("not fetched: the job did not pass ({})", end.phase.word());
-        job.fetch.iter().map(|p| failed(p, why.clone())).collect()
+        (
+            job.fetch.iter().map(|p| failed(p, why.clone())).collect(),
+            Vec::new(),
+        )
     };
     let mut text = String::new();
+    for n in &notes {
+        text.push_str("[tasks] ");
+        text.push_str(n);
+        text.push('\n');
+    }
     for r in &results {
         text.push_str("[tasks] ");
         text.push_str(&r.line());
@@ -96,13 +104,15 @@ pub(super) fn fetch_outputs<T: Transport>(
     end.fetch = results;
 }
 
-fn run<T: Transport>(inner: &Inner<T>, job: &Job) -> Vec<FetchResult> {
+/// The results, and a note for each file whose blob stream failed and came in chunks instead.
+fn run<T: Transport>(inner: &Inner<T>, job: &Job) -> (Vec<FetchResult>, Vec<String>) {
     // a transfer slot, like a sync: the writes obey the I/O gate
     let _slot = inner.opts.gate.enter(SyncPhase::Fetch);
     let mut conn: Option<Box<dyn Connection>> = None;
     // set once the peer has said it cannot fetch at all: asking again would only repeat it
     let mut unsupported: Option<String> = None;
     let mut out = Vec::new();
+    let mut notes = Vec::new();
     for path in &job.fetch {
         if let Some(why) = &unsupported {
             out.push(failed(path, why.clone()));
@@ -132,7 +142,18 @@ fn run<T: Transport>(inner: &Inner<T>, job: &Job) -> Vec<FetchResult> {
             inner.opts.fetch_max_bytes,
             &inner.opts.fetch_links,
         ) {
-            Ok(report) => out.push(result_of(path, &report)),
+            Ok(report) => {
+                if let Some(why) = report
+                    .fetched
+                    .first()
+                    .and_then(|f| f.blob_fallback.as_ref())
+                {
+                    notes.push(format!(
+                        "note: {path} came in chunks, slower than the blob stream ({why})"
+                    ));
+                }
+                out.push(result_of(path, &report));
+            }
             Err(e) => {
                 let why = match &e {
                     FetchError::Peer(pe) => explain(&job.peer, pe),
@@ -152,7 +173,7 @@ fn run<T: Transport>(inner: &Inner<T>, job: &Job) -> Vec<FetchResult> {
             }
         }
     }
-    out
+    (out, notes)
 }
 
 fn result_of(path: &str, report: &outputs::FetchReport) -> FetchResult {

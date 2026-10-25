@@ -3,7 +3,8 @@
 //! any request is read, one bidirectional stream per request, and a long-lived stream per event
 //! subscription.
 //!
-//! Frames on a stream are `u32` big-endian length + the JSON of [`crate::proto`].
+//! Frames on a stream are `u32` big-endian length + the JSON of [`crate::proto`]. Fetched outputs
+//! travel on a second ALPN, iroh-blobs ([`crate::iroh_blobs_shelf`], R-795).
 //! The blocking [`Transport`] methods use a tokio runtime handle and must be
 //! called from outside that runtime's worker threads (the daemon's job threads).
 
@@ -93,7 +94,7 @@ pub async fn endpoint(secret: SecretKey, opts: &EndpointOptions) -> Result<Endpo
             .map_err(|e| err(&e))?;
     }
     b.secret_key(secret)
-        .alpns(vec![ALPN.to_vec()])
+        .alpns(vec![ALPN.to_vec(), iroh_blobs::ALPN.to_vec()])
         .bind()
         .await
         .map_err(|e| err(&e))
@@ -233,6 +234,7 @@ impl IrohTransport {
             .map_err(|e| offline(e.to_string()))?;
         Ok(Box::new(IrohConnection {
             conn,
+            endpoint: self.endpoint.clone(),
             rt: self.rt.clone(),
         }))
     }
@@ -259,7 +261,73 @@ impl Transport for IrohTransport {
 
 struct IrohConnection {
     conn: iroh::endpoint::Connection,
+    /// For the blobs connection to the same peer.
+    endpoint: Endpoint,
     rt: Handle,
+}
+
+/// Why a blob stream failed, as a link error.
+fn blob_err(what: &str, e: impl std::fmt::Display) -> PeerError {
+    PeerError::LinkLost(format!("blob stream: {what}: {e}"))
+}
+
+/// Streams `hash` on `conn` (blobs ALPN) into `sink`, verifying every piece against the BLAKE3
+/// tree; a stall of [`UPLOAD_IDLE`] ends it.
+async fn stream_blob(
+    conn: iroh::endpoint::Connection,
+    hash: iroh_blobs::Hash,
+    size: u64,
+    sink: &mut dyn FnMut(&[u8]) -> std::io::Result<()>,
+) -> Result<(), PeerError> {
+    use bao_tree::io::BaoContentItem;
+    use iroh_blobs::get::fsm;
+    let idle = |what: &'static str| move |_| blob_err(what, "stalled");
+    let request = iroh_blobs::protocol::GetRequest::blob(hash);
+    let connected = fsm::start(conn, request, Default::default())
+        .next()
+        .await
+        .map_err(|e| blob_err("request", e))?;
+    let fsm::ConnectedNext::StartRoot(start) =
+        connected.next().await.map_err(|e| blob_err("start", e))?
+    else {
+        return Err(blob_err("start", "not a single blob"));
+    };
+    let (mut content, announced) = tokio::time::timeout(UPLOAD_IDLE, start.next().next())
+        .await
+        .map_err(idle("header"))?
+        .map_err(|e| blob_err("header", e))?;
+    if announced != size {
+        return Err(blob_err(
+            "header",
+            format!("{announced} bytes, the listing said {size}"),
+        ));
+    }
+    let mut at = 0u64;
+    let end = loop {
+        match tokio::time::timeout(UPLOAD_IDLE, content.next())
+            .await
+            .map_err(idle("content"))?
+        {
+            fsm::BlobContentNext::More((next, item)) => {
+                content = next;
+                match item.map_err(|e| blob_err("verification", e))? {
+                    BaoContentItem::Parent(_) => {}
+                    BaoContentItem::Leaf(leaf) => {
+                        if leaf.offset != at {
+                            return Err(blob_err("content", "pieces out of order"));
+                        }
+                        sink(&leaf.data).map_err(|e| blob_err("writing", e))?;
+                        at += leaf.data.len() as u64;
+                    }
+                }
+            }
+            fsm::BlobContentNext::Done(end) => break end,
+        }
+    };
+    if let fsm::EndBlobNext::Closing(closing) = end.next() {
+        let _ = closing.next().await;
+    }
+    Ok(())
 }
 
 impl Connection for IrohConnection {
@@ -280,6 +348,31 @@ impl Connection for IrohConnection {
 
     fn remote_hints(&self) -> Option<DialHints> {
         Some(hints_of_paths(&self.conn.paths()))
+    }
+
+    fn fetch_blob(
+        &mut self,
+        blob: &str,
+        size: u64,
+        sink: &mut dyn FnMut(&[u8]) -> std::io::Result<()>,
+    ) -> Result<(), PeerError> {
+        let hash: iroh_blobs::Hash = blob
+            .parse()
+            .map_err(|e| PeerError::Protocol(format!("blob hash {blob:?}: {e}")))?;
+        let (ep, remote) = (self.endpoint.clone(), self.conn.remote_id());
+        // a connection of its own on the blobs ALPN, over the paths iroh already has to the peer
+        let conn = self
+            .rt
+            .block_on(async move {
+                tokio::time::timeout(UPLOAD_IDLE, ep.connect(remote, iroh_blobs::ALPN)).await
+            })
+            .map_err(|_| blob_err("connect", "timed out"))?
+            .map_err(|e| blob_err("connect", e))?;
+        let streamed = self
+            .rt
+            .block_on(stream_blob(conn.clone(), hash, size, sink));
+        conn.close(0u32.into(), b"done");
+        streamed
     }
 
     fn open_upload(&mut self, head: Body) -> Result<Box<dyn Upload>, PeerError> {
@@ -460,9 +553,18 @@ impl EventStream for IrohEvents {
 /// ([`crate::trust::TrustedHandler`]): iroh proves the dialer's node id, the handler decides on
 /// the grant in the first frame. A connection that stays unadmitted past [`PRE_ADMISSION`] is
 /// closed, and until it is admitted only small control frames are read.
-pub async fn serve(endpoint: Endpoint, handler: Arc<dyn Handler>) {
+///
+/// Connections on the blobs ALPN go to `blobs`, which admits only what fetch listings granted
+/// ([`crate::iroh_blobs_shelf`]); without it they are closed.
+pub async fn serve(
+    endpoint: Endpoint,
+    handler: Arc<dyn Handler>,
+    blobs: Option<iroh_blobs::BlobsProtocol>,
+) {
+    use iroh::protocol::ProtocolHandler;
     while let Some(incoming) = endpoint.accept().await {
         let handler = Arc::clone(&handler);
+        let blobs = blobs.clone();
         tokio::spawn(async move {
             let Ok(accepting) = incoming.accept() else {
                 return;
@@ -470,6 +572,15 @@ pub async fn serve(endpoint: Endpoint, handler: Arc<dyn Handler>) {
             let Ok(conn) = accepting.await else {
                 return;
             };
+            if conn.alpn() == iroh_blobs::ALPN {
+                match blobs {
+                    Some(b) => {
+                        let _ = b.accept(conn).await;
+                    }
+                    None => conn.close(4u32.into(), b"no blob store"),
+                }
+                return;
+            }
             let Ok(peer) = PeerId::new(&conn.remote_id().to_string()) else {
                 conn.close(1u32.into(), b"bad identity");
                 return;
