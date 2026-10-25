@@ -1,7 +1,7 @@
 //! Fetching named outputs back: content-addressed, bounded, and confined to
 //! the checkout (R-159, REQUIREMENTS 7.13).
 
-use crate::ids::{CheckoutId, Hash};
+use crate::ids::{CheckoutId, Hash, PeerId};
 use crate::proto::{Body, FetchEntry, MAX_CHUNK_BYTES, MAX_FETCH_PATHS, Refusal};
 use crate::sync::{check_rel_path, hash_file};
 use crate::transport::{Connection, PeerError};
@@ -70,6 +70,31 @@ pub fn list(
     Ok(paths.iter().map(|p| list_one(tree, p, policy)).collect())
 }
 
+/// Offers listed files over a bulk transport (iroh-blobs, R-795).
+pub trait BlobShelf: Send + Sync {
+    /// Makes `file` fetchable by `to` and returns its blob hash (hex), or `None` when it cannot
+    /// be offered (the chunked fetch still works).
+    fn offer(&self, to: &PeerId, file: &Path) -> Option<String>;
+}
+
+/// [`list`], with every found file also offered on `shelf` to `to`.
+pub fn list_offered(
+    tree: &Path,
+    paths: &[String],
+    policy: &FetchPolicy,
+    shelf: &dyn BlobShelf,
+    to: &PeerId,
+) -> Result<Vec<FetchEntry>, Refusal> {
+    let mut entries = list(tree, paths, policy)?;
+    for e in &mut entries {
+        if let FetchEntry::Found { path, blob, .. } = e {
+            // resolve() already checked the path and its links when listing
+            *blob = shelf.offer(to, &tree.join(path.as_str()));
+        }
+    }
+    Ok(entries)
+}
+
 fn list_one(tree: &Path, rel: &str, policy: &FetchPolicy) -> FetchEntry {
     let path = rel.to_string();
     let abs = match resolve(tree, rel, policy) {
@@ -100,6 +125,7 @@ fn list_one(tree: &Path, rel: &str, policy: &FetchPolicy) -> FetchEntry {
             hash,
             size,
             exec: m.permissions().mode() & 0o111 != 0,
+            blob: None,
         },
         Err(e) => FetchEntry::Refused {
             path,
@@ -183,6 +209,8 @@ pub struct Fetched {
     pub size: u64,
     /// True when the destination already had this content and nothing was transferred.
     pub unchanged: bool,
+    /// Why the peer's blob stream could not be used, when the file came in chunks instead.
+    pub blob_fallback: Option<String>,
 }
 
 /// The result of a fetch: the rest still arrives when some files are refused.
@@ -274,6 +302,7 @@ pub fn fetch_into(
                     hash,
                     size,
                     exec,
+                    blob,
                 } => {
                     if let Err(e) = check_rel_path(&path) {
                         report
@@ -289,12 +318,19 @@ pub fn fetch_into(
                         report.refused.push((path, reason));
                         continue;
                     }
-                    match fetch_one(conn, checkout, &path, hash, size, exec, dest)? {
-                        Ok(unchanged) => report.fetched.push(Fetched {
+                    let want = Want {
+                        hash,
+                        size,
+                        exec,
+                        blob: blob.as_deref(),
+                    };
+                    match fetch_one(conn, checkout, &path, &want, dest)? {
+                        Ok(how) => report.fetched.push(Fetched {
                             path,
                             hash,
                             size,
-                            unchanged,
+                            unchanged: how.unchanged,
+                            blob_fallback: how.blob_fallback,
                         }),
                         Err(reason) => report.refused.push((path, reason)),
                     }
@@ -316,21 +352,38 @@ impl Drop for TmpGuard {
     }
 }
 
-/// `Ok(Ok(unchanged))` on success, `Ok(Err(reason))` for a per-file failure.
+/// What the listing said about one file.
+struct Want<'a> {
+    hash: Hash,
+    size: u64,
+    exec: bool,
+    blob: Option<&'a str>,
+}
+
+/// How one file arrived.
+struct Arrived {
+    unchanged: bool,
+    blob_fallback: Option<String>,
+}
+
+/// `Ok(Ok(how))` on success, `Ok(Err(reason))` for a per-file failure. The peer's blob stream
+/// is tried first when it offers one (one verified stream, no round trip per chunk); if it fails
+/// the file is fetched again in chunks, and why is kept in [`Arrived::blob_fallback`].
 fn fetch_one(
     conn: &mut dyn Connection,
     checkout: &CheckoutId,
     path: &str,
-    hash: Hash,
-    size: u64,
-    exec: bool,
+    want: &Want<'_>,
     dest: &Path,
-) -> Result<Result<bool, String>, FetchError> {
+) -> Result<Result<Arrived, String>, FetchError> {
     let target = dest.join(path);
-    if fs::metadata(&target).is_ok_and(|m| m.is_file() && m.len() == size)
-        && hash_file(&target).is_ok_and(|(h, _)| h == hash)
+    if fs::metadata(&target).is_ok_and(|m| m.is_file() && m.len() == want.size)
+        && hash_file(&target).is_ok_and(|(h, _)| h == want.hash)
     {
-        return Ok(Ok(true));
+        return Ok(Ok(Arrived {
+            unchanged: true,
+            blob_fallback: None,
+        }));
     }
     let local = |what: &str, e: std::io::Error| format!("{what} {path}: {e}");
     if let Some(parent) = target.parent()
@@ -353,13 +406,88 @@ fn fetch_one(
         Err(e) => return Ok(Err(local("creating a temporary file for", e))),
     };
     let _guard = TmpGuard(tmp.clone());
+    let mut blob_fallback = None;
+    let mut arrived = None;
+    if let Some(blob) = want.blob {
+        match by_blob(conn, blob, want.size, &mut out) {
+            Ok(got) => arrived = Some(got),
+            Err(why) => {
+                // start again from an empty file
+                if let Err(e) = out
+                    .set_len(0)
+                    .and_then(|()| out.seek(SeekFrom::Start(0)).map(drop))
+                {
+                    return Ok(Err(local("resetting", e)));
+                }
+                blob_fallback = Some(why);
+            }
+        }
+    }
+    let (digest, offset) = match arrived {
+        Some(got) => got,
+        None => match by_chunks(conn, checkout, path, want, &mut out)? {
+            Ok(got) => got,
+            Err(reason) => return Ok(Err(reason)),
+        },
+    };
+    if let Err(e) = out.sync_all() {
+        return Ok(Err(local("flushing", e)));
+    }
+    drop(out);
+    if offset != want.size || Hash::from_digest(digest) != want.hash {
+        return Ok(Err("content does not match its hash".to_string()));
+    }
+    let mode = if want.exec { 0o755 } else { 0o644 };
+    if let Err(e) = fs::set_permissions(&tmp, fs::Permissions::from_mode(mode)) {
+        return Ok(Err(local("setting the mode of", e)));
+    }
+    if let Err(e) = fs::rename(&tmp, &target) {
+        return Ok(Err(local("moving into place", e)));
+    }
+    Ok(Ok(Arrived {
+        unchanged: false,
+        blob_fallback,
+    }))
+}
+
+/// The whole file over the peer's blob stream: the bytes and their sha256 as they were written.
+fn by_blob(
+    conn: &mut dyn Connection,
+    blob: &str,
+    size: u64,
+    out: &mut fs::File,
+) -> Result<(Sha256, u64), String> {
+    let mut digest = Sha256::new();
+    let mut written = 0u64;
+    conn.fetch_blob(blob, size, &mut |data: &[u8]| {
+        digest.update(data);
+        written += data.len() as u64;
+        out.write_all(data)
+    })
+    .map_err(|e| e.to_string())?;
+    if written != size {
+        return Err(format!(
+            "the blob stream ended after {written} of {size} bytes"
+        ));
+    }
+    Ok((digest, written))
+}
+
+/// The file in chunks, one request each: what peers without a blob stream serve.
+fn by_chunks(
+    conn: &mut dyn Connection,
+    checkout: &CheckoutId,
+    path: &str,
+    want: &Want<'_>,
+    out: &mut fs::File,
+) -> Result<Result<(Sha256, u64), String>, FetchError> {
     let mut digest = Sha256::new();
     let mut offset = 0u64;
     loop {
         let reply = conn.request(Body::FetchChunk {
             checkout: checkout.clone(),
             path: path.to_string(),
-            hash,
+            hash: want.hash,
             offset,
             len: MAX_CHUNK_BYTES as u32,
         });
@@ -375,29 +503,15 @@ fn fetch_one(
         };
         digest.update(&data);
         if let Err(e) = out.write_all(&data) {
-            return Ok(Err(local("writing", e)));
+            return Ok(Err(format!("writing {path}: {e}")));
         }
         offset += data.len() as u64;
-        if offset > size {
+        if offset > want.size {
             return Ok(Err("peer sent more than the announced size".to_string()));
         }
         if eof || data.is_empty() {
             break;
         }
     }
-    if let Err(e) = out.sync_all() {
-        return Ok(Err(local("flushing", e)));
-    }
-    drop(out);
-    if offset != size || Hash::from_digest(digest) != hash {
-        return Ok(Err("content does not match its hash".to_string()));
-    }
-    let mode = if exec { 0o755 } else { 0o644 };
-    if let Err(e) = fs::set_permissions(&tmp, fs::Permissions::from_mode(mode)) {
-        return Ok(Err(local("setting the mode of", e)));
-    }
-    if let Err(e) = fs::rename(&tmp, &target) {
-        return Ok(Err(local("moving into place", e)));
-    }
-    Ok(Ok(false))
+    Ok(Ok((digest, offset)))
 }

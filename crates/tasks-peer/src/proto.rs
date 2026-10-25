@@ -642,6 +642,10 @@ pub enum FetchEntry {
         size: u64,
         /// Executable bit.
         exec: bool,
+        /// The file's BLAKE3 hash (hex) when the peer also offers it over iroh-blobs; absent from
+        /// older peers, which serve chunks only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blob: Option<String>,
     },
     /// No such file.
     Missing {

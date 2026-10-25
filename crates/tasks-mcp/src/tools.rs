@@ -878,8 +878,8 @@ impl Tools {
             text.push_str("\n(job still running; the last line may grow)");
         }
         Ok(ToolResult {
+            structured: json!({"mode": "tail", "lines": got.len(), "running": running, "truncated": cut, "text": text.clone()}),
             text,
-            structured: json!({"mode": "tail", "lines": got.len(), "running": running, "truncated": cut}),
             is_error: false,
         })
     }
@@ -927,8 +927,8 @@ impl Tools {
             text.push_str("\ntruncated: the search stopped at its match limit; narrow the pattern");
         }
         Ok(ToolResult {
+            structured: json!({"mode": "grep", "matches": matches, "truncated": cut || truncated, "text": text.clone()}),
             text,
-            structured: json!({"mode": "grep", "matches": matches, "truncated": cut || truncated}),
             is_error: false,
         })
     }
@@ -970,8 +970,8 @@ impl Tools {
             ));
         }
         Ok(ToolResult {
+            structured: json!({"mode": "offset", "offset": offset, "next_offset": next, "done": done && !more, "truncated": more, "text": text.clone()}),
             text,
-            structured: json!({"mode": "offset", "offset": offset, "next_offset": next, "done": done && !more, "truncated": more}),
             is_error: false,
         })
     }

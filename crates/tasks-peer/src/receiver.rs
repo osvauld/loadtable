@@ -5,7 +5,7 @@
 //! module owns the protocol rules and nothing else.
 
 use crate::ids::{PeerId, RemoteJobId, SubmitKey};
-use crate::outputs::{self, FetchPolicy};
+use crate::outputs::{self, BlobShelf, FetchPolicy};
 use crate::proto::{
     Body, CancelState, Hello, JobEvent, MAX_CHUNK_BYTES, PeerStatus, Refusal, SubmitJob, Submitted,
     SyncApply, WireEnd, WireOutcome, WireSample,
@@ -13,7 +13,7 @@ use crate::proto::{
 use crate::sync::{SyncStore, check_rel_path};
 use crate::transport::{EventStream, Handler, PeerError, StreamPoll};
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tasks_core::{JobSpec, Phase, Placement};
 
 /// Peers allowed to talk to this daemon, by transport-proven identity.
@@ -139,6 +139,8 @@ pub struct Receiver {
     status: Arc<dyn StatusSource>,
     policy: Arc<dyn SubmitPolicy>,
     fetch: FetchPolicy,
+    /// Where listed outputs are also offered as blobs, once the transport has one (R-795).
+    blobs: OnceLock<Arc<dyn BlobShelf>>,
 }
 
 impl Receiver {
@@ -160,7 +162,13 @@ impl Receiver {
             status,
             policy,
             fetch,
+            blobs: OnceLock::new(),
         }
+    }
+
+    /// Offers every file a fetch listing finds on `shelf` too. Set once, when serving starts.
+    pub fn set_blobs(&self, shelf: Arc<dyn BlobShelf>) {
+        let _ = self.blobs.set(shelf);
     }
 
     /// Maps a submission onto a local spec whose cwd is inside the synced copy.
@@ -279,7 +287,13 @@ impl Receiver {
                 }
                 self.store.touch(from, &checkout);
                 let tree = self.store.tree_root(from, &checkout);
-                match outputs::list(&tree, &paths, &self.fetch) {
+                let listed = match self.blobs.get() {
+                    Some(shelf) => {
+                        outputs::list_offered(&tree, &paths, &self.fetch, shelf.as_ref(), from)
+                    }
+                    None => outputs::list(&tree, &paths, &self.fetch),
+                };
+                match listed {
                     Ok(entries) => Body::FetchListing { entries },
                     Err(r) => Body::Refuse(r),
                 }

@@ -11,7 +11,7 @@ workspace = true
 
 [features]
 # The real iroh transport. Off by default so the core stays light and sync.
-iroh = ["dep:iroh", "dep:tokio"]
+iroh = ["dep:iroh", "dep:tokio", "dep:iroh-blobs", "dep:bao-tree"]
 
 [dependencies]
 tasks-core.workspace = true
@@ -30,6 +30,10 @@ sha2.workspace = true
 gix = { version = "=0.90.0", default-features = false, features = ["sha1", "index", "dirwalk", "excludes", "attributes"] }
 iroh = { version = "1.3", optional = true }
 tokio = { version = "1", optional = true, features = ["rt-multi-thread", "sync", "time", "net", "io-util", "macros"] }
+# Fetched outputs travel as verified BLAKE3 streams (R-795): the worker's store references the
+# files in place, the origin streams them straight into its temporary file.
+iroh-blobs = { version = "0.103", optional = true, default-features = false, features = ["fs-store"] }
+bao-tree = { version = "0.16", optional = true, default-features = false }
 
 [dev-dependencies]
 tempfile.workspace = true

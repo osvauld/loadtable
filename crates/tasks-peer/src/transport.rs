@@ -149,6 +149,19 @@ pub trait Connection: Send {
     fn remote_hints(&self) -> Option<DialHints> {
         None
     }
+    /// Streams the blob `blob` (BLAKE3 hex, from a fetch listing) of `size` bytes from the peer,
+    /// handing each verified piece to `sink` in order. The default has no blob stream.
+    fn fetch_blob(
+        &mut self,
+        blob: &str,
+        size: u64,
+        sink: &mut dyn FnMut(&[u8]) -> std::io::Result<()>,
+    ) -> Result<(), PeerError> {
+        let _ = (blob, size, sink);
+        Err(PeerError::Protocol(
+            "this link has no blob stream".to_string(),
+        ))
+    }
 }
 
 /// Opens links to peers.
