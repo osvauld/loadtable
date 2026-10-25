@@ -23,7 +23,7 @@ use tasks_peer::receiver::{
 use tasks_peer::sync::{GixTransfer, SyncLimits, SyncStore};
 use tasks_peer::{PeerId, RemoteJobId, SubmitKey};
 use tasks_platform::CgroupName;
-use tasks_timing::{Cache, Outcome as TimingOutcome, RecipeKey, Sample, SampleKey};
+use tasks_timing::{Cache, History, Outcome as TimingOutcome, RecipeKey, Sample, SampleKey};
 
 /// The scheduler and ledger as the receiver's [`JobRunner`].
 pub struct DaemonRunner {
@@ -77,8 +77,9 @@ fn wire_end(rec: &JobRecord) -> WireEnd {
 }
 
 /// The end of a finished job as the receiver reports it. One whole-job timing sample is sent
-/// back so the origin's history learns what this machine costs.
-fn finished(rec: &JobRecord, machine: &str) -> FinishedJob {
+/// back so the origin's history learns what this machine costs, with the warmth this machine
+/// stamped on its own sample of the run (R-800).
+fn finished(rec: &JobRecord, machine: &str, history: &dyn History) -> FinishedJob {
     let wall_ms = match (rec.started_at_ms, rec.finished_at_ms) {
         (Some(s), Some(f)) => u64::try_from((f - s).max(0)).unwrap_or(0),
         _ => 0,
@@ -107,9 +108,10 @@ fn finished(rec: &JobRecord, machine: &str) -> FinishedJob {
             target: None,
             machine: machine.to_string(),
         };
+        let cache = own_warmth(history, &key, rec);
         let sample = Sample {
             secs: wall_ms as f64 / 1000.0,
-            cache: Cache::Unknown,
+            cache,
             outcome: if rec.phase == Phase::Passed {
                 TimingOutcome::Passed
             } else {
@@ -120,6 +122,23 @@ fn finished(rec: &JobRecord, machine: &str) -> FinishedJob {
         samples.push(WireSample::from_sample(&key, &sample));
     }
     FinishedJob { outcome, samples }
+}
+
+/// The warmth of this machine's own sample of `rec`'s run: the one filed between its start and
+/// shortly after its end. `Unknown` when there is none (a run that teaches no timing).
+fn own_warmth(history: &dyn History, key: &SampleKey, rec: &JobRecord) -> Cache {
+    const SLACK_MS: u64 = 10_000;
+    let ms = |v: Option<i64>| v.and_then(|v| u64::try_from(v).ok());
+    let (Some(start), Some(end)) = (ms(rec.started_at_ms), ms(rec.finished_at_ms)) else {
+        return Cache::Unknown;
+    };
+    history
+        .samples(key)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| s.at_ms >= start && s.at_ms <= end + SLACK_MS)
+        .max_by_key(|s| s.at_ms)
+        .map_or(Cache::Unknown, |s| s.cache)
 }
 
 impl JobRunner for DaemonRunner {
@@ -163,7 +182,7 @@ impl JobRunner for DaemonRunner {
             finished: rec
                 .phase
                 .is_terminal()
-                .then(|| finished(&rec, &self.sch.cfg.machine)),
+                .then(|| finished(&rec, &self.sch.cfg.machine, self.sch.history())),
             phase: rec.phase,
             log_len,
         })
@@ -463,6 +482,29 @@ mod tests {
         let at = u64::try_from(log.find("hello").unwrap()).unwrap();
         assert_eq!(run.read_log(&peer(), id, at + 6, 4), b"from");
         assert_eq!(run.cancel(&peer(), id), Some(CancelState::AlreadyFinished));
+    }
+
+    #[test]
+    fn r800_a_remote_jobs_sample_carries_the_warmth_the_worker_stamped() {
+        let r = Rig::new();
+        r.procs.auto_exit(0);
+        let run = DaemonRunner::new(r.sch.clone());
+        let mut got = Vec::new();
+        for n in 0..2 {
+            let key = SubmitKey::new(&format!("laptop:w{n}")).unwrap();
+            let (id, _) = run
+                .submit(&peer(), &key, r.spec("o", &["make", "w"], Kind::Run))
+                .unwrap();
+            assert_eq!(
+                r.until_done(JobId(i64::try_from(id.0).unwrap())),
+                Phase::Passed
+            );
+            let fin = run.view(&peer(), id).unwrap().finished.unwrap();
+            let (_, sample) = fin.samples[0].to_sample().unwrap();
+            got.push(sample.cache);
+        }
+        // not cargo: warm once this machine has passed it (R-665); never "unknown" any more
+        assert_eq!(got, vec![Cache::Cold, Cache::Warm]);
     }
 
     #[test]

@@ -78,6 +78,14 @@ fn parse_result(rest: &str) -> (u32, u32, u32, Option<f64>) {
     (p, f, i, secs)
 }
 
+/// `Compiling desktop v0.2.1 (/home/x/crates/desktop)`: a crate of a local path. A registry
+/// crate has no parenthesis, a git one names its URL.
+fn is_path_crate(line: &str) -> bool {
+    line.split_once(" (").is_some_and(|(_, p)| {
+        p.starts_with('/') || p.starts_with("file:") || p.get(1..2) == Some(":")
+    })
+}
+
 impl CargoParser {
     /// A parser at the start of a run.
     pub fn new() -> CargoParser {
@@ -107,6 +115,11 @@ impl CargoParser {
             if !self.compiling {
                 self.compiling = true;
                 out.push(Event::CompileStarted);
+            }
+            if !t.starts_with("Documenting ") {
+                out.push(Event::CrateBuilt {
+                    dependency: !is_path_crate(t),
+                });
             }
         } else if let Some(rest) = t.strip_prefix("Finished ") {
             if !self.compiling {
@@ -215,10 +228,34 @@ mod tests {
             ev,
             vec![
                 Event::CompileStarted,
+                Event::CrateBuilt { dependency: true },
+                Event::CrateBuilt { dependency: true },
                 Event::CompileFinished {
                     profile: "test".into()
                 }
             ]
+        );
+    }
+
+    #[test]
+    fn r800_each_built_crate_says_whether_it_is_a_dependency() {
+        let deps = |lines: &[&str]| -> Vec<bool> {
+            run(lines)
+                .into_iter()
+                .filter_map(|e| match e {
+                    Event::CrateBuilt { dependency } => Some(dependency),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            deps(&[
+                "   Compiling serde v1.0.200",
+                "   Compiling iroh v1.4.1 (https://github.com/n0-computer/iroh#abc123)",
+                "    Checking desktop v0.2.1 (/home/abe/p2p_chat/crates/desktop)",
+                " Documenting desktop v0.2.1 (/home/abe/p2p_chat/crates/desktop)",
+            ]),
+            vec![true, true, false]
         );
     }
 
@@ -326,7 +363,14 @@ mod tests {
             "error: could not compile `x` (lib) due to 1 previous error",
             "warning: foo",
         ]);
-        assert_eq!(ev, vec![Event::CompileStarted, Event::CompileFailed]);
+        assert_eq!(
+            ev,
+            vec![
+                Event::CompileStarted,
+                Event::CrateBuilt { dependency: true },
+                Event::CompileFailed
+            ]
+        );
     }
 
     #[test]

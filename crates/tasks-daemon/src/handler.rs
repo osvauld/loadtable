@@ -841,7 +841,7 @@ impl Scheduler {
                 cores: p.machine.cores,
             })
             .collect();
-        let want = self.wanted_cache(&recipe);
+        let want = crate::place::guessed(self.wanted_cache(&recipe));
         let shown = self.shown_for(&recipe, &self.machine_info(), &others, want);
         Response::Estimate(match &shown {
             Shown::Eta(e) => EstimateView {

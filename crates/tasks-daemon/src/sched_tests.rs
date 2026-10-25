@@ -944,6 +944,97 @@ fn r665_a_finished_run_is_stamped_cold_until_this_machine_has_passed_it() {
     assert_eq!(stamps, vec![Cache::Cold, Cache::Warm]);
 }
 
+/// A workspace with `deps` registry dependencies in its lockfile.
+fn cargo_ws(r: &Rig, deps: usize) -> std::path::PathBuf {
+    let ws = r.dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::write(ws.join("Cargo.toml"), "[workspace]\n").unwrap();
+    let mut lock = String::from("version = 4\n");
+    for i in 0..deps {
+        lock.push_str(&format!(
+            "\n[[package]]\nname = \"d{i}\"\nversion = \"1.0.0\"\nsource = \"registry+x\"\n"
+        ));
+    }
+    std::fs::write(ws.join("Cargo.lock"), lock).unwrap();
+    ws
+}
+
+#[test]
+fn r800_a_cargo_run_is_stamped_warm_or_cold_from_what_it_compiled() {
+    let r = Rig::new();
+    let ws = cargo_ws(&r, 8);
+    let own = format!(
+        "   Compiling app v0.1.0 ({}/app)\n    Finished `dev` profile [unoptimized] target(s) in 1s\n",
+        ws.display()
+    );
+    let all: String = (0..8)
+        .map(|i| format!("   Compiling d{i} v1.0.0\n"))
+        .chain(["    Finished `dev` profile [unoptimized] target(s) in 9s\n".to_string()])
+        .collect();
+    // the first run here only rebuilt its own crate; the second (a lockfile bump) all of them
+    r.procs
+        .script_spawns(&[(own.as_bytes(), 0), (all.as_bytes(), 0)]);
+    let argv = ["cargo", "build", "-p", "app"];
+    for _ in 0..2 {
+        let mut s = r.spec("o", &argv, Kind::Compile);
+        s.cwd = ws.clone();
+        let id = r.submit(&s);
+        r.tick();
+        assert_eq!(r.until_done(id), Phase::Passed);
+    }
+    let key = SampleKey {
+        recipe: RecipeKey::history_key(&argv.map(String::from), &[]).unwrap(),
+        target: None,
+        machine: "testbox".into(),
+    };
+    let mut got = r.store.samples(&key).unwrap();
+    got.sort_by_key(|s| s.at_ms);
+    assert_eq!(
+        got.iter().map(|s| s.cache).collect::<Vec<_>>(),
+        vec![Cache::Warm, Cache::Cold]
+    );
+}
+
+#[test]
+fn r800_a_queued_cargo_job_is_estimated_from_runs_of_the_warmth_its_target_holds() {
+    let r = Rig::new();
+    let ws = cargo_ws(&r, 8);
+    let argv = ["cargo", "build", "-p", "app"];
+    let recipe = RecipeKey::history_key(&argv.map(String::from), &[]).unwrap();
+    seed_run(&r, &recipe, 400.0, Outcome::Passed, 1);
+    let key = SampleKey {
+        recipe: recipe.clone(),
+        target: None,
+        machine: "testbox".into(),
+    };
+    r.store
+        .record_sample(
+            &key,
+            &Sample {
+                secs: 20.0,
+                cache: Cache::Warm,
+                outcome: Outcome::Passed,
+                at_ms: 2,
+            },
+        )
+        .unwrap();
+    let est = |r: &Rig| {
+        let mut s = r.spec("o", &argv, Kind::Compile);
+        s.cwd = ws.clone();
+        let id = r.submit(&s);
+        let rec = r.store.get(id).unwrap().unwrap();
+        r.sch.facts(&rec).shown.eta().map(|e| e.median_secs)
+    };
+    // no target/: a cold build, timed by the cold run
+    assert_eq!(est(&r), Some(400.0));
+    // a target holding the dependencies: a rebuild, timed by the warm run
+    let fp = ws.join("target/debug/.fingerprint");
+    for i in 0..8 {
+        std::fs::create_dir_all(fp.join(format!("d{i}-1"))).unwrap();
+    }
+    assert_eq!(est(&r), Some(20.0));
+}
+
 // R-709: a peer's test step that only reads the synced copy does not wait behind another job of
 // the copy; jobs that may change it still go one at a time.
 #[test]

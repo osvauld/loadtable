@@ -21,6 +21,8 @@ pub enum NoEstimate {
     NoPassingRun,
     /// It passed elsewhere, but not here with the build state this run starts from.
     FirstBuildHere,
+    /// It passed here only from a cold build; this run starts warm (R-800).
+    NoWarmRunHere,
     /// The job runs on a peer; its progress is not measured here.
     OnPeer,
     /// The timing history could not be read.
@@ -35,6 +37,7 @@ impl fmt::Display for NoEstimate {
             NoEstimate::FirstRun => "first run",
             NoEstimate::NoPassingRun => "no passing run yet",
             NoEstimate::FirstBuildHere => "first build here",
+            NoEstimate::NoWarmRunHere => "no warm run here yet",
             NoEstimate::OnPeer => "runs on a peer",
             NoEstimate::HistoryUnreadable => "the timing history could not be read",
             NoEstimate::Interactive => "interactive: runs as long as it is used",
@@ -201,20 +204,46 @@ fn finite(s: &Sample) -> bool {
     s.secs.is_finite() && s.secs >= 0.0
 }
 
-/// A passing sample of this machine that stands for a run starting with warmth `want`: a warm
-/// run is bounded by any passing run here (a cold one only overestimates), a cold run only by
-/// cold ones; a sample recorded before warmth was kept (`Unknown`) counts for both.
-fn fits_here(s: &Sample, want: Cache) -> bool {
-    s.outcome == Outcome::Passed
-        && finite(s)
-        && match want {
-            Cache::Warm => true,
-            Cache::Cold | Cache::Unknown => matches!(s.cache, Cache::Cold | Cache::Unknown),
+/// The passing samples of this machine that stand for a run starting with warmth `want`. A
+/// measured warmth (a cargo build's output directory, R-800) takes runs of that warmth only, so
+/// a rebuild is never timed by a cold build or the other way round; samples whose warmth was
+/// not known stand in only while there is no run of the wanted warmth. `Unknown` (the warmth is
+/// only guessed from history) takes the warm runs when there are any, else every passing run.
+fn fitting_here(here: &[Sample], want: Cache) -> Vec<Sample> {
+    let passed = |s: &&Sample| s.outcome == Outcome::Passed && finite(s);
+    let wanted = if want == Cache::Unknown {
+        if here.iter().filter(passed).any(|s| s.cache == Cache::Warm) {
+            Cache::Warm
+        } else {
+            return here.iter().filter(passed).cloned().collect();
         }
+    } else {
+        want
+    };
+    let exact: Vec<Sample> = here
+        .iter()
+        .filter(passed)
+        .filter(|s| s.cache == wanted)
+        .cloned()
+        .collect();
+    if !exact.is_empty() {
+        return exact;
+    }
+    here.iter()
+        .filter(passed)
+        .filter(|s| s.cache == Cache::Unknown)
+        .cloned()
+        .collect()
 }
 
-/// Another machine's sample counts only when its warmth is known to be the wanted one.
+/// Another machine's sample counts only when its warmth is known to be the wanted one; a
+/// guessed warmth (`Unknown`) takes its warm runs.
 fn fits_there(s: &Sample, want: Cache) -> bool {
+    let want = if want == Cache::Unknown {
+        Cache::Warm
+    } else {
+        want
+    };
     s.outcome == Outcome::Passed && finite(s) && s.cache == want
 }
 
@@ -245,8 +274,9 @@ pub fn shown(
     };
     let here = history.samples(&at(&machine.name))?;
     let mut any_sample = !here.is_empty();
-    let mut any_passed = here.iter().any(|s| s.outcome == Outcome::Passed);
-    let mine = window(here.into_iter().filter(|s| fits_here(s, want)).collect());
+    let passed_here = here.iter().any(|s| s.outcome == Outcome::Passed);
+    let mut any_passed = passed_here;
+    let mine = window(fitting_here(&here, want));
     if !mine.is_empty() {
         let (median_secs, p90_secs) = build(&mine, 1.0);
         return Ok(Shown::Eta(Eta {
@@ -281,7 +311,9 @@ pub fn shown(
             rough: true,
         }));
     }
-    Ok(Shown::Absent(if any_passed {
+    Ok(Shown::Absent(if passed_here && want != Cache::Cold {
+        NoEstimate::NoWarmRunHere
+    } else if any_passed {
         NoEstimate::FirstBuildHere
     } else if any_sample {
         NoEstimate::NoPassingRun

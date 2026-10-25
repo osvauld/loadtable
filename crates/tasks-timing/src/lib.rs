@@ -19,6 +19,7 @@ mod shell;
 pub mod short;
 pub mod split;
 pub mod timeline;
+pub mod warmth;
 
 pub use cargo::CargoParser;
 pub use error::TimingError;

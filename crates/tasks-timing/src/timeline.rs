@@ -58,6 +58,10 @@ pub struct Timeline {
     pub panics: Vec<(String, String)>,
     /// gradle `BUILD ...` result as `(success, reported_secs)`.
     pub build: Option<(bool, Option<f64>)>,
+    /// Crates cargo compiled or checked, and how many of them were dependencies (R-800).
+    pub crates_built: u32,
+    /// The dependencies among [`Timeline::crates_built`].
+    pub deps_built: u32,
 }
 
 impl Timeline {
@@ -127,6 +131,10 @@ impl Timeline {
         self.last_ms = ts;
         match event {
             Event::CompileStarted => self.push("compile".into(), PhaseKind::Compile, ts),
+            Event::CrateBuilt { dependency } => {
+                self.crates_built += 1;
+                self.deps_built += u32::from(*dependency);
+            }
             Event::CompileFinished { .. } => self.close_open(ts, |p| p.kind == PhaseKind::Compile),
             Event::CompileFailed => {
                 self.compile_failed = true;

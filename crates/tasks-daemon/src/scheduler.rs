@@ -975,6 +975,7 @@ impl Scheduler {
             recipe: facts.recipe.clone(),
             piece: rec.hints.split.clone(),
             interactive: rec.spec.interactive,
+            cargo: crate::cargo_warmth::CargoBuild::of(&rec.spec),
         };
         lock(&self.running).insert(id, rj.clone());
         lock(&self.state).last_wait.remove(&id);
