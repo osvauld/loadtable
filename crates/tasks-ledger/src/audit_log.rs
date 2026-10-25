@@ -77,6 +77,9 @@ pub mod action {
     /// hold the pressure, the per-job and transfer figures and the biggest processes outside
     /// any job (names only), so the stall can be explained afterwards.
     pub const PRESSURE_TRIP: &str = "pressure.trip";
+    /// The machine policy file changed and was applied, or refused and the old one kept; the
+    /// details list the changed keys (R-798).
+    pub const POLICY_RELOAD: &str = "policy.reload";
     /// The queue was drained.
     pub const QUEUE_DRAIN: &str = "queue.drain";
     /// A drain was lifted.
@@ -110,6 +113,7 @@ pub mod action {
         DATA_FETCHED,
         DATA_RETENTION,
         PRESSURE_TRIP,
+        POLICY_RELOAD,
         QUEUE_DRAIN,
         QUEUE_RESUME,
         crate::audit::ACTION_CHECKPOINT,

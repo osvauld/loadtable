@@ -217,6 +217,7 @@ impl Daemon {
             .spawn(move || sampler_sch.run_sampler())
             .ok();
         while !self.sch.is_shutdown() {
+            self.sch.reload_policy_if_changed();
             self.sch.tick();
             self.sch.wake().wait(self.sch.policy().tick());
         }
