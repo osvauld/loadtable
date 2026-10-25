@@ -209,6 +209,7 @@ pub(crate) fn plan_jobs(
                 // the step's own hint fills the spec's limit (R-095's sibling)
                 timeout_secs: step.hints.timeout_secs,
                 broad_test_escape: ctx.broad_test_escape,
+                script_escape: false,
                 priority,
                 priority_reason,
                 fetch: step.hints.fetch.clone(),

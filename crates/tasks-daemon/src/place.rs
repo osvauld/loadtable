@@ -208,6 +208,29 @@ impl Scheduler {
             .unwrap_or(Shown::Absent(NoEstimate::HistoryUnreadable))
     }
 
+    /// What may be shown as the duration of a job forwarded to `peer`: the runs this machine
+    /// recorded of the same command on that peer, with the peer's warmth (R-790). Other
+    /// machines' runs are not offered: the job runs at the peer's speed.
+    pub(crate) fn shown_on_peer(&self, rec: &JobRecord, peer: &str) -> Shown {
+        let recipe = RecipeKey::history_key(&rec.spec.argv, &rec.spec.env)
+            .unwrap_or_else(|| rec.spec.argv.first().cloned().unwrap_or_default());
+        let key = SampleKey {
+            recipe,
+            target: None,
+            machine: peer.to_string(),
+        };
+        let want = self
+            .history()
+            .samples(&key)
+            .map_or(Cache::Cold, |s| wanted_cache(&s));
+        let machine = MachineInfo {
+            name: peer.to_string(),
+            cores: 1,
+        };
+        shown(self.history(), &key, &machine, &[], want)
+            .unwrap_or(Shown::Absent(NoEstimate::HistoryUnreadable))
+    }
+
     /// The build state a run of `recipe` starts from on this machine: warm once this machine
     /// has a passing run of the command, cold before. The same rule stamps the run's sample
     /// when it finishes, so later estimates can tell a first build from a repeat. An unreadable

@@ -95,7 +95,10 @@ impl Scheduler {
             kill_reason: Mutex::new(None),
             stuck: Mutex::new(StuckDetector::new(policy.stuck_window_secs())),
             est_median: None,
-            shown: tasks_timing::Shown::Absent(tasks_timing::NoEstimate::OnPeer),
+            shown: rec.forward.as_ref().map_or(
+                tasks_timing::Shown::Absent(tasks_timing::NoEstimate::OnPeer),
+                |fw| self.shown_on_peer(rec, &fw.peer.0),
+            ),
             figures: Mutex::new(None),
             isolate: false,
         })

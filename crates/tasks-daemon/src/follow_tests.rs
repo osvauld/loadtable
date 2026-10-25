@@ -16,7 +16,7 @@ use tasks_core::{
 use tasks_ledger::Clock;
 use tasks_ledger::{NewJob, Store};
 use tasks_peer::receiver::SubmitPolicy;
-use tasks_timing::{Cache, History, Outcome, Sample, SampleKey};
+use tasks_timing::{Cache, History, NoEstimate, Outcome, Sample, SampleKey, Shown};
 
 fn ok(r: Reply) -> Response {
     match r {
@@ -248,6 +248,35 @@ fn r186_a_forwarded_row_carries_the_remote_phase() {
         panic!("jobs expected");
     };
     assert_eq!(jobs[0].remote_phase, Some(Phase::Running));
+}
+
+// R-790
+#[test]
+fn r790_a_forwarded_job_is_estimated_from_its_commands_runs_on_that_peer() {
+    let r = Rig::new();
+    for (i, secs) in [240.0, 260.0, 250.0].into_iter().enumerate() {
+        r.store
+            .record_sample(
+                &key("build_core.sh", None, "mac"),
+                &sample(secs, 100 + i as u64),
+            )
+            .unwrap();
+    }
+    // this machine's own runs of another command are not borrowed for the peer
+    seed(&r, &key("xcodegen", None, "testbox"), 3);
+    let id = r.submit(&r.spec("o", &["ios/scripts/build_core.sh"], Kind::Run));
+    let rec = r.store.get(id).unwrap().unwrap();
+    let Shown::Eta(eta) = r.sch.shown_on_peer(&rec, "mac") else {
+        panic!("an estimate expected")
+    };
+    assert_eq!((eta.median_secs, eta.samples), (250.0, 3));
+    assert_eq!((eta.machine.as_str(), eta.rough), ("mac", false));
+    let other = r.submit(&r.spec("o", &["xcodegen", "generate"], Kind::Run));
+    let rec = r.store.get(other).unwrap().unwrap();
+    assert_eq!(
+        r.sch.shown_on_peer(&rec, "mac"),
+        Shown::Absent(NoEstimate::FirstRun)
+    );
 }
 
 // ---------------------------------------------------------------- 5: history

@@ -193,6 +193,7 @@ pub fn build_spec(ctx: &mut Ctx<'_>, a: &RunArgs) -> Result<JobSpec, CliError> {
         // recipe and the ETA history
         timeout_secs: a.timeout,
         broad_test_escape: a.broad_test,
+        script_escape: a.allow_script,
         priority: Priority::Normal,
         priority_reason: None,
         fetch: a.fetch.clone(),

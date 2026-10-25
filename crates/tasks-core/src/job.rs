@@ -131,6 +131,10 @@ pub struct JobSpec {
     /// so every receiver of the job (a peer, a replayed plan) gives the same answer.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub broad_test_escape: bool,
+    /// The submitter passed `--allow-script` (R-791): a shell script of several commands runs
+    /// as one job instead of being refused.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub script_escape: bool,
     /// Queue class. `blocking` needs `priority_reason`; a plan step's `hints.priority` fills it.
     #[serde(default, skip_serializing_if = "Priority::is_normal")]
     pub priority: Priority,
@@ -249,6 +253,7 @@ pub(crate) mod tests {
             after: vec![],
             timeout_secs: None,
             broad_test_escape: false,
+            script_escape: false,
             priority: Priority::Normal,
             priority_reason: None,
             fetch: Vec::new(),

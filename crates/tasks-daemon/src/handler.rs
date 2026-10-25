@@ -316,7 +316,8 @@ impl Scheduler {
         what: &str,
         hint: Option<&str>,
     ) -> Result<Vec<String>, ApiError> {
-        match self.spec_verdict_hinted(spec, Via::Local, hint) {
+        // `what` names a plan step; empty is a job submitted on its own (R-791 applies to those)
+        match self.spec_verdict_as(spec, Via::Local, hint, what.is_empty()) {
             Ok(v) => Ok(v.warnings),
             Err(refusals) => {
                 self.audit_refusal(spec, &refusals, Via::Local, None);
@@ -512,6 +513,7 @@ impl Scheduler {
                 after: Vec::new(),
                 timeout_secs: step.hints.timeout_secs,
                 broad_test_escape: ctx.broad_test_escape,
+                script_escape: false,
                 priority: ctx.step_priority(&step.hints).0,
                 priority_reason: ctx.step_priority(&step.hints).1,
                 fetch: Vec::new(),

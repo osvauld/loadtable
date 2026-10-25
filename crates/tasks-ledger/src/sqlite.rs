@@ -940,6 +940,7 @@ mod tests {
             after: vec![],
             timeout_secs: None,
             broad_test_escape: false,
+            script_escape: false,
             priority: tasks_core::Priority::Normal,
             priority_reason: None,
             fetch: Vec::new(),

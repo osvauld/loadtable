@@ -36,6 +36,7 @@ fn record(store: &MemoryStore, root: &Path, fetch: &[&str]) -> JobRecord {
         after: vec![],
         timeout_secs: None,
         broad_test_escape: false,
+        script_escape: false,
         priority: tasks_core::Priority::Normal,
         priority_reason: None,
         fetch: fetch.iter().map(ToString::to_string).collect(),
