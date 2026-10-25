@@ -216,6 +216,7 @@ pub(crate) fn plan_jobs(
                 isolate: step.hints.isolate,
                 light: step.hints.light,
                 retry_alone: step.hints.retry_alone,
+                interactive: false,
             },
             hints: step.hints.clone(),
             step: Some((plan_id, step.name.clone())),

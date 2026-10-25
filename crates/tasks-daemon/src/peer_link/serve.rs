@@ -97,8 +97,10 @@ fn finished(rec: &JobRecord, machine: &str) -> FinishedJob {
     };
     let mut samples = Vec::new();
     let key_text = RecipeKey::history_key(&rec.spec.argv, &rec.spec.env);
-    let ran =
-        rec.started_at_ms.is_some() && matches!(rec.phase, Phase::Passed | Phase::Failed { .. });
+    // an interactive job's length is how long someone used it, not a timing (R-799)
+    let ran = rec.started_at_ms.is_some()
+        && matches!(rec.phase, Phase::Passed | Phase::Failed { .. })
+        && !rec.spec.interactive;
     if let (Some(k), true) = (key_text, ran) {
         let key = SampleKey {
             recipe: k,

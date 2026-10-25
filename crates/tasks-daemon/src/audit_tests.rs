@@ -785,6 +785,7 @@ fn r294_a_real_daemon_audits_to_the_ledger_signs_checkpoints_and_keeps_rows_acro
             isolate: false,
             light: false,
             retry_alone: false,
+            interactive: false,
         }
     };
     let first_rows = {

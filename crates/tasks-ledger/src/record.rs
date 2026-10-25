@@ -242,6 +242,7 @@ pub(crate) mod tests {
                 isolate: false,
                 light: false,
                 retry_alone: false,
+                interactive: false,
             },
             hints: StepHints::default(),
             plan_id: None,

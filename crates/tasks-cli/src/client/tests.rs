@@ -263,6 +263,7 @@ fn r101_a_connection_limit_reply_is_safely_resent_but_a_busy_reply_is_not() {
         isolate: false,
         light: false,
         retry_alone: false,
+        interactive: false,
     };
     let r = c.call(&Request::Submit { spec }).unwrap();
     assert_eq!(

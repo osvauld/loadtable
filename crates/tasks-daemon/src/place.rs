@@ -212,6 +212,9 @@ impl Scheduler {
     /// recorded of the same command on that peer, with the peer's warmth (R-790). Other
     /// machines' runs are not offered: the job runs at the peer's speed.
     pub(crate) fn shown_on_peer(&self, rec: &JobRecord, peer: &str) -> Shown {
+        if rec.spec.interactive {
+            return Shown::Absent(NoEstimate::Interactive);
+        }
         let recipe = RecipeKey::history_key(&rec.spec.argv, &rec.spec.env)
             .unwrap_or_else(|| rec.spec.argv.first().cloned().unwrap_or_default());
         let key = SampleKey {
@@ -270,7 +273,11 @@ impl Scheduler {
             basis: tasks_timing::Basis::BuiltIn,
         });
         let want = self.wanted_cache(&recipe);
-        let shown = self.shown_for(&recipe, &info, &peers, want);
+        let shown = if rec.spec.interactive {
+            Shown::Absent(NoEstimate::Interactive)
+        } else {
+            self.shown_for(&recipe, &info, &peers, want)
+        };
         // A peer's test step that only reads the synced copy (R-700) does not queue behind the
         // other jobs of the copy: the origin's checkout lock already orders them against any
         // job that syncs or builds, and which of the readers run together is the slots' call.

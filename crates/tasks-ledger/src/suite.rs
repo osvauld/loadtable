@@ -147,6 +147,7 @@ fn spec(owner: &str, after: Vec<JobId>) -> JobSpec {
         isolate: false,
         light: false,
         retry_alone: false,
+        interactive: false,
     }
 }
 

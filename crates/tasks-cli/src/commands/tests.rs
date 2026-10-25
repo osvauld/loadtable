@@ -2065,6 +2065,18 @@ fn r714_light_and_retry_alone_travel_on_the_spec_and_default_to_off() {
     assert!(!s.light && !s.retry_alone);
 }
 
+#[test]
+fn r799_interactive_travels_on_the_spec_and_defaults_to_off() {
+    let c = daemon(1, vec![], finished(1, Phase::Passed));
+    let r = Harness::default().run(&c, &["enqueue", "--interactive", "--", "./app"]);
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(submitted_spec(&c).interactive);
+    let c = daemon(1, vec![], finished(1, Phase::Passed));
+    let r = Harness::default().run(&c, &["enqueue", "--", "./app"]);
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(!submitted_spec(&c).interactive);
+}
+
 // ---------------------------------------------------------------- wait
 
 /// A daemon whose job `id` answers `get` with each phase of `phases` in turn (the last one

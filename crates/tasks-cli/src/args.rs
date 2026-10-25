@@ -178,6 +178,10 @@ pub struct RunArgs {
     /// alone, and say whether they passed.
     #[arg(long)]
     pub retry_alone: bool,
+    /// The job opens a window or waits on a person (a GUI, a REPL): it runs as long as it is
+    /// used, so it gets no estimate or "over the usual" warning and its runs teach no timings.
+    #[arg(long)]
+    pub interactive: bool,
     /// Submit and print the id; do not follow the log (`run` only).
     #[arg(long)]
     pub detach: bool,

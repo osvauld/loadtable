@@ -231,6 +231,7 @@ struct SubmitArgs {
     priority: Option<String>,
     reason: Option<String>,
     fetch: Option<Vec<String>>,
+    interactive: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -550,6 +551,7 @@ impl Tools {
             isolate: false,
             light: false,
             retry_alone: false,
+            interactive: a.interactive.unwrap_or(false),
         };
         spec.requirements.device = a.device.map(DeviceId);
         spec.requirements.os =

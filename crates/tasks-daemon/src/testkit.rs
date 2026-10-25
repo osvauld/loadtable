@@ -616,6 +616,7 @@ impl Rig {
             isolate: false,
             light: false,
             retry_alone: false,
+            interactive: false,
         }
     }
 

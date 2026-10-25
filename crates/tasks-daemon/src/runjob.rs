@@ -27,6 +27,8 @@ pub(crate) struct JobMeta {
     pub recipe: String,
     /// Set for one piece of a command split by test target: where its time is also filed.
     pub piece: Option<SplitOrigin>,
+    /// The job is interactive (R-799): its runs are not timings.
+    pub interactive: bool,
 }
 
 enum Parser {
@@ -300,9 +302,14 @@ impl RunEvents for Events {
             },
             summary: Some(summary),
         };
-        // Timing samples: only for runs that say something about the work's duration.
+        // Timing samples: only for runs that say something about the work's duration; an
+        // interactive job's length is how long someone used it (R-799).
         let mut samples = Vec::new();
-        if reason.is_none() && self.started_ok && phase != Phase::Interrupted {
+        if reason.is_none()
+            && self.started_ok
+            && phase != Phase::Interrupted
+            && !self.meta.interactive
+        {
             let tl = lock(&self.rj.timeline);
             let job = JobResult {
                 recipe: self.meta.recipe.clone(),

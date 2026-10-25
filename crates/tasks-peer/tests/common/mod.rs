@@ -146,6 +146,7 @@ impl World {
             isolate: false,
             light: false,
             retry_alone: false,
+            interactive: false,
         }
     }
 
