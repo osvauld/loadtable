@@ -680,6 +680,67 @@ fn r349_a_forwarded_job_the_peer_holds_back_is_listed_as_waiting_with_the_peers_
     assert_eq!(job.remote_wait, None);
 }
 
+// R-801
+#[test]
+fn r801_a_forwarded_job_whose_outputs_come_back_shows_the_transfer_not_the_run() {
+    let f = Arc::new(FakeForwarder::new(vec![]));
+    let r = Rig::with_forwarder(f.clone());
+    let id = r.submit(&anywhere(&r));
+    r.store.set_forward(id, &nixos(), None, Some("k1")).unwrap();
+    f.script(id, accepted(Phase::Running));
+    r.until("running on the peer", || {
+        r.tick();
+        r.sch.status().running.iter().any(|j| j.id == id)
+    });
+    let row = |st: &StatusSnapshot| st.running.iter().find(|j| j.id == id).cloned().unwrap();
+    assert_eq!(row(&r.sch.status()).transfer, None);
+    // the command is over on the peer and its binary is a third of the way back
+    let t = tasks_core::TransferProgress {
+        kind: tasks_core::TransferKind::Fetch,
+        peer: "node-id".into(),
+        path: Some("target/debug/app".into()),
+        done_bytes: 120 << 20,
+        total_bytes: Some(362 << 20),
+        rate_bps: Some(f64::from(4u32 << 20)),
+        remote_result: Some("command exit 0".into()),
+        at_ms: crate::peer_link::fetch::now_ms(),
+    };
+    let log = r.sch.cfg.log_path(id);
+    crate::peer_link::fetch::write_transfer(&log, &t);
+    let shown = row(&r.sch.status())
+        .transfer
+        .expect("the transfer in status");
+    assert_eq!(
+        shown.peer, "nixos",
+        "named by the job's peer, not the node id"
+    );
+    assert_eq!(
+        shown.line(),
+        "command exit 0 on nixos; fetching target/debug/app 120/362 MiB, 4 MiB/s, ~61s left"
+    );
+    let v = row(&r.sch.status());
+    assert_eq!(
+        (v.eta_secs, v.over_by_secs),
+        (None, None),
+        "no run time to show"
+    );
+    let Response::Job { job } = ok(r.sch.handle(Request::Get { id })) else {
+        panic!("job expected");
+    };
+    assert_eq!(job.log_path.as_deref(), Some(log.as_path()));
+    assert_eq!(job.transfer.map(|t| t.peer), Some("nixos".to_string()));
+    // a report nobody refreshed for a while is from a transfer that died
+    crate::peer_link::fetch::write_transfer(
+        &log,
+        &tasks_core::TransferProgress {
+            at_ms: t.at_ms - 60_000,
+            ..t
+        },
+    );
+    assert_eq!(row(&r.sch.status()).transfer, None);
+    crate::peer_link::fetch::clear_transfer(&log);
+}
+
 // R-353
 #[test]
 fn r353_a_forwarded_job_that_passed_stores_the_peers_final_phase_not_the_last_one_mirrored() {
@@ -942,6 +1003,97 @@ fn r665_a_finished_run_is_stamped_cold_until_this_machine_has_passed_it() {
         stamps = got.iter().map(|s| s.cache).collect();
     }
     assert_eq!(stamps, vec![Cache::Cold, Cache::Warm]);
+}
+
+/// A workspace with `deps` registry dependencies in its lockfile.
+fn cargo_ws(r: &Rig, deps: usize) -> std::path::PathBuf {
+    let ws = r.dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::write(ws.join("Cargo.toml"), "[workspace]\n").unwrap();
+    let mut lock = String::from("version = 4\n");
+    for i in 0..deps {
+        lock.push_str(&format!(
+            "\n[[package]]\nname = \"d{i}\"\nversion = \"1.0.0\"\nsource = \"registry+x\"\n"
+        ));
+    }
+    std::fs::write(ws.join("Cargo.lock"), lock).unwrap();
+    ws
+}
+
+#[test]
+fn r800_a_cargo_run_is_stamped_warm_or_cold_from_what_it_compiled() {
+    let r = Rig::new();
+    let ws = cargo_ws(&r, 8);
+    let own = format!(
+        "   Compiling app v0.1.0 ({}/app)\n    Finished `dev` profile [unoptimized] target(s) in 1s\n",
+        ws.display()
+    );
+    let all: String = (0..8)
+        .map(|i| format!("   Compiling d{i} v1.0.0\n"))
+        .chain(["    Finished `dev` profile [unoptimized] target(s) in 9s\n".to_string()])
+        .collect();
+    // the first run here only rebuilt its own crate; the second (a lockfile bump) all of them
+    r.procs
+        .script_spawns(&[(own.as_bytes(), 0), (all.as_bytes(), 0)]);
+    let argv = ["cargo", "build", "-p", "app"];
+    for _ in 0..2 {
+        let mut s = r.spec("o", &argv, Kind::Compile);
+        s.cwd = ws.clone();
+        let id = r.submit(&s);
+        r.tick();
+        assert_eq!(r.until_done(id), Phase::Passed);
+    }
+    let key = SampleKey {
+        recipe: RecipeKey::history_key(&argv.map(String::from), &[]).unwrap(),
+        target: None,
+        machine: "testbox".into(),
+    };
+    let mut got = r.store.samples(&key).unwrap();
+    got.sort_by_key(|s| s.at_ms);
+    assert_eq!(
+        got.iter().map(|s| s.cache).collect::<Vec<_>>(),
+        vec![Cache::Warm, Cache::Cold]
+    );
+}
+
+#[test]
+fn r800_a_queued_cargo_job_is_estimated_from_runs_of_the_warmth_its_target_holds() {
+    let r = Rig::new();
+    let ws = cargo_ws(&r, 8);
+    let argv = ["cargo", "build", "-p", "app"];
+    let recipe = RecipeKey::history_key(&argv.map(String::from), &[]).unwrap();
+    seed_run(&r, &recipe, 400.0, Outcome::Passed, 1);
+    let key = SampleKey {
+        recipe: recipe.clone(),
+        target: None,
+        machine: "testbox".into(),
+    };
+    r.store
+        .record_sample(
+            &key,
+            &Sample {
+                secs: 20.0,
+                cache: Cache::Warm,
+                outcome: Outcome::Passed,
+                at_ms: 2,
+            },
+        )
+        .unwrap();
+    let est = |r: &Rig| {
+        let mut s = r.spec("o", &argv, Kind::Compile);
+        s.cwd = ws.clone();
+        let id = r.submit(&s);
+        let rec = r.store.get(id).unwrap().unwrap();
+        r.sch.facts(&rec).shown.eta().map(|e| e.median_secs)
+    };
+    // no target/: a cold build, timed by the cold run
+    assert_eq!(est(&r), Some(400.0));
+    // a target holding the dependencies: a rebuild, timed by the warm run
+    let fp = ws.join("target/debug/.fingerprint");
+    for i in 0..8 {
+        std::fs::create_dir_all(fp.join(format!("d{i}-1"))).unwrap();
+    }
+    assert_eq!(est(&r), Some(20.0));
 }
 
 // R-709: a peer's test step that only reads the synced copy does not wait behind another job of

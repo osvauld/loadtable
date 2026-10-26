@@ -246,6 +246,7 @@ mod tests {
             fetch_paths: Vec::new(),
             fetch: Vec::new(),
             sync: None,
+            transfer: None,
         }
     }
 

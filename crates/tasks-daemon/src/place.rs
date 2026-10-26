@@ -18,6 +18,16 @@ use tasks_placement::{
 use tasks_timing::estimate::{Estimate, MachineInfo, NoEstimate, Planning, Shown, planning, shown};
 use tasks_timing::{Cache, Estimates, History, RecipeKey, SampleKey, progress, wanted_cache};
 
+/// The warmth to ask an estimate for when it is only guessed from history: a first run is cold;
+/// a later one is probably warm but not known to be, so it takes the warm runs when there are
+/// any and else any passing run (R-800).
+pub(crate) fn guessed(c: Cache) -> Cache {
+    match c {
+        Cache::Warm => Cache::Unknown,
+        other => other,
+    }
+}
+
 /// Planning figure for a run nothing is known about, seconds.
 pub(crate) const UNKNOWN_RUN_SECS: f64 = 60.0;
 
@@ -172,7 +182,7 @@ impl Scheduler {
         }
     }
 
-    fn history(&self) -> &dyn History {
+    pub(crate) fn history(&self) -> &dyn History {
         &*self.ledger
     }
 
@@ -225,7 +235,7 @@ impl Scheduler {
         let want = self
             .history()
             .samples(&key)
-            .map_or(Cache::Cold, |s| wanted_cache(&s));
+            .map_or(Cache::Cold, |s| guessed(wanted_cache(&s)));
         let machine = MachineInfo {
             name: peer.to_string(),
             cores: 1,
@@ -272,7 +282,9 @@ impl Scheduler {
             samples: 0,
             basis: tasks_timing::Basis::BuiltIn,
         });
-        let want = self.wanted_cache(&recipe);
+        // a cargo job's warmth comes from its output directory on disk (R-800)
+        let want = crate::cargo_warmth::CargoBuild::of(&rec.spec)
+            .map_or_else(|| guessed(self.wanted_cache(&recipe)), |b| b.start());
         let shown = if rec.spec.interactive {
             Shown::Absent(NoEstimate::Interactive)
         } else {

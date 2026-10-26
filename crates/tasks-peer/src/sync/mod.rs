@@ -93,6 +93,16 @@ pub enum SyncEvent {
         /// Bytes of pack sent.
         bytes: u64,
     },
+    /// The origin is sending a pack to `peer`: `bytes` so far (R-801). Not audited; it feeds the
+    /// job's transfer progress.
+    Sending {
+        /// The worker.
+        peer: PeerId,
+        /// The local job the sync is for.
+        job: Option<i64>,
+        /// Bytes of pack sent so far.
+        bytes: u64,
+    },
     /// The origin refused to send: files were refused by name.
     Refused {
         /// The worker.

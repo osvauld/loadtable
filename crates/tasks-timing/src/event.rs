@@ -45,6 +45,11 @@ pub enum TaskOutcome {
 pub enum Event {
     /// The first `Compiling` line was seen.
     CompileStarted,
+    /// One crate was compiled or checked (every `Compiling`/`Checking` line, R-800).
+    CrateBuilt {
+        /// A dependency (registry or git), not a crate of the checkout.
+        dependency: bool,
+    },
     /// cargo printed `Finished`.
     CompileFinished {
         /// Profile name, e.g. `release` or `test`.

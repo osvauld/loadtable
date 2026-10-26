@@ -29,6 +29,9 @@ pub(crate) struct JobMeta {
     pub piece: Option<SplitOrigin>,
     /// The job is interactive (R-799): its runs are not timings.
     pub interactive: bool,
+    /// Where a cargo job builds; its finished run is stamped warm or cold from what it compiled
+    /// (R-800).
+    pub cargo: Option<crate::cargo_warmth::CargoBuild>,
 }
 
 enum Parser {
@@ -315,8 +318,12 @@ impl RunEvents for Events {
                 recipe: self.meta.recipe.clone(),
                 kind: self.meta.kind,
                 machine: self.sch.cfg.machine.clone(),
-                // warm once this machine has a passing run of the command (R-665)
-                cache: self.sch.wanted_cache(&self.meta.recipe),
+                // a cargo run by what it compiled (R-800); else warm once this machine has a
+                // passing run of the command (R-665)
+                cache: match &self.meta.cargo {
+                    Some(b) => b.after(&tl),
+                    None => self.sch.wanted_cache(&self.meta.recipe),
+                },
                 cancelled: phase == Phase::Cancelled,
                 passed: phase == Phase::Passed,
                 secs: o.wall.as_secs_f64(),

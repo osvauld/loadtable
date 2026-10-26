@@ -77,12 +77,50 @@ fn r662_a_first_build_here_does_not_borrow_a_warm_time() {
     let e = show(&h, Cache::Cold, &[m("nixos", 8)]);
     let e = e.eta().unwrap();
     assert!(e.rough && e.machine == "nixos" && e.median_secs == 240.0);
-    // a warm run here may be bounded by a cold one: it can only overestimate
+}
+
+#[test]
+fn r800_a_warm_run_is_timed_by_warm_runs_only_and_a_cold_one_by_cold_runs() {
+    let mut h = MemHistory::new();
+    h.add(k("laptop"), s(240.0, Cache::Cold, Outcome::Passed, 1));
+    // a cold build says nothing about a rebuild
+    assert_eq!(
+        show(&h, Cache::Warm, &[]),
+        Shown::Absent(NoEstimate::NoWarmRunHere)
+    );
+    assert_eq!(
+        NoEstimate::NoWarmRunHere.to_string(),
+        "no warm run here yet"
+    );
+    h.add(k("laptop"), s(20.0, Cache::Warm, Outcome::Passed, 2));
+    h.add(k("laptop"), s(22.0, Cache::Warm, Outcome::Passed, 3));
+    let median = |want| show(&h, want, &[]).eta().map(|e| e.median_secs);
+    assert_eq!(
+        median(Cache::Warm),
+        Some(21.0),
+        "the cold build is not mixed in"
+    );
+    assert_eq!(
+        median(Cache::Cold),
+        Some(240.0),
+        "nor the rebuilds into a cold build"
+    );
+    // a warmth only guessed from history takes the warm runs, and any passing run before one
+    assert_eq!(median(Cache::Unknown), Some(21.0));
     let mut c = MemHistory::new();
     c.add(k("laptop"), s(240.0, Cache::Cold, Outcome::Passed, 1));
     assert_eq!(
-        show(&c, Cache::Warm, &[]).eta().map(|e| e.median_secs),
+        show(&c, Cache::Unknown, &[]).eta().map(|e| e.median_secs),
         Some(240.0)
+    );
+    // runs of unknown warmth stand in only while there is no run of the wanted warmth
+    let mut u = MemHistory::new();
+    u.add(k("laptop"), s(250.0, Cache::Unknown, Outcome::Passed, 1));
+    u.add(k("laptop"), s(1.0, Cache::Unknown, Outcome::Passed, 2));
+    u.add(k("laptop"), s(18.0, Cache::Warm, Outcome::Passed, 3));
+    assert_eq!(
+        show(&u, Cache::Warm, &[]).eta().map(|e| e.median_secs),
+        Some(18.0)
     );
 }
 

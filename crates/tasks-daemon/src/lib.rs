@@ -17,6 +17,7 @@ pub mod audited;
 mod awake;
 pub mod build_cache;
 pub mod cargo_jobs;
+mod cargo_warmth;
 pub mod config;
 pub mod daemon_log;
 pub mod entry;

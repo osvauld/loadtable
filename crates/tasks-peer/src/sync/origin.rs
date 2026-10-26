@@ -247,15 +247,28 @@ struct ChunkSink<'a> {
     buf: Vec<u8>,
     sha: Sha256,
     err: Option<SyncError>,
+    /// Told the bytes sent so far each time another MiB has gone out (R-801).
+    progress: &'a dyn Fn(u64),
 }
 
+/// How often the pack's progress is reported, in bytes sent.
+const PROGRESS_STEP: u64 = 1 << 20;
+
 impl ChunkSink<'_> {
+    fn sent_more(&mut self, len: u64) {
+        let before = self.sent;
+        self.sent += len;
+        if before / PROGRESS_STEP != self.sent / PROGRESS_STEP {
+            (self.progress)(self.sent);
+        }
+    }
+
     fn send(&mut self, data: Vec<u8>) -> Result<(), SyncError> {
         let len = data.len() as u64;
         self.sha.update(&data);
         if let Some(up) = self.upload.as_mut() {
             up.write(&data)?;
-            self.sent += len;
+            self.sent_more(len);
             return Ok(());
         }
         let reply = self.conn.request(Body::SyncPackChunk {
@@ -266,7 +279,7 @@ impl ChunkSink<'_> {
         })?;
         match reply {
             Body::SyncPackAck { received } if received == self.sent + len => {
-                self.sent += len;
+                self.sent_more(len);
                 Ok(())
             }
             Body::SyncPackAck { .. } => Err(SyncError::Peer(PeerError::Protocol(
@@ -424,6 +437,13 @@ impl SyncDriver for OriginSync {
                 }
                 Err(_) => None,
             };
+            let progress = |bytes: u64| {
+                self.observer.event(&SyncEvent::Sending {
+                    peer: job.peer.clone(),
+                    job: Some(job.local_job),
+                    bytes,
+                });
+            };
             let mut sink = ChunkSink {
                 conn: &mut *conn,
                 checkout: job.checkout,
@@ -433,6 +453,7 @@ impl SyncDriver for OriginSync {
                 buf: Vec::new(),
                 sha: Sha256::new(),
                 err: None,
+                progress: &progress,
             };
             let built = self.transfer.build_pack(
                 &PackRequest {
