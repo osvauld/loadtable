@@ -230,7 +230,7 @@ fn drive_resume<T: Transport>(
 ) {
     resume_body(inner, job, peer, remote, log_path);
     if let Some((checkout, owner)) = &job.resumed_lock {
-        inner.locks.release(checkout, *owner);
+        inner.locks_of(&job.peer).release(checkout, *owner);
     }
 }
 

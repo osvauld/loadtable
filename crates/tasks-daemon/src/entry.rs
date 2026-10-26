@@ -251,6 +251,9 @@ pub fn run(args: &[String]) -> Result<(), DaemonError> {
                 "this build has no peer transport (build with --features iroh); \
                  identity and pairing tickets work, but every job runs here",
             );
+            // registered before the socket is listening: a SIGTERM that arrives as soon as the
+            // daemon answers is seen, not handled by the default action (R-685)
+            let signals = termination_flags();
             let daemon = Daemon::start(opts)?;
             for note in &daemon.startup.notes {
                 crate::daemon_log::say(format_args!("startup: {note}"));
@@ -261,7 +264,7 @@ pub fn run(args: &[String]) -> Result<(), DaemonError> {
                     daemon.startup.interrupted.len()
                 ));
             }
-            watch_termination(daemon.scheduler().clone());
+            watch_termination(daemon.scheduler().clone(), signals);
             daemon.run()
         }
     }
@@ -287,20 +290,27 @@ fn on_signal(pending: Option<i32>, running_jobs: usize) -> OnSignal {
     }
 }
 
-/// Makes SIGTERM and SIGINT stop an idle daemon cleanly. Without this the CLI's embedded daemon
-/// inherited the CLI's flag-only handlers and ignored SIGTERM (R-685); `tasks2d` had no
-/// handler and died with its socket file left behind.
-fn watch_termination(sch: std::sync::Arc<crate::scheduler::Scheduler>) {
+/// The termination signals and whether each arrived.
+type SignalFlags = Vec<(i32, std::sync::Arc<std::sync::atomic::AtomicBool>)>;
+
+/// Catches SIGTERM and SIGINT from now on; [`watch_termination`] acts on them.
+fn termination_flags() -> SignalFlags {
     use signal_hook::consts::{SIGINT, SIGTERM};
-    use std::sync::atomic::{AtomicBool, Ordering};
-    let flags: Vec<(i32, std::sync::Arc<AtomicBool>)> = [SIGTERM, SIGINT]
+    [SIGTERM, SIGINT]
         .into_iter()
         .filter_map(|sig| {
-            let f = std::sync::Arc::new(AtomicBool::new(false));
+            let f = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             signal_hook::flag::register(sig, f.clone()).ok()?;
             Some((sig, f))
         })
-        .collect();
+        .collect()
+}
+
+/// Makes SIGTERM and SIGINT stop an idle daemon cleanly. Without this the CLI's embedded daemon
+/// inherited the CLI's flag-only handlers and ignored SIGTERM (R-685); `tasks2d` had no
+/// handler and died with its socket file left behind.
+fn watch_termination(sch: std::sync::Arc<crate::scheduler::Scheduler>, flags: SignalFlags) {
+    use std::sync::atomic::Ordering;
     let _ = std::thread::Builder::new()
         .name("signals".into())
         .spawn(move || {
