@@ -605,6 +605,53 @@ struct StateInput<'a> {
     now_ms: i64,
 }
 
+/// The state cell of a job whose checkout goes to its peer or whose outputs come back (R-801):
+/// a bar of the bytes moved when the size is known, the peer's result and the file, the bytes
+/// and the time left.
+fn transfer_cell(t: &tasks_core::TransferProgress) -> StateCell {
+    let rate = t
+        .rate_bps
+        .map(|r| format!(" · {}/s", format::bytes(r as u64)))
+        .unwrap_or_default();
+    let (left, right) = match t.kind {
+        tasks_core::TransferKind::Sync => (
+            format!("sending the checkout to {}", t.peer),
+            format!("{} sent{rate}", format::bytes(t.done_bytes)),
+        ),
+        tasks_core::TransferKind::Fetch => {
+            let file = t
+                .path
+                .as_deref()
+                .map(|p| p.rsplit('/').next().unwrap_or(p))
+                .unwrap_or("outputs");
+            let left = match &t.remote_result {
+                Some(r) => format!("{r} on {} · fetching {file}", t.peer),
+                None => format!("fetching {file} from {}", t.peer),
+            };
+            let size = match t.total_bytes {
+                Some(total) => format!(
+                    "{} of {}",
+                    format::bytes(t.done_bytes),
+                    format::bytes(total)
+                ),
+                None => format::bytes(t.done_bytes),
+            };
+            let eta = t
+                .eta_secs()
+                .map(|e| format!(" · ~{} left", format::duration(e)))
+                .unwrap_or_default();
+            (left, format!("{size}{rate}{eta}"))
+        }
+    };
+    StateCell {
+        bar: t.fraction().map(|f| f as f32),
+        head: String::new(),
+        tone: PhaseClass::Running,
+        left,
+        right,
+    }
+}
+
 /// The state cell of a row (R-581): progress and time left for a running job, the position
 /// and reason for a waiting one, the result in words for a finished one.
 fn state_cell(i: &StateInput) -> StateCell {
@@ -624,6 +671,15 @@ fn state_cell(i: &StateInput) -> StateCell {
                 Some(m) => format!("~{} left (rough, from {m}'s runs)", format::duration(e)),
                 None => format!("~{} left", format::duration(e)),
             };
+            // the checkout going out, or the outputs coming back once the command is over: that
+            // transfer is what the job is doing, so it takes the cell (R-801)
+            let transfer = j
+                .transfer
+                .as_ref()
+                .or_else(|| i.rv.and_then(|r| r.transfer.as_ref()));
+            if let Some(t) = transfer {
+                return transfer_cell(t);
+            }
             let (bar, left, right) = match i.rv {
                 Some(r) if r.over_by_secs.is_some() => (
                     None,
@@ -776,10 +832,18 @@ fn job_row(
 ) -> JobRow {
     let local = st.daemon.machine.as_str();
     let section = section_of(j);
-    let (phase, class) = if j.remote_wait.is_some() {
-        ("waiting".to_string(), PhaseClass::Waiting)
-    } else {
-        phase_text(&j.phase)
+    let transfer = j
+        .transfer
+        .as_ref()
+        .or_else(|| running.get(&j.id.0).and_then(|r| r.transfer.as_ref()));
+    let (phase, class) = match transfer {
+        // the command is over on the peer; what is left is bringing its outputs back (R-801)
+        Some(t) if t.kind == tasks_core::TransferKind::Fetch => {
+            ("fetching outputs".to_string(), PhaseClass::Running)
+        }
+        Some(_) => ("sending the checkout".to_string(), PhaseClass::Running),
+        None if j.remote_wait.is_some() => ("waiting".to_string(), PhaseClass::Waiting),
+        None => phase_text(&j.phase),
     };
     let machine = machine_of(j, local).to_string();
     let remote = machine != local;
@@ -2183,6 +2247,31 @@ mod tests {
             build(&d, 0).endpoint_line.as_deref(),
             Some("this machine: no peer transport")
         );
+    }
+
+    #[test]
+    fn r801_a_job_bringing_its_outputs_back_shows_a_bar_and_the_peers_result() {
+        let vm = build(&fixtures::fetching(), 0);
+        let r = vm.running.iter().find(|r| r.id == 104).expect("104");
+        assert_eq!(r.phase, "fetching outputs");
+        let bar = r.state.bar.expect("a bar");
+        assert!((bar - 120.0 / 362.0).abs() < 1e-3, "{bar}");
+        assert_eq!(
+            r.state.left,
+            "command exit 0 on mac · fetching core.xcframework"
+        );
+        assert!(
+            r.state
+                .right
+                .starts_with("120.0 MiB of 362.0 MiB · 4.0 MiB/s · ~"),
+            "{}",
+            r.state.right
+        );
+        assert!(r.state.right.ends_with("left"), "{}", r.state.right);
+        // without a transfer the same job is just running on the Mac
+        let vm = build(&fixtures::mac(), 0);
+        let r = vm.running.iter().find(|r| r.id == 104).expect("104");
+        assert_eq!(r.phase, "running");
     }
 
     #[test]

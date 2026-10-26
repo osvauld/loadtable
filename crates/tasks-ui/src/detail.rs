@@ -219,7 +219,17 @@ pub fn detail(row: &JobRow, now_ms: i64, tz: &TimeZone, home: Option<&Path>) -> 
     let j = &row.job;
     let at = |ms: i64| format::clock_in(ms, now_ms, tz);
     let (state, tone) = match row.section {
-        Section::Running => (format!("Running · {}", row.age), PhaseClass::Running),
+        Section::Running => match j.transfer.as_ref().map(|t| t.kind) {
+            Some(tasks_core::TransferKind::Fetch) => (
+                format!("Fetching outputs · {}", row.age),
+                PhaseClass::Running,
+            ),
+            Some(tasks_core::TransferKind::Sync) => (
+                format!("Sending the checkout · {}", row.age),
+                PhaseClass::Running,
+            ),
+            None => (format!("Running · {}", row.age), PhaseClass::Running),
+        },
         Section::Queued => (format!("Waiting · {}", row.age), PhaseClass::Waiting),
         Section::Recent => (row.state.head.clone(), row.class),
     };
@@ -228,6 +238,13 @@ pub fn detail(row: &JobRow, now_ms: i64, tz: &TimeZone, home: Option<&Path>) -> 
     facts.push(("Machine", why_there(row)));
     if let Some(p) = &row.remote_phase {
         facts.push(("On the peer", p.clone()));
+    }
+    if let Some(t) = &j.transfer {
+        let pct = t
+            .fraction()
+            .map(|f| format!("{:.0}% · ", f * 100.0))
+            .unwrap_or_default();
+        facts.push(("Transfer", format!("{pct}{}", t.line())));
     }
     if row.section == Section::Queued {
         if let Some(w) = &row.wait {

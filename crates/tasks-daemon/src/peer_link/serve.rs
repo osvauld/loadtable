@@ -526,6 +526,7 @@ mod tests {
             figures: None,
             cores: None,
             mem_bytes: None,
+            transfer: None,
         }
     }
 

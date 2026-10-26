@@ -1049,6 +1049,7 @@ fn snapshot() -> tasks_daemon::api::StatusSnapshot {
             figures: None,
             cores: None,
             mem_bytes: None,
+            transfer: None,
         }],
         pressure: PressureView {
             memory: "ok".into(),
@@ -1573,6 +1574,47 @@ fn r517_submit_and_steps_take_a_fetch_list_checked_before_any_daemon_request() {
         assert!(r.is_error, "{bad} accepted in a step");
     }
     assert!(never.requests().is_empty());
+}
+
+// R-801: a job whose command is over on the peer while its outputs come back says so, with the
+// peer's result and how far the file got, instead of looking like it still runs.
+#[test]
+fn r801_get_and_wait_show_a_job_fetching_its_outputs_after_the_remote_exit() {
+    let d = fake(|r| match r {
+        Request::Get { .. } => {
+            let mut j = job(750, "bot", Phase::Running, "cargo build");
+            j.forwarded_to = Some(("nixos".into(), Some(352)));
+            j.fetch_paths = vec!["target/debug/p2p-desktop".into()];
+            j.transfer = Some(tasks_core::TransferProgress {
+                kind: tasks_core::TransferKind::Fetch,
+                peer: "nixos".into(),
+                path: Some("target/debug/p2p-desktop".into()),
+                done_bytes: 120 << 20,
+                total_bytes: Some(362 << 20),
+                rate_bps: Some(f64::from(4u32 << 20)),
+                remote_result: Some("command exit 0".into()),
+                at_ms: 0,
+            });
+            Ok(Response::Job { job: Box::new(j) })
+        }
+        _ => Err(DaemonError::Failed("unexpected".into())),
+    });
+    let line = "command exit 0 on nixos; fetching target/debug/p2p-desktop 120/362 MiB, 4 MiB/s, ~61s left";
+    let r = call(&tools_with(&d), "get", json!({"id": 750}));
+    assert!(r.text.contains("fetching outputs on nixos"), "{}", r.text);
+    assert!(
+        r.text.contains(&format!("transfer: 33% {line}")),
+        "{}",
+        r.text
+    );
+    assert_eq!(r.structured["transfer"]["done_bytes"], 120u64 << 20);
+    assert_eq!(r.structured["transfer_text"], json!(format!("33% {line}")));
+    let r = call(&tools_with(&d), "wait", json!({"id": 750, "timeout_s": 0}));
+    assert!(
+        r.text.contains("is still fetching outputs on nixos"),
+        "{}",
+        r.text
+    );
 }
 
 // R-796: clients that show only structuredContent saw counts but no log lines, and no sign of a

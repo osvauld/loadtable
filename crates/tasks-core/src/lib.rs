@@ -11,6 +11,7 @@ mod phase;
 pub mod plan;
 mod priority;
 mod requirements;
+mod transfer;
 
 pub use attribution::{Attribution, JobFigures, human_bytes};
 pub use error::CoreError;
@@ -25,3 +26,4 @@ pub use phase::{Phase, SlotKind, WaitReason};
 pub use plan::{SplitOrigin, StepHints};
 pub use priority::{MAX_PRIORITY_REASON, Priority, UnknownPriority, check_reason};
 pub use requirements::{Requirements, Unmet};
+pub use transfer::{TransferKind, TransferMeter, TransferProgress};

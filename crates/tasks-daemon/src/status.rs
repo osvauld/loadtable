@@ -9,6 +9,7 @@ use crate::queue_estimate::{Queued, starts_in_queue_order};
 use crate::queue_view::{class_note, peer_hold, remote_wait};
 use crate::scheduler::{RunningJob, Scheduler, lock, shorten};
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tasks_admission::{Lane, Waiter, check_gates, effective, kind_name};
@@ -101,6 +102,7 @@ pub fn job_view(r: &JobRecord) -> JobView {
         fetch_paths: r.spec.fetch.clone(),
         fetch: fetch_results(r),
         sync: sync_view(r),
+        transfer: transfer_of(r),
     }
 }
 
@@ -128,6 +130,27 @@ fn sync_view(r: &JobRecord) -> Option<crate::api::SyncView> {
 }
 
 /// The recorded fetch results of a finished job that asked for any.
+/// A report older than this is from a transfer that died without clearing it.
+const TRANSFER_STALE_MS: i64 = 30_000;
+
+/// The transfer moving now for a forwarded job whose log is `log`, named by its peer `peer`
+/// (R-801): the checkout going out or an output coming back.
+pub(crate) fn live_transfer(log: &Path, peer: &str) -> Option<tasks_core::TransferProgress> {
+    let mut t = crate::peer_link::fetch::read_transfer(log)?;
+    if crate::peer_link::fetch::now_ms().saturating_sub(t.at_ms) > TRANSFER_STALE_MS {
+        return None;
+    }
+    t.peer = peer.to_string();
+    Some(t)
+}
+
+fn transfer_of(r: &JobRecord) -> Option<tasks_core::TransferProgress> {
+    if r.phase.is_terminal() {
+        return None;
+    }
+    live_transfer(r.log_path.as_deref()?, &r.forward.as_ref()?.peer.0)
+}
+
 fn fetch_results(r: &JobRecord) -> Vec<tasks_core::FetchResult> {
     match (&r.log_path, r.spec.fetch.is_empty(), r.phase.is_terminal()) {
         (Some(log), false, true) => crate::peer_link::fetch::read_results(log),
@@ -377,6 +400,15 @@ impl Scheduler {
                     }
                     tasks_timing::Shown::Absent(w) => (None, None, None, Some(w.to_string())),
                 };
+                let transfer = records
+                    .get(&rj.id)
+                    .and_then(|r| r.forward.as_ref())
+                    .and_then(|fw| live_transfer(&rj.log_path, &fw.peer.0));
+                // the command is over once its outputs come back: no time left or over to show
+                let (eta, over) = match &transfer {
+                    Some(t) if t.kind == tasks_core::TransferKind::Fetch => (None, None),
+                    _ => (eta, over),
+                };
                 RunningView {
                     id: rj.id,
                     owner: rj.owner.clone(),
@@ -397,6 +429,7 @@ impl Scheduler {
                     figures: lock(&rj.figures).clone(),
                     cores: live.and_then(|l| l.cores),
                     mem_bytes: live.and_then(|l| l.mem_bytes),
+                    transfer,
                 }
             })
             .collect();

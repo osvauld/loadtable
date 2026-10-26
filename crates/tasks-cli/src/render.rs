@@ -474,6 +474,9 @@ pub fn job_detail(j: &JobView, now_ms: i64, waiter: Option<&WaiterView>) -> Stri
     if let Some(rp) = shown_remote_phase(j) {
         let _ = writeln!(out, "  remote:    {}", phase_tag(rp));
     }
+    if let Some(t) = &j.transfer {
+        let _ = writeln!(out, "  transfer:  {}", transfer_text(t));
+    }
     if let Some(n) = wait_note(j, waiter) {
         let _ = writeln!(out, "  {n}");
     }
@@ -551,9 +554,34 @@ pub fn estimate(e: &EstimateView) -> String {
     }
 }
 
+/// Width of a transfer's text bar, in cells.
+const BAR_CELLS: usize = 20;
+
+/// `[######--------------] 30% command exit 0 on nixos; fetching ...`; a transfer of unknown
+/// size (a sync pack) is its line alone (R-801).
+pub fn transfer_text(t: &tasks_core::TransferProgress) -> String {
+    match t.fraction() {
+        Some(f) => {
+            let full = ((f * BAR_CELLS as f64).round() as usize).min(BAR_CELLS);
+            format!(
+                "[{}{}] {:.0}% {}",
+                "#".repeat(full),
+                "-".repeat(BAR_CELLS - full),
+                f * 100.0,
+                t.line()
+            )
+        }
+        None => t.line(),
+    }
+}
+
 /// What a running job says about its time: time left (with `rough` when it rests on another
 /// machine's runs), "over the usual", or why there is no estimate. Never a bare `0s left`.
 pub fn running_eta_text(r: &tasks_daemon::api::RunningView) -> String {
+    // the checkout going out or the outputs coming back says more than the command's time
+    if let Some(t) = &r.transfer {
+        return format!(", {}", transfer_text(t));
+    }
     if let (Some(usual), Some(by)) = (r.usual_secs, r.over_by_secs) {
         return format!(
             ", over the usual by {} (usual {})",

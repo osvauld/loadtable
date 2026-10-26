@@ -159,6 +159,34 @@ fn r505_a_passed_forwarded_job_brings_its_file_back_with_the_right_hash() {
     assert_eq!(names, ["app-debug.apk"]);
 }
 
+// R-801
+#[test]
+fn r801_a_fetch_reports_its_progress_in_the_log_and_clears_it_when_done() {
+    let w = PeerWorld::new();
+    let mut opts = w.options();
+    // every piece reports, so even a fast fake link leaves progress lines
+    opts.transfer_report_every = Duration::ZERO;
+    let link = PeerLink::new(w.net.transport(&w.origin), opts);
+    let apk = vec![7u8; 600 * 1024];
+    let ran = run(&w, &link, &[APK], 0, |tree, _| put(tree, APK, &apk));
+    assert_eq!(ran.end.phase, Phase::Passed);
+    assert!(ran.end.fetch[0].ok(), "{:?}", ran.end.fetch);
+    let log = std::fs::read_to_string(&ran.log).unwrap();
+    let progress: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains(&format!("; fetching {APK} ")))
+        .collect();
+    assert!(progress.len() >= 2, "{log}");
+    let last = progress.last().unwrap();
+    assert!(
+        last.starts_with(&format!("[tasks] {} on nixos;", ran.end.reason)),
+        "the peer's result first: {last}"
+    );
+    assert!(last.contains("600 KiB/600 KiB"), "{last}");
+    // over: nothing says it is still moving
+    assert_eq!(fetch::read_transfer(&ran.log), None);
+}
+
 // R-648
 #[test]
 fn r648_a_forwarded_job_keeps_what_its_sync_sent_and_how_long_it_took() {

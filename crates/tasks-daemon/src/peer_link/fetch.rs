@@ -10,13 +10,17 @@
 //! - files land at the same relative path in the job's checkout through a temporary name and a
 //!   rename; no symlink is written through except the coordinator-placed output links;
 //! - the results go to the job log (`[tasks] fetched ...`), to a sidecar next to the log that
-//!   `get` reads, and (by the scheduler) to the audit log.
+//!   `get` reads, and (by the scheduler) to the audit log;
+//! - while a file arrives, how far it got is kept in a second sidecar (`get`, `status` and the
+//!   UI show it) and repeated in the job log every few seconds, so a job whose command is over
+//!   does not look stuck while its outputs come back (R-801).
 
 use super::drive::FileLog;
 use super::{Inner, Job};
 use crate::forwarder::ForwardEnd;
+use crate::scheduler::lock;
 use std::path::{Path, PathBuf};
-use tasks_core::{FetchResult, FetchStatus, Phase};
+use tasks_core::{FetchResult, FetchStatus, Phase, TransferKind, TransferMeter, TransferProgress};
 use tasks_peer::outputs::{self, FetchError};
 use tasks_peer::sync::SyncPhase;
 use tasks_peer::transport::{Connection, PeerError, Transport};
@@ -45,6 +49,53 @@ fn write_results(log: &Path, results: &[FetchResult]) {
     {
         let _ = std::fs::rename(&tmp, &path);
     }
+}
+
+/// Where a job's transfer in progress is kept while it moves: next to its log.
+pub fn transfer_path(log: &Path) -> PathBuf {
+    let mut p = log.as_os_str().to_os_string();
+    p.push(".transfer.json");
+    PathBuf::from(p)
+}
+
+/// The transfer in progress for the job whose log is `log`, if one is moving now.
+pub fn read_transfer(log: &Path) -> Option<TransferProgress> {
+    std::fs::read(transfer_path(log))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+}
+
+/// Records how far a transfer got (through a temporary name, so a reader never sees half).
+pub fn write_transfer(log: &Path, p: &TransferProgress) {
+    let path = transfer_path(log);
+    let tmp = path.with_extension("json.tmp");
+    if let Ok(bytes) = serde_json::to_vec(p)
+        && std::fs::write(&tmp, bytes).is_ok()
+    {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
+
+/// Forgets the transfer of the job whose log is `log`: it ended.
+pub fn clear_transfer(log: &Path) {
+    let _ = std::fs::remove_file(transfer_path(log));
+}
+
+/// The wall clock, ms since the epoch.
+pub(crate) fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_millis()).ok())
+        .unwrap_or(0)
+}
+
+/// The paired machine's name for `peer`, or its node id.
+fn peer_name<T: Transport>(inner: &Inner<T>, peer: &PeerId) -> String {
+    lock(&inner.links)
+        .values()
+        .find(|l| &l.spec.node_id == peer)
+        .map_or_else(|| peer.to_string(), |l| l.spec.name.clone())
 }
 
 fn failed(path: &str, reason: String) -> FetchResult {
@@ -80,7 +131,9 @@ pub(super) fn fetch_outputs<T: Transport>(
         return;
     }
     let (results, notes) = if end.phase == Phase::Passed && end.remote_job.is_some() {
-        run(inner, job)
+        let out = run(inner, job, log, &end.reason);
+        clear_transfer(log.path());
+        out
     } else {
         let why = format!("not fetched: the job did not pass ({})", end.phase.word());
         (
@@ -105,7 +158,28 @@ pub(super) fn fetch_outputs<T: Transport>(
 }
 
 /// The results, and a note for each file whose blob stream failed and came in chunks instead.
-fn run<T: Transport>(inner: &Inner<T>, job: &Job) -> (Vec<FetchResult>, Vec<String>) {
+fn run<T: Transport>(
+    inner: &Inner<T>,
+    job: &Job,
+    log: &mut FileLog,
+    remote_result: &str,
+) -> (Vec<FetchResult>, Vec<String>) {
+    let peer = peer_name(inner, &job.peer);
+    let every = i64::try_from(inner.opts.transfer_report_every.as_millis()).unwrap_or(1000);
+    let shown = |path: &str, done: u64, total: Option<u64>, rate: Option<f64>| TransferProgress {
+        kind: TransferKind::Fetch,
+        peer: peer.clone(),
+        path: Some(path.to_string()),
+        done_bytes: done,
+        total_bytes: total,
+        rate_bps: rate,
+        remote_result: Some(remote_result.to_string()),
+        at_ms: now_ms(),
+    };
+    // waiting for the transfer slot is already "fetching": the command is over
+    if let Some(first) = job.fetch.first() {
+        write_transfer(log.path(), &shown(first, 0, None, None));
+    }
     // a transfer slot, like a sync: the writes obey the I/O gate
     let _slot = inner.opts.gate.enter(SyncPhase::Fetch);
     let mut conn: Option<Box<dyn Connection>> = None;
@@ -134,14 +208,31 @@ fn run<T: Transport>(inner: &Inner<T>, job: &Job) -> (Vec<FetchResult>, Vec<Stri
             continue;
         };
         let one = [path.clone()];
-        match outputs::fetch_into(
+        let started = now_ms();
+        let mut sidecar = TransferMeter::new(started, every);
+        let mut logged = TransferMeter::new(started, every.saturating_mul(3));
+        let mut report = |p: &str, done: u64, total: u64| {
+            let now = now_ms();
+            let rate = sidecar.rate(now, done);
+            let last = done >= total;
+            if sidecar.due(now) || last {
+                write_transfer(log.path(), &shown(p, done, Some(total), rate));
+            }
+            if logged.due(now) || last {
+                let line = shown(p, done, Some(total), rate).line();
+                log.append_local(format!("[tasks] {line}\n").as_bytes());
+            }
+        };
+        let fetched = outputs::fetch_with_progress(
             c.as_mut(),
             &job.checkout,
             &one,
             &job.root,
             inner.opts.fetch_max_bytes,
             &inner.opts.fetch_links,
-        ) {
+            &mut report,
+        );
+        match fetched {
             Ok(report) => {
                 if let Some(why) = report
                     .fetched

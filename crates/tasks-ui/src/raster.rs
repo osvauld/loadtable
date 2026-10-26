@@ -598,6 +598,16 @@ mod tests {
                 true,
             ),
             (
+                "fetching-dark",
+                {
+                    let mut a = App::fixed(&fixtures::fetching(), dead_link());
+                    a.select(104);
+                    a
+                },
+                [1400, 1240],
+                true,
+            ),
+            (
                 "finished-forward-light",
                 {
                     let mut a = App::fixed(&fixtures::mac(), dead_link());
