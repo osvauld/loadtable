@@ -160,6 +160,39 @@ fn r230_only_the_first_of_a_checkout_is_ready_and_an_unrelated_one_never_waits()
     assert!(!link.ready_to_start(a3.id), "and only one at a time");
 }
 
+// R-803: each peer holds its own copy of a checkout, so its lock is per peer too
+#[test]
+fn r803_a_job_on_one_peer_never_waits_for_the_same_checkout_on_another() {
+    let w = PeerWorld::new();
+    let mut o = w.options();
+    o.peers.push(crate::peers_config::PeerSpec {
+        name: "mac".into(),
+        node_id: tasks_peer::PeerId::new("mac").unwrap(),
+        did: String::new(),
+    });
+    let link = PeerLink::new(w.net.transport(&w.origin), o);
+    let store = MemoryStore::new();
+    let on_nixos = record(&store, &w.root_a);
+    let on_mac = record(&store, &w.root_a);
+    let after = record(&store, &w.root_a);
+    link.forward(&on_nixos, &nixos()).unwrap();
+    link.forward(&on_mac, &MachineName("mac".into())).unwrap();
+    link.forward(&after, &nixos()).unwrap();
+    link.start(on_nixos.id, &w.dir.path().join("n.log"))
+        .unwrap();
+    until("accepted on nixos", || accepted(&link, on_nixos.id));
+    assert!(link.ready_to_start(on_mac.id), "the mac's copy is its own");
+    assert!(
+        !link
+            .wait_reason(on_mac.id)
+            .is_some_and(|t| t.contains("is using the remote copy"))
+    );
+    assert!(
+        !link.ready_to_start(after.id),
+        "nixos's copy is still one job at a time"
+    );
+}
+
 // R-230: a waiter that vanished must not wedge the queue
 #[test]
 fn r230_forgetting_or_sweeping_an_unstarted_registration_frees_its_place() {

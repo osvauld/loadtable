@@ -232,7 +232,9 @@ struct LinkInfo {
 pub(crate) struct Inner<T: Transport> {
     pub transport: T,
     pub opts: PeerLinkOptions,
-    pub locks: Arc<CheckoutLocks>,
+    /// One set of checkout locks per peer: each peer holds its own copy of a checkout, so a job
+    /// on one peer never waits for a job of the same checkout on another (R-803).
+    locks: Mutex<BTreeMap<PeerId, Arc<CheckoutLocks>>>,
     pub jobs: Mutex<BTreeMap<JobId, Arc<Job>>>,
     links: Mutex<BTreeMap<String, LinkInfo>>,
     metrics_cache: Mutex<BTreeMap<(String, i64), metrics::Cached>>,
@@ -242,6 +244,11 @@ pub(crate) struct Inner<T: Transport> {
 }
 
 impl<T: Transport> Inner<T> {
+    /// The checkout locks for jobs on `peer`.
+    pub(crate) fn locks_of(&self, peer: &PeerId) -> Arc<CheckoutLocks> {
+        lock(&self.locks).entry(peer.clone()).or_default().clone()
+    }
+
     /// Time since the adapter started, plus any test skew.
     pub fn now(&self) -> Duration {
         self.epoch.elapsed() + *lock(&self.skew)
@@ -281,7 +288,7 @@ impl<T: Transport + 'static> PeerLink<T> {
         let inner = Arc::new(Inner {
             transport,
             opts,
-            locks: Arc::new(CheckoutLocks::new()),
+            locks: Mutex::new(BTreeMap::new()),
             jobs: Mutex::new(BTreeMap::new()),
             links: Mutex::new(links),
             metrics_cache: Mutex::new(BTreeMap::new()),
@@ -678,7 +685,7 @@ impl<T: Transport + 'static> Forwarder for PeerLink<T> {
         let fwd = Forward::new(
             job,
             self.inner.opts.policy.clone(),
-            self.inner.locks.clone(),
+            self.inner.locks_of(&spec.node_id),
             self.inner.now(),
         );
         let entry = Arc::new(Job {
@@ -715,7 +722,7 @@ impl<T: Transport + 'static> Forwarder for PeerLink<T> {
     fn wait_reason(&self, job: JobId) -> Option<String> {
         let j = self.job(job)?;
         // name the job that holds the remote copy, as the old checkout gate did (R-161)
-        let holders = self.inner.locks.holders(&j.checkout);
+        let holders = self.inner.locks_of(&j.peer).holders(&j.checkout);
         match holders.first() {
             Some(h) if !holders.iter().any(|x| x.0 == job.0) => Some(format!(
                 "waiting for checkout: job #{} is using the remote copy",
@@ -772,8 +779,9 @@ impl<T: Transport + 'static> Forwarder for PeerLink<T> {
         } else {
             tasks_peer::LockMode::Exclusive
         };
-        self.inner.locks.enqueue_as(&checkout, owner, mode);
-        let _ = self.inner.locks.try_acquire(&checkout, owner);
+        let locks = self.inner.locks_of(&spec.node_id);
+        locks.enqueue_as(&checkout, owner, mode);
+        let _ = locks.try_acquire(&checkout, owner);
         let entry = Arc::new(Job {
             id: rec.id,
             checkout: checkout.clone(),
