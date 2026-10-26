@@ -148,6 +148,9 @@ pub struct PeerLinkOptions {
     pub fetch_links: Vec<String>,
     /// Largest output file fetched back.
     pub fetch_max_bytes: u64,
+    /// How often a fetch updates the job's transfer progress; the job log gets a progress line
+    /// at three times this interval (R-801).
+    pub transfer_report_every: Duration,
     /// The longest a request for a forwarded job's metrics may take.
     pub metrics_timeout: Duration,
 }
@@ -175,6 +178,7 @@ impl PeerLinkOptions {
             gate: Arc::new(tasks_peer::sync::OpenGate),
             fetch_links: Vec::new(),
             fetch_max_bytes: tasks_peer::outputs::FetchPolicy::default().max_file_bytes,
+            transfer_report_every: Duration::from_secs(1),
             metrics_timeout: Duration::from_secs(2),
         }
     }

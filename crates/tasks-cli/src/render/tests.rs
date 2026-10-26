@@ -860,7 +860,27 @@ fn running(eta: Option<f64>) -> tasks_daemon::api::RunningView {
         figures: None,
         cores: None,
         mem_bytes: None,
+        transfer: None,
     }
+}
+
+#[test]
+fn r801_a_running_row_bringing_its_outputs_back_shows_a_bar_not_its_time() {
+    let mut r = running(Some(30.0));
+    r.transfer = Some(tasks_core::TransferProgress {
+        kind: tasks_core::TransferKind::Fetch,
+        peer: "nixos".into(),
+        path: Some("target/debug/p2p-desktop".into()),
+        done_bytes: 181 << 20,
+        total_bytes: Some(362 << 20),
+        rate_bps: None,
+        remote_result: Some("command exit 0".into()),
+        at_ms: 0,
+    });
+    assert_eq!(
+        running_eta_text(&r),
+        ", [##########----------] 50% command exit 0 on nixos; fetching target/debug/p2p-desktop 181/362 MiB"
+    );
 }
 
 #[test]

@@ -680,6 +680,67 @@ fn r349_a_forwarded_job_the_peer_holds_back_is_listed_as_waiting_with_the_peers_
     assert_eq!(job.remote_wait, None);
 }
 
+// R-801
+#[test]
+fn r801_a_forwarded_job_whose_outputs_come_back_shows_the_transfer_not_the_run() {
+    let f = Arc::new(FakeForwarder::new(vec![]));
+    let r = Rig::with_forwarder(f.clone());
+    let id = r.submit(&anywhere(&r));
+    r.store.set_forward(id, &nixos(), None, Some("k1")).unwrap();
+    f.script(id, accepted(Phase::Running));
+    r.until("running on the peer", || {
+        r.tick();
+        r.sch.status().running.iter().any(|j| j.id == id)
+    });
+    let row = |st: &StatusSnapshot| st.running.iter().find(|j| j.id == id).cloned().unwrap();
+    assert_eq!(row(&r.sch.status()).transfer, None);
+    // the command is over on the peer and its binary is a third of the way back
+    let t = tasks_core::TransferProgress {
+        kind: tasks_core::TransferKind::Fetch,
+        peer: "node-id".into(),
+        path: Some("target/debug/app".into()),
+        done_bytes: 120 << 20,
+        total_bytes: Some(362 << 20),
+        rate_bps: Some(f64::from(4u32 << 20)),
+        remote_result: Some("command exit 0".into()),
+        at_ms: crate::peer_link::fetch::now_ms(),
+    };
+    let log = r.sch.cfg.log_path(id);
+    crate::peer_link::fetch::write_transfer(&log, &t);
+    let shown = row(&r.sch.status())
+        .transfer
+        .expect("the transfer in status");
+    assert_eq!(
+        shown.peer, "nixos",
+        "named by the job's peer, not the node id"
+    );
+    assert_eq!(
+        shown.line(),
+        "command exit 0 on nixos; fetching target/debug/app 120/362 MiB, 4 MiB/s, ~61s left"
+    );
+    let v = row(&r.sch.status());
+    assert_eq!(
+        (v.eta_secs, v.over_by_secs),
+        (None, None),
+        "no run time to show"
+    );
+    let Response::Job { job } = ok(r.sch.handle(Request::Get { id })) else {
+        panic!("job expected");
+    };
+    assert_eq!(job.log_path.as_deref(), Some(log.as_path()));
+    assert_eq!(job.transfer.map(|t| t.peer), Some("nixos".to_string()));
+    // a report nobody refreshed for a while is from a transfer that died
+    crate::peer_link::fetch::write_transfer(
+        &log,
+        &tasks_core::TransferProgress {
+            at_ms: t.at_ms - 60_000,
+            ..t
+        },
+    );
+    assert_eq!(row(&r.sch.status()).transfer, None);
+    crate::peer_link::fetch::clear_transfer(&log);
+}
+
 // R-353
 #[test]
 fn r353_a_forwarded_job_that_passed_stores_the_peers_final_phase_not_the_last_one_mirrored() {

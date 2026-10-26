@@ -115,7 +115,9 @@ impl PeerRuntimeFactory for IrohFactory {
             )
             .with_gate(ctx.transfer_gate.clone())
             .with_extras(Arc::new(super::PolicyExtras))
-            .with_observer(Arc::new(crate::audited::AuditSync::new(ctx.audit.clone()))),
+            .with_observer(Arc::new(
+                crate::audited::AuditSync::new(ctx.audit.clone()).with_progress(cfg.log_dir()),
+            )),
         );
         let prune = origin.clone();
         let mut opts = PeerLinkOptions::new(&cfg.machine, Vec::new(), origin);

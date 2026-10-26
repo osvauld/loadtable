@@ -25,10 +25,12 @@ pub fn phase_tag(p: &Phase) -> &'static str {
 /// The phase with its exit code or reason.
 pub fn phase_text(j: &JobView) -> String {
     // a forwarded job the peer holds back on its own gates is waiting, not running
-    let tag = if j.remote_wait.is_some() {
-        "waiting"
-    } else {
-        phase_tag(&j.phase)
+    // and one whose command is over while its outputs come back is fetching, not running (R-801)
+    let tag = match &j.transfer {
+        Some(t) if t.kind == tasks_core::TransferKind::Fetch => "fetching outputs",
+        Some(_) => "sending the checkout",
+        None if j.remote_wait.is_some() => "waiting",
+        None => phase_tag(&j.phase),
     };
     let mut s = match &j.phase {
         Phase::Failed { exit: Some(c) } | Phase::TimedOut { exit: Some(c) } => {
@@ -127,7 +129,17 @@ pub fn job_json(j: &JobView, now_ms: i64) -> Value {
         "fetch": j.fetch,
         "fetch_requested": j.fetch_paths,
         "fetch_failed": tasks_core::any_failed(&j.fetch),
+        "transfer": j.transfer,
+        "transfer_text": j.transfer.as_ref().map(transfer_text),
     })
+}
+
+/// `42% command exit 0 on nixos; fetching ...`, or the line alone when the size is unknown.
+pub fn transfer_text(t: &tasks_core::TransferProgress) -> String {
+    match t.fraction() {
+        Some(f) => format!("{:.0}% {}", f * 100.0, t.line()),
+        None => t.line(),
+    }
 }
 
 /// The multi-line description of one job.
@@ -149,6 +161,9 @@ pub fn job_detail(j: &JobView, now_ms: i64) -> String {
     }
     if let Some(w) = &j.remote_wait {
         s.push_str(&format!("waiting: {w}\n"));
+    }
+    if let Some(t) = &j.transfer {
+        s.push_str(&format!("transfer: {}\n", transfer_text(t)));
     }
     if j.priority != tasks_core::Priority::Normal {
         s.push_str(&format!("priority: {}", j.priority));

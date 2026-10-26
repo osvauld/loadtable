@@ -281,6 +281,28 @@ pub fn fetch_into(
     max_file_bytes: u64,
     allowed_links: &[String],
 ) -> Result<FetchReport, FetchError> {
+    fetch_with_progress(
+        conn,
+        checkout,
+        paths,
+        dest,
+        max_file_bytes,
+        allowed_links,
+        &mut |_, _, _| {},
+    )
+}
+
+/// [`fetch_into`], calling `progress(path, bytes so far, size)` as each file's bytes arrive
+/// (R-801); a file already in place reports nothing.
+pub fn fetch_with_progress(
+    conn: &mut dyn Connection,
+    checkout: &CheckoutId,
+    paths: &[String],
+    dest: &Path,
+    max_file_bytes: u64,
+    allowed_links: &[String],
+    progress: &mut dyn FnMut(&str, u64, u64),
+) -> Result<FetchReport, FetchError> {
     let mut report = FetchReport::default();
     for batch in paths.chunks(MAX_FETCH_PATHS) {
         let reply = conn.request(Body::FetchList {
@@ -324,7 +346,8 @@ pub fn fetch_into(
                         exec,
                         blob: blob.as_deref(),
                     };
-                    match fetch_one(conn, checkout, &path, &want, dest)? {
+                    let mut moved = |done: u64| progress(&path, done, size);
+                    match fetch_one(conn, checkout, &path, &want, dest, &mut moved)? {
                         Ok(how) => report.fetched.push(Fetched {
                             path,
                             hash,
@@ -375,6 +398,7 @@ fn fetch_one(
     path: &str,
     want: &Want<'_>,
     dest: &Path,
+    moved: &mut dyn FnMut(u64),
 ) -> Result<Result<Arrived, String>, FetchError> {
     let target = dest.join(path);
     if fs::metadata(&target).is_ok_and(|m| m.is_file() && m.len() == want.size)
@@ -409,7 +433,7 @@ fn fetch_one(
     let mut blob_fallback = None;
     let mut arrived = None;
     if let Some(blob) = want.blob {
-        match by_blob(conn, blob, want.size, &mut out) {
+        match by_blob(conn, blob, want.size, &mut out, moved) {
             Ok(got) => arrived = Some(got),
             Err(why) => {
                 // start again from an empty file
@@ -425,7 +449,7 @@ fn fetch_one(
     }
     let (digest, offset) = match arrived {
         Some(got) => got,
-        None => match by_chunks(conn, checkout, path, want, &mut out)? {
+        None => match by_chunks(conn, checkout, path, want, &mut out, moved)? {
             Ok(got) => got,
             Err(reason) => return Ok(Err(reason)),
         },
@@ -456,13 +480,16 @@ fn by_blob(
     blob: &str,
     size: u64,
     out: &mut fs::File,
+    moved: &mut dyn FnMut(u64),
 ) -> Result<(Sha256, u64), String> {
     let mut digest = Sha256::new();
     let mut written = 0u64;
     conn.fetch_blob(blob, size, &mut |data: &[u8]| {
         digest.update(data);
         written += data.len() as u64;
-        out.write_all(data)
+        out.write_all(data)?;
+        moved(written);
+        Ok(())
     })
     .map_err(|e| e.to_string())?;
     if written != size {
@@ -480,6 +507,7 @@ fn by_chunks(
     path: &str,
     want: &Want<'_>,
     out: &mut fs::File,
+    moved: &mut dyn FnMut(u64),
 ) -> Result<Result<(Sha256, u64), String>, FetchError> {
     let mut digest = Sha256::new();
     let mut offset = 0u64;
@@ -506,6 +534,7 @@ fn by_chunks(
             return Ok(Err(format!("writing {path}: {e}")));
         }
         offset += data.len() as u64;
+        moved(offset);
         if offset > want.size {
             return Ok(Err("peer sent more than the announced size".to_string()));
         }

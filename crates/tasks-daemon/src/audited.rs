@@ -205,12 +205,70 @@ impl crate::peer_link::LinkObserver for AuditLinks {
 /// bytes it freed.
 pub struct AuditSync {
     sink: Arc<AuditSink>,
+    /// Where job logs live, when an outgoing pack's progress is kept for the job (R-801).
+    log_dir: Option<std::path::PathBuf>,
+    /// When each job's pack started going out, ms, for its rate.
+    sending: Mutex<std::collections::HashMap<i64, tasks_core::TransferMeter>>,
 }
 
 impl AuditSync {
     /// Records into `sink`.
     pub fn new(sink: Arc<AuditSink>) -> AuditSync {
-        AuditSync { sink }
+        AuditSync {
+            sink,
+            log_dir: None,
+            sending: Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Also keeps how far each job's outgoing pack got next to the job's log in `log_dir`, for
+    /// `get`, `status` and the UI (R-801).
+    pub fn with_progress(mut self, log_dir: std::path::PathBuf) -> AuditSync {
+        self.log_dir = Some(log_dir);
+        self
+    }
+
+    fn log_of(&self, job: i64) -> Option<std::path::PathBuf> {
+        self.log_dir.as_ref().map(|d| d.join(format!("{job}.log")))
+    }
+
+    fn sending(&self, peer: &tasks_peer::PeerId, job: i64, bytes: u64) {
+        let Some(log) = self.log_of(job) else {
+            return;
+        };
+        let now = crate::peer_link::fetch::now_ms();
+        let mut meters = self.sending.lock().unwrap_or_else(|e| e.into_inner());
+        let meter = meters
+            .entry(job)
+            .or_insert_with(|| tasks_core::TransferMeter::new(now, 1000));
+        let rate = meter.rate(now, bytes);
+        if !meter.due(now) {
+            return;
+        }
+        drop(meters);
+        crate::peer_link::fetch::write_transfer(
+            &log,
+            &tasks_core::TransferProgress {
+                kind: tasks_core::TransferKind::Sync,
+                peer: peer.to_string(),
+                path: None,
+                done_bytes: bytes,
+                total_bytes: None,
+                rate_bps: rate,
+                remote_result: None,
+                at_ms: now,
+            },
+        );
+    }
+
+    fn sent(&self, job: Option<i64>) {
+        let Some(job) = job else { return };
+        let mut meters = self.sending.lock().unwrap_or_else(|e| e.into_inner());
+        if meters.remove(&job).is_some()
+            && let Some(log) = self.log_of(job)
+        {
+            crate::peer_link::fetch::clear_transfer(&log);
+        }
     }
 
     fn peer(&self, ev: AuditEvent, node: &tasks_peer::PeerId) -> AuditEvent {
@@ -233,7 +291,18 @@ fn job_of(ev: AuditEvent, job: Option<i64>) -> AuditEvent {
 impl tasks_peer::sync::SyncObserver for AuditSync {
     fn event(&self, event: &tasks_peer::sync::SyncEvent) {
         use tasks_peer::sync::SyncEvent as E;
+        match event {
+            E::Sending { peer, job, bytes } => {
+                if let Some(j) = job {
+                    self.sending(peer, *j, *bytes);
+                }
+                return;
+            }
+            E::Sent { job, .. } | E::Refused { job, .. } => self.sent(*job),
+            _ => {}
+        }
         let ev = match event {
+            E::Sending { .. } => return,
             E::Sent {
                 peer,
                 checkout,

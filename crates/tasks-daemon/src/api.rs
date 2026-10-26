@@ -776,6 +776,10 @@ pub struct JobView {
     /// What the sync before a forwarded run sent and how long it took, once it has finished.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync: Option<SyncView>,
+    /// The checkout going to the peer, or an output coming back, while it moves (R-801). A job
+    /// whose command is over on the peer and whose outputs are arriving shows that here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer: Option<tasks_core::TransferProgress>,
 }
 
 /// The sync of a checkout to a peer before a forwarded job.
@@ -982,6 +986,10 @@ pub struct RunningView {
     /// Memory in use now, bytes, when sampled.
     #[serde(default)]
     pub mem_bytes: Option<u64>,
+    /// The forwarded job's checkout going out or its outputs coming back, while they move
+    /// (R-801).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer: Option<tasks_core::TransferProgress>,
 }
 
 /// The words for a memory level, the same on every surface: `normal` is `ok`, `warn` is

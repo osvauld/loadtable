@@ -81,6 +81,7 @@ pub fn job(id: i64, owner: &str, phase: Phase) -> JobView {
         fetch_paths: Vec::new(),
         fetch: Vec::new(),
         sync: None,
+        transfer: None,
     }
 }
 
@@ -337,6 +338,7 @@ pub fn busy() -> Dashboard {
             figures: None,
             cores: Some(2.0),
             mem_bytes: Some(1_500_000_000),
+            transfer: None,
         },
         RunningView {
             id: JobId(102),
@@ -356,6 +358,7 @@ pub fn busy() -> Dashboard {
             figures: None,
             cores: Some(1.2),
             mem_bytes: Some(400 << 20),
+            transfer: None,
         },
     ];
     st.waiting = vec![
@@ -557,6 +560,27 @@ pub fn mac() -> Dashboard {
     d
 }
 
+/// [`mac`], with job 104's command over on the Mac and its framework a third of the way back
+/// (R-801).
+pub fn fetching() -> Dashboard {
+    let mut d = mac();
+    let t = tasks_core::TransferProgress {
+        kind: tasks_core::TransferKind::Fetch,
+        peer: "mac".into(),
+        path: Some("build/core.xcframework".into()),
+        done_bytes: 120 << 20,
+        total_bytes: Some(362 << 20),
+        rate_bps: Some(f64::from(4u32 << 20)),
+        remote_result: Some("command exit 0".into()),
+        at_ms: NOW_MS,
+    };
+    if let Some(j) = d.jobs.iter_mut().find(|j| j.id.0 == 104) {
+        j.fetch_paths = vec!["build/core.xcframework".into()];
+        j.transfer = Some(t);
+    }
+    d
+}
+
 /// The step names of the real core-split suite's test plan, in submission order.
 const PLAN_TESTS: [&str; 39] = [
     "test-calls",
@@ -628,6 +652,7 @@ pub fn with_plan() -> Dashboard {
         figures: None,
         cores: Some(2.0),
         mem_bytes: Some(1_500_000_000),
+        transfer: None,
     });
     let step = |id: i64, name: &str, phase: Phase| {
         let mut j = job(id, owner, phase.clone());
@@ -728,6 +753,7 @@ pub fn with_plan() -> Dashboard {
                 figures: None,
                 cores: Some(1.0),
                 mem_bytes: Some(600 << 20),
+                transfer: None,
             });
         }
         d.jobs.push(j);

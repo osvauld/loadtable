@@ -62,6 +62,7 @@ pub fn job(id: i64, owner: &str, cwd: &str, phase: Phase, cmd: &str) -> JobView 
         fetch_paths: Vec::new(),
         fetch: Vec::new(),
         sync: None,
+        transfer: None,
     }
 }
 
@@ -303,6 +304,7 @@ pub fn status_snapshot() -> StatusSnapshot {
             figures: None,
             cores: None,
             mem_bytes: None,
+            transfer: None,
         }],
         pressure: PressureView {
             memory: "ok".into(),
