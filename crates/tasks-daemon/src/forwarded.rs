@@ -11,7 +11,11 @@
 //!   ends it `Interrupted` (R-150, R-173);
 //! - after a daemon restart a forwarded job that was running is followed read-only by its
 //!   remote id; a job with a stored key but no remote id is re-registered with that same key,
-//!   so the peer deduplicates (R-152).
+//!   so the peer deduplicates (R-152);
+//! - an offload slot is held only while the peer runs the job: one waiting in the peer's queue
+//!   hands its slot back, and one running there without a slot (moved out of the peer's queue,
+//!   or followed after a restart) takes a free one; its run time counts from its real start
+//!   (R-797).
 
 use crate::forwarder::{ForwardEnd, ForwardPoll};
 use crate::scheduler::{RunningJob, Scheduler, lock};
@@ -74,17 +78,29 @@ impl Scheduler {
         Some(w)
     }
 
-    fn forwarded_running(&self, rec: &JobRecord, slot: Option<(SlotKind, u32)>) -> Arc<RunningJob> {
+    fn forwarded_running(
+        &self,
+        rec: &JobRecord,
+        slot: Option<(SlotKind, u32)>,
+        guard: Option<SlotGuard>,
+    ) -> Arc<RunningJob> {
         let policy = self.policy();
+        // a job followed after a restart has been running since its recorded start
+        let since = rec
+            .started_at_ms
+            .map(|at| self.clock.now_ms().saturating_sub(at))
+            .and_then(|ms| u64::try_from(ms).ok())
+            .map(std::time::Duration::from_millis);
+        let now = Instant::now();
         Arc::new(RunningJob {
             id: rec.id,
             owner: rec.spec.owner.as_str().to_string(),
             command: crate::scheduler::shorten(&rec.spec.argv.join(" ")),
-            hold: crate::scheduler::SlotHold::new(slot.map(|s| s.0), slot, None),
+            hold: crate::scheduler::SlotHold::new(slot.map(|s| s.0), slot, guard),
             testing: std::sync::atomic::AtomicBool::new(false),
             checkout: None,
             token: CancelToken::new(),
-            started: Instant::now(),
+            started: since.and_then(|d| now.checked_sub(d)).unwrap_or(now),
             log_path: self.cfg.log_path(rec.id),
             group: Mutex::new(None),
             timeline: Mutex::new(Timeline::new()),
@@ -123,7 +139,7 @@ impl Scheduler {
         let Some(fw) = rec.forward.clone() else {
             return false;
         };
-        let rj = self.forwarded_running(&rec, slot);
+        let rj = self.forwarded_running(&rec, slot, guard);
         if let Some(dir) = rj.log_path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
@@ -135,11 +151,11 @@ impl Scheduler {
             return false;
         }
         lock(&self.state).last_wait.remove(&id);
-        self.spawn_driver(rj, fw.peer, guard, false)
+        self.spawn_driver(rj, fw.peer, false)
     }
 
     /// Follows a forwarded job by its remote id after a restart. Read-only: nothing is
-    /// submitted. The job holds no local slot while followed.
+    /// submitted. It starts without a slot and takes one once the peer reports it running.
     pub(crate) fn resume_forwarded(self: &Arc<Self>, rec: JobRecord) {
         let id = rec.id;
         let Some(fw) = rec.forward.clone() else {
@@ -148,12 +164,12 @@ impl Scheduler {
         if lock(&self.running).contains_key(&id) {
             return;
         }
-        let rj = self.forwarded_running(&rec, None);
+        let rj = self.forwarded_running(&rec, None, None);
         let log = rec.log_path.clone().unwrap_or_else(|| rj.log_path.clone());
         let running = rec.phase == Phase::Running;
         match self.forwarder.resume(&rec, &log) {
             Ok(()) => {
-                self.spawn_driver(rj, fw.peer, None, running);
+                self.spawn_driver(rj, fw.peer, running);
             }
             Err(e) => {
                 let mut fin = Finish::from_phase(Phase::Interrupted);
@@ -183,7 +199,6 @@ impl Scheduler {
         self: &Arc<Self>,
         rj: Arc<RunningJob>,
         peer: MachineName,
-        guard: Option<SlotGuard>,
         started: bool,
     ) -> bool {
         let id = rj.id;
@@ -191,7 +206,7 @@ impl Scheduler {
         let sch = self.clone();
         let spawned = std::thread::Builder::new()
             .name(format!("forwarded-{}", id.0))
-            .spawn(move || drive(&sch, &rj, &peer, guard, started));
+            .spawn(move || drive(&sch, &rj, &peer, started));
         if let Err(e) = spawned {
             lock(&self.running).remove(&id);
             self.forwarder.cancel(id, "no thread to follow it");
@@ -366,16 +381,62 @@ impl Scheduler {
         };
         hint == "anywhere"
     }
+
+    /// Fits a started forward's offload slot to the peer's phase (R-797): a job waiting in the
+    /// peer's queue hands its slot back; one the peer runs takes a free slot when it has none.
+    /// With every slot taken it runs on without one and tries again on the next poll.
+    fn fit_offload_slot(&self, rj: &RunningJob, peer: &MachineName, remote: &Phase) {
+        let mut h = lock(&rj.hold);
+        let note = if matches!(remote, Phase::Queued | Phase::Waiting(_)) {
+            let Some((SlotKind::Offload, i)) = h.slot else {
+                return;
+            };
+            h.guard = None;
+            h.slot = None;
+            h.kind = None;
+            format!(
+                "slot: waiting in {}'s queue; offload slot {i} handed back",
+                peer.0
+            )
+        } else if *remote == Phase::Running && h.slot.is_none() {
+            let slots = self.policy().slot_count(SlotKind::Offload);
+            let Some((i, g)) = (0..slots).find_map(|i| {
+                match self.platform.locks.try_acquire(SlotKind::Offload, i) {
+                    Ok(g) => g.map(|g| (i, g)),
+                    Err(e) => {
+                        self.note_error(&format!("offload slot for job {}: {e}", rj.id.0));
+                        None
+                    }
+                }
+            }) else {
+                return;
+            };
+            h.guard = Some(g);
+            h.slot = Some((SlotKind::Offload, i));
+            h.kind = Some(SlotKind::Offload);
+            format!("slot: running on {}; took offload slot {i}", peer.0)
+        } else {
+            return;
+        };
+        drop(h);
+        // the job log holds only the peer's bytes (its length is the reattach offset): local
+        // notes go to the sibling `<log>.forward`
+        let mut p = rj.log_path.as_os_str().to_os_string();
+        p.push(".forward");
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(p)
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "{note}");
+        }
+        self.wake.notify();
+    }
 }
 
 /// The body of a forwarded job's thread: poll the forwarder, mirror the peer into the row.
-fn drive(
-    sch: &Arc<Scheduler>,
-    rj: &Arc<RunningJob>,
-    peer: &MachineName,
-    guard: Option<SlotGuard>,
-    mut started: bool,
-) {
+fn drive(sch: &Arc<Scheduler>, rj: &Arc<RunningJob>, peer: &MachineName, mut started: bool) {
     let id = rj.id;
     let mut cancel_sent = false;
     let mut last_mirror = String::new();
@@ -423,6 +484,9 @@ fn drive(
                     last_remote_phase = Some(ph.clone());
                     let _ = sch.guard("set_remote_phase", sch.ledger.set_remote_phase(id, ph));
                 }
+                if started && let Some(ph) = &p.remote_phase {
+                    sch.fit_offload_slot(rj, peer, ph);
+                }
                 if !started && p.mirror != last_mirror {
                     last_mirror = p.mirror.clone();
                     sch.set_wait(id, LedgerWait::Placement(p.mirror.clone()), &p.mirror);
@@ -437,7 +501,7 @@ fn drive(
     if let Some(end) = ended {
         sch.finish_forwarded(rj, peer, end, started);
     }
-    drop(guard);
+    lock(&rj.hold).guard = None;
     lock(&sch.running).remove(&id);
     sch.wake.notify();
 }
