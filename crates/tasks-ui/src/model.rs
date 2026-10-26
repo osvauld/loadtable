@@ -606,17 +606,14 @@ struct StateInput<'a> {
 }
 
 /// The state cell of a job whose checkout goes to its peer or whose outputs come back (R-801):
-/// a bar of the bytes moved when the size is known, the peer's result and the file, the bytes
-/// and the time left.
+/// a bar of the bytes moved when the size is known, the file on the left, how far and the time
+/// left on the right. It is as short as the other running rows; the peer's result, the sizes and
+/// the rate are in the detail's Transfer line.
 fn transfer_cell(t: &tasks_core::TransferProgress) -> StateCell {
-    let rate = t
-        .rate_bps
-        .map(|r| format!(" · {}/s", format::bytes(r as u64)))
-        .unwrap_or_default();
     let (left, right) = match t.kind {
         tasks_core::TransferKind::Sync => (
             format!("sending the checkout to {}", t.peer),
-            format!("{} sent{rate}", format::bytes(t.done_bytes)),
+            format!("{} sent", format::bytes(t.done_bytes)),
         ),
         tasks_core::TransferKind::Fetch => {
             let file = t
@@ -624,23 +621,15 @@ fn transfer_cell(t: &tasks_core::TransferProgress) -> StateCell {
                 .as_deref()
                 .map(|p| p.rsplit('/').next().unwrap_or(p))
                 .unwrap_or("outputs");
-            let left = match &t.remote_result {
-                Some(r) => format!("{r} on {} · fetching {file}", t.peer),
-                None => format!("fetching {file} from {}", t.peer),
-            };
-            let size = match t.total_bytes {
-                Some(total) => format!(
-                    "{} of {}",
-                    format::bytes(t.done_bytes),
-                    format::bytes(total)
-                ),
+            let done = match t.fraction() {
+                Some(f) => format!("{:.0}%", f * 100.0),
                 None => format::bytes(t.done_bytes),
             };
-            let eta = t
-                .eta_secs()
-                .map(|e| format!(" · ~{} left", format::duration(e)))
-                .unwrap_or_default();
-            (left, format!("{size}{rate}{eta}"))
+            let right = match t.eta_secs() {
+                Some(e) => format!("{done} · ~{} left", format::duration(e)),
+                None => done,
+            };
+            (format!("fetching {file}"), right)
         }
     };
     StateCell {
@@ -2256,17 +2245,8 @@ mod tests {
         assert_eq!(r.phase, "fetching outputs");
         let bar = r.state.bar.expect("a bar");
         assert!((bar - 120.0 / 362.0).abs() < 1e-3, "{bar}");
-        assert_eq!(
-            r.state.left,
-            "command exit 0 on mac · fetching core.xcframework"
-        );
-        assert!(
-            r.state
-                .right
-                .starts_with("120.0 MiB of 362.0 MiB · 4.0 MiB/s · ~"),
-            "{}",
-            r.state.right
-        );
+        assert_eq!(r.state.left, "fetching core.xcframework");
+        assert!(r.state.right.starts_with("33% · ~"), "{}", r.state.right);
         assert!(r.state.right.ends_with("left"), "{}", r.state.right);
         // without a transfer the same job is just running on the Mac
         let vm = build(&fixtures::mac(), 0);
