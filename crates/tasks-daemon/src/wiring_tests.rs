@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tasks_core::{JobId, Kind, MachineName, Phase, Placement};
+use tasks_core::{JobId, Kind, MachineName, Phase, Placement, SlotKind};
 use tasks_ledger::Store;
 use tasks_peer::RemoteJobId;
 use tasks_peer::fake::FakeTransport;
@@ -781,4 +781,120 @@ fn r700_a_plans_test_steps_run_on_the_peer_together_once_its_build_is_done() {
         r.tick();
         (1..=3).all(|i| r.phase(JobId(i)) == Phase::Passed)
     });
+}
+
+fn on_peer(remote: i64, phase: Phase) -> ForwardPoll {
+    ForwardPoll::Active(ForwardProgress {
+        mirror: format!("#{remote}"),
+        remote_job: Some(remote),
+        accepted: true,
+        remote_phase: Some(phase),
+    })
+}
+
+fn passed(remote: i64) -> ForwardPoll {
+    ForwardPoll::Done(ForwardEnd {
+        phase: Phase::Passed,
+        reason: "command exit 0".into(),
+        exit_code: Some(0),
+        signal: None,
+        remote_job: Some(remote),
+        nothing_submitted: false,
+        samples: vec![],
+        fetch: vec![],
+    })
+}
+
+fn slot_of(s: &Arc<crate::Scheduler>, id: JobId) -> Option<(SlotKind, u32)> {
+    lock(&s.running).get(&id).and_then(|rj| rj.slot())
+}
+
+// R-797: a job only waiting in the peer's queue does not keep the next forward off the peer.
+#[test]
+fn r797_a_job_queued_on_the_peer_hands_its_offload_slot_back_and_takes_one_when_it_runs() {
+    let f = Arc::new(FakeForwarder::new(vec![]));
+    let r = Rig::with_policy_forwarder("[slots]\noffload = 1\n", f.clone());
+    let mk = |sub: &str| {
+        let mut s = r.spec_in("o", &["cargo", "test"], Kind::Test, sub);
+        s.placement = Placement::Anywhere;
+        let id = r.submit(&s);
+        r.store
+            .set_forward(id, &nixos(), None, Some(&format!("k{}", id.0)))
+            .unwrap();
+        id
+    };
+    let (j1, j2) = (mk("a"), mk("b"));
+    r.tick();
+    assert_eq!(f.started.lock().unwrap().clone(), vec![j1]);
+    f.script(j1, on_peer(1, Phase::Queued));
+    within("j2 takes the slot j1 handed back", || {
+        r.tick();
+        f.started.lock().unwrap().contains(&j2)
+    });
+    assert_eq!(slot_of(&r.sch, j1), None);
+    assert_eq!(slot_of(&r.sch, j2), Some((SlotKind::Offload, 0)));
+    // j1 starts on the peer while j2 holds the only slot: it runs on without one
+    f.script(j2, on_peer(2, Phase::Running));
+    f.script(j1, on_peer(1, Phase::Running));
+    for _ in 0..5 {
+        r.tick();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(slot_of(&r.sch, j1), None);
+    f.script(j2, passed(2));
+    within("j1 takes the freed slot", || {
+        r.tick();
+        slot_of(&r.sch, j1) == Some((SlotKind::Offload, 0))
+    });
+    let log = std::fs::read_to_string(format!("{}.forward", r.cfg.log_path(j1).display()))
+        .unwrap_or_default();
+    assert!(
+        log.contains("waiting in nixos's queue; offload slot 0 handed back"),
+        "{log}"
+    );
+    assert!(
+        log.contains("running on nixos; took offload slot 0"),
+        "{log}"
+    );
+    f.script(j1, passed(1));
+    within("j1 passed", || {
+        r.tick();
+        r.phase(j1) == Phase::Passed
+    });
+    assert_eq!(r.phase(j2), Phase::Passed);
+}
+
+// R-797: a job followed after a restart counts against the offload slots and keeps its run time.
+#[test]
+fn r797_a_job_followed_after_a_restart_takes_an_offload_slot_and_keeps_its_run_time() {
+    let f = Arc::new(FakeForwarder::new(vec![]));
+    let r = Rig::with_forwarder(f.clone());
+    let mut s = r.spec("o", &["cargo", "test"], Kind::Test);
+    s.placement = Placement::Anywhere;
+    let id = r.submit(&s);
+    r.store
+        .set_forward(id, &nixos(), Some(7), Some("k1"))
+        .unwrap();
+    r.store.set_phase(id, Phase::Running).unwrap();
+    r.clock.advance(107_000);
+    let f2 = Arc::new(FakeForwarder::new(vec![]));
+    f2.script(id, on_peer(7, Phase::Running));
+    let sch2 = r.restart_with(f2.clone());
+    within("followed, holding an offload slot", || {
+        sch2.tick();
+        slot_of(&sch2, id).is_some_and(|s| s.0 == SlotKind::Offload)
+    });
+    assert!(f2.resumed.lock().unwrap().contains(&id));
+    let rj = lock(&sch2.running).get(&id).cloned().unwrap();
+    assert!(
+        rj.started.elapsed() >= Duration::from_secs(107),
+        "{:?}",
+        rj.started.elapsed()
+    );
+    f2.script(id, passed(7));
+    within("passed", || {
+        sch2.tick();
+        r.phase(id) == Phase::Passed
+    });
+    assert_eq!(slot_of(&sch2, id), None);
 }
