@@ -592,6 +592,7 @@ impl FakeStatus {
             jobs: Vec::new(),
             cores_in_use_milli: None,
             power: None,
+            version: None,
         })
     }
 }

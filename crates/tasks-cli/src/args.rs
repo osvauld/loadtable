@@ -9,7 +9,7 @@ use tasks_core::{MachineName, Placement, Priority};
 #[derive(Parser, Debug)]
 #[command(
     name = "loadtable",
-    version,
+    version = tasks_daemon::VERSION,
     about = "Submit builds and tests to the LoadTable coordinator, watch them and read their history",
     after_help = EXIT_CODES_HELP,
     arg_required_else_help = true

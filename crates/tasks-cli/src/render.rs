@@ -279,12 +279,15 @@ pub fn wait_note(j: &JobView, waiter: Option<&WaiterView>) -> Option<String> {
         } else if !w.class.is_empty() && w.class != "normal" {
             parts.push(format!("class {}", w.class));
         }
-        if let Some(e) = w.start_estimate_secs {
-            parts.push(format!(
+        match w.start_estimate_secs {
+            Some(e) => parts.push(format!(
                 "starts in ~{}{}",
                 fmt_eta(e),
                 if w.rough { " (rough, no history)" } else { "" }
-            ));
+            )),
+            // what it waits for has no estimate; never "~0s" (R-805)
+            None if w.on_peer.is_none() => parts.push("start time unknown".to_string()),
+            None => {}
         }
     }
     (!parts.is_empty()).then(|| parts.join("; "))
@@ -772,13 +775,15 @@ pub fn status(s: &StatusSnapshot) -> String {
     if !s.waiting.is_empty() {
         let _ = writeln!(out, "waiting ({}):", s.waiting.len() + s.waiting_more);
         for w in &s.waiting {
-            let est = w.start_estimate_secs.map_or(String::new(), |e| {
-                format!(
+            let est = match w.start_estimate_secs {
+                Some(e) => format!(
                     "; starts in ~{}{}",
                     fmt_eta(e),
                     if w.rough { " (rough)" } else { "" }
-                )
-            });
+                ),
+                None if w.on_peer.is_none() => "; start time unknown".to_string(),
+                None => String::new(),
+            };
             let place = match &w.on_peer {
                 Some(p) => format!("on {p}"),
                 None => format!("#{}", w.position),
@@ -1025,6 +1030,10 @@ fn peers_section(
                 m.waiting,
                 m.running
             );
+            // which build the peer runs; an older peer does not say (R-807)
+            if let Some(v) = &m.version {
+                let _ = writeln!(out, "    build: loadtabled {v}");
+            }
             let pc = |v: Option<u8>| v.map_or("?".to_string(), |x| format!("{x}%"));
             let mut load = format!(
                 "    pressure: cpu {}, memory {}, io {}",

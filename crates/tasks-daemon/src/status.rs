@@ -6,7 +6,7 @@ use crate::api::{
 };
 use crate::api::{PeerJobUseView, PeerMachineView, PeerSlotView};
 use crate::queue_estimate::{Queued, starts_in_queue_order};
-use crate::queue_view::{class_note, peer_hold, remote_wait};
+use crate::queue_view::{class_note, peer_hold, remote_wait, waits_off_slot};
 use crate::scheduler::{RunningJob, Scheduler, lock, shorten};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -56,6 +56,7 @@ fn peer_machine_view(s: &tasks_peer::proto::PeerStatus) -> PeerMachineView {
             .collect(),
         cores_in_use_milli: s.cores_in_use_milli,
         power: s.power.map(|p| power_text(p.on_battery, p.percent)),
+        version: s.version.clone(),
     }
 }
 
@@ -333,7 +334,9 @@ impl Scheduler {
                         .unwrap_or_else(|| "queued".to_string()),
                     position: i + 1,
                     start_estimate_secs: if kind.is_some() && held.is_none() {
-                        *start
+                        // the slot model says "now", but the job waits for something else that
+                        // has no estimate (pressure, a dependency, the checkout): unknown, not ~0s
+                        start.filter(|s| *s >= 1.0 || !waits_off_slot(&r.phase))
                     } else {
                         None
                     },
@@ -437,7 +440,7 @@ impl Scheduler {
         StatusSnapshot {
             daemon: DaemonView {
                 pid: std::process::id(),
-                version: env!("CARGO_PKG_VERSION").to_string(),
+                version: crate::VERSION.to_string(),
                 machine: self.cfg.machine.clone(),
                 state_dir: self.cfg.state_dir.clone(),
                 lock_dir: self.cfg.lock_dir.clone(),
@@ -654,6 +657,7 @@ mod peer_view_tests {
             jobs: vec![],
             cores_in_use_milli: None,
             power: None,
+            version: Some("0.1.0 (41ac455 2026-10-27)".into()),
         });
         assert_eq!(
             (v.cores, v.memory_bytes, v.waiting, v.running),
@@ -695,12 +699,16 @@ mod peer_view_tests {
                 jobs: vec![],
                 cores_in_use_milli: None,
                 power: None,
+                version: None,
             }
         });
         assert_eq!(
             (old.cpu_busy_pct, old.swap_total, old.swap_used),
             (None, None, None)
         );
+        // R-807: the peer's build reaches the view; an older peer's is unknown
+        assert_eq!(v.version.as_deref(), Some("0.1.0 (41ac455 2026-10-27)"));
+        assert_eq!(old.version, None);
     }
 
     // R-360: a peer of the previous build sends none of the new fields and still parses

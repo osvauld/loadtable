@@ -724,10 +724,21 @@ impl<T: Transport + 'static> Forwarder for PeerLink<T> {
         // name the job that holds the remote copy, as the old checkout gate did (R-161)
         let holders = self.inner.locks_of(&j.peer).holders(&j.checkout);
         match holders.first() {
-            Some(h) if !holders.iter().any(|x| x.0 == job.0) => Some(format!(
-                "waiting for checkout: job #{} is using the remote copy",
-                h.0
-            )),
+            Some(h) if !holders.iter().any(|x| x.0 == job.0) => {
+                // say which copy and why this job waits for it (R-806)
+                let peer = self
+                    .inner
+                    .opts
+                    .peers
+                    .iter()
+                    .find(|p| p.node_id == j.peer)
+                    .map_or_else(|| j.peer.as_str().to_string(), |p| p.name.clone());
+                Some(format!(
+                    "waiting for checkout: job #{} is using this checkout's copy on {peer}; \
+                     a copy takes one job at a time, so this one starts after it",
+                    h.0
+                ))
+            }
             _ => {
                 let g = j.fwd.try_lock().ok()?;
                 g.as_ref().map(Forward::mirror)

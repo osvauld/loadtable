@@ -329,6 +329,10 @@ pub struct PeerStatus {
     /// Where its power comes from; absent from older peers.
     #[serde(default)]
     pub power: Option<PowerSummary>,
+    /// Its daemon's version and build, `0.1.0 (41ac455 2026-10-27)`; absent from older peers
+    /// (R-807).
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 /// A peer's power state, shown next to its link state.

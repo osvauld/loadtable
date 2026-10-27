@@ -225,6 +225,44 @@ fn r186_active_table_names_the_remote_job_and_what_a_queued_job_waits_for() {
     assert!(t.contains("waits for: compile slot held by job 10 (about 3m left); position 2; starts in ~3m (rough, no history)"), "{t}");
 }
 
+// R-805: a wait with no estimate says so instead of "starts in ~0s"
+#[test]
+fn r805_a_wait_without_an_estimate_says_the_start_time_is_unknown() {
+    let mut queued = job(
+        12,
+        "me",
+        "/w",
+        Phase::Waiting(tasks_core::WaitReason::Pressure("CPU contended".into())),
+        "cargo build",
+    );
+    queued.wait_text = Some("CPU contended".into());
+    let mut waiter = WaiterView {
+        id: JobId(12),
+        owner: "me".into(),
+        command: "cargo build".into(),
+        wait_text: "CPU contended".into(),
+        position: 1,
+        start_estimate_secs: None,
+        rough: false,
+        class: String::new(),
+        class_note: String::new(),
+        on_peer: None,
+    };
+    let note = wait_note(&queued, Some(&waiter)).unwrap();
+    assert_eq!(
+        note,
+        "waits for: CPU contended; position 1; start time unknown"
+    );
+    assert!(!note.contains("~0s"));
+    // a job its peer holds back is explained by the peer's reason alone
+    waiter.on_peer = Some("nixos".into());
+    assert!(
+        !wait_note(&queued, Some(&waiter))
+            .unwrap()
+            .contains("unknown")
+    );
+}
+
 #[test]
 fn r186_a_reconciled_remote_result_is_shown_next_to_the_local_phase() {
     let mut j = job(5, "a", "/w", Phase::Interrupted, "cargo test");
@@ -629,6 +667,7 @@ fn r356_status_lists_each_peer_with_state_path_latencies_roles_and_its_last_repo
                 jobs: Vec::new(),
                 cores_in_use_milli: None,
                 power: Some("on battery 80%".into()),
+                version: Some("0.1.0 (41ac455 2026-10-27)".into()),
             }),
         },
         PeerView {
@@ -660,6 +699,11 @@ fn r356_status_lists_each_peer_with_state_path_latencies_roles_and_its_last_repo
     assert!(t.contains("16 cores") && t.contains("compile 1/4"), "{t}");
     assert!(t.contains("2 waiting, 1 running"), "{t}");
     assert!(t.contains("cpu busy 41%"), "{t}");
+    // R-807: the build each peer runs
+    assert!(
+        t.contains("    build: loadtabled 0.1.0 (41ac455 2026-10-27)\n"),
+        "{t}"
+    );
     assert!(
         t.contains("swap 1.0 GiB of 8.0 GiB used (in 0 B/s, out 2.0 KiB/s)"),
         "{t}"
@@ -807,6 +851,7 @@ fn r611_a_peers_power_is_shown_with_its_last_report() {
                 memory_level: None,
                 jobs: vec![],
                 cores_in_use_milli: None,
+                version: None,
             }),
         }];
         s
@@ -964,6 +1009,7 @@ fn offline_mac() -> tasks_daemon::api::PeerView {
             jobs: Vec::new(),
             cores_in_use_milli: None,
             power: None,
+            version: None,
         }),
     }
 }
