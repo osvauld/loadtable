@@ -1,4 +1,4 @@
-//! The read-only text behind `tasks2 cache`: the wrapper in use, the cache root and the disk
+//! The read-only text behind `loadtable cache`: the wrapper in use, the cache root and the disk
 //! against its reserve. It starts no daemon and creates nothing.
 
 use super::{BuildCache, Settings};

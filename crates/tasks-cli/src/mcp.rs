@@ -1,4 +1,4 @@
-//! `tasks2 mcp`: the MCP server over this crate's daemon [`Client`].
+//! `loadtable mcp`: the MCP server over this crate's daemon [`Client`].
 //!
 //! `tasks-mcp` cannot depend on this crate (this crate depends on it), so it defines its own
 //! `Daemon` trait; [`ClientDaemon`] adapts a [`Client`] to it. Autostart and the retry rules
@@ -56,7 +56,7 @@ pub fn run_stdio(
     match serve(client, cwd, env, stdin.lock(), std::io::stdout()) {
         Ok(()) => crate::error::EXIT_OK,
         Err(e) => {
-            eprintln!("tasks2 mcp: {e}");
+            eprintln!("loadtable mcp: {e}");
             crate::error::EXIT_FAILURE
         }
     }
@@ -81,7 +81,7 @@ mod tests {
         serve(
             client,
             PathBuf::from("/w"),
-            &|k| (k == "TASKS_WHO").then(|| "me".to_string()),
+            &|k| (k == "LOADTABLE_WHO").then(|| "me".to_string()),
             input.as_bytes(),
             &mut out,
         )

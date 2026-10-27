@@ -46,7 +46,7 @@ pub(super) fn inhibit(why: &str) -> Result<InhibitGuard, PlatformError> {
     let mut child = Command::new("systemd-inhibit")
         .args([
             "--what=idle:sleep",
-            "--who=tasks2d",
+            "--who=loadtabled",
             "--mode=block",
             &format!("--why={why}"),
             "sh",

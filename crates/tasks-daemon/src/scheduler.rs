@@ -756,7 +756,7 @@ impl Scheduler {
             Some(Hold::Drain)
         } else if !self.execution_enabled.load(Ordering::SeqCst) {
             Some(Hold::Other(
-                "execution is stopped (start it with `tasks2 execution start`)".to_string(),
+                "execution is stopped (start it with `loadtable execution start`)".to_string(),
             ))
         } else {
             None

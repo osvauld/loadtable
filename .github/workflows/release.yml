@@ -1,0 +1,130 @@
+name: Release builds
+
+# Pushing a vX.Y.Z tag builds the binaries for every published target and drafts the GitHub release
+# with them. Publishing that draft (by hand, after testing) triggers publish-r2.yml.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        name: Validate release version
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, re, tomllib
+          with open('Cargo.toml', 'rb') as f:
+              version = tomllib.load(f)['workspace']['package']['version']
+          if not re.fullmatch(r'\d+\.\d+\.\d+', version):
+              raise SystemExit('Only stable X.Y.Z versions are released')
+          if os.environ['GITHUB_REF_TYPE'] == 'tag' and os.environ['GITHUB_REF_NAME'] != f'v{version}':
+              raise SystemExit(f'Tag {os.environ["GITHUB_REF_NAME"]} does not match the workspace version {version}')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'version={version}\n')
+          PY
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux builds run on the oldest supported Ubuntu, so the binaries need no newer glibc than 2.35.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            smoke: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+            smoke: true
+          - target: aarch64-apple-darwin
+            os: macos-14
+            smoke: true
+          # Intel Macs: cross-built on the Apple silicon runner, so it cannot be run there.
+          - target: x86_64-apple-darwin
+            os: macos-14
+            smoke: false
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --target "$TARGET"
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+      # The CLI carries the MCP server (agents start it as `loadtable mcp`). The desktop window
+      # (`--features ui`) is left out: it needs graphics libraries a headless worker does not have.
+      - name: Build loadtable and loadtabled
+        run: cargo build --release --locked --target "$TARGET" -p tasks-daemon -p tasks-cli --features tasks-cli/mcp
+      - name: Package
+        shell: bash
+        run: |
+          name="loadtable-$VERSION-$TARGET"
+          mkdir -p "dist/$name/bin"
+          cp "target/$TARGET/release/loadtable" "target/$TARGET/release/loadtabled" "dist/$name/bin/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
+      - name: Smoke test
+        if: matrix.smoke
+        shell: bash
+        run: |
+          bin="dist/loadtable-$VERSION-$TARGET/bin"
+          "$bin/loadtable" --version
+          "$bin/loadtable" --help >/dev/null
+          "$bin/loadtabled" --help >/dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error
+
+  draft-release:
+    if: github.ref_type == 'tag'
+    needs: [version, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Create the draft release and attach the binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: v${{ needs.version.outputs.version }}
+        run: |
+          (cd artifacts && sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            test "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = true || {
+              echo 'Refusing to replace the binaries of a published release'; exit 1;
+            }
+          else
+            gh release create "$TAG" --verify-tag --draft --title "LoadTable $TAG" \
+              --notes 'Candidate binaries for Linux (x86-64, arm64) and macOS (Apple silicon, Intel). Test before publishing; publishing copies them to repo.osvauld.com.'
+          fi
+          gh release upload "$TAG" artifacts/* --clobber

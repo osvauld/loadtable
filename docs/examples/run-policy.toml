@@ -1,7 +1,7 @@
-# .tasks/run-policy.toml -- how this repo is built and tested.
+# .loadtable/run-policy.toml -- how this repo is built and tested.
 #
-# Agents: run `tasks2 suite run NAME` instead of writing cargo lines by hand, and read
-# `tasks2 policy show`. After a few runs, `tasks2 policy suggest` proposes edits to this file
+# Agents: run `loadtable suite run NAME` instead of writing cargo lines by hand, and read
+# `loadtable policy show`. After a few runs, `loadtable policy suggest` proposes edits to this file
 # with timing evidence; review the diff and commit it. tasks never rewrites this file.
 # Unknown keys are errors.
 

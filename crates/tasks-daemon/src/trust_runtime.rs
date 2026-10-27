@@ -1,6 +1,6 @@
 //! The daemon's trust runtime: the machine identity (keystore in the state dir, created on the
 //! first start), the trust ledger and the [`TrustNode`] over them. Independent of the peer
-//! transport, so every daemon has an identity and `tasks2 identity show` works on any build.
+//! transport, so every daemon has an identity and `loadtable identity show` works on any build.
 
 use crate::audited::AuditSink;
 use crate::config::DaemonConfig;

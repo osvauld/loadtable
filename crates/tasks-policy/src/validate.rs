@@ -196,7 +196,7 @@ mod tests {
     use super::*;
 
     fn p(text: &str) -> Result<Policy, PolicyError> {
-        parse(text, Path::new("/r/.tasks/run-policy.toml"))
+        parse(text, Path::new("/r/.loadtable/run-policy.toml"))
     }
     fn problems(text: &str) -> Vec<Problem> {
         match p(text) {

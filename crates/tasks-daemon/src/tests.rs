@@ -50,10 +50,10 @@ fn r116_a_job_runs_and_the_placement_line_is_written_once_at_the_top_of_its_log(
     assert_eq!(r.until_done(id), Phase::Passed);
     let log = r.log_text(id);
     assert!(
-        log.starts_with("[tasks] placement: testbox (default: stays on this machine)"),
+        log.starts_with("[loadtable] placement: testbox (default: stays on this machine)"),
         "{log}"
     );
-    assert_eq!(log.matches("[tasks] placement:").count(), 1);
+    assert_eq!(log.matches("[loadtable] placement:").count(), 1);
     assert!(log.contains("hello"));
     let rec = r.record(id);
     assert_eq!(rec.shown_exit(), Some(0));
@@ -877,9 +877,9 @@ fn suites_expand_from_the_repo_policy_and_unknown_ones_are_refused() {
     let r = Rig::new();
     let repo = r.dir.path().join("repo");
     std::fs::create_dir_all(repo.join(".git")).unwrap();
-    std::fs::create_dir_all(repo.join(".tasks")).unwrap();
+    std::fs::create_dir_all(repo.join(".loadtable")).unwrap();
     std::fs::write(
-        repo.join(".tasks/run-policy.toml"),
+        repo.join(".loadtable/run-policy.toml"),
         "version = 1\n[suites.s]\n[[suites.s.steps]]\nname=\"a\"\ncommand=[\"true\"]\n",
     )
     .unwrap();
@@ -917,9 +917,9 @@ fn r794_the_repo_os_keeps_anywhere_jobs_off_other_systems() {
     let r = Rig::with_forwarder(f.clone());
     let repo = r.dir.path().join("repo");
     std::fs::create_dir_all(repo.join(".git")).unwrap();
-    std::fs::create_dir_all(repo.join(".tasks")).unwrap();
+    std::fs::create_dir_all(repo.join(".loadtable")).unwrap();
     std::fs::write(
-        repo.join(".tasks/run-policy.toml"),
+        repo.join(".loadtable/run-policy.toml"),
         "version = 1\n[placement]\nos = \"linux\"\n[suites.s]\n\
          [[suites.s.steps]]\nname=\"build\"\ncommand=[\"make\"]\n\
          [[suites.s.steps]]\nname=\"ios\"\ncommand=[\"xcodebuild\"]\nplacement=\"mac\"\n",
@@ -1093,7 +1093,7 @@ fn a_real_process_runs_and_its_exit_code_and_output_are_recorded() {
     r.tick();
     assert_eq!(r.until_done(id), Phase::Failed { exit: Some(3) });
     assert!(r.log_text(id).contains("hello"));
-    assert!(r.log_text(id).starts_with("[tasks] placement:"));
+    assert!(r.log_text(id).starts_with("[loadtable] placement:"));
 }
 
 // R-107 with a real process group.

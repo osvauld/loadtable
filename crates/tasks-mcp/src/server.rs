@@ -25,7 +25,7 @@ pub const MAX_LINE_BYTES: usize = 4 << 20;
 /// Most tool calls in flight at once.
 pub const MAX_IN_FLIGHT: usize = 64;
 
-const INSTRUCTIONS: &str = "tasks coordinates builds and tests on this machine (and its peers). \
+const INSTRUCTIONS: &str = "LoadTable coordinates builds and tests on this machine (and its peers). \
 Submit work with submit, submit_steps or run_suite; each returns job ids at once. Then wait for a \
 job (cancelling a wait never touches the job), read logs, or check status. Pass your own agent \
 name as who. Heavy cargo/gradle commands belong in the queue, not in a shell.";
@@ -58,7 +58,7 @@ impl<W: Write> Out<W> {
             .and_then(|()| w.flush())
         {
             // the client went away; there is nobody to tell
-            eprintln!("tasks mcp: cannot write to the client: {e}");
+            eprintln!("loadtable mcp: cannot write to the client: {e}");
         }
     }
 }
@@ -159,7 +159,7 @@ impl Server {
                 }
                 match parse_line(&buf) {
                     Incoming::Invalid { id, code, message } => {
-                        eprintln!("tasks mcp: bad message: {message}");
+                        eprintln!("loadtable mcp: bad message: {message}");
                         out.send(&error_response(&id, code, &message));
                     }
                     Incoming::Notification { method, params } => {
@@ -195,7 +195,7 @@ impl Server {
                     json!({
                         "protocolVersion": negotiate_version(requested),
                         "capabilities": {"tools": {"listChanged": false}},
-                        "serverInfo": {"name": "tasks", "version": env!("CARGO_PKG_VERSION")},
+                        "serverInfo": {"name": "loadtable", "version": env!("CARGO_PKG_VERSION")},
                         "instructions": INSTRUCTIONS,
                     }),
                 )

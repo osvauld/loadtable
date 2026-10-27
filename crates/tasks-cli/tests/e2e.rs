@@ -53,14 +53,14 @@ impl Rig {
 
     fn tasks(&self, args: &[&str]) -> (i32, String, String) {
         let mut full = vec![
-            "tasks2".to_string(),
+            "loadtable".to_string(),
             "--state-dir".into(),
             self.dir.join("state").display().to_string(),
         ];
         full.extend(args.iter().map(|s| s.to_string()));
         let env = |k: &str| match k {
             "HOME" => Some("/nonexistent".to_string()),
-            "TASKS_WHO" => Some("e2e".to_string()),
+            "LOADTABLE_WHO" => Some("e2e".to_string()),
             _ => None,
         };
         let now = || 0i64;
@@ -116,7 +116,7 @@ fn the_client_talks_to_a_real_daemon() {
     // enqueue: the id on stdout, the submit line on stderr
     let (code, out, err) = rig.tasks(&["enqueue", "--", "echo", "hello world"]);
     assert_eq!(code, 0, "{err}");
-    assert!(err.starts_with("tasks: submitted job "), "{err}");
+    assert!(err.starts_with("loadtable: submitted job "), "{err}");
     let id: i64 = out.trim().parse().unwrap();
 
     // list and get; the hold reason appears on the scheduler's next tick, so wait for it

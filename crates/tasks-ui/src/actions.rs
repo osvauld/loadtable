@@ -113,7 +113,7 @@ pub fn queue_banner(d: &DaemonView) -> Option<String> {
             ". Running jobs finish; queued jobs wait. Resume it from the menu at the top right.",
         );
     } else {
-        text.push_str("Execution is stopped (it persists across restarts). Queued jobs wait; resume with `tasks2 start-worker`.");
+        text.push_str("Execution is stopped (it persists across restarts). Queued jobs wait; resume with `loadtable start-worker`.");
     }
     Some(text)
 }

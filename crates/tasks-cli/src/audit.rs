@@ -1,4 +1,4 @@
-//! `tasks2 audit`: the audit log, and `audit verify` / `audit checkpoint`.
+//! `loadtable audit`: the audit log, and `audit verify` / `audit checkpoint`.
 //!
 //! Rows are printed oldest first (the latest N, like `tail`), as JSON lines with `--json`.
 //! Times are UTC. A broken chain is a normal answer, not a failure of the command: `verify`
@@ -29,7 +29,7 @@ pub fn parse_when(text: &str, now_ms: i64) -> Result<i64, CliError> {
     })
 }
 
-/// `tasks2 audit …`.
+/// `loadtable audit …`.
 pub fn audit(ctx: &mut Ctx<'_>, a: &AuditArgs) -> Result<i32, CliError> {
     match &a.sub {
         Some(AuditCommand::Verify { json }) => verify(ctx, *json),
@@ -170,9 +170,9 @@ pub fn table(rows: &[AuditRowView]) -> String {
 /// Trips shown when `--limit` is not given.
 const DEFAULT_STALLS: usize = 20;
 
-/// `tasks2 stalls`: the `pressure.trip` audit rows, oldest first, each with the busiest
+/// `loadtable stalls`: the `pressure.trip` audit rows, oldest first, each with the busiest
 /// outside process and the running jobs' costs. Reads the same rows as
-/// `tasks2 audit --action pressure.trip`.
+/// `loadtable audit --action pressure.trip`.
 pub fn stalls(ctx: &mut Ctx<'_>, a: &StallsArgs) -> Result<i32, CliError> {
     let now = (ctx.now_ms)();
     let since_ms = a.since.as_deref().map(|t| parse_when(t, now)).transpose()?;

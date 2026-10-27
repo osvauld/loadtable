@@ -112,11 +112,15 @@ pub fn parse_cmdline(raw: &[u8]) -> String {
     }
 }
 
-/// The `TASKS_JOB_ID` of a NUL-separated `environ`.
+/// The `LOADTABLE_JOB_ID` (or, from a job started before the rename, `TASKS_JOB_ID`) of a
+/// NUL-separated `environ`.
 pub fn parse_job_env(raw: &[u8]) -> Option<JobId> {
     String::from_utf8_lossy(raw)
         .split('\0')
-        .find_map(|kv| kv.strip_prefix("TASKS_JOB_ID="))
+        .find_map(|kv| {
+            kv.strip_prefix("LOADTABLE_JOB_ID=")
+                .or_else(|| kv.strip_prefix("TASKS_JOB_ID="))
+        })
         .and_then(|v| v.parse::<i64>().ok())
         .map(JobId)
 }

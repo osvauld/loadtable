@@ -30,9 +30,9 @@ Reuse the osvauld identity contract (osvauld2 `identity/`, p2p_chat `crates/iden
 | device | Ed25519 | the iroh endpoint key (node id) |
 | encryption | X25519 | not needed yet; derived anyway so the contract matches |
 
-- One identity per machine, generated on first `tasks2 daemon serve` from 32 random bytes
+- One identity per machine, generated on first `loadtable daemon serve` from 32 random bytes
   through the same BIP39 + HKDF derivation (`osv/identity/*/v1`), so the existing crates'
-  golden tests apply and the mnemonic can be backed up (`tasks2 identity show --mnemonic`).
+  golden tests apply and the mnemonic can be backed up (`loadtable identity show --mnemonic`).
 - Stored in the daemon's state dir, mode 0600, never in argv or logs. macOS: same file;
   Keychain later if wanted.
 - `did:key:z…` is the machine's stable name in the ledger, audit log and status; the
@@ -68,9 +68,9 @@ needs a grant each way, made by one pairing (§4) that asks for both.
 ## 4. Pairing ticket
 
 ```
-tasks2 pair invite --role submit,observe [--both-ways] [--ttl 15m]   # on the worker
+loadtable pair invite --role submit,observe [--both-ways] [--ttl 15m]   # on the worker
   -> tasks1.eyJ2ZXJzaW9uIjox…   (one URL-safe word; QR optional)
-tasks2 pair accept tasks1.eyJ…                                         # on the laptop
+loadtable pair accept tasks1.eyJ…                                         # on the laptop
 ```
 
 Ticket body (JSON, versioned prefix `tasks1.` so a newer ticket is refused by name):
@@ -88,7 +88,7 @@ Redeem:
    peer. With `--both-ways` the laptop mints the reverse grant in the same exchange.
 4. Both sides write audit rows. The ticket is now useless.
 
-Like p2p_chat's ticket rotation, `tasks2 pair reset` invalidates every unredeemed ticket.
+Like p2p_chat's ticket rotation, `loadtable pair reset` invalidates every unredeemed ticket.
 
 ## 5. Connection
 
@@ -143,7 +143,7 @@ The job records `tree`, the HEAD commit it was based on and the dirty-file count
   end of the job is published. Results (fetched with bytes and sha256, missing, too large,
   failed) go to the job log, a sidecar next to it that `get` reads, and one `data.fetched`
   audit row per file. Files may be written through the placed output links and no other
-  symlink. The job's phase never changes; `tasks2 run` exits 1 if a passed job lost a file.
+  symlink. The job's phase never changes; `loadtable run` exits 1 if a passed job lost a file.
 - Retention: the worker drops a working copy idle for N days (default 7) and runs
   `git gc --prune=<age>` on its mirrors weekly; the origin prunes its object dir of trees
   older than the newest job per checkout. Every deletion writes an audit row with bytes
@@ -182,7 +182,7 @@ a real gap may fall back to the `git` command behind the same trait, named in th
   cost one round trip each).
 - **Extras** are a second tree (`extras_tree`) of the allowlisted ignored files, sent in the same
   pack and applied through its own index, so a file that leaves the allowlist is removed and
-  nothing else ever is. `[sync] extra = [...]` in `.tasks/run-policy.toml` (`tasks-policy`).
+  nothing else ever is. `[sync] extra = [...]` in `.loadtable/run-policy.toml` (`tasks-policy`).
 - **Worker**. `<peer>/mirrors/<repo>.git` (bare) and `<peer>/<checkout>/{tree,index,
   index.extras,state.json}`. Apply is `read-tree --reset -u` into `tree/`, so a file is removed
   only if the previous index listed it, a file a job modified is restored, and untracked build
@@ -219,7 +219,7 @@ a real gap may fall back to the `git` command behind the same trait, named in th
 An append-only `audit` table in the ledger. Each row: time, actor DID (machine) and owner
 (agent/person), action, target (job id, peer DID, checkout, path), details JSON, and
 `prev_hash` = hash of the previous row, so silent edits break the chain and
-`tasks2 audit verify` finds them. Rows are signed by the machine's key in batches.
+`loadtable audit verify` finds them. Rows are signed by the machine's key in batches.
 
 Recorded actions:
 - pairing: ticket minted, redeemed, refused (and why), grant issued, renewed, revoked;
@@ -230,7 +230,7 @@ Recorded actions:
   retention deletions (path, bytes);
 - pressure: every gate trip with the attribution snapshot (§9).
 
-`tasks2 audit [--since] [--peer] [--job] [--action] [--json]` reads it; the UI shows it.
+`loadtable audit [--since] [--peer] [--job] [--action] [--json]` reads it; the UI shows it.
 Retention: 90 days by default, chain kept intact by recording a checkpoint row.
 
 ## 9. Attribution of stalls
@@ -302,7 +302,7 @@ offload slot, the transfer slot respects the I/O gate, because a sync is local d
   figures and the top 10 outside processes by disk bytes in the last window
   (`attribution.sample_secs`, 5) and by RSS. A process is recorded as pid and program base name
   only; the process table type has no field for arguments or environment.
-  `tasks2 stalls` is `tasks2 audit --action pressure.trip` with the evidence laid out; the UI
+  `loadtable stalls` is `loadtable audit --action pressure.trip` with the evidence laid out; the UI
   has a Pressure events tab. A process whose I/O the OS hides (another user's, on Linux) is
   counted as unreadable, not listed.
 - **Transfers.** `SyncGate` is implemented by `TransferGate` on top of admission: new slot kind
@@ -411,8 +411,8 @@ Queue order: `(class, effective wait, submit time)`.
 ## 13. Build order
 
 1. Identity + grants + pairing + iroh connection with admission (peer crate `trust`
-   module, daemon wiring, `tasks2 pair`/`peers`/`identity` commands). Remove SSH paths.
-2. Audit table and `tasks2 audit` (ledger schema bump), wired to pairing and forwarding.
+   module, daemon wiring, `loadtable pair`/`peers`/`identity` commands). Remove SSH paths.
+2. Audit table and `loadtable audit` (ledger schema bump), wired to pairing and forwarding.
 3. Git sync (`Snapshot`, `PackTransfer`, worker mirrors, retention), replacing
    manifest/sync/store.
 4. Attribution: per-job cgroups, macOS sampler, gate-trip snapshots, transfer slot.

@@ -77,10 +77,10 @@ pub fn command_display(argv: &[String]) -> String {
         .join(" ")
 }
 
-/// The first client line; scripts parse the `tasks: submitted job N;` prefix (R-183).
+/// The first client line; scripts parse the `loadtable: submitted job N;` prefix (R-183; `tasks:` before R-804).
 pub fn submit_line(id: i64, cwd: &Path, argv: &[String]) -> String {
     format!(
-        "tasks: submitted job {id}; cwd {}; argv {}; Ctrl-C detaches, tasks2 cancel {id} cancels",
+        "loadtable: submitted job {id}; cwd {}; argv {}; Ctrl-C detaches, loadtable cancel {id} cancels",
         cwd.display(),
         truncate_end(&command_display(argv), SUBMIT_COMMAND)
     )
@@ -89,7 +89,7 @@ pub fn submit_line(id: i64, cwd: &Path, argv: &[String]) -> String {
 /// The detach message (R-104).
 pub fn still_live(id: i64) -> String {
     format!(
-        "tasks: job {id} is still live; query with `tasks2 logs {id}` / `tasks2 list`; do not resubmit (`tasks2 cancel {id}` cancels)"
+        "loadtable: job {id} is still live; query with `loadtable logs {id}` / `loadtable list`; do not resubmit (`loadtable cancel {id}` cancels)"
     )
 }
 
@@ -160,7 +160,7 @@ pub fn exit_label(j: &JobView) -> String {
     }
 }
 
-/// The exit code `tasks2 run` returns for a finished job: the job's own code when it has one.
+/// The exit code `loadtable run` returns for a finished job: the job's own code when it has one.
 /// A job that passed but could not bring back a file it was asked to fetch exits 1, as the
 /// earlier release did (R-504); the command's own exit code is never changed.
 pub fn job_exit_code(j: &JobView) -> i32 {
@@ -184,10 +184,10 @@ pub fn job_exit_code(j: &JobView) -> i32 {
     }
 }
 
-/// The last stdout line of `tasks2 run`: `job N <word> (exit X) owner=W [on HOST]`, so that
+/// The last stdout line of `loadtable run`: `job N <word> (exit X) owner=W [on HOST]`, so that
 /// `| tail -1` recovers the id and the result (REQUIREMENTS 1.1). `HOST` is the peer a forwarded
 /// job ran on. A timeout or a job that never started reads as `failed`, with the exit code
-/// `tasks2 run` itself returns.
+/// `loadtable run` itself returns.
 pub fn summary_line(j: &JobView) -> String {
     let word = match &j.phase {
         Phase::Passed => "passed",
@@ -415,7 +415,7 @@ fn plan_block(out: &mut String, plan_id: i64, steps: &[&JobView], now_ms: i64, a
 }
 
 /// The line under the table.
-pub const TABLE_LEGEND: &str = "tasks: AGE = since submission (to finish when done); RUN = run time so far (+ = still running). Env values over 40 chars are abbreviated here only; tasks2 list --json has the full argv.";
+pub const TABLE_LEGEND: &str = "loadtable: AGE = since submission (to finish when done); RUN = run time so far (+ = still running). Env values over 40 chars are abbreviated here only; loadtable list --json has the full argv.";
 
 /// One job in full.
 pub fn job_detail(j: &JobView, now_ms: i64, waiter: Option<&WaiterView>) -> String {
@@ -523,7 +523,7 @@ pub fn log_search(results: &[JobGrep], matches: usize, truncated: bool) -> Strin
     }
     let _ = writeln!(
         out,
-        "tasks: {matches} matching line(s) in {} job(s){}",
+        "loadtable: {matches} matching line(s) in {} job(s){}",
         results.len(),
         if truncated {
             "; the search hit a bound, narrow it (--phase, --since, --id) or raise --max-matches"
@@ -712,26 +712,26 @@ fn queue_state(out: &mut String, s: &StatusSnapshot) {
                 let ago = fmt_precise(((d.now_ms - at).max(0) / 1000) as f64);
                 let _ = writeln!(
                     out,
-                    "queue: DRAINING: stopped by {who}, {ago} ago, resume with `tasks2 resume` (no new job starts until then or the next daemon start)"
+                    "queue: DRAINING: stopped by {who}, {ago} ago, resume with `loadtable resume` (no new job starts until then or the next daemon start)"
                 );
             }
             _ => out.push_str(
-                "queue: DRAINING: no new job starts until the daemon restarts; `tasks2 resume` resumes it\n",
+                "queue: DRAINING: no new job starts until the daemon restarts; `loadtable resume` resumes it\n",
             ),
         }
     }
     if !d.execution_enabled {
         out.push_str(
-            "queue: STOPPED: queued jobs do not start; `tasks2 execution start` lets them run\n",
+            "queue: STOPPED: queued jobs do not start; `loadtable execution start` lets them run\n",
         );
     }
 }
 
-/// `tasks2 status`.
+/// `loadtable status`.
 pub fn status(s: &StatusSnapshot) -> String {
     let d = &s.daemon;
     let mut out = format!(
-        "daemon: tasks2d {} pid {} on {} (up {})\n",
+        "daemon: loadtabled {} pid {} on {} (up {})\n",
         d.version,
         d.pid,
         d.machine,
@@ -856,7 +856,7 @@ pub fn status(s: &StatusSnapshot) -> String {
         }
     }
     if !s.trips.is_empty() {
-        out.push_str("pressure trips (newest first; `tasks2 stalls` lists more):\n");
+        out.push_str("pressure trips (newest first; `loadtable stalls` lists more):\n");
         for t in &s.trips {
             let _ = writeln!(
                 out,
@@ -1048,7 +1048,7 @@ fn peers_section(
     }
 }
 
-/// `tasks2 admission`: the lock directory, thresholds, slot holders and the source of every
+/// `loadtable admission`: the lock directory, thresholds, slot holders and the source of every
 /// policy value. `client_lock_dir` is where this client would look; a disagreement is flagged
 /// (R-045, R-231).
 pub fn admission(s: &StatusSnapshot, client_lock_dir: Option<&Path>) -> String {
@@ -1057,7 +1057,7 @@ pub fn admission(s: &StatusSnapshot, client_lock_dir: Option<&Path>) -> String {
     if let Some(c) = client_lock_dir.filter(|c| *c != d.lock_dir) {
         let _ = writeln!(
             out,
-            "warning: this shell would resolve the lock dir to {}, not the daemon's; only the daemon's counts, set TASKS_LOCK_DIR for the daemon rather than the client",
+            "warning: this shell would resolve the lock dir to {}, not the daemon's; only the daemon's counts, set LOADTABLE_LOCK_DIR for the daemon rather than the client",
             c.display()
         );
     }
@@ -1138,7 +1138,7 @@ fn row_label(r: &StatRow) -> String {
     s
 }
 
-/// `tasks2 stats` table.
+/// `loadtable stats` table.
 pub fn stats(rows: &[StatRow]) -> String {
     if rows.is_empty() {
         return "(no timing samples)\n".to_string();

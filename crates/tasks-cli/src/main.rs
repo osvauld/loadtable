@@ -1,4 +1,4 @@
-//! `tasks2`: thin wrapper over [`tasks_cli::real_main`].
+//! `loadtable`: thin wrapper over [`tasks_cli::real_main`].
 
 use std::process::ExitCode;
 

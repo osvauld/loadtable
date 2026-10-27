@@ -43,7 +43,7 @@ fn link_into_cache(w: &World, tree: &Path) -> PathBuf {
     let cache = w
         .tmp
         .path()
-        .join("build-cache/tasks2/checkouts/peer/laptop-node/x/target");
+        .join("build-cache/loadtable/checkouts/peer/laptop-node/x/target");
     write(&cache, "debug/app", "warm artifact");
     std::os::unix::fs::symlink(&cache, tree.join("target")).unwrap();
     cache

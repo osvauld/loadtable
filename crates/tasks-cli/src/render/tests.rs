@@ -57,12 +57,12 @@ fn r184_truncation_is_character_safe() {
 fn r183_submit_line_keeps_the_parsed_prefix_and_shows_cwd_and_command() {
     let line = submit_line(42, Path::new("/home/u/wt"), &argv("cargo test -p x"));
     assert!(
-        line.starts_with("tasks: submitted job 42; cwd /home/u/wt;"),
+        line.starts_with("loadtable: submitted job 42; cwd /home/u/wt;"),
         "{line}"
     );
     assert!(line.contains("argv cargo test -p x;"), "{line}");
     assert!(
-        line.ends_with("Ctrl-C detaches, tasks2 cancel 42 cancels"),
+        line.ends_with("Ctrl-C detaches, loadtable cancel 42 cancels"),
         "{line}"
     );
     let long = vec![
@@ -79,7 +79,7 @@ fn r104_the_detach_message_says_the_job_is_live_and_not_to_resubmit() {
     let m = still_live(9);
     assert!(m.contains("job 9 is still live"));
     assert!(m.contains("do not resubmit"));
-    assert!(m.contains("tasks2 cancel 9"));
+    assert!(m.contains("loadtable cancel 9"));
 }
 
 // R-009
@@ -161,7 +161,7 @@ fn r185_table_has_one_line_per_job_with_the_requested_columns() {
     assert!(lines[0].contains("ID") && lines[0].contains("PHASE") && lines[0].contains("CWD"));
     assert!(lines[1].contains("passed") && lines[1].contains("~/wt") && lines[1].contains(" 0 "));
     assert!(lines[2].contains("running") && lines[2].contains("bob"));
-    assert!(lines[3].starts_with("tasks: AGE ="));
+    assert!(lines[3].starts_with("loadtable: AGE ="));
     let brief = job_table(
         &jobs,
         NOW,
@@ -338,12 +338,12 @@ fn r189_a_held_queue_says_it_is_held_and_how_to_resume() {
     s.daemon.draining = true;
     let t = status(&s);
     assert!(t.contains("queue: DRAINING"), "{t}");
-    assert!(t.contains("`tasks2 resume`"));
+    assert!(t.contains("`loadtable resume`"));
     s.daemon.draining = false;
     s.daemon.execution_enabled = false;
     let t = status(&s);
     assert!(
-        t.contains("queue: STOPPED") && t.contains("tasks2 execution start"),
+        t.contains("queue: STOPPED") && t.contains("loadtable execution start"),
         "{t}"
     );
     assert!(!t.contains("worker not running"));
@@ -357,7 +357,7 @@ fn r189_a_drained_queue_says_who_stopped_it_how_long_ago_and_how_to_resume() {
     s.daemon.drained_at_ms = Some(s.daemon.now_ms - 125_000);
     let t = status(&s);
     assert!(
-        t.contains("queue: DRAINING: stopped by alice, 2m05s ago, resume with `tasks2 resume`"),
+        t.contains("queue: DRAINING: stopped by alice, 2m05s ago, resume with `loadtable resume`"),
         "{t}"
     );
     // a daemon that did not record it keeps the plain line
@@ -1027,7 +1027,7 @@ fn r692_status_prints_this_machines_endpoint_and_a_missing_transport_with_its_al
     s.alerts = vec![tasks_daemon::api::AlertView {
         id: "no-peer-transport".into(),
         level: "warn".into(),
-        message: "this daemon was built without peer transport: paired peers mac, nixos cannot reach it or be reached; run tasks2d (built with --features iroh)".into(),
+        message: "this daemon was built without peer transport: paired peers mac, nixos cannot reach it or be reached; run loadtabled (built with --features iroh)".into(),
         since_ms: 0,
     }];
     let t = status(&s);

@@ -158,7 +158,7 @@ impl fmt::Display for Violations {
 pub enum PolicyError {
     /// No policy file between the cwd and the repo root.
     #[error(
-        "no .tasks/run-policy.toml found from {0} up to the repo root (fix: create one; see docs/examples/run-policy.toml)"
+        "no .loadtable/run-policy.toml found from {0} up to the repo root (fix: create one; see docs/examples/run-policy.toml)"
     )]
     NotFound(PathBuf),
     /// The file could not be read.

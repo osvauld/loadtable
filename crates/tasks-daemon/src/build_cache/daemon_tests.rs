@@ -122,10 +122,10 @@ fn r408_without_sccache_the_job_runs_uncached_and_says_so() {
     let log = r.log_text(id);
     let first = log
         .lines()
-        .find(|l| l.starts_with("[tasks] cache:"))
+        .find(|l| l.starts_with("[loadtable] cache:"))
         .unwrap();
     assert!(
-        first.starts_with("[tasks] cache: uncached build: sccache was not found"),
+        first.starts_with("[loadtable] cache: uncached build: sccache was not found"),
         "{log}"
     );
     assert!(!matches!(
@@ -167,17 +167,17 @@ fn r407_the_output_starts_with_the_cache_line() {
     let log = r.log_text(id);
     let first = log
         .lines()
-        .find(|l| l.starts_with("[tasks] cache:"))
+        .find(|l| l.starts_with("[loadtable] cache:"))
         .unwrap();
     let real = fs::read_link(root.join("target")).unwrap();
     assert!(
-        real.starts_with(r.cfg.cache_dir.join("tasks2/checkouts")),
+        real.starts_with(r.cfg.cache_dir.join("loadtable/checkouts")),
         "{real:?}"
     );
     assert_eq!(
         first,
         format!(
-            "[tasks] cache: sccache {}, target -> {}",
+            "[loadtable] cache: sccache {}, target -> {}",
             r.cfg.cache_dir.join("sccache").display(),
             real.display()
         )
@@ -208,7 +208,7 @@ fn r402_a_forwarded_job_gets_the_peers_key() {
     let want = r
         .cfg
         .cache_dir
-        .join("tasks2/checkouts/peer/laptop-node/aa11bb/target");
+        .join("loadtable/checkouts/peer/laptop-node/aa11bb/target");
     assert!(real.is_absolute(), "{real:?}");
     assert_eq!(
         fs::canonicalize(&real).unwrap(),
@@ -224,7 +224,7 @@ fn r404_new_cache_output_waits_for_the_disk_reserve_and_existing_links_do_not() 
     let fresh = checkout(&r, "fresh");
     let warm = checkout(&r, "warm");
     // `warm` already has its link (placed by an earlier job)
-    let real = r.cfg.cache_dir.join("tasks2/checkouts/warm/target");
+    let real = r.cfg.cache_dir.join("loadtable/checkouts/warm/target");
     fs::create_dir_all(&real).unwrap();
     std::os::unix::fs::symlink(&real, warm.join("target")).unwrap();
 
@@ -340,7 +340,7 @@ fn r401_the_cache_root_defaults_to_build_cache_under_home_and_can_be_moved() {
     );
     let env2 = |k: &str| match k {
         "HOME" => Some("/home/u".to_string()),
-        "TASKS_CACHE_DIR" => Some("/data/c".to_string()),
+        "LOADTABLE_CACHE_DIR" => Some("/data/c".to_string()),
         _ => None,
     };
     assert_eq!(
@@ -351,7 +351,7 @@ fn r401_the_cache_root_defaults_to_build_cache_under_home_and_can_be_moved() {
     );
 }
 
-// R-407: `tasks2 cache` shows the wrapper, the root and the disk against the reserve.
+// R-407: `loadtable cache` shows the wrapper, the root and the disk against the reserve.
 #[test]
 fn r407_the_report_names_the_wrapper_the_root_and_the_disk_against_the_reserve() {
     let r = rig_with(true);

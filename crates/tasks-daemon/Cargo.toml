@@ -10,8 +10,8 @@ publish.workspace = true
 workspace = true
 
 [[bin]]
-name = "tasks2d"
-path = "src/bin/tasks2d.rs"
+name = "loadtabled"
+path = "src/bin/loadtabled.rs"
 
 [dependencies]
 tasks-core.workspace = true

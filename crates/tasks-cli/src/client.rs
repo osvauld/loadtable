@@ -59,7 +59,7 @@ pub enum ClientError {
     },
     /// The daemon speaks another protocol version.
     #[error(
-        "protocol version mismatch: this client speaks version {ours}, the daemon speaks version {}; use a tasks2 built from the same release as the daemon",
+        "protocol version mismatch: this client speaks version {ours}, the daemon speaks version {}; use a loadtable built from the same release as the daemon",
         theirs.map_or_else(|| "unknown".to_string(), |v| v.to_string())
     )]
     Version {

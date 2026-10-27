@@ -46,7 +46,7 @@ impl Scheduler {
                 self.kill(
                     &rj,
                     format!(
-                        "killed by tasks: the log grew past the hard cap of {} MiB",
+                        "killed by loadtable: the log grew past the hard cap of {} MiB",
                         hard / MIB
                     ),
                 );
@@ -322,7 +322,7 @@ impl Scheduler {
                 "no-peer-transport".to_string(),
                 AlertLevel::Warn,
                 format!(
-                    "this daemon was built without peer transport: paired peers {} cannot reach it or be reached; run tasks2d (built with --features iroh)",
+                    "this daemon was built without peer transport: paired peers {} cannot reach it or be reached; run loadtabled (built with --features iroh)",
                     paired.join(", ")
                 ),
             ));
@@ -389,7 +389,7 @@ impl Scheduler {
                 };
                 let what = if e.direction == "held" {
                     format!(
-                        "the {} grant from {} {when} and could not be renewed; pair again with `tasks2 pair`",
+                        "the {} grant from {} {when} and could not be renewed; pair again with `loadtable pair`",
                         e.role, e.peer
                     )
                 } else {

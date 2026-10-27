@@ -1,7 +1,7 @@
-//! Command line of the daemon: `tasks2d serve`, `tasks2d install`, `tasks2d policy-sample`.
+//! Command line of the daemon: `loadtabled serve`, `loadtabled install`, `loadtabled policy-sample`.
 //!
-//! The binary `tasks2d` is a thin wrapper over [`main_from_env`]; the CLI crate can call
-//! [`run`] with the arguments after `tasks2 daemon`.
+//! The binary `loadtabled` is a thin wrapper over [`main_from_env`]; the CLI crate can call
+//! [`run`] with the arguments after `loadtable daemon`.
 
 use crate::config::{ConfigArgs, DaemonConfig};
 use crate::error::DaemonError;
@@ -12,15 +12,18 @@ use std::process::ExitCode;
 use tasks_platform::{Service, ServiceUnit};
 
 /// The service name.
-pub const SERVICE_NAME: &str = "tasks2d";
+pub const SERVICE_NAME: &str = "loadtabled";
+/// The service and daemon binary before the rename (R-804); a `tasks2d` link still runs the
+/// daemon.
+pub const OLD_SERVICE_NAME: &str = "tasks2d";
 
-const USAGE: &str = "usage: tasks2d [serve] [OPTIONS]      run the daemon (also: tasks2 daemon serve)\n\
-       tasks2d install [--dry-run] [OPTIONS]  write the user service unit and print the next command\n\
-       tasks2d policy-sample                  print a machine-policy.toml listing every default\n\
+const USAGE: &str = "usage: loadtabled [serve] [OPTIONS]      run the daemon (also: loadtable daemon serve)\n\
+       loadtabled install [--dry-run] [OPTIONS]  write the user service unit and print the next command\n\
+       loadtabled policy-sample                  print a machine-policy.toml listing every default\n\
 \n\
 OPTIONS\n\
-  --state-dir DIR   ledger, socket, logs (default: $XDG_STATE_HOME/tasks2)\n\
-  --config-dir DIR  holds machine-policy.toml (default: $XDG_CONFIG_HOME/tasks2)\n\
+  --state-dir DIR   ledger, socket, logs (default: $XDG_STATE_HOME/loadtable)\n\
+  --config-dir DIR  holds machine-policy.toml (default: $XDG_CONFIG_HOME/loadtable)\n\
   --lock-dir DIR    slot lock files (default: STATE_DIR/slots; never TMPDIR)\n\
   --cache-dir DIR   cache root: sccache, gradle, outputs (default: ~/build-cache; its disk is\n                    checked against the reserve)\n\
   --machine NAME    this machine's name in placement";
@@ -84,16 +87,16 @@ pub fn parse_args(args: &[String]) -> Result<Command, DaemonError> {
     })
 }
 
-/// True when `exe` is the daemon binary itself (`tasks2d`), which takes `serve` directly. Any
-/// other executable is the CLI (`tasks2`), whose daemon lives under `tasks2 daemon`.
+/// True when `exe` is the daemon binary itself (`loadtabled`), which takes `serve` directly. Any
+/// other executable is the CLI (`loadtable`), whose daemon lives under `loadtable daemon`.
 fn is_daemon_binary(exe: &str) -> bool {
     std::path::Path::new(exe)
         .file_name()
         .and_then(|n| n.to_str())
-        .is_some_and(|n| n.starts_with(SERVICE_NAME))
+        .is_some_and(|n| n.starts_with(SERVICE_NAME) || n.starts_with(OLD_SERVICE_NAME))
 }
 
-/// The `tasks2d` that sits next to `exe` and can run, if any (R-681). The CLI is built without
+/// The `loadtabled` that sits next to `exe` and can run, if any (R-681). The CLI is built without
 /// the peer transport unless asked, so a service should prefer the daemon binary beside it.
 fn sibling_daemon(exe: &std::path::Path) -> Option<String> {
     use std::os::unix::fs::PermissionsExt;
@@ -108,8 +111,8 @@ fn sibling_daemon(exe: &std::path::Path) -> Option<String> {
 fn install_warning(unit: &ServiceUnit, has_transport: bool) -> Option<String> {
     let runs_cli = unit.argv.first().is_some_and(|e| !is_daemon_binary(e));
     (runs_cli && !has_transport).then(|| {
-        "warning: this service cannot reach peers; install tasks2d with --features iroh \
-         and run `tasks2d install`"
+        "warning: this service cannot reach peers; install loadtabled with --features iroh \
+         and run `loadtabled install`"
             .to_string()
     })
 }
@@ -117,8 +120,8 @@ fn install_warning(unit: &ServiceUnit, has_transport: bool) -> Option<String> {
 /// The service unit for this executable and these directories. Only directories the user
 /// passed explicitly are baked in; the rest resolve from the service's own environment.
 ///
-/// The unit starts `tasks2d serve ...` when `exe` is the daemon binary or when the CLI has a
-/// `tasks2d` beside it (`sibling`), and `tasks2 daemon serve ...` otherwise, so the installed
+/// The unit starts `loadtabled serve ...` when `exe` is the daemon binary or when the CLI has a
+/// `loadtabled` beside it (`sibling`), and `loadtable daemon serve ...` otherwise, so the installed
 /// unit works whichever of the two ran `install`.
 pub fn service_unit(exe: &str, sibling: Option<&str>, args: &ConfigArgs) -> ServiceUnit {
     let exe = match sibling {
@@ -230,7 +233,7 @@ pub fn run(args: &[String]) -> Result<(), DaemonError> {
             let sibling = sibling_daemon(&exe);
             let unit = service_unit(&exe.display().to_string(), sibling.as_deref(), &args);
             if let Some(w) = install_warning(&unit, cfg!(feature = "iroh")) {
-                eprintln!("tasks2d: {w}");
+                eprintln!("loadtabled: {w}");
             }
             let native = tasks_platform::native();
             let text = install_plan(&unit, if dry_run { None } else { Some(&native) })?;
@@ -238,8 +241,14 @@ pub fn run(args: &[String]) -> Result<(), DaemonError> {
             Ok(())
         }
         Command::Serve(args) => {
-            let env = |k: &str| std::env::var(k).ok();
+            let env = |k: &str| tasks_core::names::env_or_old(&|v| std::env::var(v).ok(), k);
+            // a tasks2 install moves to the LoadTable names before anything opens it (R-804)
+            let mut moved = crate::rename::move_default_dirs(&args, &env)?;
             let config = DaemonConfig::resolve(&args, &env)?;
+            moved.extend(crate::rename::move_cache_outputs(&config.cache_dir)?);
+            for note in &moved {
+                crate::daemon_log::say(format_args!("rename: {note}"));
+            }
             #[allow(unused_mut)]
             let mut opts = DaemonOptions::new(config);
             #[cfg(feature = "iroh")]
@@ -307,7 +316,7 @@ fn termination_flags() -> SignalFlags {
 }
 
 /// Makes SIGTERM and SIGINT stop an idle daemon cleanly. Without this the CLI's embedded daemon
-/// inherited the CLI's flag-only handlers and ignored SIGTERM (R-685); `tasks2d` had no
+/// inherited the CLI's flag-only handlers and ignored SIGTERM (R-685); `loadtabled` had no
 /// handler and died with its socket file left behind.
 fn watch_termination(sch: std::sync::Arc<crate::scheduler::Scheduler>, flags: SignalFlags) {
     use std::sync::atomic::Ordering;
@@ -339,7 +348,7 @@ fn watch_termination(sch: std::sync::Arc<crate::scheduler::Scheduler>, flags: Si
         });
 }
 
-/// `main` for the `tasks2d` binary.
+/// `main` for the `loadtabled` binary.
 pub fn main_from_env() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match run(&args) {
@@ -400,31 +409,34 @@ mod tests {
     fn r681_the_cli_installs_the_daemon_binary_beside_it() {
         let args = ConfigArgs::default();
         let beside = service_unit(
-            "/home/u/.local/bin/tasks2",
-            Some("/home/u/.local/bin/tasks2d"),
+            "/home/u/.local/bin/loadtable",
+            Some("/home/u/.local/bin/loadtabled"),
             &args,
         );
-        assert_eq!(beside.argv, ["/home/u/.local/bin/tasks2d", "serve"]);
+        assert_eq!(beside.argv, ["/home/u/.local/bin/loadtabled", "serve"]);
         // without one beside it the unit keeps the embedded daemon
-        let alone = service_unit("/home/u/.local/bin/tasks2", None, &args);
-        assert_eq!(alone.argv, ["/home/u/.local/bin/tasks2", "daemon", "serve"]);
+        let alone = service_unit("/home/u/.local/bin/loadtable", None, &args);
+        assert_eq!(
+            alone.argv,
+            ["/home/u/.local/bin/loadtable", "daemon", "serve"]
+        );
         // the daemon binary ignores any sibling
-        let d = service_unit("/a/tasks2d", Some("/b/tasks2d"), &args);
-        assert_eq!(d.argv, ["/a/tasks2d", "serve"]);
+        let d = service_unit("/a/loadtabled", Some("/b/loadtabled"), &args);
+        assert_eq!(d.argv, ["/a/loadtabled", "serve"]);
     }
 
     #[test]
     fn r681_a_unit_that_cannot_reach_peers_is_warned_about() {
         let args = ConfigArgs::default();
-        let cli = service_unit("/bin/tasks2", None, &args);
-        let d = service_unit("/bin/tasks2d", None, &args);
+        let cli = service_unit("/bin/loadtable", None, &args);
+        let d = service_unit("/bin/loadtabled", None, &args);
         assert!(
             install_warning(&cli, false)
                 .unwrap()
                 .contains("cannot reach peers")
         );
         assert!(install_warning(&cli, true).is_none());
-        // tasks2d without the transport warns at its own startup, not here
+        // loadtabled without the transport warns at its own startup, not here
         assert!(install_warning(&d, false).is_none());
     }
 
@@ -434,7 +446,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("r681-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let exe = dir.join("tasks2");
+        let exe = dir.join("loadtable");
         assert_eq!(sibling_daemon(&exe), None);
         let d = dir.join(SERVICE_NAME);
         std::fs::write(&d, "x").unwrap();
@@ -453,11 +465,11 @@ mod tests {
             ..ConfigArgs::default()
         };
         // the CLI binary: the daemon is its `daemon` subcommand
-        let cli = service_unit("/home/u/.local/bin/tasks2", None, &args);
+        let cli = service_unit("/home/u/.local/bin/loadtable", None, &args);
         assert_eq!(
             cli.argv,
             [
-                "/home/u/.local/bin/tasks2",
+                "/home/u/.local/bin/loadtable",
                 "daemon",
                 "serve",
                 "--state-dir",
@@ -467,8 +479,8 @@ mod tests {
             ]
         );
         // the daemon binary takes `serve` itself
-        let d = service_unit("/usr/bin/tasks2d", None, &args);
-        assert_eq!(&d.argv[..2], ["/usr/bin/tasks2d", "serve"]);
+        let d = service_unit("/usr/bin/loadtabled", None, &args);
+        assert_eq!(&d.argv[..2], ["/usr/bin/loadtabled", "serve"]);
         // the arguments of the unit parse as the daemon's own command line
         let after_daemon: Vec<String> = cli.argv[2..].to_vec();
         assert!(matches!(
@@ -479,29 +491,29 @@ mod tests {
         assert!(
             install_plan(&cli, None)
                 .unwrap()
-                .contains("Run `tasks2 daemon install`")
+                .contains("Run `loadtable daemon install`")
         );
         assert!(
             install_plan(&d, None)
                 .unwrap()
-                .contains("Run `tasks2d install`")
+                .contains("Run `loadtabled install`")
         );
     }
 
     #[test]
     fn install_plan_prints_the_unit_and_the_next_command_without_running_anything() {
         let args = ConfigArgs {
-            state_dir: Some("/var/lib/tasks2".into()),
+            state_dir: Some("/var/lib/loadtable".into()),
             ..ConfigArgs::default()
         };
-        let unit = service_unit("/usr/local/bin/tasks2d", None, &args);
+        let unit = service_unit("/usr/local/bin/loadtabled", None, &args);
         assert_eq!(
             unit.argv,
             [
-                "/usr/local/bin/tasks2d",
+                "/usr/local/bin/loadtabled",
                 "serve",
                 "--state-dir",
-                "/var/lib/tasks2"
+                "/var/lib/loadtable"
             ]
         );
         let dry = install_plan(&unit, None).unwrap();
@@ -509,7 +521,10 @@ mod tests {
         assert!(dry.contains("ExecStart=") || dry.contains("<key>ProgramArguments</key>"));
         let fake = FakePlatform::default();
         let real = install_plan(&unit, Some(&fake)).unwrap();
-        assert!(real.contains("next, run:\n  fake-start tasks2d"), "{real}");
-        assert!(real.contains("/fake/tasks2d.service"));
+        assert!(
+            real.contains("next, run:\n  fake-start loadtabled"),
+            "{real}"
+        );
+        assert!(real.contains("/fake/loadtabled.service"));
     }
 }

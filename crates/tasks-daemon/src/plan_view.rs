@@ -1,5 +1,5 @@
 //! One plan as one thing: the counts, the overall state and the times that the dashboard and
-//! `tasks2 list` show instead of one row per step (R-740).
+//! `loadtable list` show instead of one row per step (R-740).
 
 use crate::api::JobView;
 use tasks_core::Phase;

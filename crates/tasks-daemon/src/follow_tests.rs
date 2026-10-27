@@ -434,7 +434,7 @@ fn r191_the_machine_policy_downgrades_the_refusal_to_a_warning_with_its_source()
     r.until_running(id);
     assert!(
         r.log_text(id)
-            .contains("[tasks] warning: this builds every test target"),
+            .contains("[loadtable] warning: this builds every test target"),
         "{}",
         r.log_text(id)
     );
@@ -474,7 +474,7 @@ fn r191_the_machine_policy_downgrades_the_refusal_to_a_warning_with_its_source()
 fn r191_the_daemons_environment_overrides_the_policy_file() {
     let p = crate::machine_policy::MachinePolicy::from_text(
         Some("[submit]\nbroad_test = \"warn\"\n"),
-        &|k| (k == "TASKS_BROAD_TEST").then(|| "refuse".to_string()),
+        &|k| (k == "LOADTABLE_BROAD_TEST").then(|| "refuse".to_string()),
     );
     assert_eq!(
         p.broad_test_mode(),
@@ -639,9 +639,9 @@ fn r191_suites_get_the_same_answer() {
     let r = Rig::new();
     let repo = r.dir.path().join("repo");
     std::fs::create_dir_all(repo.join(".git")).unwrap();
-    std::fs::create_dir_all(repo.join(".tasks")).unwrap();
+    std::fs::create_dir_all(repo.join(".loadtable")).unwrap();
     std::fs::write(
-        repo.join(".tasks/run-policy.toml"),
+        repo.join(".loadtable/run-policy.toml"),
         "version = 1\n[suites.s]\n[[suites.s.steps]]\nname=\"a\"\ncommand=[\"cargo\",\"test\",\"foo\"]\n",
     )
     .unwrap();
@@ -800,7 +800,7 @@ fn a_stopped_queue_names_the_real_command_that_starts_it() {
     let id = r.submit(&r.spec("o", &["make"], Kind::Run));
     r.tick();
     let text = r.record(id).wait_text.unwrap();
-    assert!(text.contains("`tasks2 execution start`"), "{text}");
+    assert!(text.contains("`loadtable execution start`"), "{text}");
     assert!(!text.contains("execution enable"), "{text}");
 }
 

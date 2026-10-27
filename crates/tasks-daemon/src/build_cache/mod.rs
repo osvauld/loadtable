@@ -10,7 +10,7 @@
 //! - [`BuildCache::env_policy`] turns the machine's settings into the runner's [`EnvPolicy`].
 //! - [`outputs`] places `target` and the Android outputs as symlinks into the cache root, with
 //!   the old release's rules: never replace, move or delete an existing entry.
-//! - [`report`] is the read-only text behind `tasks2 cache`.
+//! - [`report`] is the read-only text behind `loadtable cache`.
 
 pub mod outputs;
 pub mod report;
@@ -112,7 +112,7 @@ pub fn fallback_tool_dirs(env: &[(String, String)]) -> Vec<String> {
 const SCCACHE_SUBDIR: &str = "sccache";
 const GRADLE_SUBDIR: &str = "gradle";
 /// Job outputs under the cache root.
-pub(crate) const CHECKOUTS_SUBDIR: &str = "tasks2/checkouts";
+pub(crate) const CHECKOUTS_SUBDIR: &str = "loadtable/checkouts";
 
 /// The first executable regular file named `sccache` in `dirs`, as an absolute path.
 pub fn find_sccache(dirs: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
@@ -192,7 +192,7 @@ impl BuildCache {
         let dir = self.root.join(GRADLE_SUBDIR);
         dir.is_dir().then_some(dir)
     }
-    /// Where checkouts' outputs live (`<root>/tasks2/checkouts`).
+    /// Where checkouts' outputs live (`<root>/loadtable/checkouts`).
     pub fn checkouts_dir(&self) -> PathBuf {
         self.root.join(CHECKOUTS_SUBDIR)
     }

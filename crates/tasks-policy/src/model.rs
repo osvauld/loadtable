@@ -1,4 +1,4 @@
-//! The run-policy data model, as written in `.tasks/run-policy.toml`.
+//! The run-policy data model, as written in `.loadtable/run-policy.toml`.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

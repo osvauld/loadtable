@@ -46,7 +46,7 @@ fn r194_initialize_negotiates_the_protocol_version() {
     assert_eq!(out[0]["result"]["protocolVersion"], "2024-11-05");
     assert_eq!(out[1]["result"]["protocolVersion"], "2025-06-18");
     assert_eq!(out[2]["result"]["protocolVersion"], "2025-06-18");
-    assert_eq!(out[0]["result"]["serverInfo"]["name"], "tasks");
+    assert_eq!(out[0]["result"]["serverInfo"]["name"], "loadtable");
     assert_eq!(
         out[0]["result"]["capabilities"]["tools"]["listChanged"],
         false

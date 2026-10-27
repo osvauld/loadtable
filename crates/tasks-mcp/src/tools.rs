@@ -40,7 +40,7 @@ const RECONCILE_SLACK_MS: i64 = 5_000;
 pub struct Config {
     /// Default checkout for submissions: the server's working directory.
     pub cwd: PathBuf,
-    /// Default job owner: `$TASKS_WHO`, then `$USER`.
+    /// Default job owner: `$LOADTABLE_WHO`, then `$USER`.
     pub default_who: Option<String>,
     /// Pause between polls of a waited job.
     pub poll: Duration,
@@ -58,7 +58,7 @@ impl Config {
         let non_empty = |k: &str| env(k).filter(|v| !v.is_empty());
         Config {
             cwd,
-            default_who: non_empty("TASKS_WHO").or_else(|| non_empty("USER")),
+            default_who: non_empty("LOADTABLE_WHO").or_else(|| non_empty("USER")),
             poll: Duration::from_millis(500),
             default_wait: Duration::from_secs(120),
             max_wait: Duration::from_secs(3600),
@@ -165,7 +165,7 @@ impl ToolError {
             ToolError::Daemon(DaemonError::Unreachable(m)) => error_result(
                 "daemon_unreachable",
                 format!(
-                    "{m}. Nothing was sent; the tasks daemon is not available, try again shortly or run `tasks2 status` in a shell"
+                    "{m}. Nothing was sent; the loadtable daemon is not available, try again shortly or run `loadtable status` in a shell"
                 ),
             ),
             ToolError::Daemon(DaemonError::ReplyLost(d)) => error_result(
@@ -463,7 +463,7 @@ impl Tools {
             .or_else(|| self.cfg.default_who.clone())
             .ok_or_else(|| {
                 ToolError::Args(
-                    "no job owner: pass who (your agent name) or set TASKS_WHO for the MCP server"
+                    "no job owner: pass who (your agent name) or set LOADTABLE_WHO for the MCP server"
                         .into(),
                 )
             })?;

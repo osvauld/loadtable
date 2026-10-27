@@ -1,0 +1,90 @@
+name: Publish release to R2
+
+# Copies a published, stable GitHub release to https://repo.osvauld.com/loadtable/, the bucket that
+# also serves Tinline. LoadTable owns only the loadtable/ prefix:
+#
+#   loadtable/releases/vX.Y.Z/loadtable-X.Y.Z-<target>.tar.gz (+ .sha256)
+#   loadtable/releases/vX.Y.Z/SHA256SUMS
+#   loadtable/latest            the newest version number, read by the installer; uploaded last
+#
+# Versioned objects are immutable: a rerun may upload the same bytes again, never different ones.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing published release tag (vX.Y.Z)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r2-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    environment: release
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      R2_BUCKET: ${{ vars.R2_BUCKET }}
+      R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+    steps:
+      - name: Validate the release and configuration
+        shell: bash
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Expected a stable vX.Y.Z tag'; exit 1; }
+          state=$(gh release view "$TAG" --json isDraft,isPrerelease --jq '"\(.isDraft) \(.isPrerelease)"')
+          [ "$state" = 'false false' ] || { echo "Release $TAG must be published and stable (draft, prerelease: $state)"; exit 1; }
+          : "${R2_BUCKET:?Set the environment variable R2_BUCKET}"
+          : "${R2_ENDPOINT:?Set the environment variable R2_ENDPOINT}"
+          : "${AWS_ACCESS_KEY_ID:?Missing the R2_ACCESS_KEY_ID secret}"
+          : "${AWS_SECRET_ACCESS_KEY:?Missing the R2_SECRET_ACCESS_KEY secret}"
+          command -v aws
+      - name: Download and verify the release binaries
+        run: |
+          mkdir -p "dist/$TAG"
+          gh release download "$TAG" --pattern 'loadtable-*.tar.gz*' --pattern SHA256SUMS --dir "dist/$TAG"
+          (cd "dist/$TAG" && sha256sum --check SHA256SUMS)
+          ls -l "dist/$TAG"
+      - name: Refuse to change an object that is already published
+        run: |
+          prefix="loadtable/releases/$TAG"
+          for path in dist/"$TAG"/*; do
+            key="$prefix/$(basename "$path")"
+            if aws s3api head-object --bucket "$R2_BUCKET" --key "$key" --endpoint-url "$R2_ENDPOINT" >/dev/null 2>&1; then
+              aws s3 cp "s3://$R2_BUCKET/$key" existing-object --endpoint-url "$R2_ENDPOINT" --only-show-errors
+              cmp -s "$path" existing-object || { echo "Refusing to overwrite immutable object: $key"; exit 1; }
+            fi
+          done
+      - name: Upload the binaries, then the latest pointer
+        run: |
+          # Never sync --delete: older releases stay downloadable.
+          aws s3 cp "dist/$TAG/" "s3://$R2_BUCKET/loadtable/releases/$TAG/" --recursive \
+            --endpoint-url "$R2_ENDPOINT" --cache-control 'public,max-age=31536000,immutable' --only-show-errors
+          # Only move latest forward: republishing an older tag must not downgrade new installs.
+          current=$(curl -fsS "https://repo.osvauld.com/loadtable/latest" 2>/dev/null || true)
+          newest=$(printf '%s\n%s\n' "${current:-0.0.0}" "${TAG#v}" | sort -V | tail -n1)
+          if [ "$newest" = "${TAG#v}" ]; then
+            printf '%s\n' "${TAG#v}" > latest
+            aws s3 cp latest "s3://$R2_BUCKET/loadtable/latest" --endpoint-url "$R2_ENDPOINT" \
+              --content-type 'text/plain; charset=utf-8' --cache-control 'no-cache,max-age=0,must-revalidate'
+            echo "loadtable/latest -> ${TAG#v}"
+          else
+            echo "loadtable/latest stays at $current"
+          fi
+      - name: Check the public URLs
+        run: |
+          base="https://repo.osvauld.com/loadtable"
+          curl -fsSI "$base/releases/$TAG/SHA256SUMS" >/dev/null
+          for f in dist/"$TAG"/*.tar.gz; do curl -fsSI "$base/releases/$TAG/$(basename "$f")" >/dev/null; done
+          echo "latest: $(curl -fsS "$base/latest")"

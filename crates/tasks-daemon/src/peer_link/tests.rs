@@ -414,9 +414,9 @@ fn r322_the_repo_run_policy_names_the_ignored_files_that_travel() {
     let w = PeerWorld::new();
     let none = super::PolicyExtras.extras(&w.root_a);
     assert_eq!(none, Ok(Vec::new()), "no policy file means no extras");
-    std::fs::create_dir_all(w.root_a.join(".tasks")).unwrap();
+    std::fs::create_dir_all(w.root_a.join(".loadtable")).unwrap();
     std::fs::write(
-        w.root_a.join(".tasks/run-policy.toml"),
+        w.root_a.join(".loadtable/run-policy.toml"),
         "version = 1\n[sync]\nextra = [\"local.properties\", \"config/*.json\"]\n",
     )
     .unwrap();
@@ -428,7 +428,7 @@ fn r322_the_repo_run_policy_names_the_ignored_files_that_travel() {
         ])
     );
     std::fs::write(
-        w.root_a.join(".tasks/run-policy.toml"),
+        w.root_a.join(".loadtable/run-policy.toml"),
         "version = 1\n[sync]\nextra = [\"../x\"]\n",
     )
     .unwrap();

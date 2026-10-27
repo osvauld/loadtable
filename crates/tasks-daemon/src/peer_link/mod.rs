@@ -99,7 +99,7 @@ pub trait AddrLearner: Send + Sync {
 const ADDR_REFRESH: Duration = Duration::from_secs(600);
 
 /// Reads the files that must travel with a checkout beyond its git working tree from the repo's
-/// run policy (`[sync] extra` in `.tasks/run-policy.toml`). No policy file means none.
+/// run policy (`[sync] extra` in `.loadtable/run-policy.toml`). No policy file means none.
 pub struct PolicyExtras;
 
 impl tasks_peer::sync::ExtrasProvider for PolicyExtras {

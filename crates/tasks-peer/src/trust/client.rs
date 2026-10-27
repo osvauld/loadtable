@@ -34,7 +34,7 @@ impl<T: Transport> Transport for TrustedTransport<T> {
         let held = self.node.held_for(peer.as_str());
         if held.is_empty() {
             let e = TrustError::NotAuthorised(
-                "no live grant from this machine; pair with `tasks2 pair accept`".to_string(),
+                "no live grant from this machine; pair with `loadtable pair accept`".to_string(),
             );
             self.node.note_dial_refused(peer.as_str(), &e);
             return Err(PeerError::Refused(Refusal::Unauthorized {

@@ -403,9 +403,9 @@ fn r335_a_running_jobs_figures_show_in_the_status() {
 fn r337_the_daemons_own_disk_bytes_while_a_transfer_slot_is_held_are_counted() {
     let r = rig();
     let me = i32::try_from(std::process::id()).unwrap();
-    *r.table.table.lock().unwrap() = vec![proc_row(me, "tasks2d", 1 << 20, (100, 200))];
+    *r.table.table.lock().unwrap() = vec![proc_row(me, "loadtabled", 1 << 20, (100, 200))];
     let guard = r.sch.transfer_gate().enter(SyncPhase::Snapshot);
-    *r.table.table.lock().unwrap() = vec![proc_row(me, "tasks2d", 1 << 20, (1100, 5200))];
+    *r.table.table.lock().unwrap() = vec![proc_row(me, "loadtabled", 1 << 20, (1100, 5200))];
     drop(guard);
     let t = r.sch.status().transfer.unwrap();
     assert_eq!((t.inproc_read_bytes, t.inproc_write_bytes), (1000, 5000));

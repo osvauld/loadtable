@@ -1,4 +1,4 @@
-//! `tasks2`: the command line client of the tasks coordinator.
+//! `loadtable`: the command line client of the tasks coordinator.
 //!
 //! The library holds everything testable: argument parsing ([`args`]), the daemon [`client`]
 //! (a trait with a Unix-socket implementation and a [`fake`]), the [`commands`], and pure
@@ -77,7 +77,7 @@ pub fn real_client(
     };
     match DaemonConfig::resolve(&args, &|k| env(k)) {
         Ok(cfg) => {
-            let program = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("tasks2"));
+            let program = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("loadtable"));
             let mut sargs = vec!["daemon".to_string(), "serve".to_string()];
             if let Some(d) = &cli.state_dir {
                 sargs.push("--state-dir".into());
@@ -124,11 +124,11 @@ pub fn real_client(
 /// The text for `ui` and `mcp` in a build without them (R-199).
 pub fn not_built(name: &str) -> String {
     format!(
-        "tasks2: built without {name}: this binary has the daemon and the command line only; rebuild with `--features {name}`"
+        "loadtable: built without {name}: this binary has the daemon and the command line only; rebuild with `--features {name}`"
     )
 }
 
-/// Runs `tasks2 mcp`: the MCP server on stdin and stdout.
+/// Runs `loadtable mcp`: the MCP server on stdin and stdout.
 #[cfg(feature = "mcp")]
 fn run_mcp(cli: &Cli, deps: &Deps<'_>) -> i32 {
     let (client, _) = (deps.client_for)(cli);
@@ -141,7 +141,7 @@ fn run_mcp(_cli: &Cli, _deps: &Deps<'_>) -> i32 {
     error::EXIT_USAGE
 }
 
-/// Runs `tasks2 ui`: the desktop window over the daemon this shell resolves.
+/// Runs `loadtable ui`: the desktop window over the daemon this shell resolves.
 #[cfg(feature = "ui")]
 fn run_ui(cli: &Cli, deps: &Deps<'_>) -> i32 {
     let (client, _) = (deps.client_for)(cli);
@@ -156,7 +156,7 @@ fn run_ui(_cli: &Cli, _deps: &Deps<'_>) -> i32 {
     error::EXIT_USAGE
 }
 
-/// `tasks2 cache`: what the daemon of this shell would use, read from its configuration and the
+/// `loadtable cache`: what the daemon of this shell would use, read from its configuration and the
 /// machine, without starting it.
 fn cache_report(
     state_dir: Option<&Path>,
@@ -171,7 +171,7 @@ fn cache_report(
     let cfg = match DaemonConfig::resolve(&args, &|k| env(k)) {
         Ok(c) => c,
         Err(e) => {
-            let _ = writeln!(err, "tasks2: cannot work out the cache directory ({e})");
+            let _ = writeln!(err, "loadtable: cannot work out the cache directory ({e})");
             return error::EXIT_USAGE;
         }
     };
@@ -206,7 +206,7 @@ pub fn run_cli(args: &[String], out: &mut dyn Write, err: &mut dyn Write, deps: 
             return match tasks_daemon::entry::run(args) {
                 Ok(()) => error::EXIT_OK,
                 Err(e) => {
-                    let _ = writeln!(err, "tasks2 daemon: {e}");
+                    let _ = writeln!(err, "loadtable daemon: {e}");
                     error::EXIT_FAILURE
                 }
             };
@@ -236,7 +236,7 @@ pub fn run_cli(args: &[String], out: &mut dyn Write, err: &mut dyn Write, deps: 
             };
             // `built` is false here: a built front end returned above
             let _ = if built {
-                writeln!(err, "tasks2: the {name} front end failed to start")
+                writeln!(err, "loadtable: the {name} front end failed to start")
             } else {
                 writeln!(err, "{}", not_built(name))
             };
@@ -287,11 +287,11 @@ pub fn real_main() -> i32 {
         Ok(s) => Box::new(s),
         Err(_) => Box::new(runtime::NoSignals),
     };
-    let env = |k: &str| std::env::var(k).ok();
+    let env = |k: &str| tasks_core::names::env_or_old(&|v| std::env::var(v).ok(), k);
     let Ok(cwd) = std::env::current_dir() else {
         let _ = writeln!(
             std::io::stderr(),
-            "tasks2: the working directory is not readable"
+            "loadtable: the working directory is not readable"
         );
         return error::EXIT_FAILURE;
     };

@@ -71,7 +71,15 @@ fn spawn_spec_uses_allowlisted_env_and_job_id() {
     ];
     let spec = build_spawn_spec(&job(&dir, &["true"]), parent, &env_policy()).unwrap();
     let names: Vec<&str> = spec.env.iter().map(|(k, _)| k.as_str()).collect();
-    assert_eq!(names, ["CARGO_BUILD_JOBS", "PATH", "TASKS_JOB_ID"]);
+    assert_eq!(
+        names,
+        [
+            "CARGO_BUILD_JOBS",
+            "LOADTABLE_JOB_ID",
+            "PATH",
+            "TASKS_JOB_ID"
+        ]
+    );
     let mut empty = job(&dir, &["true"]);
     empty.argv.clear();
     assert!(matches!(

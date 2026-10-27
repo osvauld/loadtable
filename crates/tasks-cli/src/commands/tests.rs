@@ -69,7 +69,7 @@ fn r183_run_prints_the_submit_line_and_follows_the_log_to_stdout() {
     assert_eq!(r.out, "compiling\ndone\njob 7 passed (exit 0) owner=me\n");
     assert!(
         r.err
-            .starts_with("tasks: submitted job 7; cwd /w/repo; argv cargo test -p x;"),
+            .starts_with("loadtable: submitted job 7; cwd /w/repo; argv cargo test -p x;"),
         "{}",
         r.err
     );
@@ -158,7 +158,7 @@ fn detach_and_enqueue_print_the_id_and_do_not_follow() {
         let c = daemon(12, vec![], finished(12, Phase::Passed));
         let r = Harness::default().run(&c, args);
         assert_eq!((r.code, r.out.as_str()), (0, "12\n"), "{args:?}");
-        assert!(r.err.contains("tasks: submitted job 12;"));
+        assert!(r.err.contains("loadtable: submitted job 12;"));
         assert!(
             c.requests()
                 .iter()
@@ -216,7 +216,7 @@ fn a_queued_job_prints_what_it_waits_for_while_following() {
     assert_eq!(r.code, 0, "{}", r.err);
     assert!(
         r.err
-            .contains("tasks: job 4 waiting: compile slot held by job 2"),
+            .contains("loadtable: job 4 waiting: compile slot held by job 2"),
         "{}",
         r.err
     );
@@ -455,7 +455,7 @@ fn r099_ambiguity_says_where_to_look_and_not_to_resubmit() {
         r.err
     );
     assert!(
-        r.err.contains("tasks2 list --who me") && r.err.contains("Do NOT resubmit"),
+        r.err.contains("loadtable list --who me") && r.err.contains("Do NOT resubmit"),
         "{}",
         r.err
     );
@@ -472,7 +472,7 @@ fn r100_a_delivered_cancel_with_a_lost_reply_is_never_replayed() {
     let r = Harness::default().run(&c, &["cancel", "9"]);
     assert_eq!(r.code, 1);
     assert!(
-        r.err.contains("was not resent") && r.err.contains("tasks2 get 9"),
+        r.err.contains("was not resent") && r.err.contains("loadtable get 9"),
         "{}",
         r.err
     );
@@ -574,14 +574,14 @@ fn r191_the_escape_flag_travels_on_the_spec_and_the_environment_is_not_read() {
     );
     assert_eq!(r.code, 0, "{}", r.err);
     assert!(submitted_spec(&c).broad_test_escape);
-    // TASKS_BROAD_TEST is the daemon's policy now: setting it here changes nothing
+    // LOADTABLE_BROAD_TEST is the daemon's policy now: setting it here changes nothing
     let mut h = Harness::default();
-    h.env.insert("TASKS_BROAD_TEST".into(), "warn".into());
+    h.env.insert("LOADTABLE_BROAD_TEST".into(), "warn".into());
     let c = daemon(1, vec![], finished(1, Phase::Passed));
     let r = h.run(&c, &["enqueue", "--", "cargo", "test", "foo"]);
     assert_eq!(r.code, 0);
     assert!(!submitted_spec(&c).broad_test_escape);
-    assert!(!r.err.contains("TASKS_BROAD_TEST"), "{}", r.err);
+    assert!(!r.err.contains("LOADTABLE_BROAD_TEST"), "{}", r.err);
 }
 
 #[test]
@@ -722,7 +722,7 @@ fn anywhere_for_a_build_says_it_stays_local() {
 fn the_owner_comes_from_who_then_the_environment() {
     let c = daemon(1, vec![], finished(1, Phase::Passed));
     let mut h = Harness::default();
-    h.env.remove("TASKS_WHO");
+    h.env.remove("LOADTABLE_WHO");
     h.env.insert("USER".into(), "abe".into());
     h.run(&c, &["enqueue", "--", "x"]);
     h.run(&c, &["enqueue", "--who", "agent-1", "--", "x"]);
@@ -854,7 +854,7 @@ fn get_prints_one_job_or_its_json_and_a_missing_job_exits_4() {
         serde_json::from_str(&Harness::default().run(&c, &["get", "5", "--json"]).out).unwrap();
     assert_eq!(v["id"], 5);
     let r = Harness::default().run(&c, &["get", "6"]);
-    assert_eq!((r.code, r.err.as_str()), (4, "tasks2: no such job 6\n"));
+    assert_eq!((r.code, r.err.as_str()), (4, "loadtable: no such job 6\n"));
 }
 
 // logs
@@ -1017,7 +1017,7 @@ fn r231_admission_flags_a_shell_that_disagrees_with_the_daemon_about_the_lock_di
     );
     let v: serde_json::Value = serde_json::from_str(&h.run(&c, &["status", "--json"]).out).unwrap();
     assert_eq!(v["daemon"]["lock_dir"], "/state/slots");
-    assert!(h.run(&c, &["status"]).out.contains("daemon: tasks2d"));
+    assert!(h.run(&c, &["status"]).out.contains("daemon: loadtabled"));
 }
 
 #[test]
@@ -1111,7 +1111,7 @@ fn r188_execution_and_drain_print_one_line() {
             .out
             .contains("execution started")
     );
-    assert!(h.run(&c, &["drain"]).out.contains("`tasks2 resume`"));
+    assert!(h.run(&c, &["drain"]).out.contains("`loadtable resume`"));
     assert!(h.run(&c, &["resume"]).out.contains("resumed"));
     assert_eq!(
         c.requests(),
@@ -1278,7 +1278,7 @@ fn steps_submits_a_plan_and_lists_the_jobs() {
     assert_eq!(r.code, 0, "{}", r.err);
     assert_eq!(
         r.out,
-        "tasks: submitted plan 4 with 2 step(s)\n  build -> job 10\n  test -> job 11\n"
+        "loadtable: submitted plan 4 with 2 step(s)\n  build -> job 10\n  test -> job 11\n"
     );
     let Some(Request::SubmitPlan {
         owner,
@@ -1366,7 +1366,7 @@ fn suite_run_sends_the_suite_and_suite_list_reads_the_policy() {
 
     let mut h = Harness::default();
     h.fs.files.insert(
-        PathBuf::from("/w/repo/.tasks/run-policy.toml"),
+        PathBuf::from("/w/repo/.loadtable/run-policy.toml"),
         POLICY.into(),
     );
     h.fs.files
@@ -1382,7 +1382,7 @@ fn suite_run_sends_the_suite_and_suite_list_reads_the_policy() {
     let r = Harness::default().run(&c, &["policy", "show"]);
     assert_eq!(r.code, 4);
     assert!(
-        r.err.contains("no .tasks/run-policy.toml found"),
+        r.err.contains("no .loadtable/run-policy.toml found"),
         "{}",
         r.err
     );
@@ -1400,7 +1400,7 @@ command = ["cargo", "test", "-p", "p2pcore", "--lib"]
 fn r114_policy_suggest_asks_the_daemon_for_the_policys_recipes_on_this_machine() {
     let mut h = Harness::default();
     h.fs.files.insert(
-        PathBuf::from("/w/repo/.tasks/run-policy.toml"),
+        PathBuf::from("/w/repo/.loadtable/run-policy.toml"),
         POLICY.into(),
     );
     let c = Arc::new(FakeClient::from_fn(|req| match req {
@@ -1444,7 +1444,7 @@ fn r114_policy_suggest_asks_the_daemon_for_the_policys_recipes_on_this_machine()
 #[test]
 fn suggestions_render_from_a_history() {
     let loaded = tasks_policy::Loaded {
-        file: PathBuf::from("/w/repo/.tasks/run-policy.toml"),
+        file: PathBuf::from("/w/repo/.loadtable/run-policy.toml"),
         text: POLICY.into(),
         policy: tasks_policy::parse(POLICY, Path::new("p.toml")).unwrap(),
     };
@@ -1647,7 +1647,7 @@ fn r199_the_headless_build_keeps_the_command_line() {
     );
     let r = Harness::default().run(&never_called(), &["--version"]);
     assert_eq!(r.code, 0);
-    assert!(r.out.starts_with("tasks2 "));
+    assert!(r.out.starts_with("loadtable "));
     let r = Harness::default().run(&never_called(), &["bogus"]);
     assert_eq!(r.code, 2);
     assert!(
@@ -1815,7 +1815,7 @@ fn r343_no_command_has_a_flag_that_claims_the_short_lane() {
         }
     }
     let mut bad = Vec::new();
-    walk(&crate::args::Cli::command(), "tasks2", &mut bad);
+    walk(&crate::args::Cli::command(), "loadtable", &mut bad);
     assert!(bad.is_empty(), "{bad:?}");
     // and clap refuses one an agent invents
     let c = daemon(1, vec![], finished(1, Phase::Passed));
@@ -1872,7 +1872,7 @@ fn r368_submit_warnings_from_the_daemon_are_printed_by_the_cli() {
     assert_eq!(r.code, 0, "{}", r.err);
     assert!(
         r.err
-            .contains("tasks: warning: this builds every test target (policy: warn)"),
+            .contains("loadtable: warning: this builds every test target (policy: warn)"),
         "{}",
         r.err
     );
@@ -1994,7 +1994,7 @@ fn suite_request(h: &mut Harness) -> (Vec<Request>, String) {
         other => Err(ClientError::BadReply(format!("{other:?}"))),
     }));
     h.fs.files.insert(
-        PathBuf::from("/w/repo/.tasks/run-policy.toml"),
+        PathBuf::from("/w/repo/.loadtable/run-policy.toml"),
         SPLIT_POLICY.into(),
     );
     h.fs.files
@@ -2191,7 +2191,7 @@ fn r722_wait_gives_up_after_its_timeout_with_124_and_leaves_the_job_alone() {
     let r = Harness::default().run(&c, &["wait", "--timeout", "3", "9"]);
     assert_eq!(r.code, crate::error::EXIT_TIMED_OUT);
     assert!(r.err.contains("job 9 is untouched"), "{}", r.err);
-    assert!(r.err.contains("tasks2 logs 9"), "{}", r.err);
+    assert!(r.err.contains("loadtable logs 9"), "{}", r.err);
     assert!(c.requests().iter().all(is_read_only));
     let gets = c
         .requests()

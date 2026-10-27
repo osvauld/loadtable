@@ -77,350 +77,365 @@ const fn fm(
 
 /// Every setting. The committed sample lists exactly these keys with their defaults.
 const FIELDS: &[Field] = &[
-    f("slots.compile", "TASKS_COMPILE_SLOTS", Ty::Uint(1, 8), "2"),
-    f("slots.run", "TASKS_RUN_SLOTS", Ty::Uint(1, 16), "4"),
-    f("slots.offload", "TASKS_OFFLOAD_SLOTS", Ty::Uint(1, 16), "4"),
+    f(
+        "slots.compile",
+        "LOADTABLE_COMPILE_SLOTS",
+        Ty::Uint(1, 8),
+        "2",
+    ),
+    f("slots.run", "LOADTABLE_RUN_SLOTS", Ty::Uint(1, 16), "4"),
+    f(
+        "slots.offload",
+        "LOADTABLE_OFFLOAD_SLOTS",
+        Ty::Uint(1, 16),
+        "4",
+    ),
     f(
         "slots.transfer",
-        "TASKS_TRANSFER_SLOTS",
+        "LOADTABLE_TRANSFER_SLOTS",
         Ty::Uint(1, 4),
         "1",
     ),
-    f("slots.light", "TASKS_LIGHT_SLOTS", Ty::Uint(0, 16), "4"),
+    f("slots.light", "LOADTABLE_LIGHT_SLOTS", Ty::Uint(0, 16), "4"),
     f(
         "slots.short_lane",
-        "TASKS_SHORT_LANE_SLOTS",
+        "LOADTABLE_SHORT_LANE_SLOTS",
         Ty::Uint(0, 4),
         "1",
     ),
     f(
         "slots.short_job_max_secs",
-        "TASKS_SHORT_JOB_MAX_SECS",
+        "LOADTABLE_SHORT_JOB_MAX_SECS",
         Ty::Float(1.0, 600.0),
         "60",
     ),
     f(
         "slots.short_job_max_memory_mib",
-        "TASKS_SHORT_JOB_MAX_MEMORY_MIB",
+        "LOADTABLE_SHORT_JOB_MAX_MEMORY_MIB",
         Ty::Uint(16, 1_048_576),
         "1024",
     ),
     f(
         "queue.aging_mins",
-        "TASKS_QUEUE_AGING_MINS",
+        "LOADTABLE_QUEUE_AGING_MINS",
         Ty::OptUint(1, 10_080),
         "20",
     ),
     f(
         "cpu.compile_weight",
-        "TASKS_CPU_COMPILE_WEIGHT",
+        "LOADTABLE_CPU_COMPILE_WEIGHT",
         Ty::Uint(1, 10_000),
         "50",
     ),
     f(
         "cpu.run_weight",
-        "TASKS_CPU_RUN_WEIGHT",
+        "LOADTABLE_CPU_RUN_WEIGHT",
         Ty::Uint(1, 10_000),
         "200",
     ),
     f(
         "cpu.compile_nice",
-        "TASKS_CPU_COMPILE_NICE",
+        "LOADTABLE_CPU_COMPILE_NICE",
         Ty::Uint(0, 19),
         "10",
     ),
     fm(
         "pressure.compile.max_cpu",
-        "TASKS_COMPILE_MAX_CPU",
+        "LOADTABLE_COMPILE_MAX_CPU",
         Ty::OptFloat(0.0, 100.0),
         "40",
         "off",
     ),
     fm(
         "pressure.compile.max_io",
-        "TASKS_COMPILE_MAX_IO",
+        "LOADTABLE_COMPILE_MAX_IO",
         Ty::OptFloat(0.0, 100.0),
         "40",
         "off",
     ),
     f(
         "pressure.compile.max_memory",
-        "TASKS_COMPILE_MAX_MEMORY",
+        "LOADTABLE_COMPILE_MAX_MEMORY",
         Ty::Level,
         "normal",
     ),
     fm(
         "pressure.run.max_cpu",
-        "TASKS_RUN_MAX_CPU",
+        "LOADTABLE_RUN_MAX_CPU",
         Ty::OptFloat(0.0, 100.0),
         "80",
         "off",
     ),
     fm(
         "pressure.run.max_io",
-        "TASKS_RUN_MAX_IO",
+        "LOADTABLE_RUN_MAX_IO",
         Ty::OptFloat(0.0, 100.0),
         "80",
         "off",
     ),
     f(
         "pressure.run.max_memory",
-        "TASKS_RUN_MAX_MEMORY",
+        "LOADTABLE_RUN_MAX_MEMORY",
         Ty::Level,
         "normal",
     ),
     f(
         "pressure.offload.max_memory",
-        "TASKS_OFFLOAD_MAX_MEMORY",
+        "LOADTABLE_OFFLOAD_MAX_MEMORY",
         Ty::Level,
         "normal",
     ),
     fm(
         "pressure.transfer.max_io",
-        "TASKS_TRANSFER_MAX_IO",
+        "LOADTABLE_TRANSFER_MAX_IO",
         Ty::OptFloat(0.0, 100.0),
         "40",
         "off",
     ),
     fm(
         "attribution.trip_io_pct",
-        "TASKS_TRIP_IO_PCT",
+        "LOADTABLE_TRIP_IO_PCT",
         Ty::OptFloat(0.0, 100.0),
         "10",
         "off",
     ),
     fm(
         "attribution.trip_cpu_pct",
-        "TASKS_TRIP_CPU_PCT",
+        "LOADTABLE_TRIP_CPU_PCT",
         Ty::OptFloat(0.0, 100.0),
         "60",
         "off",
     ),
     f(
         "attribution.trip_interval_secs",
-        "TASKS_TRIP_INTERVAL_SECS",
+        "LOADTABLE_TRIP_INTERVAL_SECS",
         Ty::Uint(1, 86_400),
         "60",
     ),
     f(
         "attribution.sample_secs",
-        "TASKS_ATTRIB_SAMPLE_SECS",
+        "LOADTABLE_ATTRIB_SAMPLE_SECS",
         Ty::Uint(1, 600),
         "5",
     ),
     f(
         "memory.min_available_gib",
-        "TASKS_MIN_AVAILABLE_GIB",
+        "LOADTABLE_MIN_AVAILABLE_GIB",
         Ty::Float(0.0, 4096.0),
         "2",
     ),
     f(
         "memory.some_warn",
-        "TASKS_MEMORY_SOME_WARN",
+        "LOADTABLE_MEMORY_SOME_WARN",
         Ty::Float(0.0, 100.0),
         "10",
     ),
     f(
         "memory.some_critical",
-        "TASKS_MEMORY_SOME_CRITICAL",
+        "LOADTABLE_MEMORY_SOME_CRITICAL",
         Ty::Float(0.0, 100.0),
         "40",
     ),
     f(
         "memory.full_warn",
-        "TASKS_MEMORY_FULL_WARN",
+        "LOADTABLE_MEMORY_FULL_WARN",
         Ty::Float(0.0, 100.0),
         "5",
     ),
     f(
         "memory.full_critical",
-        "TASKS_MEMORY_FULL_CRITICAL",
+        "LOADTABLE_MEMORY_FULL_CRITICAL",
         Ty::Float(0.0, 100.0),
         "20",
     ),
     f(
         "disk.cache_reserve_gib",
-        "TASKS_CACHE_RESERVE_GIB",
+        "LOADTABLE_CACHE_RESERVE_GIB",
         Ty::Float(0.0, 100_000.0),
         "20",
     ),
     f(
         "disk.state_reserve_gib",
-        "TASKS_STATE_RESERVE_GIB",
+        "LOADTABLE_STATE_RESERVE_GIB",
         Ty::Float(0.0, 100_000.0),
         "1",
     ),
     f(
         "cache.sccache",
-        "TASKS_SCCACHE",
+        "LOADTABLE_SCCACHE",
         Ty::Choice(&["auto", "off"]),
         "auto",
     ),
     f(
         "cache.sccache_size_gib",
-        "TASKS_SCCACHE_SIZE_GIB",
+        "LOADTABLE_SCCACHE_SIZE_GIB",
         Ty::Uint(1, 100_000),
         "30",
     ),
     f(
         "runner.cancel_grace_ms",
-        "TASKS_CANCEL_GRACE_MS",
+        "LOADTABLE_CANCEL_GRACE_MS",
         Ty::Uint(100, 30_000),
         "300",
     ),
     f(
         "runner.wall_timeout_secs",
-        "TASKS_WALL_TIMEOUT_SECS",
+        "LOADTABLE_WALL_TIMEOUT_SECS",
         Ty::OptUint(1, 604_800),
         "off",
     ),
     f(
         "runner.idle_timeout_secs",
-        "TASKS_IDLE_TIMEOUT_SECS",
+        "LOADTABLE_IDLE_TIMEOUT_SECS",
         Ty::OptUint(1, 604_800),
         "off",
     ),
     f(
         "logs.soft_cap_mib",
-        "TASKS_LOG_SOFT_CAP_MIB",
+        "LOADTABLE_LOG_SOFT_CAP_MIB",
         Ty::Uint(1, 65_536),
         "64",
     ),
     f(
         "logs.hard_cap_mib",
-        "TASKS_LOG_HARD_CAP_MIB",
+        "LOADTABLE_LOG_HARD_CAP_MIB",
         Ty::Uint(1, 1_048_576),
         "1024",
     ),
     f(
         "retention.max_finished_jobs",
-        "TASKS_RETAIN_JOBS",
+        "LOADTABLE_RETAIN_JOBS",
         Ty::OptUint(10, 10_000_000),
         "20000",
     ),
     f(
         "retention.max_job_age_days",
-        "TASKS_RETAIN_JOB_DAYS",
+        "LOADTABLE_RETAIN_JOB_DAYS",
         Ty::OptUint(1, 3650),
         "60",
     ),
     f(
         "retention.max_sample_age_days",
-        "TASKS_RETAIN_SAMPLE_DAYS",
+        "LOADTABLE_RETAIN_SAMPLE_DAYS",
         Ty::OptUint(1, 3650),
         "365",
     ),
     f(
         "retention.max_samples_per_key",
-        "TASKS_RETAIN_SAMPLES_PER_KEY",
+        "LOADTABLE_RETAIN_SAMPLES_PER_KEY",
         Ty::OptUint(1, 100_000),
         "200",
     ),
     f(
         "sync.idle_days",
-        "TASKS_SYNC_IDLE_DAYS",
+        "LOADTABLE_SYNC_IDLE_DAYS",
         Ty::Uint(1, 3650),
         "7",
     ),
-    f("sync.gc_days", "TASKS_SYNC_GC_DAYS", Ty::Uint(1, 365), "7"),
+    f(
+        "sync.gc_days",
+        "LOADTABLE_SYNC_GC_DAYS",
+        Ty::Uint(1, 365),
+        "7",
+    ),
     f(
         "audit.retention_days",
-        "TASKS_AUDIT_RETENTION_DAYS",
+        "LOADTABLE_AUDIT_RETENTION_DAYS",
         Ty::OptUint(1, 3650),
         "90",
     ),
     f(
         "audit.checkpoint_every",
-        "TASKS_AUDIT_CHECKPOINT_EVERY",
+        "LOADTABLE_AUDIT_CHECKPOINT_EVERY",
         Ty::Uint(0, 1_000_000),
         "100",
     ),
     f(
         "cargo.max_jobs",
-        "TASKS_MAX_CARGO_JOBS",
+        "LOADTABLE_MAX_CARGO_JOBS",
         Ty::Uint(1, 16),
         "2",
     ),
     f(
         "cargo.jobs_when_busy",
-        "TASKS_CARGO_JOBS_WHEN_BUSY",
+        "LOADTABLE_CARGO_JOBS_WHEN_BUSY",
         Ty::Uint(1, 16),
         "1",
     ),
     f(
         "stuck.seconds",
-        "TASKS_STUCK_JOB_SECONDS",
+        "LOADTABLE_STUCK_JOB_SECONDS",
         Ty::Uint(30, 3600),
         "300",
     ),
     f(
         "alerts.slot_grace_secs",
-        "TASKS_ALERT_SLOT_GRACE_SECS",
+        "LOADTABLE_ALERT_SLOT_GRACE_SECS",
         Ty::Uint(0, 86_400),
         "120",
     ),
     f(
         "alerts.memory_secs",
-        "TASKS_ALERT_MEMORY_SECS",
+        "LOADTABLE_ALERT_MEMORY_SECS",
         Ty::Uint(0, 86_400),
         "60",
     ),
     f(
         "alerts.peer_grace_secs",
-        "TASKS_ALERT_PEER_GRACE_SECS",
+        "LOADTABLE_ALERT_PEER_GRACE_SECS",
         Ty::Uint(0, 86_400),
         "120",
     ),
     f(
         "alerts.audit_secs",
-        "TASKS_AUDIT_SECS",
+        "LOADTABLE_AUDIT_SECS",
         Ty::Uint(5, 86_400),
         "300",
     ),
     f(
         "daemon.tick_ms",
-        "TASKS_TICK_MS",
+        "LOADTABLE_TICK_MS",
         Ty::Uint(50, 60_000),
         "1000",
     ),
     f(
         "daemon.nofile_target",
-        "TASKS_NOFILE_TARGET",
+        "LOADTABLE_NOFILE_TARGET",
         Ty::Uint(256, 1_048_576),
         "65536",
     ),
     f(
         "submit.broad_test",
-        "TASKS_BROAD_TEST",
+        "LOADTABLE_BROAD_TEST",
         Ty::Choice(&["refuse", "warn"]),
         "refuse",
     ),
     f(
         "placement.peer_wait_secs",
-        "TASKS_PEER_WAIT_SECS",
+        "LOADTABLE_PEER_WAIT_SECS",
         Ty::Uint(0, 86_400),
         "600",
     ),
     f(
         "power.keep_awake",
-        "TASKS_KEEP_AWAKE",
+        "LOADTABLE_KEEP_AWAKE",
         Ty::Choice(&["on", "off"]),
         "on",
     ),
     f(
         "power.keep_awake_linger_secs",
-        "TASKS_KEEP_AWAKE_LINGER_SECS",
+        "LOADTABLE_KEEP_AWAKE_LINGER_SECS",
         Ty::Uint(0, 3600),
         "120",
     ),
     f(
         "power.peer_jobs_on_battery",
-        "TASKS_PEER_JOBS_ON_BATTERY",
+        "LOADTABLE_PEER_JOBS_ON_BATTERY",
         Ty::Choice(&["false", "true"]),
         "false",
     ),
-    f("machine.devices", "TASKS_DEVICES", Ty::List, ""),
-    f("machine.tools", "TASKS_TOOLS", Ty::List, ""),
+    f("machine.devices", "LOADTABLE_DEVICES", Ty::List, ""),
+    f("machine.tools", "LOADTABLE_TOOLS", Ty::List, ""),
 ];
 
 /// A parsed value.
@@ -1084,7 +1099,7 @@ impl MachinePolicy {
     /// The text of a sample file listing every key at its default.
     pub fn sample_text() -> String {
         let mut out = String::from(
-            "# tasks2 machine policy. Every line shows the default; uncomment to change.\n\
+            "# loadtable machine policy. Every line shows the default; uncomment to change.\n\
              # Environment variables of the daemon win over this file.\n\
              # A bad value refuses the whole file and the daemon runs on the defaults.\n",
         );
@@ -1163,7 +1178,7 @@ mod tests {
         assert_eq!(p.compile_slots(), 3);
         assert_eq!(p.source_of("slots.compile"), Some(Source::File));
         assert!(p.file_loaded);
-        let p = MachinePolicy::from_text(Some(file), &env1("TASKS_COMPILE_SLOTS", "5"));
+        let p = MachinePolicy::from_text(Some(file), &env1("LOADTABLE_COMPILE_SLOTS", "5"));
         assert_eq!(p.compile_slots(), 5);
         assert_eq!(p.source_of("slots.compile"), Some(Source::Env));
         assert_eq!(p.source_of("slots.run"), Some(Source::File));
@@ -1188,10 +1203,10 @@ mod tests {
         // a bad environment value is ignored, named, and the file value stays
         let p = MachinePolicy::from_text(
             Some("[slots]\ncompile = 3\n"),
-            &env1("TASKS_COMPILE_SLOTS", "0"),
+            &env1("LOADTABLE_COMPILE_SLOTS", "0"),
         );
         assert_eq!(p.compile_slots(), 3);
-        assert!(p.problems[0].contains("TASKS_COMPILE_SLOTS"));
+        assert!(p.problems[0].contains("LOADTABLE_COMPILE_SLOTS"));
     }
 
     // R-219
@@ -1303,7 +1318,7 @@ mod tests {
         let off = MachinePolicy::from_text(Some("[audit]\nretention_days = \"off\"\n"), &no_env);
         assert!(off.problems.is_empty(), "{:?}", off.problems);
         assert_eq!(off.audit_retention(), None);
-        let env = MachinePolicy::from_text(None, &env1("TASKS_AUDIT_RETENTION_DAYS", "30"));
+        let env = MachinePolicy::from_text(None, &env1("LOADTABLE_AUDIT_RETENTION_DAYS", "30"));
         assert_eq!(
             env.audit_retention(),
             Some(Duration::from_secs(30 * 86_400))
@@ -1328,7 +1343,7 @@ mod tests {
                 Duration::from_secs(30 * 86_400)
             )
         );
-        let env = MachinePolicy::from_text(None, &env1("TASKS_SYNC_IDLE_DAYS", "3"));
+        let env = MachinePolicy::from_text(None, &env1("LOADTABLE_SYNC_IDLE_DAYS", "3"));
         assert_eq!(env.sync_retention().idle, Duration::from_secs(3 * 86_400));
         let bad = MachinePolicy::from_text(Some("[sync]\nidle_days = 0\n"), &no_env);
         assert!(!bad.problems.is_empty());
@@ -1380,7 +1395,7 @@ mod tests {
         );
         assert!(all.contains("refused as a whole"), "{all}");
         // the grace is an ordinary setting with an environment override
-        let p = MachinePolicy::from_text(None, &env1("TASKS_ALERT_PEER_GRACE_SECS", "5"));
+        let p = MachinePolicy::from_text(None, &env1("LOADTABLE_ALERT_PEER_GRACE_SECS", "5"));
         assert_eq!(p.peer_grace_secs(), 5);
         assert_eq!(MachinePolicy::defaults().peer_grace_secs(), 120);
     }
