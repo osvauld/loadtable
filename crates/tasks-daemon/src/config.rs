@@ -197,6 +197,9 @@ impl DaemonConfig {
     }
 }
 
+/// How long [`PidLock::acquire`] waits for a lock held under its own pid to be let go.
+const OWN_PID_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Holds the exclusive flock on the pid file for the daemon's lifetime. The file is never
 /// deleted, so its inode is stable for anyone watching the lock.
 #[derive(Debug)]
@@ -218,18 +221,29 @@ impl PidLock {
             .write(true)
             .open(path)
             .map_err(|e| DaemonError::io(path, e))?;
-        match flock(&file, FlockOperation::NonBlockingLockExclusive) {
-            Ok(()) => {}
-            Err(rustix::io::Errno::WOULDBLOCK) => {
-                let mut text = String::new();
-                let _ = file.read_to_string(&mut text);
-                let pid = text.trim().parse::<u32>().ok();
-                return Err(DaemonError::AlreadyRunning {
-                    pid,
-                    path: path.to_path_buf(),
-                });
+        let t0 = std::time::Instant::now();
+        loop {
+            match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+                Ok(()) => break,
+                Err(rustix::io::Errno::WOULDBLOCK) => {
+                    let mut text = String::new();
+                    let _ = file.seek(SeekFrom::Start(0));
+                    let _ = file.read_to_string(&mut text);
+                    let pid = text.trim().parse::<u32>().ok();
+                    // Held under our own pid: a lock this process just dropped can still be held
+                    // by a child forked a moment ago, until it execs (close-on-exec acts only
+                    // then). That clears in milliseconds; a lock we really still hold does not.
+                    if pid == Some(std::process::id()) && t0.elapsed() < OWN_PID_LOCK_WAIT {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        continue;
+                    }
+                    return Err(DaemonError::AlreadyRunning {
+                        pid,
+                        path: path.to_path_buf(),
+                    });
+                }
+                Err(e) => return Err(DaemonError::io(path, std::io::Error::from(e))),
             }
-            Err(e) => return Err(DaemonError::io(path, std::io::Error::from(e))),
         }
         file.set_len(0).map_err(|e| DaemonError::io(path, e))?;
         file.seek(SeekFrom::Start(0))
@@ -332,6 +346,8 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         }
         drop(first);
+        // taken again at once, even while a child another test forks holds a copy of the
+        // descriptor for a moment (the own-pid wait in `acquire`)
         let again = PidLock::acquire(&path).unwrap();
         drop(again);
         let _ = std::fs::remove_dir_all(&dir);

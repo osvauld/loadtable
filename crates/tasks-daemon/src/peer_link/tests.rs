@@ -370,7 +370,12 @@ fn r173_an_unreachable_peer_is_never_success_it_is_interrupted_after_the_grace()
     w.net.set_down(&w.nixos, true);
     let link = w.link();
     link.resume(&rec, &w.dir.path().join("x.log")).unwrap();
-    std::thread::sleep(Duration::from_millis(30));
+    // the grace runs from the first failed attempt; a fixed sleep let the clock jump before it
+    // on a busy machine, so the grace started after the jump and never ran out
+    until(
+        "the link noticed the peer is gone",
+        || matches!(link.poll(rec.id), ForwardPoll::Active(p) if p.mirror.contains("link lost")),
+    );
     link.advance_clock(Duration::from_secs(600));
     let end = poll_until_done(&link, rec.id);
     assert_eq!(end.phase, Phase::Interrupted);

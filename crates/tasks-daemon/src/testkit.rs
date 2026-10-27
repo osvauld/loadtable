@@ -114,10 +114,16 @@ impl Disk for FakeMachine {
 #[derive(Default)]
 pub struct FakeProcs {
     inner: Mutex<ProcState>,
+    /// Signalled when `paused` or `parked` changes.
+    changed: std::sync::Condvar,
 }
 
 #[derive(Default)]
 struct ProcState {
+    /// Runner threads stop in `peek_exit` (the first step of each runner loop) until resumed.
+    paused: bool,
+    /// Runner threads parked by `paused`.
+    parked: usize,
     next: i32,
     procs: BTreeMap<i32, Proc>,
     spawned: Vec<SpawnSpec>,
@@ -176,6 +182,31 @@ impl FakeProcs {
         if let Some(p) = lock(&self.inner).procs.get_mut(&pgid) {
             p.exit = Some(code);
         }
+    }
+    /// Parks the runner threads of the running jobs and returns once `jobs` of them are parked:
+    /// from then on no runner reports figures or ends a job until [`FakeProcs::resume`]. For
+    /// tests that script a running job's samples themselves; the runner's own two-second
+    /// samples would land on the same fake instants and replace them.
+    pub fn pause(&self, jobs: usize) {
+        let mut st = lock(&self.inner);
+        st.paused = true;
+        let t0 = Instant::now();
+        while st.parked < jobs {
+            assert!(
+                t0.elapsed() < Duration::from_secs(5),
+                "timed out waiting for {jobs} runner(s) to park"
+            );
+            st = self
+                .changed
+                .wait_timeout(st, Duration::from_millis(10))
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+    }
+    /// Lets parked runner threads go on.
+    pub fn resume(&self) {
+        lock(&self.inner).paused = false;
+        self.changed.notify_all();
     }
     pub fn set_cpu(&self, pgid: i32, cpu: f64) {
         if let Some(p) = lock(&self.inner).procs.get_mut(&pgid) {
@@ -265,10 +296,19 @@ impl Processes for FakeProcs {
         }
     }
     fn peek_exit(&self, child: &Child) -> Result<Option<i32>, PlatformError> {
-        Ok(lock(&self.inner)
-            .procs
-            .get(&child.group.pgid)
-            .and_then(|p| p.exit))
+        let mut st = lock(&self.inner);
+        if st.paused {
+            st.parked += 1;
+            self.changed.notify_all();
+            while st.paused {
+                st = self
+                    .changed
+                    .wait(st)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+            st.parked -= 1;
+        }
+        Ok(st.procs.get(&child.group.pgid).and_then(|p| p.exit))
     }
     fn try_wait(&self, child: &Child) -> Result<Option<i32>, PlatformError> {
         self.peek_exit(child)
@@ -664,20 +704,34 @@ impl Rig {
 
     /// Waits until the job is running (its process spawned and recorded).
     pub fn until_running(&self, id: JobId) {
-        self.until("job running", || {
-            self.store.get(id).unwrap().unwrap().phase == tasks_core::Phase::Running
-        });
+        let t0 = Instant::now();
+        loop {
+            let phase = self.phase(id);
+            if phase == tasks_core::Phase::Running {
+                return;
+            }
+            assert!(
+                !phase.is_terminal() && t0.elapsed() < Duration::from_secs(5),
+                "job {} never seen running; it is {phase:?} (wait: {:?})",
+                id.0,
+                self.record(id).wait_text
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
 
-    /// Ticks and waits for the job to reach a terminal phase.
+    /// Ticks and waits for the job to reach a terminal phase and its runner thread to be done
+    /// with it.
     pub fn until_done(&self, id: JobId) -> tasks_core::Phase {
+        // The terminal write is visible before the thread's last steps: the rows that follow it
+        // (the audit row, the per-target samples), the slot and metrics release and, last, its
+        // removal from `running`. Waiting for that removal covers them all; a fixed sleep did
+        // not on a busy machine (a status read after it still counted the job, R-609).
         self.until("job done", || {
             self.sch.tick();
             self.store.get(id).unwrap().unwrap().phase.is_terminal()
+                && !lock(&self.sch.running).contains_key(&id)
         });
-        // The terminal write is visible before the rows that follow it (the audit row, the
-        // per-target samples) are written; a busy machine made tests that read them race.
-        std::thread::sleep(Duration::from_millis(10));
         self.phase(id)
     }
 
