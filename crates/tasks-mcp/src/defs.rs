@@ -32,7 +32,7 @@ fn id_prop(what: &str) -> Value {
 }
 
 fn who_prop() -> Value {
-    json!({"type": "string", "description": "Your unique agent name, recorded as the job owner (letters, digits, '.', '_', '-'). Default: $TASKS_WHO, then $USER of the MCP server."})
+    json!({"type": "string", "description": "Your unique agent name, recorded as the job owner (letters, digits, '.', '_', '-'). Default: $LOADTABLE_WHO, then $USER of the MCP server."})
 }
 
 fn cwd_prop() -> Value {
@@ -89,7 +89,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "submit",
-            description: "Queue one command through the shared build/test queue and return its job id at once (use wait or logs afterwards). Same rules as `tasks2 run`: a broad `cargo test` (name filter without --lib/--test) is refused unless broad_test is true; a `bash -c` script of several commands is refused unless allow_script is true (use submit_steps or run_suite); the personal phone is never used.",
+            description: "Queue one command through the shared build/test queue and return its job id at once (use wait or logs afterwards). Same rules as `loadtable run`: a broad `cargo test` (name filter without --lib/--test) is refused unless broad_test is true; a `bash -c` script of several commands is refused unless allow_script is true (use submit_steps or run_suite); the personal phone is never used.",
             input_schema: object(
                 json!({
                     "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Program and arguments, e.g. [\"cargo\",\"test\",\"-p\",\"tasks-mcp\"]."},
@@ -130,7 +130,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "run_suite",
-            description: "Queue a suite of the repo's run policy (.tasks/run-policy.toml) as a plan. Returns the plan id and one job id per step.",
+            description: "Queue a suite of the repo's run policy (.loadtable/run-policy.toml) as a plan. Returns the plan id and one job id per step.",
             input_schema: object(
                 json!({
                     "name": {"type": "string", "description": "The suite name."},

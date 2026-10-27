@@ -1,9 +1,9 @@
-# Cgroup delegation for `tasks2d` (worker and laptop)
+# Cgroup delegation for `loadtabled` (worker and laptop)
 
 Design §9 "Attribution of stalls". With a delegated cgroup subtree the daemon puts every job
 in its own cgroup (`tasks.slice/job-<id>`), plus `tasks.slice/transfer` for sync work, and reads
 exact disk bytes, peak memory, CPU time and stall times from it. Without delegation the daemon
-still works: it keeps process groups, `tasks2 status` says
+still works: it keeps process groups, `loadtable status` says
 `attribution: process tree (no cgroup delegation: <reason>)`, and the per-job figures are summed
 over the job's process tree (approximate, and no stall times).
 
@@ -12,8 +12,8 @@ needs the daemon to run as root.
 
 ## What the daemon needs
 
-1. `Delegate=yes` on the `tasks2d` user service, so systemd hands the service's cgroup to it.
-   `tasks2d install` now renders this (and `DelegateSubgroup=daemon`, which starts the daemon
+1. `Delegate=yes` on the `loadtabled` user service, so systemd hands the service's cgroup to it.
+   `loadtabled install` now renders this (and `DelegateSubgroup=daemon`, which starts the daemon
    in its own `daemon` leaf; systemd older than 254 ignores that line with a warning).
 2. The **user manager** must itself own the controllers `io`, `memory` and `cpu`. Most distributions
    delegate only `pids memory cpu` to `user@.service`, so **`io` is missing by default**; without it
@@ -34,26 +34,26 @@ Root steps, in `nix/taskworker-host.nix` (or any module of the worker's configur
 systemd.services."user@".serviceConfig.Delegate = "cpu cpuset io memory pids";
 ```
 
-Then the user service. If the worker runs `tasks2d` as a systemd *user* service defined in the
+Then the user service. If the worker runs `loadtabled` as a systemd *user* service defined in the
 NixOS configuration:
 
 ```nix
-systemd.user.services.tasks2d.serviceConfig = {
+systemd.user.services.loadtabled.serviceConfig = {
   Delegate = "yes";
   DelegateSubgroup = "daemon";   # systemd >= 254; harmless warning before that
 };
 ```
 
-If the unit comes from `tasks2d install` instead, delete the old
-`~/.config/systemd/user/tasks2d.service` first (install never overwrites a different file) and run
-`tasks2d install` again, or add the two lines to the `[Service]` section by hand.
+If the unit comes from `loadtabled install` instead, delete the old
+`~/.config/systemd/user/loadtabled.service` first (install never overwrites a different file) and run
+`loadtabled install` again, or add the two lines to the `[Service]` section by hand.
 
 Apply and restart:
 
 ```sh
 sudo nixos-rebuild switch
 systemctl --user daemon-reload
-systemctl --user restart tasks2d     # only when no job is running: jobs do not survive a restart
+systemctl --user restart loadtabled     # only when no job is running: jobs do not survive a restart
 ```
 
 A reboot or `loginctl terminate-user $USER` + login is needed once for a changed `user@.service`
@@ -69,20 +69,20 @@ sudo mkdir -p /etc/systemd/system/user@.service.d
 printf '[Service]\nDelegate=cpu cpuset io memory pids\n' | sudo tee /etc/systemd/system/user@.service.d/delegate.conf
 sudo systemctl daemon-reload            # takes effect at the next login of the user manager
 
-# 2. the tasks2d unit
-mv ~/.config/systemd/user/tasks2d.service ~/.config/systemd/user/tasks2d.service.old   # install won't overwrite
-tasks2d install                         # renders Delegate=yes and DelegateSubgroup=daemon
+# 2. the loadtabled unit
+mv ~/.config/systemd/user/loadtabled.service ~/.config/systemd/user/loadtabled.service.old   # install won't overwrite
+loadtabled install                         # renders Delegate=yes and DelegateSubgroup=daemon
 systemctl --user daemon-reload
 ```
 
-Restart `tasks2d` when idle (`tasks2 drain`, wait for running jobs, then
-`systemctl --user restart tasks2d`).
+Restart `loadtabled` when idle (`loadtable drain`, wait for running jobs, then
+`systemctl --user restart loadtabled`).
 
 ## How to verify
 
 ```sh
 # the unit asks for delegation
-systemctl --user show tasks2d -p Delegate -p DelegateSubgroup
+systemctl --user show loadtabled -p Delegate -p DelegateSubgroup
 #   Delegate=yes            DelegateSubgroup=daemon
 
 # the user manager owns io, memory and cpu
@@ -90,14 +90,14 @@ cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.c
 #   must list: cpu io memory pids (cpuset is optional)
 
 # the service's cgroup and what the daemon enabled in it
-CG=$(systemctl --user show tasks2d -p ControlGroup --value)
+CG=$(systemctl --user show loadtabled -p ControlGroup --value)
 cat /sys/fs/cgroup$CG/cgroup.controllers
 cat /sys/fs/cgroup$CG/cgroup.subtree_control      # +io +memory +cpu as "cpu io memory"
 ls /sys/fs/cgroup$CG                              # daemon/  tasks.slice/  (tasks.slice/transfer)
 cat /sys/fs/cgroup$CG/tasks.slice/cgroup.subtree_control
 
 # the daemon's own verdict
-tasks2 status | grep attribution
+loadtable status | grep attribution
 #   attribution: exact cgroup (/sys/fs/cgroup/.../tasks.slice; controllers io,memory,cpu)
 ```
 

@@ -7,7 +7,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 /// Policy file location relative to the repo root.
-pub const POLICY_PATH: &str = ".tasks/run-policy.toml";
+pub const POLICY_PATH: &str = ".loadtable/run-policy.toml";
+/// Its location before the rename to LoadTable, still read when the new one is absent (R-804).
+pub const OLD_POLICY_PATH: &str = ".tasks/run-policy.toml";
 
 /// The file system operations loading needs.
 pub trait PolicyFs {
@@ -106,9 +108,11 @@ impl PolicyFs for RealFs {
 /// policy file. The root itself is checked; nothing above it is.
 pub fn find_policy(fs: &dyn PolicyFs, cwd: &Path) -> Result<PathBuf, PolicyError> {
     for dir in cwd.ancestors() {
-        let candidate = dir.join(POLICY_PATH);
-        if fs.exists(&candidate) {
-            return Ok(candidate);
+        for rel in [POLICY_PATH, OLD_POLICY_PATH] {
+            let candidate = dir.join(rel);
+            if fs.exists(&candidate) {
+                return Ok(candidate);
+            }
         }
         if fs.exists(&dir.join(".git")) {
             break;
@@ -187,6 +191,25 @@ mod tests {
         let l = load(&fs, Path::new("/r/crates/x/src")).unwrap();
         assert_eq!(l.file, Path::new("/r/.tasks/run-policy.toml"));
         assert_eq!(l.policy.suites.len(), 1);
+    }
+
+    #[test]
+    fn r804_the_loadtable_policy_wins_and_the_tasks_one_is_still_read() {
+        let mut fs = FakeFs::default();
+        fs.files
+            .insert("/r/.tasks/run-policy.toml".into(), OK.into());
+        fs.dirs.push("/r/.git".into());
+        let l = load(&fs, Path::new("/r/a")).unwrap();
+        assert_eq!(l.file, Path::new("/r/.tasks/run-policy.toml"));
+        fs.files
+            .insert("/r/.loadtable/run-policy.toml".into(), OK.into());
+        let l = load(&fs, Path::new("/r/a")).unwrap();
+        assert_eq!(l.file, Path::new("/r/.loadtable/run-policy.toml"));
+        // a nearer old file still wins over a farther new one: the nearest directory decides
+        fs.files
+            .insert("/r/a/.tasks/run-policy.toml".into(), OK.into());
+        let l = load(&fs, Path::new("/r/a")).unwrap();
+        assert_eq!(l.file, Path::new("/r/a/.tasks/run-policy.toml"));
     }
 
     #[test]

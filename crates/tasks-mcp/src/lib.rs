@@ -28,7 +28,7 @@ pub fn run_stdio(daemon: Arc<dyn Daemon>, config: Config) -> i32 {
     match server.serve(stdin.lock(), std::io::stdout()) {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("tasks mcp: {e}");
+            eprintln!("loadtable mcp: {e}");
             1
         }
     }

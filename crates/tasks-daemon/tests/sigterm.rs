@@ -1,4 +1,4 @@
-//! R-685: an idle `tasks2d` exits cleanly on SIGTERM, with its socket file removed.
+//! R-685: an idle `loadtabled` exits cleanly on SIGTERM, with its socket file removed.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -11,7 +11,7 @@ fn r685_an_idle_tasks2d_exits_on_sigterm() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let state = dir.join("state");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_tasks2d"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_loadtabled"))
         .arg("serve")
         .arg("--state-dir")
         .arg(&state)

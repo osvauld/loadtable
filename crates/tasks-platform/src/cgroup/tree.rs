@@ -242,7 +242,7 @@ pub(super) fn setup_native() -> Result<CgroupTree, String> {
     let own = Path::new(ROOT).join(delegated_root(&rel).trim_start_matches('/'));
     CgroupTree::prepare(Box::new(super::RealFs), &own, std::process::id()).map_err(|e| {
         format!(
-            "{e}; run tasks2d as a systemd user service with Delegate=yes (see deploy/v2/worker-unit.md)"
+            "{e}; run loadtabled as a systemd user service with Delegate=yes (see deploy/v2/worker-unit.md)"
         )
     })
 }
@@ -278,22 +278,23 @@ mod tests {
     #[test]
     fn r324_a_service_started_in_its_daemon_leaf_delegates_the_parent() {
         assert_eq!(
-            delegated_root("/a/b/tasks2d.service/daemon"),
-            "/a/b/tasks2d.service"
+            delegated_root("/a/b/loadtabled.service/daemon"),
+            "/a/b/loadtabled.service"
         );
         assert_eq!(
-            delegated_root("/a/b/tasks2d.service"),
-            "/a/b/tasks2d.service"
+            delegated_root("/a/b/loadtabled.service"),
+            "/a/b/loadtabled.service"
         );
         assert_eq!(delegated_root("/daemon"), "/daemon");
     }
 
     #[test]
     fn self_cgroup_line_is_found() {
-        let text = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/tasks2d.service\n";
+        let text =
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/loadtabled.service\n";
         assert_eq!(
             parse_self_cgroup(text).as_deref(),
-            Some("/user.slice/user-1000.slice/user@1000.service/app.slice/tasks2d.service")
+            Some("/user.slice/user-1000.slice/user@1000.service/app.slice/loadtabled.service")
         );
         assert_eq!(parse_self_cgroup("1:name=x:/a\n"), None);
     }

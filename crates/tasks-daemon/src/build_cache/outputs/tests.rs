@@ -59,7 +59,10 @@ fn r402_a_local_checkout_gets_a_target_link_keyed_by_its_canonical_path() {
     let key = sha_hex(root.as_os_str().as_encoded_bytes());
     assert_eq!(
         real,
-        fx.cache().join("tasks2/checkouts").join(key).join("target")
+        fx.cache()
+            .join("loadtable/checkouts")
+            .join(key)
+            .join("target")
     );
     assert!(real.is_dir(), "the cache directory exists");
     // a symlinked path to the same checkout lands on the same directory
@@ -83,7 +86,7 @@ fn r402_a_synced_copy_is_keyed_by_peer_and_checkout_and_the_link_sits_in_the_tre
     assert_eq!(
         real,
         fx.cache()
-            .join("tasks2/checkouts/peer/laptop-node/aa11/target")
+            .join("loadtable/checkouts/peer/laptop-node/aa11/target")
     );
     // another peer's copy of a same-named checkout never shares it
     let other = fx.synced("mac-node", "aa11");
@@ -132,7 +135,7 @@ fn r403_an_existing_directory_is_preserved_and_reported_not_cache_backed() {
         "local"
     );
     assert!(
-        !fx.cache().join("tasks2").exists(),
+        !fx.cache().join("loadtable").exists(),
         "nothing created in the cache"
     );
 }
@@ -258,7 +261,7 @@ fn r402_an_independent_nested_workspace_gets_its_own_target() {
     let a = link_target(&root.join("target"));
     let b = link_target(&nested.join("target"));
     assert_ne!(a, b);
-    assert!(b.starts_with(fx.cache().join("tasks2/checkouts")));
+    assert!(b.starts_with(fx.cache().join("loadtable/checkouts")));
 }
 
 #[test]

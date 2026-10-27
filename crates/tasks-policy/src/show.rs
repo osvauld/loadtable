@@ -1,4 +1,4 @@
-//! `tasks2 policy show`: a readable rendering of the effective policy.
+//! `loadtable policy show`: a readable rendering of the effective policy.
 
 use crate::error::PolicyError;
 use crate::model::{Policy, SplitMode};

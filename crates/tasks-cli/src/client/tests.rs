@@ -582,7 +582,7 @@ fn a_daemon_that_exits_before_listening_is_reported_with_its_log() {
         program: PathBuf::from("/bin/sh"),
         args: vec![
             "-c".into(),
-            "echo 'tasks2d: cannot open the ledger' >&2; exit 3".into(),
+            "echo 'loadtabled: cannot open the ledger' >&2; exit 3".into(),
         ],
         log: dir.join("daemon.log"),
         socket: dir.join("s"),
@@ -625,7 +625,7 @@ fn r231_the_client_resolves_the_daemons_directories_and_ignores_tmpdir() {
     let (_, lock) = crate::real_client(&cli, &env);
     assert_eq!(
         lock,
-        Some(PathBuf::from("/home/u/.local/state/tasks2/slots"))
+        Some(PathBuf::from("/home/u/.local/state/loadtable/slots"))
     );
     let cli = crate::args::Cli {
         state_dir: Some("/srv/t".into()),
@@ -635,7 +635,10 @@ fn r231_the_client_resolves_the_daemons_directories_and_ignores_tmpdir() {
     assert_eq!(lock, Some(PathBuf::from("/srv/t/slots")));
     // the socket is where the daemon binds it
     let cfg = DaemonConfigProbe::socket(&env);
-    assert_eq!(cfg, PathBuf::from("/home/u/.local/state/tasks2/tasks.sock"));
+    assert_eq!(
+        cfg,
+        PathBuf::from("/home/u/.local/state/loadtable/tasks.sock")
+    );
     // no HOME: every call fails with the setup error, nothing is guessed
     let (c, lock) = crate::real_client(&cli_default(), &|_| None);
     assert_eq!(lock, None);
@@ -679,7 +682,7 @@ fn svc_starter(
 ) -> ServiceStarter<tasks_platform::fake::FakePlatform> {
     ServiceStarter {
         service: p.clone(),
-        name: "tasks2d".into(),
+        name: "loadtabled".into(),
         manager: "systemd",
         fallback,
         socket: sock.to_path_buf(),
@@ -695,7 +698,7 @@ fn r682_an_installed_stopped_service_is_started_by_the_manager_not_spawned() {
     let (fb, fb_calls) = starter(&sock, Ok(()));
     let _l = UnixListener::bind(&sock).unwrap(); // the service comes up
     svc_starter(&p, fb, &sock).start().unwrap();
-    assert_eq!(*p.service_starts.lock().unwrap(), ["tasks2d"]);
+    assert_eq!(*p.service_starts.lock().unwrap(), ["loadtabled"]);
     assert_eq!(fb_calls.load(Ordering::SeqCst), 0, "no second daemon");
 }
 

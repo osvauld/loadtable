@@ -166,7 +166,7 @@ mod tests {
 
     #[test]
     fn r612_the_assertion_shows_in_pmset_and_goes_away() {
-        let name = "tasks2d test assertion (R-612)";
+        let name = "loadtabled test assertion (R-612)";
         let g = inhibit(name).unwrap();
         let held = Command::new("/usr/bin/pmset")
             .args(["-g", "assertions"])

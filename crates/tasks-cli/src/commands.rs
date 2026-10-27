@@ -76,11 +76,11 @@ pub fn execute(ctx: &mut Ctx<'_>, cmd: &Command) -> i32 {
     match dispatch(ctx, cmd) {
         Ok(code) => code,
         Err(CliError::Pipe) => {
-            let _ = writeln!(ctx.err, "tasks: standard output was closed; stopping");
+            let _ = writeln!(ctx.err, "loadtable: standard output was closed; stopping");
             EXIT_PIPE
         }
         Err(e) => {
-            let _ = writeln!(ctx.err, "tasks2: {e}");
+            let _ = writeln!(ctx.err, "loadtable: {e}");
             e.exit_code()
         }
     }
@@ -136,15 +136,15 @@ fn dispatch(ctx: &mut Ctx<'_>, cmd: &Command) -> Result<i32, CliError> {
 // ---------------------------------------------------------------------------------------------
 // submitting
 
-/// The owner: `--who`, then `$TASKS_WHO`, then `$USER`.
+/// The owner: `--who`, then `$LOADTABLE_WHO`, then `$USER`.
 pub fn resolve_owner(ctx: &Ctx<'_>, who: Option<&str>) -> Result<Owner, CliError> {
     let name = who
         .map(str::to_string)
-        .or_else(|| (ctx.env)("TASKS_WHO").filter(|v| !v.is_empty()))
+        .or_else(|| (ctx.env)("LOADTABLE_WHO").filter(|v| !v.is_empty()))
         .or_else(|| (ctx.env)("USER").filter(|v| !v.is_empty()))
         .ok_or_else(|| {
             CliError::Usage(
-                "no job owner: pass --who NAME or set TASKS_WHO (letters, digits, `.`, `_`, `-`)"
+                "no job owner: pass --who NAME or set LOADTABLE_WHO (letters, digits, `.`, `_`, `-`)"
                     .into(),
             )
         })?;
@@ -163,7 +163,7 @@ fn placement_note(ctx: &mut Ctx<'_>, argv: &[String], placement: &Placement) {
         && let PlacementClass::StaysLocal(why) = submit_rules::placement_class(argv)
     {
         ctx.note(&format!(
-            "tasks: note: --anywhere has no effect here, the job stays on this machine: {why}"
+            "loadtable: note: --anywhere has no effect here, the job stays on this machine: {why}"
         ));
     }
 }
@@ -227,7 +227,7 @@ pub fn shared_cwd_warning(jobs: &[JobView], owner: &str, cwd: &Path) -> Option<S
         .collect::<Vec<_>>()
         .join(", ");
     Some(format!(
-        "tasks: warning: other owners have unfinished jobs in this same cwd {}: {list}. They build and edit the same checkout; coordinate before relying on results (not blocking).",
+        "loadtable: warning: other owners have unfinished jobs in this same cwd {}: {list}. They build and edit the same checkout; coordinate before relying on results (not blocking).",
         cwd.display()
     ))
 }
@@ -239,12 +239,12 @@ pub fn submit_reconciled(ctx: &mut Ctx<'_>, spec: &JobSpec) -> Result<JobId, Cli
     match ctx.client.call(&Request::Submit { spec: spec.clone() }) {
         Ok(Response::Submitted { id, warnings }) => {
             for w in &warnings {
-                ctx.note(&format!("tasks: warning: {w}"));
+                ctx.note(&format!("loadtable: warning: {w}"));
             }
             Ok(id)
         }
         Ok(other) => Err(CliError::Failed(format!(
-            "unexpected reply to submit: {other:?}; do not resubmit, look in `tasks2 list --who {}`",
+            "unexpected reply to submit: {other:?}; do not resubmit, look in `loadtable list --who {}`",
             spec.owner.as_str()
         ))),
         Err(ClientError::ReplyLost { detail }) => reconcile_lost_submit(ctx, spec, before, &detail),
@@ -259,7 +259,7 @@ fn reconcile_lost_submit(
     lost: &str,
 ) -> Result<JobId, CliError> {
     let owner = spec.owner.as_str();
-    let hint = format!("`tasks2 list --who {owner}`");
+    let hint = format!("`loadtable list --who {owner}`");
     let listed = ctx.client.call(&Request::List {
         owner: Some(owner.to_string()),
         active_only: false,
@@ -284,7 +284,7 @@ fn reconcile_lost_submit(
     match matches.as_slice() {
         [id] => {
             ctx.note(&format!(
-                "tasks: the daemon's reply to submit was lost ({lost}); found the submitted job {} in the ledger by exact spec match; not resubmitted",
+                "loadtable: the daemon's reply to submit was lost ({lost}); found the submitted job {} in the ledger by exact spec match; not resubmitted",
                 id.0
             ));
             Ok(*id)
@@ -295,7 +295,7 @@ fn reconcile_lost_submit(
         many => {
             let ids: Vec<String> = many.iter().map(|i| i.0.to_string()).collect();
             Err(CliError::Failed(format!(
-                "submit reply lost ({lost}) and several identical jobs match: {}. One is yours; inspect them with {hint} / `tasks2 logs ID`. Do NOT resubmit",
+                "submit reply lost ({lost}) and several identical jobs match: {}. One is yours; inspect them with {hint} / `loadtable logs ID`. Do NOT resubmit",
                 ids.join(", ")
             )))
         }
@@ -329,7 +329,7 @@ fn run(ctx: &mut Ctx<'_>, a: &RunArgs, follow: bool) -> Result<i32, CliError> {
             if job.phase == Phase::Passed && tasks_core::any_failed(&job.fetch) {
                 let n = job.fetch.iter().filter(|r| !r.ok()).count();
                 ctx.note(&format!(
-                    "tasks: job {} passed, but {n} requested file(s) could not be fetched back; see the fetch lines above (exit 1)",
+                    "loadtable: job {} passed, but {n} requested file(s) could not be fetched back; see the fetch lines above (exit 1)",
                     id.0
                 ));
             }
@@ -348,12 +348,12 @@ fn run(ctx: &mut Ctx<'_>, a: &RunArgs, follow: bool) -> Result<i32, CliError> {
             // R-104/R-105: never cancel, never touch the job; say where it is
             if state.done {
                 ctx.note(&format!(
-                    "tasks: job {} finished but its final state could not be read ({e}); query it with `tasks2 get {}`",
+                    "loadtable: job {} finished but its final state could not be read ({e}); query it with `loadtable get {}`",
                     id.0, id.0
                 ));
             } else {
                 if !matches!(e, CliError::Pipe) {
-                    ctx.note(&format!("tasks2: {e}"));
+                    ctx.note(&format!("loadtable: {e}"));
                 }
                 ctx.note(&render::still_live(id.0));
             }
@@ -462,7 +462,7 @@ pub fn follow_log(
             if matches!(job.phase, Phase::Queued | Phase::Waiting(_)) && job.wait_text != last_wait
             {
                 if let Some(t) = &job.wait_text {
-                    ctx.note(&format!("tasks: job {} waiting: {t}", id.0));
+                    ctx.note(&format!("loadtable: job {} waiting: {t}", id.0));
                 }
                 last_wait = job.wait_text;
             }
@@ -570,7 +570,7 @@ fn list(ctx: &mut Ctx<'_>, a: &ListArgs) -> Result<i32, CliError> {
     );
     ctx.out.write_all(table.as_bytes())?;
     if truncated {
-        ctx.note("tasks: the daemon cut the list at its row limit; narrow it with --who, --active or --limit");
+        ctx.note("loadtable: the daemon cut the list at its row limit; narrow it with --who, --active or --limit");
     }
     Ok(EXIT_OK)
 }
@@ -652,7 +652,7 @@ fn wait(ctx: &mut Ctx<'_>, a: &WaitArgs) -> Result<i32, CliError> {
             if let Some(t) = job.remote_wait.as_ref().or(job.wait_text.as_ref())
                 && last_wait.get(&id.0) != Some(t)
             {
-                ctx.note(&format!("tasks: job {} waiting: {t}", id.0));
+                ctx.note(&format!("loadtable: job {} waiting: {t}", id.0));
                 last_wait.insert(id.0, t.clone());
             }
             still.push(id);
@@ -664,7 +664,7 @@ fn wait(ctx: &mut Ctx<'_>, a: &WaitArgs) -> Result<i32, CliError> {
         if a.timeout.is_some_and(|t| waited >= Duration::from_secs(t)) {
             for id in &left {
                 ctx.note(&format!(
-                    "tasks: gave up after waiting {}s; job {} is untouched",
+                    "loadtable: gave up after waiting {}s; job {} is untouched",
                     waited.as_secs(),
                     id.0
                 ));
@@ -688,7 +688,7 @@ fn wait_end(ctx: &mut Ctx<'_>, job: &JobView, tail: usize, several: bool) -> Res
         match reply {
             Ok(Response::LogTail { lines, .. }) => {
                 if several && !lines.is_empty() {
-                    ctx.note(&format!("tasks: last lines of job {}", job.id.0));
+                    ctx.note(&format!("loadtable: last lines of job {}", job.id.0));
                 }
                 for l in &lines {
                     writeln!(ctx.out, "{l}")?;
@@ -744,10 +744,10 @@ fn logs(ctx: &mut Ctx<'_>, a: &LogsArgs) -> Result<i32, CliError> {
         };
         ctx.out.write_all(render::grep_groups(&groups).as_bytes())?;
         if matches == 0 {
-            ctx.note("tasks: no matching lines");
+            ctx.note("loadtable: no matching lines");
         }
         if truncated {
-            ctx.note("tasks: the search stopped at its match limit; narrow the pattern");
+            ctx.note("loadtable: the search stopped at its match limit; narrow the pattern");
         }
         return Ok(EXIT_OK);
     }
@@ -771,7 +771,7 @@ fn logs(ctx: &mut Ctx<'_>, a: &LogsArgs) -> Result<i32, CliError> {
     }
     if running {
         ctx.note(&format!(
-            "tasks: job {} is still running; `tasks2 logs {} --follow` streams the rest",
+            "loadtable: job {} is still running; `loadtable logs {} --follow` streams the rest",
             id.0, id.0
         ));
     }
@@ -970,7 +970,7 @@ fn stats(ctx: &mut Ctx<'_>, a: &StatsArgs) -> Result<i32, CliError> {
         let per_series = a.limit.clamp(1, tasks_daemon::api::MAX_HISTORY_SAMPLES);
         let h = fetch_history(ctx, Vec::new(), machines, Some(per_series))?;
         if h.truncated {
-            ctx.note("tasks: the daemon cut the history at its size limit; narrow it with --machine or --recipe");
+            ctx.note("loadtable: the daemon cut the history at its size limit; narrow it with --machine or --recipe");
         }
         let rows = history_rows(&h, a.recipe.as_deref(), a.targets);
         ctx.out.write_all(render::stats(&rows).as_bytes())?;
@@ -1009,7 +1009,7 @@ fn cancel(
         Ok(r) => r,
         Err(ClientError::ReplyLost { detail }) => {
             return Err(CliError::Failed(format!(
-                "the cancel request for job {id} was sent but no reply arrived ({detail}); it was not resent. Check with `tasks2 get {id}`"
+                "the cancel request for job {id} was sent but no reply arrived ({detail}); it was not resent. Check with `loadtable get {id}`"
             )));
         }
         Err(e) => return Err(e.into()),
@@ -1057,7 +1057,7 @@ fn prioritize(
         Ok(r) => r,
         Err(ClientError::ReplyLost { detail }) => {
             return Err(CliError::Failed(format!(
-                "the prioritize request for job {id} was sent but no reply arrived ({detail}); it was not resent. Check with `tasks2 get {id}`"
+                "the prioritize request for job {id} was sent but no reply arrived ({detail}); it was not resent. Check with `loadtable get {id}`"
             )));
         }
         Err(e) => return Err(e.into()),
@@ -1093,7 +1093,7 @@ fn drain(ctx: &mut Ctx<'_>, cancel: bool) -> Result<i32, CliError> {
     } else {
         writeln!(
             ctx.out,
-            "draining: no new job starts until `tasks2 resume` or the next daemon start; running jobs finish"
+            "draining: no new job starts until `loadtable resume` or the next daemon start; running jobs finish"
         )?;
     }
     Ok(EXIT_OK)
@@ -1108,7 +1108,7 @@ fn execution(ctx: &mut Ctx<'_>, action: ExecutionCommand) -> Result<i32, CliErro
         if enabled {
             "execution started: queued jobs run (kept across daemon restarts)"
         } else {
-            "execution stopped: queued jobs wait until `tasks2 execution start` (kept across daemon restarts)"
+            "execution stopped: queued jobs wait until `loadtable execution start` (kept across daemon restarts)"
         }
     )?;
     Ok(EXIT_OK)
@@ -1125,7 +1125,7 @@ fn print_plan(
 ) -> Result<(), CliError> {
     writeln!(
         ctx.out,
-        "tasks: submitted plan {plan_id}{title} with {} step(s)",
+        "loadtable: submitted plan {plan_id}{title} with {} step(s)",
         jobs.len()
     )?;
     for (name, id) in jobs {
@@ -1178,7 +1178,7 @@ fn suite_run(ctx: &mut Ctx<'_>, a: &SuiteRunArgs) -> Result<i32, CliError> {
         .map(|l| tasks_policy::suite_targets(ctx.policy_fs, &ctx.cwd, &l.policy, &a.name));
     let (executables, notes) = targets.map_or_else(Default::default, |t| (t.executables, t.notes));
     for n in &notes {
-        ctx.note(&format!("tasks: {n}"));
+        ctx.note(&format!("loadtable: {n}"));
     }
     let resp = ctx.client.call(&Request::SubmitSuite {
         name: a.name.clone(),
@@ -1287,7 +1287,7 @@ fn policy_suggest(ctx: &mut Ctx<'_>) -> Result<i32, CliError> {
                 Some(tasks_daemon::api::MAX_HISTORY_SAMPLES),
             )?;
             if h.truncated {
-                ctx.note("tasks: the daemon cut the history at its size limit; suggestions may miss samples");
+                ctx.note("loadtable: the daemon cut the history at its size limit; suggestions may miss samples");
             }
             suggest_report(&loaded, &h.to_history(), &[machine])?
         }

@@ -9,6 +9,7 @@ use rustix::fs::{FlockOperation, flock};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use tasks_core::names;
 
 /// The cache root under `$HOME` when nothing else says.
 pub const DEFAULT_CACHE_DIR: &str = "build-cache";
@@ -29,6 +30,44 @@ pub struct DaemonConfig {
     pub machine: String,
 }
 
+/// The XDG state and config homes the default directories sit in.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Homes {
+    /// `$XDG_STATE_HOME`, else `~/.local/state`.
+    pub state: Option<PathBuf>,
+    /// `$XDG_CONFIG_HOME`, else `~/.config`.
+    pub config: Option<PathBuf>,
+}
+
+impl Homes {
+    /// The homes from `env`; a relative XDG variable is ignored, as the spec says.
+    pub fn of(env: &dyn Fn(&str) -> Option<String>) -> Homes {
+        let home = env("HOME").filter(|h| !h.is_empty()).map(PathBuf::from);
+        let xdg = |var: &str, under_home: &str| -> Option<PathBuf> {
+            env(var)
+                .filter(|v| v.starts_with('/'))
+                .map(PathBuf::from)
+                .or_else(|| home.as_ref().map(|h| h.join(under_home)))
+        };
+        Homes {
+            state: xdg("XDG_STATE_HOME", ".local/state"),
+            config: xdg("XDG_CONFIG_HOME", ".config"),
+        }
+    }
+}
+
+/// `<base>/loadtable`, or `<base>/tasks2` while only that one exists: the daemon moves it on
+/// start (R-804), and until then a client still finds the daemon of the old name.
+fn named_dir(base: &Path) -> PathBuf {
+    let new = base.join(names::DIR_NAME);
+    let old = base.join(names::OLD_DIR_NAME);
+    if !new.exists() && old.is_dir() {
+        old
+    } else {
+        new
+    }
+}
+
 /// Command-line overrides.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConfigArgs {
@@ -46,42 +85,37 @@ pub struct ConfigArgs {
 
 impl DaemonConfig {
     /// Resolves the directories. `env` is the daemon's own environment, read once here; the
-    /// lock directory is `--lock-dir`, then `TASKS_LOCK_DIR`, then `<state_dir>/slots`. It is
+    /// lock directory is `--lock-dir`, then `LOADTABLE_LOCK_DIR`, then `<state_dir>/slots`. It is
     /// never derived from `TMPDIR`.
     pub fn resolve(
         args: &ConfigArgs,
         env: &dyn Fn(&str) -> Option<String>,
     ) -> Result<DaemonConfig, DaemonError> {
         let home = env("HOME").filter(|h| !h.is_empty()).map(PathBuf::from);
-        let xdg = |var: &str, under_home: &str| -> Option<PathBuf> {
-            env(var)
-                .filter(|v| v.starts_with('/'))
-                .map(PathBuf::from)
-                .or_else(|| home.as_ref().map(|h| h.join(under_home)))
-        };
+        let homes = Homes::of(env);
         let state_dir = args
             .state_dir
             .clone()
-            .or_else(|| env("TASKS_STATE_DIR").map(PathBuf::from))
-            .or_else(|| xdg("XDG_STATE_HOME", ".local/state").map(|p| p.join("tasks2")))
+            .or_else(|| env("LOADTABLE_STATE_DIR").map(PathBuf::from))
+            .or_else(|| homes.state.as_deref().map(named_dir))
             .ok_or(DaemonError::NoHome("state directory"))?;
         let config_dir = args
             .config_dir
             .clone()
-            .or_else(|| env("TASKS_CONFIG_DIR").map(PathBuf::from))
-            .or_else(|| xdg("XDG_CONFIG_HOME", ".config").map(|p| p.join("tasks2")))
+            .or_else(|| env("LOADTABLE_CONFIG_DIR").map(PathBuf::from))
+            .or_else(|| homes.config.as_deref().map(named_dir))
             .ok_or(DaemonError::NoHome("config directory"))?;
         let cache_dir = args
             .cache_dir
             .clone()
-            .or_else(|| env("TASKS_CACHE_DIR").map(PathBuf::from))
+            .or_else(|| env("LOADTABLE_CACHE_DIR").map(PathBuf::from))
             // the earlier release's cache root, so its warm caches are reused (R-401)
             .or_else(|| home.as_ref().map(|h| h.join(DEFAULT_CACHE_DIR)))
             .unwrap_or_else(|| state_dir.clone());
         let lock_dir = args
             .lock_dir
             .clone()
-            .or_else(|| env("TASKS_LOCK_DIR").map(PathBuf::from))
+            .or_else(|| env("LOADTABLE_LOCK_DIR").map(PathBuf::from))
             .unwrap_or_else(|| state_dir.join("slots"));
         for (what, p) in [
             ("state directory", &state_dir),
@@ -96,7 +130,7 @@ impl DaemonConfig {
         let machine = args
             .machine
             .clone()
-            .or_else(|| env("TASKS_MACHINE"))
+            .or_else(|| env("LOADTABLE_MACHINE"))
             .or_else(|| env("HOSTNAME").filter(|h| !h.is_empty()))
             .or_else(|| {
                 std::fs::read_to_string("/etc/hostname")
@@ -255,10 +289,10 @@ mod tests {
     fn r231_lock_dir_ignores_tmpdir_and_is_resolved_from_daemon_config() {
         let env = env_of(&[("HOME", "/home/u"), ("TMPDIR", "/tmp/claude-1000")]);
         let c = DaemonConfig::resolve(&ConfigArgs::default(), &env).unwrap();
-        assert_eq!(c.state_dir, PathBuf::from("/home/u/.local/state/tasks2"));
+        assert_eq!(c.state_dir, PathBuf::from("/home/u/.local/state/loadtable"));
         assert_eq!(
             c.lock_dir,
-            PathBuf::from("/home/u/.local/state/tasks2/slots")
+            PathBuf::from("/home/u/.local/state/loadtable/slots")
         );
         assert!(!c.lock_dir.starts_with("/tmp/claude-1000"));
         // an explicit state dir moves the lock dir with it; TMPDIR still does not matter
@@ -269,7 +303,7 @@ mod tests {
         let c = DaemonConfig::resolve(&args, &env).unwrap();
         assert_eq!(c.lock_dir, PathBuf::from("/srv/t/slots"));
         // only the explicit daemon-side setting overrides it
-        let env = env_of(&[("HOME", "/home/u"), ("TASKS_LOCK_DIR", "/var/lock/t")]);
+        let env = env_of(&[("HOME", "/home/u"), ("LOADTABLE_LOCK_DIR", "/var/lock/t")]);
         let c = DaemonConfig::resolve(&ConfigArgs::default(), &env).unwrap();
         assert_eq!(c.lock_dir, PathBuf::from("/var/lock/t"));
     }

@@ -161,7 +161,7 @@ pub struct Harness {
 impl Default for Harness {
     fn default() -> Harness {
         let mut env = BTreeMap::new();
-        env.insert("TASKS_WHO".to_string(), "me".to_string());
+        env.insert("LOADTABLE_WHO".to_string(), "me".to_string());
         env.insert("HOME".to_string(), "/home/u".to_string());
         Harness {
             env,
@@ -181,7 +181,7 @@ pub struct Run {
 }
 
 impl Harness {
-    /// Runs `tasks2 ARGS...` against `client`; output goes to strings.
+    /// Runs `loadtable ARGS...` against `client`; output goes to strings.
     pub fn run(&self, client: &Arc<FakeClient>, args: &[&str]) -> Run {
         let mut out = Vec::new();
         let mut err = Vec::new();
@@ -200,7 +200,7 @@ impl Harness {
         out: &mut dyn Write,
         err: &mut dyn Write,
     ) -> i32 {
-        let mut full = vec!["tasks2".to_string()];
+        let mut full = vec!["loadtable".to_string()];
         full.extend(args.iter().map(|s| s.to_string()));
         let env = |k: &str| self.env.get(k).cloned();
         let now = || NOW;

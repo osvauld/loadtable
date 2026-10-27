@@ -2,7 +2,7 @@ use super::*;
 use clap::CommandFactory;
 
 fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
-    let mut v = vec!["tasks2"];
+    let mut v = vec!["loadtable"];
     v.extend_from_slice(args);
     Cli::try_parse_from(v)
 }
@@ -248,7 +248,7 @@ fn list_log_search_and_control_commands_parse() {
         parse(&["policy", "suggest"]).unwrap().command,
         Command::Policy { .. }
     ));
-    // R-407: `tasks2 cache` takes no arguments
+    // R-407: `loadtable cache` takes no arguments
     assert!(matches!(parse(&["cache"]).unwrap().command, Command::Cache));
     assert!(parse(&["cache", "--bogus"]).is_err());
     assert!(matches!(

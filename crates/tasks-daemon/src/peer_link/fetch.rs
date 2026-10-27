@@ -9,7 +9,7 @@
 //!   the others get a "not fetched" result so the reason is visible;
 //! - files land at the same relative path in the job's checkout through a temporary name and a
 //!   rename; no symlink is written through except the coordinator-placed output links;
-//! - the results go to the job log (`[tasks] fetched ...`), to a sidecar next to the log that
+//! - the results go to the job log (`[loadtable] fetched ...`), to a sidecar next to the log that
 //!   `get` reads, and (by the scheduler) to the audit log;
 //! - while a file arrives, how far it got is kept in a second sidecar (`get`, `status` and the
 //!   UI show it) and repeated in the job log every few seconds, so a job whose command is over
@@ -110,7 +110,7 @@ fn failed(path: &str, reason: String) -> FetchResult {
 fn explain(peer: &PeerId, e: &PeerError) -> String {
     match e {
         PeerError::Refused(Refusal::UnknownMessage { .. } | Refusal::Malformed { .. }) => format!(
-            "peer {peer} does not support output fetch (it runs an older tasks; upgrade it): {e}"
+            "peer {peer} does not support output fetch (it runs an older loadtable; upgrade it): {e}"
         ),
         PeerError::Refused(Refusal::NotSynced { .. }) => format!(
             "peer {peer} no longer has this checkout's copy (cleaned by retention?); the job's files are gone: {e}"
@@ -143,12 +143,12 @@ pub(super) fn fetch_outputs<T: Transport>(
     };
     let mut text = String::new();
     for n in &notes {
-        text.push_str("[tasks] ");
+        text.push_str("[loadtable] ");
         text.push_str(n);
         text.push('\n');
     }
     for r in &results {
-        text.push_str("[tasks] ");
+        text.push_str("[loadtable] ");
         text.push_str(&r.line());
         text.push('\n');
     }
@@ -220,7 +220,7 @@ fn run<T: Transport>(
             }
             if logged.due(now) || last {
                 let line = shown(p, done, Some(total), rate).line();
-                log.append_local(format!("[tasks] {line}\n").as_bytes());
+                log.append_local(format!("[loadtable] {line}\n").as_bytes());
             }
         };
         let fetched = outputs::fetch_with_progress(

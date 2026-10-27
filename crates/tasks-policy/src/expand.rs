@@ -547,7 +547,7 @@ isolate = true
         assert_eq!(e.plan.validate(), Ok(()));
     }
 
-    // R-704, R-707: what `tasks2 suite run core-split` submits for the p2p workload, with the
+    // R-704, R-707: what `loadtable suite run core-split` submits for the p2p workload, with the
     // targets read from `cargo metadata` before anything is built.
     #[test]
     fn r704_a_split_suite_becomes_one_build_and_one_step_per_test_target_longest_first() {

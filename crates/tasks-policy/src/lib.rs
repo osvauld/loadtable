@@ -1,6 +1,6 @@
-//! Repo run policy: a checked-in `.tasks/run-policy.toml` that says how to build and test a repo.
+//! Repo run policy: a checked-in `.loadtable/run-policy.toml` that says how to build and test a repo.
 //!
-//! Agents read it and run `tasks2 suite run NAME`. After a few runs, [`suggest`] turns measured
+//! Agents read it and run `loadtable suite run NAME`. After a few runs, [`suggest`] turns measured
 //! history into a proposed diff with evidence. tasks never writes the policy file.
 //!
 //! Layers: [`model`] and [`validate`] are pure; [`load`] is the thin I/O layer behind
@@ -22,7 +22,7 @@ pub mod validate;
 pub use diff::{render_diff, render_proposal};
 pub use error::{PolicyError, Problem, Violation, Violations};
 pub use expand::{Executables, ExpandOptions, Expansion, expand};
-pub use load::{Loaded, POLICY_PATH, PolicyFs, RealFs, find_policy, load};
+pub use load::{Loaded, OLD_POLICY_PATH, POLICY_PATH, PolicyFs, RealFs, find_policy, load};
 pub use model::{
     MAX_SYNC_EXTRA, PlacementSection, Policy, PolicyOs, SCHEMA_VERSION, SplitMode, StepDef, Suite,
     SyncSection, TargetNote,

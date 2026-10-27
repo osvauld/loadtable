@@ -56,7 +56,7 @@ impl Keeper {
         if jobs > 0 {
             self.idle_since_ms = None;
             if self.guard.is_none() && now_ms >= self.retry_at_ms {
-                let why = "tasks2d has jobs running or queued";
+                let why = "loadtabled has jobs running or queued";
                 match sleep.keep_awake(why) {
                     Ok(g) => {
                         self.guard = Some(g);

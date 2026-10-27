@@ -210,7 +210,7 @@ pub(crate) fn blocked_reason(dep: &JobRecord) -> String {
         Phase::Cancelled => "was cancelled",
         _ => "ended without passing",
     };
-    format!("{who} {what}; see `tasks2 get {}`", dep.id.0)
+    format!("{who} {what}; see `loadtable get {}`", dep.id.0)
 }
 
 /// The requester name recorded when a job is cancelled because a dependency cannot pass.

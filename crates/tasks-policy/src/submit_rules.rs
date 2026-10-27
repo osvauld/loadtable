@@ -275,7 +275,7 @@ pub fn script_refusal(cmds: &[String]) -> String {
         })
         .collect();
     format!(
-        "refused: this shell script runs {} commands as one job ({}), so it gets no timing history and no estimate; submit them as steps (tasks2 steps, MCP submit_steps), run a suite from .tasks/run-policy.toml (tasks2 suite run NAME, MCP run_suite), or put them in a script file in the repo and submit that file; --allow-script (MCP allow_script) runs it as one job anyway",
+        "refused: this shell script runs {} commands as one job ({}), so it gets no timing history and no estimate; submit them as steps (loadtable steps, MCP submit_steps), run a suite from .loadtable/run-policy.toml (loadtable suite run NAME, MCP run_suite), or put them in a script file in the repo and submit that file; --allow-script (MCP allow_script) runs it as one job anyway",
         cmds.len(),
         shown.join("; ")
     )

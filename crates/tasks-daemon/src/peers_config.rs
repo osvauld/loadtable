@@ -1,7 +1,7 @@
 //! The `[peers]` section of the machine policy, and the peers a forwarder dials.
 //!
 //! Who may talk to this machine is no longer configured here: a peer exists because a ticket was
-//! redeemed (`tasks2 pair`), and what it may do is a grant in the ledger. The policy keeps only
+//! redeemed (`loadtable pair`), and what it may do is a grant in the ledger. The policy keeps only
 //! transport choices:
 //!
 //! ```toml
@@ -80,7 +80,7 @@ impl PeerConfig {
                 },
                 other if v.is_table() => problems.push(format!(
                     "peers.{other}: peers are no longer configured here; pair with \
-                     `tasks2 pair invite` and `tasks2 pair accept`"
+                     `loadtable pair invite` and `loadtable pair accept`"
                 )),
                 other => problems.push(format!("peers.{other}: unknown field")),
             }
@@ -91,7 +91,7 @@ impl PeerConfig {
 
 /// The commented sample block for the policy sample file. Lines start with `#>` so the sample
 /// test that uncomments every `# key = value` default leaves them alone; remove the `#>` to use.
-pub const SAMPLE: &str = "\n# Peers are paired, not configured (`tasks2 pair invite` / `pair accept`).\n\
+pub const SAMPLE: &str = "\n# Peers are paired, not configured (`loadtable pair invite` / `pair accept`).\n\
 # Transport choices (read at start; restart to change). Remove the leading `#>` to use.\n\
 #> [peers]\n\
 #> relay = \"default\"\n\
@@ -136,7 +136,7 @@ mod tests {
             "peers.relay:",
             "peers.stray: unknown field",
             "peers.nixos: peers are no longer configured here",
-            "tasks2 pair accept",
+            "loadtable pair accept",
         ] {
             assert!(all.contains(needle), "missing {needle:?} in\n{all}");
         }

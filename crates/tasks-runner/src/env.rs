@@ -68,7 +68,7 @@ pub fn with_dirs(path: &str, extra: &[String]) -> String {
 }
 
 /// Builds the complete child environment: allowlisted parent variables, then the
-/// job's own variables (which win), the cargo jobs default, and `TASKS_JOB_ID`
+/// job's own variables (which win), the cargo jobs default, and `LOADTABLE_JOB_ID` (also as `TASKS_JOB_ID`)
 /// (always set last). The result is sorted by name and has no duplicates.
 pub fn build_env(
     job: JobId,
@@ -100,6 +100,8 @@ pub fn build_env(
     for (k, v) in &policy.force {
         map.insert(k.clone(), v.clone());
     }
+    map.insert("LOADTABLE_JOB_ID".to_string(), job.0.to_string());
+    // the name before the rename, which scripts may still read (R-804)
     map.insert("TASKS_JOB_ID".to_string(), job.0.to_string());
     map.into_iter().collect()
 }
@@ -169,12 +171,14 @@ mod tests {
                 "ANDROID_HOME",
                 "JAVA_HOME",
                 "LIBCLANG_PATH",
+                "LOADTABLE_JOB_ID",
                 "NIX_LD_LIBRARY_PATH",
                 "PATH",
                 "TASKS_JOB_ID"
             ]
         );
         assert!(env.contains(&kv("TASKS_JOB_ID", "7")));
+        assert!(env.contains(&kv("LOADTABLE_JOB_ID", "7")));
     }
 
     #[test]

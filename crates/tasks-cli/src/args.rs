@@ -5,12 +5,12 @@ use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 use tasks_core::{MachineName, Placement, Priority};
 
-/// `tasks2`: submit builds and tests to the tasks coordinator, watch them, read history.
+/// `loadtable`: submit builds and tests to the LoadTable coordinator, watch them, read history.
 #[derive(Parser, Debug)]
 #[command(
-    name = "tasks2",
+    name = "loadtable",
     version,
-    about = "Submit builds and tests to the tasks coordinator, watch them and read their history",
+    about = "Submit builds and tests to the LoadTable coordinator, watch them and read their history",
     after_help = EXIT_CODES_HELP,
     arg_required_else_help = true
 )]
@@ -140,7 +140,7 @@ impl PriorityArgs {
 /// Arguments of `run`, `enqueue` and `submit`.
 #[derive(Args, Debug, Clone)]
 pub struct RunArgs {
-    /// Job owner (default: $TASKS_WHO, then $USER).
+    /// Job owner (default: $LOADTABLE_WHO, then $USER).
     #[arg(long, value_name = "OWNER")]
     pub who: Option<String>,
     /// Where the job may run.
@@ -314,7 +314,7 @@ pub struct StepsArgs {
 /// Arguments of `suite run`.
 #[derive(Args, Debug, Clone)]
 pub struct SuiteRunArgs {
-    /// The suite of .tasks/run-policy.toml.
+    /// The suite of .loadtable/run-policy.toml.
     pub name: String,
     /// Drop steps marked skip_in_quick.
     #[arg(long)]
@@ -436,7 +436,7 @@ pub enum PairCommand {
 pub enum PeersCommand {
     /// Revoke a peer's grants, close its live connections and stop forwarding to it.
     Revoke {
-        /// The peer's name, as `tasks2 peers` shows it.
+        /// The peer's name, as `loadtable peers` shows it.
         name: String,
     },
 }
@@ -539,7 +539,7 @@ pub enum Command {
     Cancel {
         /// The job.
         id: i64,
-        /// The asking owner (default: $TASKS_WHO, then $USER).
+        /// The asking owner (default: $LOADTABLE_WHO, then $USER).
         #[arg(long, value_name = "OWNER")]
         who: Option<String>,
         /// Why; kept with the job and shown by `get` and `list`.
@@ -551,7 +551,7 @@ pub enum Command {
     Prioritize {
         /// The job.
         id: i64,
-        /// The asking owner (default: $TASKS_WHO, then $USER).
+        /// The asking owner (default: $LOADTABLE_WHO, then $USER).
         #[arg(long, value_name = "OWNER")]
         who: Option<String>,
         /// The new class: blocking, normal or background.

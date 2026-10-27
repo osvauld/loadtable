@@ -1,116 +1,116 @@
-# tasks2 machine policy. Every line shows the default; uncomment to change.
+# loadtable machine policy. Every line shows the default; uncomment to change.
 # Environment variables of the daemon win over this file.
 # A bad value refuses the whole file and the daemon runs on the defaults.
 
 [slots]
-# compile = 2   # env TASKS_COMPILE_SLOTS
-# run = 4   # env TASKS_RUN_SLOTS
-# offload = 4   # env TASKS_OFFLOAD_SLOTS
-# transfer = 1   # env TASKS_TRANSFER_SLOTS
-# light = 4   # env TASKS_LIGHT_SLOTS
-# short_lane = 1   # env TASKS_SHORT_LANE_SLOTS
-# short_job_max_secs = 60   # env TASKS_SHORT_JOB_MAX_SECS
-# short_job_max_memory_mib = 1024   # env TASKS_SHORT_JOB_MAX_MEMORY_MIB
+# compile = 2   # env LOADTABLE_COMPILE_SLOTS
+# run = 4   # env LOADTABLE_RUN_SLOTS
+# offload = 4   # env LOADTABLE_OFFLOAD_SLOTS
+# transfer = 1   # env LOADTABLE_TRANSFER_SLOTS
+# light = 4   # env LOADTABLE_LIGHT_SLOTS
+# short_lane = 1   # env LOADTABLE_SHORT_LANE_SLOTS
+# short_job_max_secs = 60   # env LOADTABLE_SHORT_JOB_MAX_SECS
+# short_job_max_memory_mib = 1024   # env LOADTABLE_SHORT_JOB_MAX_MEMORY_MIB
 
 [queue]
-# aging_mins = 20   # env TASKS_QUEUE_AGING_MINS
+# aging_mins = 20   # env LOADTABLE_QUEUE_AGING_MINS
 
 [cpu]
-# compile_weight = 50   # env TASKS_CPU_COMPILE_WEIGHT
-# run_weight = 200   # env TASKS_CPU_RUN_WEIGHT
-# compile_nice = 10   # env TASKS_CPU_COMPILE_NICE
+# compile_weight = 50   # env LOADTABLE_CPU_COMPILE_WEIGHT
+# run_weight = 200   # env LOADTABLE_CPU_RUN_WEIGHT
+# compile_nice = 10   # env LOADTABLE_CPU_COMPILE_NICE
 
 [pressure.compile]
-# max_cpu = 40   # env TASKS_COMPILE_MAX_CPU
-# max_io = 40   # env TASKS_COMPILE_MAX_IO
-# max_memory = "normal"   # env TASKS_COMPILE_MAX_MEMORY
+# max_cpu = 40   # env LOADTABLE_COMPILE_MAX_CPU
+# max_io = 40   # env LOADTABLE_COMPILE_MAX_IO
+# max_memory = "normal"   # env LOADTABLE_COMPILE_MAX_MEMORY
 
 [pressure.run]
-# max_cpu = 80   # env TASKS_RUN_MAX_CPU
-# max_io = 80   # env TASKS_RUN_MAX_IO
-# max_memory = "normal"   # env TASKS_RUN_MAX_MEMORY
+# max_cpu = 80   # env LOADTABLE_RUN_MAX_CPU
+# max_io = 80   # env LOADTABLE_RUN_MAX_IO
+# max_memory = "normal"   # env LOADTABLE_RUN_MAX_MEMORY
 
 [pressure.offload]
-# max_memory = "normal"   # env TASKS_OFFLOAD_MAX_MEMORY
+# max_memory = "normal"   # env LOADTABLE_OFFLOAD_MAX_MEMORY
 
 [pressure.transfer]
-# max_io = 40   # env TASKS_TRANSFER_MAX_IO
+# max_io = 40   # env LOADTABLE_TRANSFER_MAX_IO
 
 [attribution]
-# trip_io_pct = 10   # env TASKS_TRIP_IO_PCT
-# trip_cpu_pct = 60   # env TASKS_TRIP_CPU_PCT
-# trip_interval_secs = 60   # env TASKS_TRIP_INTERVAL_SECS
-# sample_secs = 5   # env TASKS_ATTRIB_SAMPLE_SECS
+# trip_io_pct = 10   # env LOADTABLE_TRIP_IO_PCT
+# trip_cpu_pct = 60   # env LOADTABLE_TRIP_CPU_PCT
+# trip_interval_secs = 60   # env LOADTABLE_TRIP_INTERVAL_SECS
+# sample_secs = 5   # env LOADTABLE_ATTRIB_SAMPLE_SECS
 
 [memory]
-# min_available_gib = 2   # env TASKS_MIN_AVAILABLE_GIB
-# some_warn = 10   # env TASKS_MEMORY_SOME_WARN
-# some_critical = 40   # env TASKS_MEMORY_SOME_CRITICAL
-# full_warn = 5   # env TASKS_MEMORY_FULL_WARN
-# full_critical = 20   # env TASKS_MEMORY_FULL_CRITICAL
+# min_available_gib = 2   # env LOADTABLE_MIN_AVAILABLE_GIB
+# some_warn = 10   # env LOADTABLE_MEMORY_SOME_WARN
+# some_critical = 40   # env LOADTABLE_MEMORY_SOME_CRITICAL
+# full_warn = 5   # env LOADTABLE_MEMORY_FULL_WARN
+# full_critical = 20   # env LOADTABLE_MEMORY_FULL_CRITICAL
 
 [disk]
-# cache_reserve_gib = 20   # env TASKS_CACHE_RESERVE_GIB
-# state_reserve_gib = 1   # env TASKS_STATE_RESERVE_GIB
+# cache_reserve_gib = 20   # env LOADTABLE_CACHE_RESERVE_GIB
+# state_reserve_gib = 1   # env LOADTABLE_STATE_RESERVE_GIB
 
 [cache]
-# sccache = "auto"   # env TASKS_SCCACHE
-# sccache_size_gib = 30   # env TASKS_SCCACHE_SIZE_GIB
+# sccache = "auto"   # env LOADTABLE_SCCACHE
+# sccache_size_gib = 30   # env LOADTABLE_SCCACHE_SIZE_GIB
 
 [runner]
-# cancel_grace_ms = 300   # env TASKS_CANCEL_GRACE_MS
-# wall_timeout_secs = "off"   # env TASKS_WALL_TIMEOUT_SECS
-# idle_timeout_secs = "off"   # env TASKS_IDLE_TIMEOUT_SECS
+# cancel_grace_ms = 300   # env LOADTABLE_CANCEL_GRACE_MS
+# wall_timeout_secs = "off"   # env LOADTABLE_WALL_TIMEOUT_SECS
+# idle_timeout_secs = "off"   # env LOADTABLE_IDLE_TIMEOUT_SECS
 
 [logs]
-# soft_cap_mib = 64   # env TASKS_LOG_SOFT_CAP_MIB
-# hard_cap_mib = 1024   # env TASKS_LOG_HARD_CAP_MIB
+# soft_cap_mib = 64   # env LOADTABLE_LOG_SOFT_CAP_MIB
+# hard_cap_mib = 1024   # env LOADTABLE_LOG_HARD_CAP_MIB
 
 [retention]
-# max_finished_jobs = 20000   # env TASKS_RETAIN_JOBS
-# max_job_age_days = 60   # env TASKS_RETAIN_JOB_DAYS
-# max_sample_age_days = 365   # env TASKS_RETAIN_SAMPLE_DAYS
-# max_samples_per_key = 200   # env TASKS_RETAIN_SAMPLES_PER_KEY
+# max_finished_jobs = 20000   # env LOADTABLE_RETAIN_JOBS
+# max_job_age_days = 60   # env LOADTABLE_RETAIN_JOB_DAYS
+# max_sample_age_days = 365   # env LOADTABLE_RETAIN_SAMPLE_DAYS
+# max_samples_per_key = 200   # env LOADTABLE_RETAIN_SAMPLES_PER_KEY
 
 [sync]
-# idle_days = 7   # env TASKS_SYNC_IDLE_DAYS
-# gc_days = 7   # env TASKS_SYNC_GC_DAYS
+# idle_days = 7   # env LOADTABLE_SYNC_IDLE_DAYS
+# gc_days = 7   # env LOADTABLE_SYNC_GC_DAYS
 
 [audit]
-# retention_days = 90   # env TASKS_AUDIT_RETENTION_DAYS
-# checkpoint_every = 100   # env TASKS_AUDIT_CHECKPOINT_EVERY
+# retention_days = 90   # env LOADTABLE_AUDIT_RETENTION_DAYS
+# checkpoint_every = 100   # env LOADTABLE_AUDIT_CHECKPOINT_EVERY
 
 [cargo]
-# max_jobs = 2   # env TASKS_MAX_CARGO_JOBS
-# jobs_when_busy = 1   # env TASKS_CARGO_JOBS_WHEN_BUSY
+# max_jobs = 2   # env LOADTABLE_MAX_CARGO_JOBS
+# jobs_when_busy = 1   # env LOADTABLE_CARGO_JOBS_WHEN_BUSY
 
 [stuck]
-# seconds = 300   # env TASKS_STUCK_JOB_SECONDS
+# seconds = 300   # env LOADTABLE_STUCK_JOB_SECONDS
 
 [alerts]
-# slot_grace_secs = 120   # env TASKS_ALERT_SLOT_GRACE_SECS
-# memory_secs = 60   # env TASKS_ALERT_MEMORY_SECS
-# peer_grace_secs = 120   # env TASKS_ALERT_PEER_GRACE_SECS
-# audit_secs = 300   # env TASKS_AUDIT_SECS
+# slot_grace_secs = 120   # env LOADTABLE_ALERT_SLOT_GRACE_SECS
+# memory_secs = 60   # env LOADTABLE_ALERT_MEMORY_SECS
+# peer_grace_secs = 120   # env LOADTABLE_ALERT_PEER_GRACE_SECS
+# audit_secs = 300   # env LOADTABLE_AUDIT_SECS
 
 [daemon]
-# tick_ms = 1000   # env TASKS_TICK_MS
-# nofile_target = 65536   # env TASKS_NOFILE_TARGET
+# tick_ms = 1000   # env LOADTABLE_TICK_MS
+# nofile_target = 65536   # env LOADTABLE_NOFILE_TARGET
 
 [submit]
-# broad_test = "refuse"   # env TASKS_BROAD_TEST
+# broad_test = "refuse"   # env LOADTABLE_BROAD_TEST
 
 [placement]
-# peer_wait_secs = 600   # env TASKS_PEER_WAIT_SECS
+# peer_wait_secs = 600   # env LOADTABLE_PEER_WAIT_SECS
 
 [power]
-# keep_awake = "on"   # env TASKS_KEEP_AWAKE
-# keep_awake_linger_secs = 120   # env TASKS_KEEP_AWAKE_LINGER_SECS
-# peer_jobs_on_battery = "false"   # env TASKS_PEER_JOBS_ON_BATTERY
+# keep_awake = "on"   # env LOADTABLE_KEEP_AWAKE
+# keep_awake_linger_secs = 120   # env LOADTABLE_KEEP_AWAKE_LINGER_SECS
+# peer_jobs_on_battery = "false"   # env LOADTABLE_PEER_JOBS_ON_BATTERY
 
 [machine]
-# devices = []   # env TASKS_DEVICES
-# tools = []   # env TASKS_TOOLS
+# devices = []   # env LOADTABLE_DEVICES
+# tools = []   # env LOADTABLE_TOOLS
 
 # Peers (read at start; restart to change). Remove the leading `#>` to use.
 #> [peers]

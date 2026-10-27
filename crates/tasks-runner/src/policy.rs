@@ -78,7 +78,7 @@ const GRACE_DEFAULT_MS: u64 = 300;
 /// Accepted range of the cancel grace in milliseconds (R-078).
 const GRACE_RANGE_MS: std::ops::RangeInclusive<u64> = 100..=30_000;
 
-/// Strictly parses the `TASKS_CANCEL_GRACE_MS` value: unset means 300 ms; the
+/// Strictly parses the `LOADTABLE_CANCEL_GRACE_MS` value: unset means 300 ms; the
 /// value must be a plain integer in 100..=30000 (R-078).
 pub fn parse_grace_ms(value: Option<&str>) -> Result<Duration, RunnerError> {
     let Some(v) = value else {

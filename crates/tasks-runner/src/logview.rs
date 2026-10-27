@@ -145,7 +145,7 @@ impl Elider {
         let dropped_lines = self.evicted_lines - kept.len() as u64;
         let dropped_bytes = self.evicted_bytes.saturating_sub(kept_bytes);
         let notice = format!(
-            "[tasks: log elided, {dropped_lines} lines / {dropped_bytes} bytes dropped; full log: {}]",
+            "[loadtable: log elided, {dropped_lines} lines / {dropped_bytes} bytes dropped; full log: {}]",
             self.full_path.display()
         );
         let mut out = String::new();
@@ -158,7 +158,7 @@ impl Elider {
             line(l);
         }
         line(&format!(
-            "[tasks: ... {dropped_lines} lines / {dropped_bytes} bytes elided ...]"
+            "[loadtable: ... {dropped_lines} lines / {dropped_bytes} bytes elided ...]"
         ));
         for l in kept {
             line(l);
@@ -294,7 +294,7 @@ impl LogNotes {
         LogNotes::default()
     }
 
-    /// Appends `[tasks] text` unless `key` was already written; true if written.
+    /// Appends `[loadtable] text` unless `key` was already written; true if written.
     pub fn note(&mut self, log: &Path, key: &str, text: &str) -> Result<bool, RunnerError> {
         if self.written.contains(key) {
             return Ok(false);
@@ -305,7 +305,7 @@ impl LogNotes {
             .append(true)
             .open(log)
             .map_err(|e| RunnerError::log(log, e))?;
-        writeln!(f, "[tasks] {flat}").map_err(|e| RunnerError::log(log, e))?;
+        writeln!(f, "[loadtable] {flat}").map_err(|e| RunnerError::log(log, e))?;
         self.written.insert(key.to_string());
         Ok(true)
     }
@@ -445,7 +445,7 @@ mod tests {
         let text = std::fs::read_to_string(&log).unwrap();
         assert_eq!(
             text,
-            "[tasks] placed on nixos (wait 0s)\n[tasks] moved to laptop reroute\n"
+            "[loadtable] placed on nixos (wait 0s)\n[loadtable] moved to laptop reroute\n"
         );
     }
 }

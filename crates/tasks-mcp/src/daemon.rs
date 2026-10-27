@@ -1,6 +1,6 @@
 //! The daemon as this crate sees it: one call, four kinds of failure.
 //!
-//! `tasks-cli` depends on this crate (for `tasks2 mcp`), so this crate cannot name the CLI's
+//! `tasks-cli` depends on this crate (for `loadtable mcp`), so this crate cannot name the CLI's
 //! `Client` trait. The CLI adapts its client to [`Daemon`], which keeps the autostart and retry
 //! rules (R-102, R-103) in one place: the client.
 

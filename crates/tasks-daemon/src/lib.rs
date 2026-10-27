@@ -4,7 +4,7 @@
 //! The daemon owns one machine's ledger and slots. Clients speak [`api`] over a Unix socket
 //! in the state directory. [`scheduler::Scheduler`] is the core and is driven by tests through
 //! `tick()`; [`server::Daemon`] adds the process: the one-daemon lock, startup reconciliation,
-//! the socket and the loop. The `tasks2d` binary is a thin wrapper over [`entry`].
+//! the socket and the loop. The `loadtabled` binary is a thin wrapper over [`entry`].
 
 pub mod alerts;
 pub mod api;
@@ -48,6 +48,7 @@ mod policy_reload;
 pub mod queue_estimate;
 mod queue_view;
 pub mod regex_lite;
+pub mod rename;
 mod retry_alone;
 mod runjob;
 #[cfg(test)]

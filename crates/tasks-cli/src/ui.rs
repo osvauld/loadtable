@@ -1,4 +1,4 @@
-//! `tasks2 ui`: connects the egui dashboard of `tasks-ui` to the daemon client.
+//! `loadtable ui`: connects the egui dashboard of `tasks-ui` to the daemon client.
 
 use crate::client::Client;
 use std::io::Write;
@@ -26,7 +26,7 @@ pub(crate) fn run(client: Arc<dyn Client>, env: &dyn Fn(&str) -> Option<String>)
     match tasks_ui::app::run(Arc::new(ClientLink(client)), who) {
         Ok(()) => crate::error::EXIT_OK,
         Err(e) => {
-            let _ = writeln!(std::io::stderr(), "tasks2 ui: {e}");
+            let _ = writeln!(std::io::stderr(), "loadtable ui: {e}");
             crate::error::EXIT_FAILURE
         }
     }

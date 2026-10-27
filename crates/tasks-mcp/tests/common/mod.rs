@@ -23,7 +23,7 @@ pub const NOW: i64 = 1_000_000_000;
 
 pub fn config() -> Config {
     let mut c = Config::from_env(PathBuf::from("/w"), &|k| {
-        (k == "TASKS_WHO").then(|| "me".to_string())
+        (k == "LOADTABLE_WHO").then(|| "me".to_string())
     });
     c.poll = Duration::from_millis(1);
     c.now_ms = Arc::new(|| NOW);

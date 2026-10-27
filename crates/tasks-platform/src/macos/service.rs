@@ -75,6 +75,6 @@ mod tests {
 
     #[test]
     fn r683_the_kickstart_target_is_the_gui_domain_label() {
-        assert_eq!(target(501, "tasks2d"), "gui/501/tasks2d");
+        assert_eq!(target(501, "loadtabled"), "gui/501/loadtabled");
     }
 }

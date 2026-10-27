@@ -72,7 +72,7 @@ impl Raster {
                 (clip.max.x * ppp).min(width as f32),
                 (clip.max.y * ppp).min(height as f32),
             );
-            for tri in mesh.indices.chunks_exact(3) {
+            for tri in mesh.indices.as_chunks::<3>().0 {
                 let v = [
                     &mesh.vertices[tri[0] as usize],
                     &mesh.vertices[tri[1] as usize],
@@ -208,12 +208,9 @@ mod tests {
     }
 
     fn lit_pixels(rgb: &[u8]) -> usize {
-        let bg = rgb
-            .chunks_exact(3)
-            .next()
-            .map(<[u8]>::to_vec)
-            .unwrap_or_default();
-        rgb.chunks_exact(3).filter(|p| *p != bg.as_slice()).count()
+        let px = rgb.as_chunks::<3>().0;
+        let bg = px.first().map(|p| p.to_vec()).unwrap_or_default();
+        px.iter().filter(|p| p.as_slice() != bg.as_slice()).count()
     }
 
     #[test]

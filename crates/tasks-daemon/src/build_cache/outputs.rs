@@ -1,7 +1,7 @@
 //! Stable build outputs outside the working tree.
 //!
 //! `target` (and the Android output directories) become symlinks into
-//! `<cache root>/tasks2/checkouts/<key>/...`, so a synced copy that retention deletes, or a
+//! `<cache root>/loadtable/checkouts/<key>/...`, so a synced copy that retention deletes, or a
 //! fresh worktree, still builds warm. The rules are the earlier release's:
 //!
 //! - an existing entry is never replaced, moved or deleted; a real directory is kept and
@@ -400,7 +400,7 @@ pub fn ensure_android_local_properties(
             continue;
         };
         let body = format!(
-            "# Created by tasks from the machine's {name}; git-ignored per-checkout file.\nsdk.dir={}\n",
+            "# Created by loadtable from the machine's {name}; git-ignored per-checkout file.\nsdk.dir={}\n",
             text.replace('\\', "\\\\")
         );
         use std::io::Write;

@@ -155,7 +155,7 @@ pub struct RoleExpiry {
     pub grant: String,
 }
 
-/// One paired peer as `tasks2 peers` shows it.
+/// One paired peer as `loadtable peers` shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerTrust {
     /// The name placement and `--peer` use.

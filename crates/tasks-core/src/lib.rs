@@ -1,4 +1,4 @@
-//! Pure, serde-serializable domain types for the `tasks` workload coordinator. No I/O.
+//! Pure, serde-serializable domain types for the LoadTable workload coordinator. No I/O.
 
 mod attribution;
 mod error;
@@ -7,6 +7,7 @@ mod ids;
 mod job;
 mod machine;
 pub mod metrics;
+pub mod names;
 mod phase;
 pub mod plan;
 mod priority;

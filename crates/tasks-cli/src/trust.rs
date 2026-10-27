@@ -1,4 +1,4 @@
-//! `tasks2 identity`, `pair` and `peers`: this machine's identity and its paired machines.
+//! `loadtable identity`, `pair` and `peers`: this machine's identity and its paired machines.
 //!
 //! `identity` reads the keystore in the state directory and needs no daemon. The rest ask the
 //! daemon, which owns the ledger and the endpoint. Secrets: the backup phrase is printed only to
@@ -48,7 +48,7 @@ fn running_endpoint(
     }
 }
 
-/// `tasks2 identity show`. Returns the exit code. `client` is asked for the endpoint line only
+/// `loadtable identity show`. Returns the exit code. `client` is asked for the endpoint line only
 /// when a daemon is already running.
 pub fn identity(
     action: &IdentityCommand,
@@ -67,15 +67,15 @@ pub fn identity(
     let cfg = match DaemonConfig::resolve(&args, &|k| env(k)) {
         Ok(c) => c,
         Err(e) => {
-            let _ = writeln!(err, "tasks2: cannot work out the state directory ({e})");
+            let _ = writeln!(err, "loadtable: cannot work out the state directory ({e})");
             return EXIT_USAGE;
         }
     };
     if *mnemonic && (*json || !tty) {
         let _ = writeln!(
             err,
-            "tasks2: the backup phrase is printed only to a terminal, and never as JSON; \
-             run `tasks2 identity show --mnemonic` in a terminal"
+            "loadtable: the backup phrase is printed only to a terminal, and never as JSON; \
+             run `loadtable identity show --mnemonic` in a terminal"
         );
         return EXIT_USAGE;
     }
@@ -84,13 +84,13 @@ pub fn identity(
         Err(_) if !Keystore::path_in(&cfg.state_dir).exists() => {
             let _ = writeln!(
                 err,
-                "tasks2: this machine has no identity yet; it is created when the daemon first \
-                 starts (`tasks2 daemon serve`, or any command that starts it)"
+                "loadtable: this machine has no identity yet; it is created when the daemon first \
+                 starts (`loadtable daemon serve`, or any command that starts it)"
             );
             return EXIT_FAILURE;
         }
         Err(e) => {
-            let _ = writeln!(err, "tasks2: {e}");
+            let _ = writeln!(err, "loadtable: {e}");
             return EXIT_FAILURE;
         }
     };
@@ -115,14 +115,14 @@ pub fn identity(
         let ks = match Keystore::load(&Keystore::path_in(&cfg.state_dir)) {
             Ok(k) => k,
             Err(e) => {
-                let _ = writeln!(err, "tasks2: {e}");
+                let _ = writeln!(err, "loadtable: {e}");
                 return EXIT_FAILURE;
             }
         };
         let phrase = match ks.mnemonic() {
             Ok(p) => p,
             Err(e) => {
-                let _ = writeln!(err, "tasks2: {e}");
+                let _ = writeln!(err, "loadtable: {e}");
                 return EXIT_FAILURE;
             }
         };
@@ -136,7 +136,7 @@ pub fn identity(
     EXIT_OK
 }
 
-/// `tasks2 pair …`.
+/// `loadtable pair …`.
 pub fn pair(ctx: &mut Ctx<'_>, action: &PairCommand) -> Result<i32, CliError> {
     match action {
         PairCommand::Invite {
@@ -171,7 +171,7 @@ pub fn pair(ctx: &mut Ctx<'_>, action: &PairCommand) -> Result<i32, CliError> {
             writeln!(
                 ctx.err,
                 "ticket for {}{}: works once, expires in {}. On the other machine run:\n  \
-                 tasks2 pair accept TICKET",
+                 loadtable pair accept TICKET",
                 v.roles.join(","),
                 if v.both_ways { ", both ways" } else { "" },
                 human_secs(left)
@@ -186,7 +186,7 @@ pub fn pair(ctx: &mut Ctx<'_>, action: &PairCommand) -> Result<i32, CliError> {
                 return Err(CliError::Failed("unexpected reply to pair accept".into()));
             };
             writeln!(ctx.out, "paired with {} ({})", p.name, p.did)?;
-            writeln!(ctx.err, "see the grants with: tasks2 peers")?;
+            writeln!(ctx.err, "see the grants with: loadtable peers")?;
             Ok(EXIT_OK)
         }
         PairCommand::Reset => {
@@ -202,7 +202,7 @@ pub fn pair(ctx: &mut Ctx<'_>, action: &PairCommand) -> Result<i32, CliError> {
     }
 }
 
-/// `tasks2 peers` and `tasks2 peers revoke NAME`.
+/// `loadtable peers` and `loadtable peers revoke NAME`.
 pub fn peers(
     ctx: &mut Ctx<'_>,
     action: Option<&PeersCommand>,
@@ -234,7 +234,7 @@ pub fn peers(
     if peers.is_empty() {
         writeln!(
             ctx.out,
-            "no paired machines; pair one with `tasks2 pair invite` here and `tasks2 pair accept` there"
+            "no paired machines; pair one with `loadtable pair invite` here and `loadtable pair accept` there"
         )?;
         return Ok(EXIT_OK);
     }
@@ -424,7 +424,7 @@ mod tests {
             r.err
         );
         assert!(
-            r.err.contains("both ways") && r.err.contains("tasks2 pair accept"),
+            r.err.contains("both ways") && r.err.contains("loadtable pair accept"),
             "{}",
             r.err
         );
@@ -578,7 +578,7 @@ mod tests {
         }));
         let h = Harness::default();
         let r = h.run(&client, &["peers"]);
-        assert!(r.out.contains("tasks2 pair invite") && r.out.contains("tasks2 pair accept"));
+        assert!(r.out.contains("loadtable pair invite") && r.out.contains("loadtable pair accept"));
         let r = h.run(&client, &["peers", "revoke", "nixos"]);
         assert_eq!(
             r.out,

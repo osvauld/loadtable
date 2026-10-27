@@ -4,14 +4,14 @@
 use std::fmt::Display;
 use tasks_platform::local_offset_secs;
 
-/// `2026-10-24 11:47:51 tasks2d: text` for a moment given in ms since the epoch and the zone's
+/// `2026-10-24 11:47:51 loadtabled: text` for a moment given in ms since the epoch and the zone's
 /// offset east of UTC at that moment.
 pub(crate) fn stamped(ms: i64, offset_secs: i32, text: &str) -> String {
     let secs = ms.div_euclid(1000) + i64::from(offset_secs);
     let (y, m, d) = crate::logs::civil_from_days(secs.div_euclid(86_400));
     let t = secs.rem_euclid(86_400);
     format!(
-        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02} tasks2d: {text}",
+        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02} loadtabled: {text}",
         t / 3600,
         t % 3600 / 60,
         t % 60
@@ -44,13 +44,13 @@ mod tests {
         let ms = 1_792_842_471_000;
         assert_eq!(
             stamped(ms, 0, "peer mac is down"),
-            "2026-10-24 11:47:51 tasks2d: peer mac is down"
+            "2026-10-24 11:47:51 loadtabled: peer mac is down"
         );
         // two hours east of UTC, across midnight
         let late = 1_792_881_600_000; // 2026-10-24 22:40:00 UTC
         assert_eq!(
             stamped(late, 2 * 3600, "x"),
-            "2026-10-25 00:40:00 tasks2d: x"
+            "2026-10-25 00:40:00 loadtabled: x"
         );
     }
 }

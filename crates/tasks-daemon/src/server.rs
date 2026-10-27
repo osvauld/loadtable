@@ -96,7 +96,8 @@ impl Daemon {
         cfg.create_dirs()?;
         let pid = PidLock::acquire(&cfg.pid_path())?;
         let env = opts.env;
-        let lookup = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        let raw = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        let lookup = |k: &str| tasks_core::names::env_or_old(&raw, k);
         let policy = MachinePolicy::load(&cfg.policy_path(), &lookup);
         raise_nofile(policy.nofile_target());
         let store = retry_busy(&RetryPolicy::default(), &sleep, || {

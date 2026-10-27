@@ -336,7 +336,7 @@ mod tests {
 
     // a real libtest run: two failures, one of them with captured output
     const LOG: &str = "\
-[tasks] cache: sccache /x
+[loadtable] cache: sccache /x
 running 3 tests
 test glare::quiet ... ok
 test glare::glare_leaves_exactly_one_call ... FAILED

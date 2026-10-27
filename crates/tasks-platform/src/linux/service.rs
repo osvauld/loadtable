@@ -87,8 +87,8 @@ mod tests {
     #[test]
     fn r683_start_asks_systemd_for_the_user_service() {
         assert_eq!(
-            start_args("tasks2d"),
-            ["--user", "start", "tasks2d.service"]
+            start_args("loadtabled"),
+            ["--user", "start", "loadtabled.service"]
         );
     }
 

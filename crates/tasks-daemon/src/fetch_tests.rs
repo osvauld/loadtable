@@ -144,7 +144,7 @@ fn r505_a_passed_forwarded_job_brings_its_file_back_with_the_right_hash() {
     let log = std::fs::read_to_string(&ran.log).unwrap();
     assert!(
         log.contains(&format!(
-            "[tasks] fetched {APK} (585.9 KiB, sha256 {})",
+            "[loadtable] fetched {APK} (585.9 KiB, sha256 {})",
             sha(&landed)
         )),
         "{log}"
@@ -179,7 +179,7 @@ fn r801_a_fetch_reports_its_progress_in_the_log_and_clears_it_when_done() {
     assert!(progress.len() >= 2, "{log}");
     let last = progress.last().unwrap();
     assert!(
-        last.starts_with(&format!("[tasks] {} on nixos;", ran.end.reason)),
+        last.starts_with(&format!("[loadtable] {} on nixos;", ran.end.reason)),
         "the peer's result first: {last}"
     );
     assert!(last.contains("600 KiB/600 KiB"), "{last}");
@@ -220,8 +220,8 @@ fn r506_a_missing_path_is_reported_and_the_other_files_still_arrive() {
     );
     assert!(!ran.dest.join("out/nope.apk").exists());
     let log = std::fs::read_to_string(&ran.log).unwrap();
-    assert!(log.contains("[tasks] fetch failed: out/nope.apk does not exist on the peer"));
-    assert!(log.contains("[tasks] fetched out/report.txt"));
+    assert!(log.contains("[loadtable] fetch failed: out/nope.apk does not exist on the peer"));
+    assert!(log.contains("[loadtable] fetched out/report.txt"));
 }
 
 // R-507
@@ -555,14 +555,14 @@ fn r503_a_job_that_ran_here_says_there_was_nothing_to_fetch_and_get_shows_the_re
     assert_eq!(r.until_done(id), Phase::Passed);
     let log = r.log_text(id);
     assert!(
-        log.contains("[tasks] fetch: this job runs here, so its output is already in the checkout; nothing fetched (out/app.apk)"),
+        log.contains("[loadtable] fetch: this job runs here, so its output is already in the checkout; nothing fetched (out/app.apk)"),
         "{log}"
     );
     // a job without a fetch list has no such line
     let plain = r.submit(&r.spec("agent-1", &["make", "x"], Kind::Run));
     r.tick();
     assert_eq!(r.until_done(plain), Phase::Passed);
-    assert!(!r.log_text(plain).contains("[tasks] fetch:"));
+    assert!(!r.log_text(plain).contains("[loadtable] fetch:"));
     // `get` carries the requested paths and, once recorded, the results
     let get = |id| {
         let Reply::Ok(Response::Job { job }) = r.sch.handle(Request::Get { id }) else {
