@@ -396,6 +396,7 @@ impl StatusSource for DaemonStatus {
                 on_battery: p.on_battery,
                 percent: p.battery_pct,
             }),
+            version: Some(crate::VERSION.to_string()),
         }
     }
 }

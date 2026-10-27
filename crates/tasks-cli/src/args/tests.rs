@@ -19,6 +19,17 @@ fn the_cli_definition_is_consistent() {
     Cli::command().debug_assert();
 }
 
+// R-807
+#[test]
+fn r807_version_names_the_commit_it_was_built_from() {
+    let e = parse(&["--version"]).unwrap_err();
+    assert_eq!(e.kind(), clap::error::ErrorKind::DisplayVersion);
+    assert_eq!(
+        e.to_string().trim(),
+        format!("loadtable {}", tasks_daemon::VERSION)
+    );
+}
+
 #[test]
 fn run_takes_options_then_the_command_after_a_double_dash() {
     let a = run_args(&[

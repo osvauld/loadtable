@@ -371,9 +371,9 @@ impl Forwarder for FakeForwarder {
         !lock(&self.not_ready).contains(&job)
     }
     fn wait_reason(&self, job: JobId) -> Option<String> {
-        lock(&self.not_ready)
-            .contains(&job)
-            .then(|| "waiting for checkout: job #0 is using the remote copy".to_string())
+        lock(&self.not_ready).contains(&job).then(|| {
+            "waiting for checkout: job #0 is using this checkout's copy on nixos".to_string()
+        })
     }
     fn start(&self, job: JobId, _log: &std::path::Path) -> Result<(), ForwardError> {
         lock(&self.started).push(job);
@@ -841,6 +841,7 @@ impl PeerWorld {
             jobs: Vec::new(),
             cores_in_use_milli: None,
             power: None,
+            version: None,
         };
         Receiver::new(
             "nixos",

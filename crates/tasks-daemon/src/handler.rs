@@ -116,7 +116,7 @@ impl Scheduler {
         match req {
             Request::Hello => Ok(Response::Hello(HelloInfo {
                 protocol: PROTOCOL_VERSION,
-                version: env!("CARGO_PKG_VERSION").to_string(),
+                version: crate::VERSION.to_string(),
                 pid: std::process::id(),
                 state_dir: self.cfg.state_dir.clone(),
                 lock_dir: self.cfg.lock_dir.clone(),

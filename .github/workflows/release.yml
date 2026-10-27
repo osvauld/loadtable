@@ -64,6 +64,8 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
       TARGET: ${{ matrix.target }}
+      # The build stamp's commit when git is not available (crates/tasks-daemon/build.rs).
+      LOADTABLE_BUILD_COMMIT: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
@@ -91,6 +93,9 @@ jobs:
         run: |
           bin="dist/loadtable-$VERSION-$TARGET/bin"
           "$bin/loadtable" --version
+          "$bin/loadtabled" --version
+          # the stamp names the tagged commit
+          "$bin/loadtabled" --version | grep -q "($(git rev-parse --short HEAD) "
           "$bin/loadtable" --help >/dev/null
           "$bin/loadtabled" --help >/dev/null
       - uses: actions/upload-artifact@v4
