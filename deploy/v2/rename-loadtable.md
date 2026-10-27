@@ -7,6 +7,15 @@ machines keep talking to each other while they are upgraded one by one.
 
 Do it when the machine has no running jobs: stopping the old service interrupts them.
 
+**Before the swap, on a machine with a phone that must never be used:** the serial is no longer
+built in (R-820). Add it to the machine policy (`~/.config/tasks2/machine-policy.toml` before the
+move, `~/.config/loadtable/` after), or every job may use that phone:
+
+```toml
+[machine]
+denied_devices = ["<the phone's serial>"]
+```
+
 ## Laptop and the NixOS worker (systemd)
 
 ```sh

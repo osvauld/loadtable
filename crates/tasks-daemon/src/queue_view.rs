@@ -96,6 +96,13 @@ pub fn peer_hold(r: &JobRecord, peer_blocker: Option<&str>) -> Option<String> {
         .map(|b| format!("waiting on {peer}: {b}"))
 }
 
+/// Whether a waiting job is held by something other than a free slot (pressure, a dependency,
+/// placement or the checkout, disk, a device). The queue estimate only models slots, so for
+/// these a start of "now" is not known to be true (R-805).
+pub fn waits_off_slot(phase: &Phase) -> bool {
+    matches!(phase, Phase::Waiting(w) if !matches!(w, WaitReason::Slot(_)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,5 +218,24 @@ mod tests {
         let mut local = forwarded(Phase::Running, Some(Phase::Queued));
         local.forward = None;
         assert_eq!(remote_wait(&local), None);
+    }
+
+    // R-805
+    #[test]
+    fn r805_only_a_slot_wait_has_a_start_estimate_of_now() {
+        assert!(!waits_off_slot(&Phase::Queued));
+        assert!(!waits_off_slot(&Phase::Waiting(WaitReason::Slot(
+            SlotKind::Compile
+        ))));
+        assert!(waits_off_slot(&Phase::Waiting(WaitReason::Pressure(
+            "CPU contended".into()
+        ))));
+        assert!(waits_off_slot(&Phase::Waiting(WaitReason::Placement(
+            "waiting for checkout".into()
+        ))));
+        assert!(waits_off_slot(&Phase::Waiting(WaitReason::Dependency(
+            JobId(4)
+        ))));
+        assert!(waits_off_slot(&Phase::Waiting(WaitReason::Disk)));
     }
 }

@@ -1176,6 +1176,10 @@ pub struct PeerMachineView {
     /// outside jobs); `None` from an older peer.
     #[serde(default)]
     pub cores_in_use_milli: Option<u32>,
+    /// The peer daemon's version and build (`0.1.0 (41ac455 2026-10-27)`); `None` from an
+    /// older peer (R-807).
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 /// One running job on a peer.

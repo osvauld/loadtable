@@ -327,7 +327,8 @@ impl Forward {
         match &self.state {
             ForwardState::WaitingCheckout { blocker } => match blocker {
                 Some(b) => format!(
-                    "waiting for checkout: job #{} is using the remote copy",
+                    "waiting for checkout: job #{} is using this checkout's copy on the peer; \
+                     a copy takes one job at a time, so this one starts after it",
                     b.0
                 ),
                 None => "waiting for checkout".to_string(),

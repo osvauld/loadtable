@@ -77,3 +77,23 @@ pub use scheduler::{Scheduler, SchedulerParts, TickReport};
 pub use server::{Daemon, DaemonOptions};
 pub use status::job_view;
 pub use tasks_platform::slot_lock_path;
+
+/// The version with the commit it was built from, e.g. `0.1.0 (41ac455 2026-10-27)`, or
+/// `0.1.0 (unknown)` from a build without git (R-807). Status and peers report it.
+pub const VERSION: &str = env!("LOADTABLE_VERSION");
+
+#[cfg(test)]
+mod version_tests {
+    // R-807
+    #[test]
+    fn r807_the_version_names_the_package_version_and_the_build() {
+        let v = super::VERSION;
+        assert!(
+            v.starts_with(concat!(env!("CARGO_PKG_VERSION"), " (")),
+            "{v}"
+        );
+        assert!(v.ends_with(')'), "{v}");
+        let stamp = &v[env!("CARGO_PKG_VERSION").len() + 2..v.len() - 1];
+        assert!(!stamp.is_empty(), "{v}");
+    }
+}

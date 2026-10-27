@@ -162,6 +162,7 @@ fn named_peer(name: &str, state: &str, ago: Option<u64>) -> PeerView {
             jobs: Vec::new(),
             cores_in_use_milli: None,
             power: None,
+            version: None,
         }),
     }
 }

@@ -278,9 +278,9 @@ fn r011_malformed(e: &Env) {
         s.submit(&spec("alice", vec![JobId(999)])),
         Err(LedgerError::UnknownDependency(_))
     ));
-    let mut denied = spec("alice", vec![]);
-    denied.argv = vec!["adb".into(), "-s".into(), "ZD22257P6G".into()];
-    assert!(s.submit(&denied).is_err());
+    let mut nul = spec("alice", vec![]);
+    nul.argv = vec!["echo".into(), "a\0b".into()];
+    assert!(s.submit(&nul).is_err());
     assert!(s.list(&ListFilter::default()).unwrap().is_empty());
     // The next id is still the first one: nothing was consumed.
     assert_eq!(s.submit(&spec("alice", vec![])).unwrap(), JobId(1));
@@ -928,7 +928,8 @@ fn r177_plan(e: &Env) {
     // Atomic: a later step that fails validation leaves no earlier step behind.
     let before = s.list(&ListFilter::default()).unwrap().len();
     let mut bad = step("b", &["a"]);
-    bad.argv = vec!["adb".into(), "ZD22257P6G".into()];
+    // a zero timeout passes the plan's own checks and fails the job spec's
+    bad.hints.timeout_secs = Some(0);
     let broken = Plan {
         steps: vec![step("a", &[]), bad],
     };

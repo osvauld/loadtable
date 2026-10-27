@@ -655,16 +655,13 @@ fn r095_a_timeout_travels_on_the_spec() {
 
 #[test]
 fn r210_a_denied_device_is_the_daemons_to_refuse_and_the_device_travels_as_a_resource() {
-    let c = refusing("refused: the command names the denied device ZD22257P6G");
-    let r = Harness::default().run(
-        &c,
-        &["run", "--device", "ZD22257P6G", "--", "adb", "devices"],
-    );
+    let c = refusing("refused: the command names the denied device PHONE01X");
+    let r = Harness::default().run(&c, &["run", "--device", "PHONE01X", "--", "adb", "devices"]);
     assert_eq!(r.code, 2);
     assert!(r.err.contains("denied device"), "{}", r.err);
     assert_eq!(
         submitted_spec(&c).requirements.device,
-        Some(DeviceId("ZD22257P6G".into()))
+        Some(DeviceId("PHONE01X".into()))
     );
 }
 

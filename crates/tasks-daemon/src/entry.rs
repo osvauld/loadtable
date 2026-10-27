@@ -20,6 +20,7 @@ pub const OLD_SERVICE_NAME: &str = "tasks2d";
 const USAGE: &str = "usage: loadtabled [serve] [OPTIONS]      run the daemon (also: loadtable daemon serve)\n\
        loadtabled install [--dry-run] [OPTIONS]  write the user service unit and print the next command\n\
        loadtabled policy-sample                  print a machine-policy.toml listing every default\n\
+       loadtabled --version                      print the version and the commit it was built from\n\
 \n\
 OPTIONS\n\
   --state-dir DIR   ledger, socket, logs (default: $XDG_STATE_HOME/loadtable)\n\
@@ -44,6 +45,8 @@ pub enum Command {
     PolicySample,
     /// Print usage.
     Help,
+    /// Print the version and build (R-807).
+    Version,
 }
 
 /// Parses `args` (without the program name).
@@ -55,6 +58,7 @@ pub fn parse_args(args: &[String]) -> Result<Command, DaemonError> {
             s
         }
         Some("-h" | "--help" | "help") => return Ok(Command::Help),
+        Some("-V" | "--version" | "version") => return Ok(Command::Version),
         _ => "serve",
     };
     let mut cfg = ConfigArgs::default();
@@ -223,6 +227,10 @@ pub fn run(args: &[String]) -> Result<(), DaemonError> {
             println!("{USAGE}");
             Ok(())
         }
+        Command::Version => {
+            println!("{SERVICE_NAME} {}", crate::VERSION);
+            Ok(())
+        }
         Command::PolicySample => {
             print!("{}", MachinePolicy::sample_text());
             Ok(())
@@ -372,6 +380,9 @@ mod tests {
     #[test]
     fn arguments_parse_and_unknown_ones_are_refused() {
         assert_eq!(parse_args(&a(&["--help"])).unwrap(), Command::Help);
+        // R-807
+        assert_eq!(parse_args(&a(&["--version"])).unwrap(), Command::Version);
+        assert_eq!(parse_args(&a(&["-V"])).unwrap(), Command::Version);
         let Command::Serve(c) =
             parse_args(&a(&["serve", "--state-dir", "/s", "--machine", "m"])).unwrap()
         else {

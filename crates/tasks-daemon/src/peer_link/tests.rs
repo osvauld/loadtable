@@ -152,6 +152,12 @@ fn r230_only_the_first_of_a_checkout_is_ready_and_an_unrelated_one_never_waits()
     until("a1 accepted", || accepted(&link, a1.id));
     let why = link.wait_reason(a2.id).unwrap();
     assert!(why.contains(&format!("job #{}", a1.id.0)), "{why}");
+    // R-806: which copy, and why this job waits for it
+    assert!(
+        why.contains("this checkout's copy on nixos")
+            && why.contains("a copy takes one job at a time"),
+        "{why}"
+    );
     // while a1 runs the others still wait, and starting is a no-op for what is not ready
     assert!(!link.ready_to_start(a2.id));
     w.runner.finish(tasks_peer::RemoteJobId(1), 0, vec![]);
@@ -185,7 +191,7 @@ fn r803_a_job_on_one_peer_never_waits_for_the_same_checkout_on_another() {
     assert!(
         !link
             .wait_reason(on_mac.id)
-            .is_some_and(|t| t.contains("is using the remote copy"))
+            .is_some_and(|t| t.contains("is using this checkout's copy"))
     );
     assert!(
         !link.ready_to_start(after.id),
@@ -364,7 +370,12 @@ fn r173_an_unreachable_peer_is_never_success_it_is_interrupted_after_the_grace()
     w.net.set_down(&w.nixos, true);
     let link = w.link();
     link.resume(&rec, &w.dir.path().join("x.log")).unwrap();
-    std::thread::sleep(Duration::from_millis(30));
+    // the grace runs from the first failed attempt; a fixed sleep let the clock jump before it
+    // on a busy machine, so the grace started after the jump and never ran out
+    until(
+        "the link noticed the peer is gone",
+        || matches!(link.poll(rec.id), ForwardPoll::Active(p) if p.mirror.contains("link lost")),
+    );
     link.advance_clock(Duration::from_secs(600));
     let end = poll_until_done(&link, rec.id);
     assert_eq!(end.phase, Phase::Interrupted);

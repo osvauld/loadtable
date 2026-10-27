@@ -127,8 +127,10 @@ impl Scheduler {
             Via::Local => scan_known_targets(&spec.cwd, &submit_rules::packages_of(&spec.argv)),
             Via::Peer => None,
         };
+        let denied = policy.denied_devices();
         let verdict = submit_rules::check(&SubmitRules {
             argv: &hay,
+            denied_devices: &denied,
             broad_test_escape: spec.broad_test_escape,
             broad_mode: policy.broad_test_mode(),
             known: known.as_ref(),

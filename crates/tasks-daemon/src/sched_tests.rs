@@ -506,6 +506,8 @@ fn r345_an_overrunning_short_job_is_not_killed_and_the_next_run_is_not_short() {
     seed_history(&r, &CHECK, 2, 8.0, Some(100 << 20));
     let (id, slot) = slot_of(&r, &CHECK);
     assert!(slot.is_some_and(|s| s >= SHORT_LANE_BASE));
+    // the slot is taken at admission; the job is Running once its thread has spawned it
+    r.until_running(id);
     // an hour later it is still running: nothing killed it, nothing signalled it
     r.clock.advance(60 * MIN_MS);
     r.tick();
@@ -688,9 +690,11 @@ fn r801_a_forwarded_job_whose_outputs_come_back_shows_the_transfer_not_the_run()
     let id = r.submit(&anywhere(&r));
     r.store.set_forward(id, &nixos(), None, Some("k1")).unwrap();
     f.script(id, accepted(Phase::Running));
+    // the status row appears when the driver thread is registered; the row goes Running and gets
+    // its log path a moment later, from that thread, once the peer accepted
     r.until("running on the peer", || {
         r.tick();
-        r.sch.status().running.iter().any(|j| j.id == id)
+        r.sch.status().running.iter().any(|j| j.id == id) && r.record(id).log_path.is_some()
     });
     let row = |st: &StatusSnapshot| st.running.iter().find(|j| j.id == id).cloned().unwrap();
     assert_eq!(row(&r.sch.status()).transfer, None);

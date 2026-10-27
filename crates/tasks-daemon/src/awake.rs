@@ -6,6 +6,7 @@
 use crate::api::PowerView;
 use crate::machine_policy::MachinePolicy;
 use crate::scheduler::{Scheduler, lock};
+use tasks_core::JobId;
 use tasks_platform::{InhibitGuard, SleepGuard};
 
 /// How often a refused hold is tried again, ms.
@@ -107,12 +108,16 @@ impl Scheduler {
     }
 
     /// Takes or releases the stay-awake hold for the jobs running or about to start.
-    /// `started` jobs were counted in the pass's demand and now run.
-    pub(crate) fn keep_awake(&self, policy: &MachinePolicy, now_ms: i64, started: usize) {
-        let running = self.running_count();
+    /// `started` jobs were counted in the pass's demand and now run: they count once, through
+    /// the demand, even when one already ended (a job can finish before this runs, and then
+    /// never took the hold or its linger).
+    pub(crate) fn keep_awake(&self, policy: &MachinePolicy, now_ms: i64, started: &[JobId]) {
+        let older = lock(&self.running)
+            .keys()
+            .filter(|id| !started.contains(id))
+            .count();
         let mut st = lock(&self.state);
-        let queued = (st.awake_demand as usize).saturating_sub(started);
-        let jobs = u32::try_from(running + queued).unwrap_or(u32::MAX);
+        let jobs = u32::try_from(older + st.awake_demand as usize).unwrap_or(u32::MAX);
         let linger =
             i64::try_from(policy.keep_awake_linger_secs().saturating_mul(1000)).unwrap_or(i64::MAX);
         st.awake.update(

@@ -436,7 +436,7 @@ impl Scheduler {
         self.supervise(&policy, now);
         self.hand_over_tests(&policy);
         self.admit(&policy, &mut rep);
-        self.keep_awake(&policy, now, rep.started.len());
+        self.keep_awake(&policy, now, &rep.started);
         self.psi_trips(&policy);
         self.maintenance(&policy, now);
         self.evaluate_alerts(&policy, now);
