@@ -569,14 +569,17 @@ fn r222_a_slot_held_with_no_live_job_alerts_after_the_grace_naming_the_holder() 
     assert!(a.message.contains("pid 4242"), "{}", a.message);
     // R-221: it clears by itself
     drop(_held);
-    r.tick();
-    assert!(
+    // A process another test forks in this moment holds a copy of the lock's descriptor until
+    // it execs (close-on-exec acts only then), and the flock with it, so the next tick may still
+    // see the slot held: the alert clears on the first tick after the lock is really free.
+    r.until("the alert clears", || {
+        r.tick();
         r.sch
             .status()
             .alerts
             .iter()
             .all(|a| a.id != "slot-held-compile-0")
-    );
+    });
 }
 
 // R-049: an untracked holder is named and never signalled.

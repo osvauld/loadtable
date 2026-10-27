@@ -48,6 +48,15 @@ fn running(r: &Rig) -> (JobId, std::sync::Arc<crate::scheduler::RunningJob>) {
     (id, rj)
 }
 
+/// A running job whose runner thread is parked: the test's samples are the only ones. The
+/// runner's own come every two seconds of real time at the rig's frozen clock, so on a busy
+/// machine one landed on a test's instant and replaced its sample (R-568, R-569).
+fn running_quiet(r: &Rig) -> (JobId, std::sync::Arc<crate::scheduler::RunningJob>) {
+    let job = running(r);
+    r.procs.pause(1);
+    job
+}
+
 fn figs(q: Attribution, cpu: u64, mem: u64) -> JobFigures {
     let mut f = JobFigures::empty(q);
     f.cpu_usec = Some(cpu);
@@ -58,6 +67,7 @@ fn figs(q: Attribution, cpu: u64, mem: u64) -> JobFigures {
 
 fn stop(r: &Rig, rj: &crate::scheduler::RunningJob) {
     r.procs.exit(r.procs.pgid(0), 0);
+    r.procs.resume();
     r.until_done(rj.id);
 }
 
@@ -84,7 +94,7 @@ fn r567_an_unknown_job_is_not_found_and_a_waiting_one_says_it_has_no_samples() {
 #[test]
 fn r568_a_running_jobs_tree_is_grouped_by_program_and_outside_processes_are_left_out() {
     let r = Rig::new();
-    let (id, rj) = running(&r);
+    let (id, rj) = running_quiet(&r);
     let at = |s: i64| r.clock.advance(s * 1000);
     at(3600);
     *r.table.table.lock().unwrap() = vec![
@@ -123,7 +133,7 @@ fn r568_a_running_jobs_tree_is_grouped_by_program_and_outside_processes_are_left
 #[test]
 fn r569_a_cgroup_jobs_processes_are_the_cgroups_members_exactly() {
     let r = Rig::delegated();
-    let (id, rj) = running(&r);
+    let (id, rj) = running_quiet(&r);
     // 2001 escaped the process group; 1001 is in the group but not in the cgroup
     r.cgroups.set_pids(CgroupName::Job(id.0), vec![2001]);
     r.clock.advance(3_600_000);

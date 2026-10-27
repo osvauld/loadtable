@@ -842,12 +842,17 @@ fn r797_a_job_queued_on_the_peer_hands_its_offload_slot_back_and_takes_one_when_
     }
     assert_eq!(slot_of(&r.sch, j1), None);
     f.script(j2, passed(2));
+    let forward_log = || {
+        std::fs::read_to_string(format!("{}.forward", r.cfg.log_path(j1).display()))
+            .unwrap_or_default()
+    };
+    // the driver thread takes the slot, then appends its note to the log
     within("j1 takes the freed slot", || {
         r.tick();
         slot_of(&r.sch, j1) == Some((SlotKind::Offload, 0))
+            && forward_log().contains("took offload slot")
     });
-    let log = std::fs::read_to_string(format!("{}.forward", r.cfg.log_path(j1).display()))
-        .unwrap_or_default();
+    let log = forward_log();
     assert!(
         log.contains("waiting in nixos's queue; offload slot 0 handed back"),
         "{log}"
