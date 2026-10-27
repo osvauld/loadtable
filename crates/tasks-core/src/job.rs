@@ -4,9 +4,6 @@ use crate::{CoreError, JobId, Owner, Priority, Requirements};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Device serials that must never appear in a job's argv.
-pub const DENIED_DEVICES: &[&str] = &["ZD22257P6G"];
-
 /// Longest wall-clock limit a job may ask for: seven days.
 pub const MAX_TIMEOUT_SECS: u64 = 604_800;
 
@@ -232,11 +229,6 @@ impl JobSpec {
             return Err(CoreError::LightAndIsolate);
         }
         crate::check_reason(self.priority, self.priority_reason.as_deref())?;
-        for d in DENIED_DEVICES {
-            if self.argv.iter().any(|a| a.contains(d)) {
-                return Err(CoreError::DeniedDevice((*d).to_string()));
-            }
-        }
         Ok(())
     }
 }
@@ -331,13 +323,6 @@ pub(crate) mod tests {
         let mut s = spec();
         s.timeout_secs = Some(0);
         assert_eq!(s.validate(), Err(CoreError::BadTimeout(0)));
-    }
-
-    #[test]
-    fn denied_device() {
-        let mut s = spec();
-        s.argv = vec!["adb".into(), "-s".into(), "ZD22257P6G".into()];
-        assert!(matches!(s.validate(), Err(CoreError::DeniedDevice(_))));
     }
 
     #[test]

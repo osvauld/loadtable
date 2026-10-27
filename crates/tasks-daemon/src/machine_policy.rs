@@ -435,6 +435,12 @@ const FIELDS: &[Field] = &[
         "false",
     ),
     f("machine.devices", "LOADTABLE_DEVICES", Ty::List, ""),
+    f(
+        "machine.denied_devices",
+        "LOADTABLE_DENIED_DEVICES",
+        Ty::List,
+        "",
+    ),
     f("machine.tools", "LOADTABLE_TOOLS", Ty::List, ""),
 ];
 
@@ -890,6 +896,10 @@ impl MachinePolicy {
     /// Device serials attached to this machine, in lock-index order.
     pub fn devices(&self) -> Vec<String> {
         self.list("machine.devices")
+    }
+    /// Device serials no job here may name, in argv or as its device (R-210). Empty by default.
+    pub fn denied_devices(&self) -> Vec<String> {
+        self.list("machine.denied_devices")
     }
     /// Extra tools this machine declares.
     pub fn tools(&self) -> Vec<String> {

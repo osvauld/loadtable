@@ -136,27 +136,8 @@ fn r152_keys_are_scoped_to_the_submitting_peer() {
 #[test]
 fn r153_the_receiver_applies_its_own_policy() {
     let w = synced_world();
-    // Device denylist comes from the job rules.
-    let mut spec = w.spec("");
-    spec.argv = vec![
-        "adb".into(),
-        "-s".into(),
-        "ZD22257P6G".into(),
-        "shell".into(),
-    ];
-    let r = conn(&w).request(Body::Submit(SubmitJob {
-        key: SubmitKey::new("laptop:9").unwrap(),
-        checkout: CheckoutId::derive("laptop", &w.root),
-        rel_cwd: String::new(),
-        spec,
-        shared_checkout: false,
-    }));
-    assert!(
-        matches!(r, Err(PeerError::Refused(Refusal::PolicyDenied { .. }))),
-        "{r:?}"
-    );
-
-    // A custom policy (broad tests, Cargo cap) refuses with its own reason.
+    // The policy (broad tests, Cargo cap, the machine's denied devices) refuses with its own
+    // reason; the daemon's real rules are tested in tasks-daemon (r153, R-820).
     struct NoCargoTest;
     impl SubmitPolicy for NoCargoTest {
         fn check(&self, spec: &tasks_core::JobSpec) -> Result<(), String> {

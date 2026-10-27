@@ -144,7 +144,7 @@ fn r210_a_denied_device_refusal_from_the_daemon_reaches_the_agent() {
     let r = call(
         &tools_with(&d),
         "submit",
-        json!({"argv": ["adb", "-s", "zd22257p6g", "shell"]}),
+        json!({"argv": ["adb", "-s", "phone01x", "shell"]}),
     );
     assert_eq!(error_kind(&r), "refused");
     assert!(r.text.contains("denied device"), "{}", r.text);

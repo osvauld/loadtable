@@ -29,9 +29,6 @@ pub enum CoreError {
     /// The wall-clock limit is zero or above [`crate::MAX_TIMEOUT_SECS`].
     #[error("timeout of {0} s is outside 1..={max} s", max = crate::MAX_TIMEOUT_SECS)]
     BadTimeout(u64),
-    /// argv names a denied device.
-    #[error("argv mentions denied device {0}")]
-    DeniedDevice(String),
     /// A `blocking` job names no reason.
     #[error("priority blocking needs a reason (--reason TEXT)")]
     BlockingNeedsReason,
