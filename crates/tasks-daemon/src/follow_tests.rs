@@ -485,13 +485,13 @@ fn r191_the_daemons_environment_overrides_the_policy_file() {
 
 #[test]
 fn r210_a_denied_serial_is_refused_in_argv_in_any_case_and_as_a_device_resource() {
-    let r = Rig::new();
-    let lower = r.spec("o", &["adb", "-s", "zd22257p6g", "devices"], Kind::Run);
+    let r = Rig::with_policy(crate::testkit::DENY_PHONE);
+    let lower = r.spec("o", &["adb", "-s", "phone01x", "devices"], Kind::Run);
     let e = err(submit(&r, lower));
     assert_eq!(e.code, ErrorCode::Refused);
     assert!(e.message.contains("denied device"), "{}", e.message);
     let mut by_resource = r.spec("o", &["adb", "devices"], Kind::Device);
-    by_resource.requirements.device = Some(tasks_core::DeviceId("ZD22257P6G".into()));
+    by_resource.requirements.device = Some(tasks_core::DeviceId("PHONE01X".into()));
     assert_eq!(err(submit(&r, by_resource)).code, ErrorCode::Refused);
     let mut fine = r.spec("o", &["adb", "devices"], Kind::Device);
     fine.requirements.device = Some(tasks_core::DeviceId("9BWAY1LSDC".into()));
@@ -601,7 +601,7 @@ fn r540_plan_steps_follow_the_same_rule_by_plan_placement_and_step_hint() {
 
 #[test]
 fn r191_plans_get_the_same_answer_naming_the_step() {
-    let r = Rig::new();
+    let r = Rig::with_policy(crate::testkit::DENY_PHONE);
     let plan = || Plan {
         steps: vec![step("fine", "cargo test --lib"), step("broad", BROAD)],
     };
@@ -625,7 +625,7 @@ fn r191_plans_get_the_same_answer_naming_the_step() {
     );
     // denied devices and the cap apply to every step too
     let bad = Plan {
-        steps: vec![step("a", "adb -s ZD22257P6G devices")],
+        steps: vec![step("a", "adb -s PHONE01X devices")],
     };
     assert_eq!(err(submit_plan(&r, bad, false)).code, ErrorCode::Refused);
     let over = Plan {
@@ -669,7 +669,7 @@ fn r191_suites_get_the_same_answer() {
 
 #[test]
 fn r153_the_peer_receiver_applies_the_same_rules() {
-    let r = Rig::new();
+    let r = Rig::with_policy(crate::testkit::DENY_PHONE);
     let rules = DaemonRules::new(r.sch.clone());
     let broad = r.spec("o", &["cargo", "test", "-p", "x", "video_call"], Kind::Test);
     let e = rules.check(&broad).unwrap_err();
@@ -677,7 +677,7 @@ fn r153_the_peer_receiver_applies_the_same_rules() {
     let mut escaped = broad;
     escaped.broad_test_escape = true;
     assert!(rules.check(&escaped).is_ok());
-    let phone = r.spec("o", &["adb", "-s", "zd22257p6g", "shell"], Kind::Run);
+    let phone = r.spec("o", &["adb", "-s", "phone01x", "shell"], Kind::Run);
     assert!(rules.check(&phone).unwrap_err().contains("denied device"));
     // the origin's -j is not refused here: it is lowered to this machine's cap when it starts
     let jobs = r.spec("o", &["cargo", "check", "-j", "8"], Kind::Compile);

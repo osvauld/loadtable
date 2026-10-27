@@ -313,15 +313,11 @@ fn r280_forwarding_a_job_records_the_peers_did_once() {
 // R-287
 #[test]
 fn r287_a_job_refused_by_a_submit_rule_is_recorded_with_the_rule_id() {
-    let r = Rig::new();
+    let r = Rig::with_policy(crate::testkit::DENY_PHONE);
     let broad = r.spec("agent-1", &["cargo", "test", "some_filter"], Kind::Test);
     let e = err(r.sch.handle(Request::Submit { spec: broad }));
     assert_eq!(e.code, ErrorCode::Refused);
-    let phone = r.spec(
-        "agent-1",
-        &["adb", "-s", "zd22257p6g", "devices"],
-        Kind::Run,
-    );
+    let phone = r.spec("agent-1", &["adb", "-s", "phone01x", "devices"], Kind::Run);
     assert_eq!(
         err(r.sch.handle(Request::Submit { spec: phone })).code,
         ErrorCode::Refused
@@ -349,21 +345,21 @@ fn r287_a_job_refused_by_a_submit_rule_is_recorded_with_the_rule_id() {
     assert!(
         !format!("{:?}", rows(&r))
             .to_lowercase()
-            .contains("zd22257p6g")
+            .contains("phone01x")
     );
 }
 
 // R-287
 #[test]
 fn r287_a_peers_refused_job_names_the_peer_as_actor() {
-    let r = Rig::new();
+    let r = Rig::with_policy(crate::testkit::DENY_PHONE);
     r.audit
         .set_trust(stub_with(&[("laptop", "did:key:zLaptop")]));
     let rules = DaemonRules::new(r.sch.clone());
     let peer = PeerId::new("laptop-node").unwrap();
     let spec = r.spec(
         "origin-owner",
-        &["adb", "-s", "zd22257p6g", "devices"],
+        &["adb", "-s", "phone01x", "devices"],
         Kind::Run,
     );
     assert!(rules.check_from(&peer, &spec).is_err());

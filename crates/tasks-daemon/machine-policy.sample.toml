@@ -110,6 +110,7 @@
 
 [machine]
 # devices = []   # env LOADTABLE_DEVICES
+# denied_devices = []   # env LOADTABLE_DENIED_DEVICES
 # tools = []   # env LOADTABLE_TOOLS
 
 # Peers (read at start; restart to change). Remove the leading `#>` to use.

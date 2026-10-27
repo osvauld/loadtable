@@ -89,7 +89,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "submit",
-            description: "Queue one command through the shared build/test queue and return its job id at once (use wait or logs afterwards). Same rules as `loadtable run`: a broad `cargo test` (name filter without --lib/--test) is refused unless broad_test is true; a `bash -c` script of several commands is refused unless allow_script is true (use submit_steps or run_suite); the personal phone is never used.",
+            description: "Queue one command through the shared build/test queue and return its job id at once (use wait or logs afterwards). Same rules as `loadtable run`: a broad `cargo test` (name filter without --lib/--test) is refused unless broad_test is true; a `bash -c` script of several commands is refused unless allow_script is true (use submit_steps or run_suite); a device serial the machine policy denies is refused.",
             input_schema: object(
                 json!({
                     "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Program and arguments, e.g. [\"cargo\",\"test\",\"-p\",\"tasks-mcp\"]."},

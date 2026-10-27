@@ -19,8 +19,8 @@ pub use error::CoreError;
 pub use fetch::{FetchResult, FetchStatus, any_failed};
 pub use ids::{DeviceId, JobId, MachineName, Owner, Tool};
 pub use job::{
-    CpuClass, DENIED_DEVICES, JobSpec, Kind, MAX_FETCH_PATH_BYTES, MAX_FETCH_PATHS,
-    MAX_TIMEOUT_SECS, Placement, check_fetch_path,
+    CpuClass, JobSpec, Kind, MAX_FETCH_PATH_BYTES, MAX_FETCH_PATHS, MAX_TIMEOUT_SECS, Placement,
+    check_fetch_path,
 };
 pub use machine::{Arch, Machine, Os};
 pub use phase::{Phase, SlotKind, WaitReason};

@@ -448,6 +448,9 @@ pub fn rig_identity() -> Arc<tasks_identity::Identity> {
     Arc::new(tasks_identity::Identity::from_entropy(&[9u8; 32]).unwrap())
 }
 
+/// A machine policy that denies the test serial `PHONE01X` (R-210).
+pub const DENY_PHONE: &str = "[machine]\ndenied_devices = [\"PHONE01X\"]\n";
+
 impl Rig {
     pub fn new() -> Rig {
         Rig::build("", Arc::new(NoForwarder), false)

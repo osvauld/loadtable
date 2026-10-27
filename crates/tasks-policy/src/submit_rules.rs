@@ -9,10 +9,10 @@
 //! * R-137 / R-091: Cargo's parallelism is read from every form (`-j N`, `-jN`, `--jobs N`,
 //!   `--jobs=N`, `CARGO_BUILD_JOBS=N`), checked against a cap, and replaced by the chosen
 //!   machine's cap in an `env` prefix.
-//! * R-210: a denied device serial anywhere in the argv, in any case, is refused.
+//! * R-210: a device serial the machine policy denies, anywhere in the argv, in any case, is
+//!   refused.
 
 use std::collections::BTreeSet;
-use tasks_core::DENIED_DEVICES;
 use tasks_timing::RecipeKey;
 
 /// What to do with a broad `cargo test` that carries no escape.
@@ -158,11 +158,11 @@ pub fn broad_test_refusal(broad: &BroadTest, known: Option<&KnownTargets>) -> St
     )
 }
 
-/// The device serial from [`DENIED_DEVICES`] that appears anywhere in `argv`, in any case.
-pub fn denied_device(argv: &[String]) -> Option<&'static str> {
-    DENIED_DEVICES.iter().copied().find(|d| {
-        let d = d.to_ascii_lowercase();
-        argv.iter().any(|a| a.to_ascii_lowercase().contains(&d))
+/// The serial from `denied` that appears anywhere in `argv`, in any case. Empty serials never match.
+pub fn denied_device<'a>(argv: &[String], denied: &'a [String]) -> Option<&'a str> {
+    denied.iter().map(String::as_str).find(|d| {
+        let d = d.trim().to_ascii_lowercase();
+        !d.is_empty() && argv.iter().any(|a| a.to_ascii_lowercase().contains(&d))
     })
 }
 
@@ -320,6 +320,8 @@ pub struct Refusal {
 pub struct SubmitRules<'a> {
     /// The command.
     pub argv: &'a [String],
+    /// Device serials this machine never uses (machine policy `[machine] denied_devices`).
+    pub denied_devices: &'a [String],
     /// The submitter passed `--broad-test`.
     pub broad_test_escape: bool,
     /// Policy for a broad test without escape.
@@ -352,11 +354,11 @@ impl Verdict {
 /// Applies every submit rule to a command.
 pub fn check(rules: &SubmitRules<'_>) -> Verdict {
     let mut v = Verdict::default();
-    if let Some(d) = denied_device(rules.argv) {
+    if let Some(d) = denied_device(rules.argv, rules.denied_devices) {
         v.refusals.push(Refusal {
             rule: Rule::DeniedDevice,
             message: format!(
-                "refused: the command names the denied device {d} (this phone is never used); name a test device with --device SERIAL"
+                "refused: the command names the denied device {d} (this machine's policy never uses it: [machine] denied_devices); name a test device with --device SERIAL"
             ),
         });
     }
@@ -594,6 +596,7 @@ mod tests {
     fn rules<'a>(argv: &'a [String], escape: bool, mode: BroadTestMode) -> SubmitRules<'a> {
         SubmitRules {
             argv,
+            denied_devices: &[],
             broad_test_escape: escape,
             broad_mode: mode,
             known: None,
@@ -783,14 +786,27 @@ mod tests {
     // R-210
     #[test]
     fn r210_a_denied_device_is_found_anywhere_in_any_case() {
+        let denied = vec!["PHONE01X".to_string()];
         assert_eq!(
-            denied_device(&v("adb -s zd22257p6g install a.apk")),
-            Some("ZD22257P6G")
+            denied_device(&v("adb -s phone01x install a.apk"), &denied),
+            Some("PHONE01X")
         );
-        assert_eq!(denied_device(&v("adb -s 9BWAY1LSDC install")), None);
-        let argv = v("sh -c adb-ZD22257P6G");
-        let verdict = check(&rules(&argv, false, BroadTestMode::Refuse));
+        assert_eq!(denied_device(&v("adb -s TESTDEV1 install"), &denied), None);
+        let argv = v("sh -c adb-PHONE01X");
+        let verdict = check(&SubmitRules {
+            denied_devices: &denied,
+            ..rules(&argv, false, BroadTestMode::Refuse)
+        });
         assert_eq!(verdict.refusals[0].rule, Rule::DeniedDevice);
+        assert!(verdict.refusals[0].message.contains("denied_devices"));
+    }
+
+    // R-210: nothing is denied unless the machine policy says so, and an empty entry matches nothing.
+    #[test]
+    fn r210_no_device_is_denied_by_default() {
+        let argv = v("adb -s PHONE01X install a.apk");
+        assert!(check(&rules(&argv, false, BroadTestMode::Refuse)).allowed());
+        assert_eq!(denied_device(&argv, &[" ".to_string()]), None);
     }
 
     // R-139 / R-140
