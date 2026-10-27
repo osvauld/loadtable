@@ -232,13 +232,14 @@ fn an_accepted_job_goes_running_with_its_remote_id_and_ends_with_the_peers_resul
             remote_phase: Some(Phase::Running),
         }),
     );
-    within("running", || {
+    // the phase, the remote id and the peer's phase are separate writes: wait for all three
+    within("running, with the remote id and the peer's phase", || {
         r.tick();
-        r.phase(id) == Phase::Running
+        let rec = r.record(id);
+        rec.phase == Phase::Running
+            && rec.forward.is_some_and(|f| f.remote_job == Some(7))
+            && rec.remote_phase == Some(Phase::Running)
     });
-    let rec = r.record(id);
-    assert_eq!(rec.forward.unwrap().remote_job, Some(7));
-    assert_eq!(rec.remote_phase, Some(Phase::Running));
     // a cancel reaches the forwarder, which owns telling the peer
     r.store.request_cancel(id, "origin-owner").unwrap();
     within("cancel forwarded", || {
@@ -897,9 +898,9 @@ fn r797_a_job_followed_after_a_restart_takes_an_offload_slot_and_keeps_its_run_t
         rj.started.elapsed()
     );
     f2.script(id, passed(7));
-    within("passed", || {
+    // the follower writes the result before it hands the slot back, so wait for both
+    within("passed, and the offload slot handed back", || {
         sch2.tick();
-        r.phase(id) == Phase::Passed
+        r.phase(id) == Phase::Passed && slot_of(&sch2, id).is_none()
     });
-    assert_eq!(slot_of(&sch2, id), None);
 }
