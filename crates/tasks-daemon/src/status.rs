@@ -331,6 +331,11 @@ impl Scheduler {
                     wait_text: held
                         .clone()
                         .or_else(|| r.wait_text.clone())
+                        .or_else(|| {
+                            crate::queue_view::after_wait(r, &|id| {
+                                active.iter().find(|a| a.id == id).cloned()
+                            })
+                        })
                         .unwrap_or_else(|| "queued".to_string()),
                     position: i + 1,
                     start_estimate_secs: if kind.is_some() && held.is_none() {

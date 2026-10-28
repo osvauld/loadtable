@@ -22,6 +22,16 @@ pub fn phase_tag(p: &Phase) -> &'static str {
     }
 }
 
+/// The phase as a job's JSON shows it: a forwarded job its peer still holds back is `waiting`,
+/// as its text says, not `running` (R-822; the ledger keeps `running`, R-015).
+pub fn shown_phase_tag(j: &JobView) -> &'static str {
+    if j.phase == Phase::Running && j.remote_wait.is_some() {
+        "waiting"
+    } else {
+        phase_tag(&j.phase)
+    }
+}
+
 /// The phase with its exit code or reason.
 pub fn phase_text(j: &JobView) -> String {
     // a forwarded job the peer holds back on its own gates is waiting, not running
@@ -104,7 +114,7 @@ pub fn job_json(j: &JobView, now_ms: i64) -> Value {
     json!({
         "id": j.id.0,
         "owner": j.owner,
-        "phase": phase_tag(&j.phase),
+        "phase": shown_phase_tag(j),
         "terminal": j.phase.is_terminal(),
         "exit": j.exit,
         "argv": j.argv,

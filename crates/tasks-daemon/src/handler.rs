@@ -2,8 +2,8 @@
 
 use crate::api::{
     ApiError, AuditProblemView, AuditRowView, AuditVerifyView, DEFAULT_AUDIT_ROWS,
-    DEFAULT_LIST_ROWS, ErrorCode, EstimateView, HelloInfo, JobGrep, LogSearchQuery, LogView,
-    MAX_AUDIT_ROWS, MAX_LIST_ROWS, PROTOCOL_VERSION, Reply, Request, Response,
+    DEFAULT_LIST_ROWS, ErrorCode, EstimateView, HelloInfo, JobGrep, JobView, LogSearchQuery,
+    LogView, MAX_AUDIT_ROWS, MAX_LIST_ROWS, PROTOCOL_VERSION, Reply, Request, Response,
 };
 use crate::logs::{self, LogError, Matcher};
 use crate::scheduler::Scheduler;
@@ -213,7 +213,7 @@ impl Scheduler {
             Request::Get { id } => {
                 let rec = self.record(id)?;
                 Ok(Response::Job {
-                    job: Box::new(job_view(&rec)),
+                    job: Box::new(self.view(&rec)),
                 })
             }
             Request::Logs { id, view } => self.logs(id, view),
@@ -604,9 +604,18 @@ impl Scheduler {
         let truncated = rows.len() > limit;
         rows.truncate(limit);
         Ok(Response::Jobs {
-            jobs: rows.iter().map(job_view).collect(),
+            jobs: rows.iter().map(|r| self.view(r)).collect(),
             truncated,
         })
+    }
+
+    /// A job row with the reason it waits for its `after` jobs filled in (R-822).
+    fn view(&self, rec: &JobRecord) -> JobView {
+        let mut v = job_view(rec);
+        if v.wait_text.is_none() && !rec.spec.after.is_empty() {
+            v.wait_text = crate::queue_view::after_wait(rec, &|id: JobId| self.record(id).ok());
+        }
+        v
     }
 
     fn log_file(&self, rec: &JobRecord) -> PathBuf {
