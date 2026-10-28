@@ -8,6 +8,7 @@ mod error;
 pub mod estimate;
 pub mod event;
 pub mod exe;
+pub mod family;
 pub mod gradle;
 pub mod history;
 pub mod progress;
@@ -24,8 +25,8 @@ pub mod warmth;
 pub use cargo::CargoParser;
 pub use error::TimingError;
 pub use estimate::{
-    Basis, Estimate, Eta, Left, MachineInfo, NoEstimate, Planning, Shown, Source, estimate,
-    estimate_with_cache, planning, shown, wanted_cache,
+    Basis, Estimate, Eta, EtaBasis, Left, MachineInfo, NoEstimate, Planning, Shown, Source,
+    estimate, estimate_with_cache, planning, shown, wanted_cache,
 };
 pub use event::{Event, TargetKind, TaskOutcome};
 pub use exe::{ExeKind, TestExe, parse_test_executables};

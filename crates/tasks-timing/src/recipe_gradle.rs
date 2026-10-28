@@ -46,6 +46,20 @@ const IGNORED_VALUE: &[&str] = &[
     "-I",
     "--init-script",
 ];
+/// `-P`/`-D` properties that only stamp the output or tune the JVM, not what is built: every
+/// release passes a new `versionCode`, which would otherwise make each one a first run.
+const STAMP_PROPS: &[&str] = &[
+    "-PversionCode",
+    "-PversionName",
+    "-PrequireReleaseSigning",
+    "-Dfile.encoding",
+    "-Dorg.gradle.jvmargs",
+];
+
+/// True for a `-P`/`-D` word that only stamps the output.
+pub(crate) fn is_stamp(a: &str) -> bool {
+    STAMP_PROPS.contains(&a.split('=').next().unwrap_or(a))
+}
 
 pub(crate) fn parse(args: &[String]) -> RecipeKey {
     let mut k = RecipeKey::new("gradle");
@@ -67,7 +81,9 @@ pub(crate) fn parse(args: &[String]) -> RecipeKey {
         } else if let Some(v) = a.strip_prefix("--tests=") {
             fl.insert(format!("tests:{v}"));
         } else if a.starts_with("-P") || a.starts_with("-D") {
-            fl.insert(a.to_string());
+            if !is_stamp(a) {
+                fl.insert(a.to_string());
+            }
         } else if a.starts_with('-') {
             fl.insert(a.trim_start_matches('-').to_string());
         } else {
