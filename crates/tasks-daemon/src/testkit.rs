@@ -532,6 +532,33 @@ impl Rig {
             execution_enabled: true,
             runner_poll: Duration::from_millis(2),
             transfer_gate: None,
+            confine: crate::ConfineMode::Unconfined,
+        });
+        sch.set_audit(self.audit.clone());
+        sch
+    }
+
+    /// A second scheduler over the same ledger that confines jobs from other machines (R-821),
+    /// with `home` as the daemon's home folder.
+    pub fn confining(&self, policy: &str, home: &Path) -> Arc<Scheduler> {
+        let sch = Scheduler::new(SchedulerParts {
+            cfg: self.cfg.clone(),
+            policy: MachinePolicy::from_text(Some(policy), &|_| None),
+            ledger: Arc::new(AuditedLedger::new(self.store.clone(), self.audit.clone())),
+            platform: self.platform.clone(),
+            clock: self.clock.clone(),
+            forwarder: Arc::new(NoForwarder),
+            parent_env: vec![
+                ("PATH".into(), "/usr/bin:/bin".into()),
+                ("HOME".into(), home.display().to_string()),
+            ],
+            execution_enabled: true,
+            runner_poll: Duration::from_millis(2),
+            transfer_gate: None,
+            confine: crate::ConfineMode::Confine(Some(vec![
+                "/opt/lt/loadtabled".into(),
+                "confine".into(),
+            ])),
         });
         sch.set_audit(self.audit.clone());
         sch
@@ -618,6 +645,7 @@ impl Rig {
             execution_enabled: true,
             runner_poll: Duration::from_millis(2),
             transfer_gate: None,
+            confine: crate::ConfineMode::Unconfined,
         });
         sch.set_audit(audit.clone());
         Rig {

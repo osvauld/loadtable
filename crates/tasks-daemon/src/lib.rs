@@ -19,6 +19,7 @@ pub mod build_cache;
 pub mod cargo_jobs;
 mod cargo_warmth;
 pub mod config;
+pub mod confine;
 pub mod daemon_log;
 pub mod entry;
 pub mod error;
@@ -73,7 +74,7 @@ mod wiring_tests;
 
 pub use attrib::TransferGate;
 pub use error::DaemonError;
-pub use scheduler::{Scheduler, SchedulerParts, TickReport};
+pub use scheduler::{ConfineMode, Scheduler, SchedulerParts, TickReport};
 pub use server::{Daemon, DaemonOptions};
 pub use status::job_view;
 pub use tasks_platform::slot_lock_path;

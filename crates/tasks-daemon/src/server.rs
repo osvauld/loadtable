@@ -159,6 +159,7 @@ impl Daemon {
             execution_enabled: enabled,
             runner_poll: Duration::from_millis(50),
             transfer_gate: Some(transfer_gate),
+            confine: crate::ConfineMode::Confine(crate::confine::helper_from_current_exe()),
         });
         sch.set_audit(audit);
         let mut keepalive = None;

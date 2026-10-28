@@ -35,6 +35,7 @@ fn job(dir: &TempDir, argv: &[&str]) -> JobStart {
         log_path: dir.path().join("job.log"),
         timed_path: Some(dir.path().join("job.timed")),
         cpu: CpuShare::default(),
+        confine: None,
     }
 }
 

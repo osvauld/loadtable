@@ -21,13 +21,23 @@ pub(crate) fn spawn(spec: &SpawnSpec, start_time: StartTime) -> Result<Child, Pl
     if spec.argv.is_empty() {
         return Err(PlatformError::InvalidSpawn("empty argv".into()));
     }
+    // the confinement is applied inside the cgroup placement, so the pid that joins the cgroup
+    // and leads the group is the confined command's
+    let confined;
+    let inner = match &spec.confine {
+        Some(c) => {
+            confined = crate::confine::wrap(c, &spec.argv);
+            &confined
+        }
+        None => &spec.argv,
+    };
     let placed;
     let argv = match &spec.cgroup_procs {
         Some(procs) => {
-            placed = place_in_cgroup(procs, &spec.argv);
+            placed = place_in_cgroup(procs, inner);
             &placed
         }
-        None => &spec.argv,
+        None => inner,
     };
     let (program, args) = argv
         .split_first()
@@ -205,6 +215,7 @@ mod tests {
             log_path: dir.join("log"),
             cgroup_procs: None,
             nice: 0,
+            confine: None,
         }
     }
 
