@@ -1429,6 +1429,9 @@ fn r349_a_forwarded_job_the_peer_holds_back_reads_as_waiting() {
         r.structured["remote_wait"],
         "waiting on nixos: CPU contended"
     );
+    // R-822: the JSON says waiting too, as the text does
+    assert_eq!(r.structured["phase"], "waiting");
+    assert_eq!(r.structured["terminal"], false);
 }
 
 // R-368

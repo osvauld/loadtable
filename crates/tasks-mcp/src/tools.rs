@@ -4,7 +4,7 @@ use crate::cancel::CancelToken;
 use crate::daemon::{Daemon, DaemonError};
 use crate::text::{
     MAX_TEXT_BYTES, bound_head, bound_tail, dur, elapsed_secs, grep_text, job_detail, job_json,
-    job_line, phase_tag, phase_text,
+    job_line, phase_text, shown_phase_tag,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -1280,7 +1280,7 @@ fn shared_cwd_warning(jobs: &[JobView], owner: &str, cwd: &std::path::Path) -> O
     let others: Vec<String> = jobs
         .iter()
         .filter(|j| !j.phase.is_terminal() && j.cwd == cwd && j.owner != owner)
-        .map(|j| format!("{} ({}, {})", j.id.0, j.owner, phase_tag(&j.phase)))
+        .map(|j| format!("{} ({}, {})", j.id.0, j.owner, shown_phase_tag(j)))
         .collect();
     if others.is_empty() {
         return None;

@@ -3,7 +3,7 @@
 
 use tasks_admission::Effective;
 use tasks_admission::kind_name;
-use tasks_core::{Phase, Priority, WaitReason};
+use tasks_core::{JobId, Phase, Priority, WaitReason};
 use tasks_ledger::JobRecord;
 
 /// "20m", "1h05m": a wait in words.
@@ -66,6 +66,28 @@ pub fn remote_wait(r: &JobRecord) -> Option<String> {
         Phase::Waiting(w) => Some(peer_waiting(peer, w)),
         _ => None,
     }
+}
+
+/// Why a queued job does not start when it waits for its `after` jobs and has no reason of its
+/// own: the first one that has not passed, and what that one is doing, so the steps behind a job
+/// a peer holds back say so instead of a bare "queued" (R-822).
+pub fn after_wait(r: &JobRecord, dep: &dyn Fn(JobId) -> Option<JobRecord>) -> Option<String> {
+    if r.wait_text.is_some() || !matches!(r.phase, Phase::Queued | Phase::Waiting(_)) {
+        return None;
+    }
+    let d = r
+        .spec
+        .after
+        .iter()
+        .filter_map(|id| dep(*id))
+        .find(|d| d.phase != Phase::Passed)?;
+    let what = remote_wait(&d)
+        .or_else(|| d.wait_text.clone())
+        .unwrap_or_else(|| match (&d.phase, &d.forward) {
+            (Phase::Running, Some(fw)) => format!("running on {}", fw.peer.0),
+            (p, _) => p.word().to_string(),
+        });
+    Some(format!("after job #{} ({what})", d.id.0))
 }
 
 fn peer_waiting(peer: &str, w: &WaitReason) -> String {
@@ -218,6 +240,42 @@ mod tests {
         let mut local = forwarded(Phase::Running, Some(Phase::Queued));
         local.forward = None;
         assert_eq!(remote_wait(&local), None);
+    }
+
+    // R-822
+    #[test]
+    fn r822_a_step_behind_a_job_its_peer_holds_back_says_so() {
+        let mut held = forwarded(
+            Phase::Running,
+            Some(Phase::Waiting(WaitReason::Placement(
+                "mac is on battery".into(),
+            ))),
+        );
+        held.id = JobId(1427);
+        let mut next = forwarded(Phase::Queued, None);
+        next.forward = None;
+        next.spec.after = vec![JobId(1427)];
+        let dep = |id: JobId| (id == JobId(1427)).then(|| held.clone());
+        assert_eq!(
+            after_wait(&next, &dep).as_deref(),
+            Some("after job #1427 (waiting on nixos: mac is on battery)")
+        );
+        // a dependency that passed holds nothing; one that runs says where
+        let mut ran = held.clone();
+        ran.phase = Phase::Passed;
+        assert_eq!(after_wait(&next, &|_| Some(ran.clone())), None);
+        let mut running = held.clone();
+        running.remote_phase = Some(Phase::Running);
+        assert_eq!(
+            after_wait(&next, &|_| Some(running.clone())).as_deref(),
+            Some("after job #1427 (running on nixos)")
+        );
+        // a reason of its own wins, and a running job is not waiting for anything
+        next.wait_text = Some("disk: low".into());
+        assert_eq!(after_wait(&next, &dep), None);
+        next.wait_text = None;
+        next.phase = Phase::Running;
+        assert_eq!(after_wait(&next, &dep), None);
     }
 
     // R-805
