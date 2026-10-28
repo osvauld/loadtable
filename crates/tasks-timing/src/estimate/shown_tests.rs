@@ -61,16 +61,16 @@ fn r661_no_run_at_all_is_a_first_run_and_only_failures_say_no_passing_run() {
 fn r662_a_first_build_here_does_not_borrow_a_warm_time() {
     let mut h = MemHistory::new();
     h.add(k("laptop"), s(20.0, Cache::Warm, Outcome::Passed, 1));
-    // a cold run is not bounded by a warm one
-    assert_eq!(
-        show(&h, Cache::Cold, &[]),
-        Shown::Absent(NoEstimate::FirstBuildHere)
-    );
+    // a cold run is not given the warm time, only told it takes longer (R-823)
+    let first = show(&h, Cache::Cold, &[]);
+    let e = first.eta().unwrap();
+    assert_eq!((&e.basis, e.median_secs), (&EtaBasis::AtLeast, 20.0));
+    assert_eq!(e.text(), "over ~20s (first build here)");
     // another machine's warm run does not stand in for a cold one either
     h.add(k("nixos"), s(30.0, Cache::Warm, Outcome::Passed, 1));
     assert_eq!(
-        show(&h, Cache::Cold, &[m("nixos", 8)]),
-        Shown::Absent(NoEstimate::FirstBuildHere)
+        show(&h, Cache::Cold, &[m("nixos", 8)]).eta().unwrap().basis,
+        EtaBasis::AtLeast
     );
     // another machine's cold run does, labelled rough
     h.add(k("nixos"), s(240.0, Cache::Cold, Outcome::Passed, 2));
@@ -83,11 +83,11 @@ fn r662_a_first_build_here_does_not_borrow_a_warm_time() {
 fn r800_a_warm_run_is_timed_by_warm_runs_only_and_a_cold_one_by_cold_runs() {
     let mut h = MemHistory::new();
     h.add(k("laptop"), s(240.0, Cache::Cold, Outcome::Passed, 1));
-    // a cold build says nothing about a rebuild
-    assert_eq!(
-        show(&h, Cache::Warm, &[]),
-        Shown::Absent(NoEstimate::NoWarmRunHere)
-    );
+    // a cold build only bounds a rebuild (R-823)
+    let e = show(&h, Cache::Warm, &[]);
+    let e = e.eta().unwrap();
+    assert_eq!((&e.basis, e.median_secs), (&EtaBasis::AtMost, 240.0));
+    assert_eq!(e.text(), "under ~4m (only cold builds so far)");
     assert_eq!(
         NoEstimate::NoWarmRunHere.to_string(),
         "no warm run here yet"
@@ -208,9 +208,11 @@ fn eta(median: f64) -> Eta {
     Eta {
         median_secs: median,
         p90_secs: median * 2.0,
+        low_secs: None,
         samples: 3,
         machine: "laptop".into(),
         rough: false,
+        basis: EtaBasis::Exact,
     }
 }
 
@@ -229,4 +231,195 @@ fn r675_past_the_usual_time_is_over_the_usual_never_zero_left() {
     assert!(matches!(e.left(Some(0.0), 137.0), Left::Over { .. }));
     // while targets still see work ahead they are believed
     assert_eq!(e.left(Some(30.0), 137.0), Left::Secs(30.0));
+}
+
+fn gk(recipe: &str, machine: &str) -> SampleKey {
+    SampleKey {
+        recipe: recipe.into(),
+        target: None,
+        machine: machine.into(),
+    }
+}
+fn gshow(h: &MemHistory, recipe: &str, want: Cache) -> Shown {
+    shown(h, &gk(recipe, "laptop"), &m("laptop", 8), &[], want).unwrap()
+}
+
+const REL_1631: &str = "gradle sel=:app:assemblePlayRelease flags=-Pabis=x86_64,arm64-v8a,\
+                        -PrequireReleaseSigning=true,-PversionCode=1631,-PversionName=0.2.4";
+const REL_LIB: &str = "gradle sel=:app:assembleLiberumRelease flags=-Pabis=x86_64,arm64-v8a";
+
+#[test]
+fn r824_a_command_with_no_runs_is_estimated_from_its_familys_runs_here() {
+    let mut h = MemHistory::new();
+    for (i, secs) in [1627.0, 1886.0, 772.0].into_iter().enumerate() {
+        h.add(
+            gk(REL_1631, "laptop"),
+            s(secs, Cache::Cold, Outcome::Passed, i as u64),
+        );
+    }
+    let e = gshow(&h, REL_LIB, Cache::Cold);
+    let e = e.eta().unwrap();
+    assert_eq!(
+        (&e.basis, e.median_secs, e.samples),
+        (&EtaBasis::Similar, 1627.0, 3)
+    );
+    assert!(e.rough);
+    assert_eq!(e.text(), "~27m (like 3 similar builds here)");
+    // a family's runs of the other warmth do not make a plain estimate
+    assert_ne!(
+        gshow(&h, REL_LIB, Cache::Warm).eta().unwrap().basis,
+        EtaBasis::Similar
+    );
+}
+
+#[test]
+fn r823_with_no_relative_the_tools_builds_here_give_a_range_of_the_same_warmth() {
+    let mut h = MemHistory::new();
+    let debug = "gradle sel=:app:assemblePlayDebug flags=-Pabis=arm64-v8a";
+    for (i, (secs, cache)) in [
+        (893.0, Cache::Cold),
+        (1929.0, Cache::Cold),
+        (22.0, Cache::Warm),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        h.add(
+            gk(debug, "laptop"),
+            s(secs, cache, Outcome::Passed, i as u64),
+        );
+    }
+    // a dry run is no build and stays out
+    h.add(
+        gk("gradle sel=:app:assembleDebug flags=dry-run", "laptop"),
+        s(9.0, Cache::Cold, Outcome::Passed, 9),
+    );
+    let e = gshow(&h, REL_1631, Cache::Cold);
+    let e = e.eta().unwrap();
+    assert_eq!(
+        e.basis,
+        EtaBasis::Range {
+            tool: "gradle".into()
+        }
+    );
+    assert_eq!((e.low_secs, e.p90_secs), (Some(893.0), 1929.0));
+    assert_eq!(
+        e.text(),
+        format!(
+            "~{}–{} (rough: gradle builds here)",
+            crate::dur::fmt_eta(893.0),
+            crate::dur::fmt_eta(1929.0)
+        )
+    );
+    let warm = gshow(&h, REL_1631, Cache::Warm);
+    assert_eq!(warm.eta().unwrap().median_secs, 22.0, "warm builds only");
+}
+
+#[test]
+fn r823_a_command_with_no_relatives_at_all_still_says_why() {
+    let h = MemHistory::new();
+    assert_eq!(
+        gshow(&h, REL_1631, Cache::Cold),
+        Shown::Absent(NoEstimate::FirstRun)
+    );
+}
+
+#[test]
+fn r823_the_estimate_follows_the_last_six_runs() {
+    let mut h = MemHistory::new();
+    for i in 0..10u64 {
+        let secs = if i < 4 { 1000.0 } else { 100.0 };
+        h.add(k("laptop"), s(secs, Cache::Warm, Outcome::Passed, i));
+    }
+    let e = show(&h, Cache::Warm, &[]);
+    assert_eq!(
+        (e.eta().unwrap().median_secs, e.eta().unwrap().samples),
+        (100.0, RECENT)
+    );
+}
+
+#[test]
+fn r823_planning_uses_the_familys_runs_before_a_built_in_default() {
+    let mut h = MemHistory::new();
+    h.add(
+        gk(REL_1631, "laptop"),
+        s(1600.0, Cache::Cold, Outcome::Passed, 1),
+    );
+    let p = planning(&h, &gk(REL_LIB, "laptop"), &m("laptop", 8), &[]).unwrap();
+    assert_eq!((p.basis, p.median_secs), (Basis::Passed, 1600.0));
+}
+
+/// The laptop's gradle runs of 24-28 Oct 2026 as recorded (warmth unknown: it was only
+/// guessed then). Every Android build of that week gets a number in the right range.
+#[test]
+fn r823_every_android_build_of_the_week_gets_a_number_in_its_range() {
+    let runs: &[(&str, f64)] = &[
+        (
+            "gradle sel=:app:assemblePlayDebug flags=-Pabis=arm64-v8a",
+            893.0,
+        ),
+        (
+            "gradle sel=:app:assemblePlayDebug flags=-Pabis=arm64-v8a",
+            660.0,
+        ),
+        (
+            "gradle sel=:app:assemblePlayDebug flags=-Pabis=arm64-v8a",
+            175.0,
+        ),
+        ("gradle sel=:app:assemblePlayBenchmark", 1080.0),
+        ("gradle sel=:app:assemblePlayBenchmark", 655.0),
+        ("gradle sel=:app:assemblePlayBenchmark", 374.0),
+        ("gradle sel=:app:assemblePlayDebug", 1929.0),
+        ("gradle sel=:app:assembleDebug", 849.0),
+        (
+            "gradle sel=:app:assemblePlayDebug,:app:testPlayDebugUnitTest",
+            1566.0,
+        ),
+        (
+            "gradle sel=:app:assemblePlayDebug,:app:testPlayDebugUnitTest",
+            22.0,
+        ),
+        (REL_1631, 1627.0),
+        (
+            "gradle sel=:app:assemblePlayRelease flags=-Pabis=x86_64,arm64-v8a,\
+             -PrequireReleaseSigning=true,-PversionCode=1632,-PversionName=0.2.4",
+            1886.0,
+        ),
+    ];
+    let mut h = MemHistory::new();
+    for (i, (r, secs)) in runs.iter().enumerate() {
+        h.add(
+            gk(r, "laptop"),
+            s(*secs, Cache::Unknown, Outcome::Passed, i as u64),
+        );
+    }
+    // the next signed release: its family's two runs
+    let next = gshow(
+        &h,
+        "gradle sel=:app:assemblePlayRelease flags=-Pabis=x86_64,arm64-v8a",
+        Cache::Cold,
+    );
+    let e = next.eta().unwrap();
+    assert_eq!((&e.basis, e.samples), (&EtaBasis::Similar, 2));
+    assert!(
+        (1500.0..=1900.0).contains(&e.median_secs),
+        "{}",
+        e.median_secs
+    );
+    // job 1470, a release build with no -P at all (took 716 s): the release-like runs
+    let e = gshow(&h, "gradle sel=:app:assemblePlayRelease", Cache::Cold);
+    let e = e.eta().unwrap();
+    assert_eq!((&e.basis, e.samples), (&EtaBasis::Similar, 3));
+    assert!(
+        (500.0..=1100.0).contains(&e.median_secs),
+        "{}",
+        e.median_secs
+    );
+    // a unit test alone in a fresh worktree is a debug build of the same family
+    let e = gshow(
+        &h,
+        "gradle sel=:app:testLiberumDebugUnitTest flags=tests:com.osvauld.p2p.WakeRingTest",
+        Cache::Cold,
+    );
+    assert_eq!(e.eta().unwrap().basis, EtaBasis::Similar);
 }

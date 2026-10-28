@@ -282,9 +282,16 @@ impl Scheduler {
             samples: 0,
             basis: tasks_timing::Basis::BuiltIn,
         });
-        // a cargo job's warmth comes from its output directory on disk (R-800)
-        let want = crate::cargo_warmth::CargoBuild::of(&rec.spec)
-            .map_or_else(|| guessed(self.wanted_cache(&recipe)), |b| b.start());
+        // a cargo or gradle job's warmth comes from its output directories on disk (R-800,
+        // R-825)
+        let want = match (
+            crate::cargo_warmth::CargoBuild::of(&rec.spec),
+            crate::gradle_warmth::GradleBuild::of(&rec.spec),
+        ) {
+            (Some(b), _) => b.start(),
+            (None, Some(g)) => g.start(),
+            (None, None) => guessed(self.wanted_cache(&recipe)),
+        };
         let shown = if rec.spec.interactive {
             Shown::Absent(NoEstimate::Interactive)
         } else {

@@ -694,4 +694,12 @@ impl History for AuditedLedger {
     fn recent_peaks(&self, key: &SampleKey) -> std::result::Result<Vec<Option<u64>>, TimingError> {
         self.inner.recent_peaks(key)
     }
+
+    fn machine_samples(
+        &self,
+        machine: &str,
+        tool: &str,
+    ) -> std::result::Result<Vec<(String, Sample)>, TimingError> {
+        self.inner.machine_samples(machine, tool)
+    }
 }

@@ -1016,6 +1016,7 @@ impl Scheduler {
             piece: rec.hints.split.clone(),
             interactive: rec.spec.interactive,
             cargo: crate::cargo_warmth::CargoBuild::of(&rec.spec),
+            gradle: crate::gradle_warmth::GradleBuild::of(&rec.spec).map(|b| b.start()),
         };
         lock(&self.running).insert(id, rj.clone());
         lock(&self.state).last_wait.remove(&id);

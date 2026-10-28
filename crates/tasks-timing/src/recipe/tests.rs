@@ -167,6 +167,23 @@ fn gradle_tasks_sorted_and_noise_ignored() {
 }
 
 #[test]
+fn gradle_properties_that_only_stamp_the_output_are_not_the_work() {
+    let release = one("./gradlew :app:assemblePlayRelease -Pabis=arm64-v8a");
+    assert_eq!(
+        release,
+        one(
+            "./gradlew :app:assemblePlayRelease -Pabis=arm64-v8a -PversionCode=1632 \
+             -PversionName=0.2.4 -PrequireReleaseSigning=true -Dfile.encoding=UTF-8"
+        )
+    );
+    assert_ne!(
+        release,
+        one("./gradlew :app:assemblePlayRelease -Pabis=x86_64,arm64-v8a"),
+        "the ABIs are work"
+    );
+}
+
+#[test]
 fn other_tools_keep_args_verbatim() {
     let k = one("/usr/bin/make -j4 all");
     assert_eq!((k.tool.as_str(), k.rest.len()), ("make", 2));

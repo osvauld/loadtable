@@ -160,11 +160,19 @@ const V8: &str = "
 ALTER TABLE samples ADD COLUMN mem_peak INTEGER;
 ";
 
+/// A gradle run's warmth is read from its build directories from now on (R-825); before, it
+/// was only guessed ("this machine passed the command before", which a new worktree also
+/// satisfied), so those labels are dropped to unknown: they stand in only until measured runs
+/// of the wanted warmth exist.
+const V9: &str = "
+UPDATE samples SET cache = 'unknown' WHERE recipe = 'gradle' OR substr(recipe, 1, 7) = 'gradle ';
+";
+
 /// The migrations in order; entry `i` upgrades version `i` to `i + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9];
 
 /// The schema version this build writes.
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 fn version(conn: &Connection) -> Result<i64> {
     Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
@@ -355,7 +363,7 @@ mod tests {
             [],
         )
         .unwrap();
-        migrate(&mut c, MIGRATIONS).unwrap();
+        migrate(&mut c, &MIGRATIONS[..8]).unwrap();
         assert_eq!(uv(&c), 8);
         let (jobs, samples, peak): (i64, i64, Option<i64>) = c
             .query_row(
@@ -366,6 +374,41 @@ mod tests {
             .unwrap();
         // old samples have no peak: unknown, so never short
         assert_eq!((jobs, samples, peak), (1, 1, None));
+    }
+
+    #[test]
+    fn r825_a_v8_database_forgets_the_guessed_warmth_of_gradle_runs_only() {
+        let mut c = Connection::open_in_memory().unwrap();
+        migrate(&mut c, &MIGRATIONS[..8]).unwrap();
+        for recipe in [
+            "gradle sel=:app:assembleDebug",
+            "cargo check",
+            "gradlew-wrapper x",
+        ] {
+            c.execute(
+                "INSERT INTO samples(recipe, target, machine, secs, cache, outcome, at_ms)
+                 VALUES (?1, NULL, 'm', 4.5, 'warm', 'passed', 9)",
+                [recipe],
+            )
+            .unwrap();
+        }
+        migrate(&mut c, MIGRATIONS).unwrap();
+        assert_eq!(uv(&c), 9);
+        let caches: Vec<(String, String)> = c
+            .prepare("SELECT recipe, cache FROM samples ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            caches,
+            vec![
+                ("gradle sel=:app:assembleDebug".into(), "unknown".into()),
+                ("cargo check".into(), "warm".into()),
+                ("gradlew-wrapper x".into(), "warm".into()),
+            ]
+        );
     }
 
     #[test]

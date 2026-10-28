@@ -453,6 +453,25 @@ impl History for MemoryStore {
             .collect())
     }
 
+    fn machine_samples(
+        &self,
+        machine: &str,
+        tool: &str,
+    ) -> std::result::Result<Vec<(String, Sample)>, TimingError> {
+        let s = self
+            .lock()
+            .map_err(|e| TimingError::History(e.to_string()))?;
+        Ok(s.samples
+            .iter()
+            .filter(|(k, _)| {
+                k.machine == machine
+                    && k.target.is_none()
+                    && tasks_timing::family::tool(&k.recipe) == tool
+            })
+            .map(|(k, v)| (k.recipe.clone(), *v))
+            .collect())
+    }
+
     fn recent_peaks(&self, key: &SampleKey) -> std::result::Result<Vec<Option<u64>>, TimingError> {
         let s = self
             .lock()

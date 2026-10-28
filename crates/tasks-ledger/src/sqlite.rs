@@ -853,6 +853,48 @@ impl History for SqliteStore {
             .collect()
     }
 
+    fn machine_samples(
+        &self,
+        machine: &str,
+        tool: &str,
+    ) -> std::result::Result<Vec<(String, Sample)>, TimingError> {
+        let conn = self.lock().map_err(hist_err)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT recipe, secs, cache, outcome, at_ms FROM samples
+                 WHERE machine = ?1 AND target IS NULL
+                   AND (recipe = ?2 OR substr(recipe, 1, length(?2) + 1) = ?2 || ' ')
+                 ORDER BY id",
+            )
+            .map_err(hist_err)?;
+        let rows = stmt
+            .query_map(params![machine, tool], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, f64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, i64>(4)?,
+                ))
+            })
+            .map_err(hist_err)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(hist_err)?;
+        rows.into_iter()
+            .map(|(recipe, secs, cache, outcome, at)| {
+                Ok((
+                    recipe,
+                    Sample {
+                        secs,
+                        cache: parse_cache(&cache)?,
+                        outcome: parse_outcome(&outcome)?,
+                        at_ms: u64::try_from(at).map_err(hist_err)?,
+                    },
+                ))
+            })
+            .collect()
+    }
+
     fn recent_peaks(&self, key: &SampleKey) -> std::result::Result<Vec<Option<u64>>, TimingError> {
         let conn = self.lock().map_err(hist_err)?;
         let mut stmt = conn

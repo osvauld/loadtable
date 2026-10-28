@@ -257,7 +257,9 @@ pub fn estimate_with_cache(
 }
 
 mod shown;
-pub use shown::{Basis, Eta, Left, NoEstimate, Planning, Shown, planning, shown, wanted_cache};
+pub use shown::{
+    Basis, Eta, EtaBasis, Left, NoEstimate, Planning, RECENT, Shown, planning, shown, wanted_cache,
+};
 
 #[cfg(test)]
 mod shown_tests;

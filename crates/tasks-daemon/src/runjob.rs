@@ -32,6 +32,9 @@ pub(crate) struct JobMeta {
     /// Where a cargo job builds; its finished run is stamped warm or cold from what it compiled
     /// (R-800).
     pub cargo: Option<crate::cargo_warmth::CargoBuild>,
+    /// How a gradle job's build started, read from its build directories before it ran
+    /// (R-825); its finished run is stamped with it.
+    pub gradle: Option<tasks_timing::Cache>,
 }
 
 enum Parser {
@@ -318,11 +321,13 @@ impl RunEvents for Events {
                 recipe: self.meta.recipe.clone(),
                 kind: self.meta.kind,
                 machine: self.sch.cfg.machine.clone(),
-                // a cargo run by what it compiled (R-800); else warm once this machine has a
-                // passing run of the command (R-665)
-                cache: match &self.meta.cargo {
-                    Some(b) => b.after(&tl),
-                    None => self.sch.wanted_cache(&self.meta.recipe),
+                // a cargo run by what it compiled (R-800), a gradle run by what its build
+                // directories held (R-825); else warm once this machine has a passing run of
+                // the command (R-665)
+                cache: match (&self.meta.cargo, self.meta.gradle) {
+                    (Some(b), _) => b.after(&tl),
+                    (None, Some(c)) => c,
+                    (None, None) => self.sch.wanted_cache(&self.meta.recipe),
                 },
                 cancelled: phase == Phase::Cancelled,
                 passed: phase == Phase::Passed,

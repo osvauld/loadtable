@@ -62,6 +62,16 @@ pub trait History {
     fn recent_peaks(&self, _key: &SampleKey) -> Result<Vec<Option<u64>>, TimingError> {
         Ok(Vec::new())
     }
+    /// Every whole-job sample on `machine` whose recipe runs `tool` (its first word), with its
+    /// recipe: what a command's relatives took when it has no runs of its own. A store that
+    /// cannot list them returns an empty list.
+    fn machine_samples(
+        &self,
+        _machine: &str,
+        _tool: &str,
+    ) -> Result<Vec<(String, Sample)>, TimingError> {
+        Ok(Vec::new())
+    }
 }
 
 /// Most entries [`History::recent_peaks`] returns.
@@ -113,6 +123,24 @@ impl History for MemHistory {
             .filter_map(|k| k.target.as_ref())
             .collect();
         Ok(set.into_iter().cloned().collect())
+    }
+
+    fn machine_samples(
+        &self,
+        machine: &str,
+        tool: &str,
+    ) -> Result<Vec<(String, Sample)>, TimingError> {
+        if self.fail {
+            return Err(TimingError::History("store unavailable".into()));
+        }
+        Ok(self
+            .map
+            .iter()
+            .filter(|(k, _)| {
+                k.machine == machine && k.target.is_none() && crate::family::tool(&k.recipe) == tool
+            })
+            .flat_map(|(k, v)| v.iter().map(|s| (k.recipe.clone(), *s)))
+            .collect())
     }
 }
 

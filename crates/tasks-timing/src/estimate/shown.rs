@@ -1,15 +1,26 @@
 //! The two kinds of number the rest of the system gets from history.
 //!
 //! A [`Shown`] is what a person is told ("ETA", "time left", a progress bar): it exists only when
-//! passing runs back it, and otherwise says why not. A [`Planning`] is a number the scheduler
-//! needs to order a queue or score a machine; it may be a guess and must never be printed as
-//! an ETA. The two are different types so a guess cannot reach a screen by accident.
+//! passing runs back it, and says which runs ([`EtaBasis`]); with none it says why not. A
+//! [`Planning`] is a number the scheduler needs to order a queue or score a machine; it may be
+//! a guess and must never be printed as an ETA. The two are different types so a guess cannot
+//! reach a screen by accident.
+//!
+//! A command with passing runs of related work here always gets a number (R-823): its own runs
+//! first, then its family's ([`crate::family`]), another machine's, the tool's builds here as a
+//! range, and last its own runs of the other warmth as a bound. Runs of the wrong warmth never
+//! make a plain estimate: a rebuild is not timed by a cold build, nor the other way round.
 
 use super::{Estimate, MachineInfo, Source, build};
 use crate::dur::fmt_eta;
 use crate::error::TimingError;
+use crate::family::{family, tool};
 use crate::history::{Cache, History, Outcome, Sample, SampleKey};
 use std::fmt;
+
+/// The most recent passing runs an estimate shown to a person rests on: few enough to follow
+/// the code as it changes, enough that one odd run does not decide it.
+pub const RECENT: usize = 6;
 
 /// Why there is no estimate to show.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,32 +56,65 @@ impl fmt::Display for NoEstimate {
     }
 }
 
+/// Which passing runs an estimate rests on, closest first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EtaBasis {
+    /// This command's runs here, of the wanted warmth.
+    Exact,
+    /// Runs here of commands in the same family (R-824), of the wanted warmth.
+    Similar,
+    /// This command's runs on another machine, scaled by core count.
+    Peer,
+    /// The tool's builds here of the wanted warmth, as a range: `tool` names them.
+    Range {
+        /// The tool (`gradle`).
+        tool: String,
+    },
+    /// Only cold runs of this work so far and this run starts warm: at most that long.
+    AtMost,
+    /// Only warm runs of this work so far and this run starts cold: at least that long.
+    AtLeast,
+}
+
 /// An estimate backed by passing runs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Eta {
-    /// Median seconds.
+    /// Median seconds (the bound, for [`EtaBasis::AtMost`] and [`EtaBasis::AtLeast`]).
     pub median_secs: f64,
     /// 90th percentile seconds.
     pub p90_secs: f64,
+    /// The shortest run, for a [`EtaBasis::Range`].
+    pub low_secs: Option<f64>,
     /// Passing runs behind it.
     pub samples: usize,
     /// The machine whose runs these are.
     pub machine: String,
-    /// True when they are another machine's runs, scaled by core count.
+    /// True unless these are this command's own runs here ([`EtaBasis::Exact`]).
     pub rough: bool,
+    /// Which runs.
+    pub basis: EtaBasis,
 }
 
 impl Eta {
-    /// `4m`, or `~4m (rough, from nixos's runs)`.
+    /// `~4m`, `~27m (like 6 similar builds here)`, `~8m (rough, from nixos's runs)`,
+    /// `~12m–31m (rough: gradle builds here)`, `under ~27m (only cold builds so far)` or
+    /// `over ~30s (first build here)`.
     pub fn text(&self) -> String {
-        if self.rough {
-            format!(
-                "~{} (rough, from {}'s runs)",
-                fmt_eta(self.median_secs),
-                self.machine
-            )
-        } else {
-            format!("~{}", fmt_eta(self.median_secs))
+        let med = fmt_eta(self.median_secs);
+        match &self.basis {
+            EtaBasis::Exact => format!("~{med}"),
+            EtaBasis::Similar => {
+                let builds = if self.samples == 1 { "build" } else { "builds" };
+                format!("~{med} (like {} similar {builds} here)", self.samples)
+            }
+            EtaBasis::Peer => format!("~{med} (rough, from {}'s runs)", self.machine),
+            EtaBasis::Range { tool } => format!(
+                "~{}–{} (rough: {tool} builds here)",
+                fmt_eta(self.low_secs.unwrap_or(self.median_secs)),
+                fmt_eta(self.p90_secs)
+            ),
+            EtaBasis::AtMost => format!("under ~{med} (only cold builds so far)"),
+            EtaBasis::AtLeast => format!("over ~{med} (first build here)"),
         }
     }
 }
@@ -142,17 +186,28 @@ impl Shown {
 impl fmt::Display for Shown {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Shown::Eta(e) if e.rough => write!(f, "{} (p90 {})", e.text(), fmt_eta(e.p90_secs)),
             Shown::Eta(e) => {
                 let runs = if e.samples == 1 { "run" } else { "runs" };
-                write!(
-                    f,
-                    "{} (p90 {}) from {} passing {runs} on {}",
-                    e.text(),
-                    fmt_eta(e.p90_secs),
-                    e.samples,
-                    e.machine
-                )
+                match e.basis {
+                    EtaBasis::Exact => write!(
+                        f,
+                        "{} (p90 {}) from {} passing {runs} on {}",
+                        e.text(),
+                        fmt_eta(e.p90_secs),
+                        e.samples,
+                        e.machine
+                    ),
+                    EtaBasis::Similar | EtaBasis::Peer => {
+                        write!(f, "{} (p90 {})", e.text(), fmt_eta(e.p90_secs))
+                    }
+                    EtaBasis::Range { .. } | EtaBasis::AtMost | EtaBasis::AtLeast => write!(
+                        f,
+                        "{}, from {} passing {runs} on {}",
+                        e.text(),
+                        e.samples,
+                        e.machine
+                    ),
+                }
             }
             Shown::Absent(w) => write!(f, "no estimate: {w}"),
         }
@@ -249,17 +304,65 @@ fn fits_there(s: &Sample, want: Cache) -> bool {
 
 fn window(mut v: Vec<Sample>) -> Vec<f64> {
     v.sort_by_key(|s| std::cmp::Reverse(s.at_ms));
-    v.truncate(super::WINDOW);
+    v.truncate(RECENT);
     let mut secs: Vec<f64> = v.iter().map(|s| s.secs).collect();
     secs.sort_by(f64::total_cmp);
     secs
 }
 
+fn eta(secs: &[f64], scale: f64, machine: &str, basis: EtaBasis) -> Shown {
+    let (median_secs, p90_secs) = build(secs, scale);
+    let low_secs = matches!(basis, EtaBasis::Range { .. })
+        .then(|| secs.first().copied().unwrap_or(0.0) * scale);
+    Shown::Eta(Eta {
+        median_secs,
+        p90_secs,
+        low_secs,
+        samples: secs.len(),
+        machine: machine.to_string(),
+        rough: basis != EtaBasis::Exact,
+        basis,
+    })
+}
+
+/// A bound from this work's runs of the other warmth: a rebuild takes at most what the cold
+/// builds took (their median), a first build at least what the rebuilds took (their slowest).
+fn bound(here: &[Sample], want: Cache, machine: &str) -> Option<Shown> {
+    let (other, basis) = match want {
+        Cache::Warm => (Cache::Cold, EtaBasis::AtMost),
+        Cache::Cold => (Cache::Warm, EtaBasis::AtLeast),
+        Cache::Unknown => return None,
+    };
+    let secs = window(
+        here.iter()
+            .filter(|s| s.outcome == Outcome::Passed && finite(s) && s.cache == other)
+            .copied()
+            .collect(),
+    );
+    let at = match basis {
+        EtaBasis::AtMost => build(&secs, 1.0).0,
+        _ => secs.last().copied()?,
+    };
+    (!secs.is_empty()).then(|| {
+        Shown::Eta(Eta {
+            median_secs: at,
+            p90_secs: at,
+            low_secs: None,
+            samples: secs.len(),
+            machine: machine.to_string(),
+            rough: true,
+            basis,
+        })
+    })
+}
+
 /// What to show as the duration of `key` run on `machine` from build state `want`.
 ///
-/// Only passing runs count. This machine's own come first, exact; otherwise another machine's
-/// of the same warmth, scaled by cores and marked rough; otherwise nothing, with the reason.
-/// The kind's default is never offered.
+/// Only passing runs count, and only of the wanted warmth while any exist (R-800). In order
+/// (R-823): this command's own runs here; its family's runs here ("like 6 similar builds",
+/// R-824); its runs on another machine, scaled by cores; the tool's builds here as a range;
+/// its own or its family's runs of the other warmth as a bound ("under ~27m"). Otherwise
+/// nothing, with the reason. The kind's default is never offered.
 pub fn shown(
     history: &dyn History,
     key: &SampleKey,
@@ -278,14 +381,31 @@ pub fn shown(
     let mut any_passed = passed_here;
     let mine = window(fitting_here(&here, want));
     if !mine.is_empty() {
-        let (median_secs, p90_secs) = build(&mine, 1.0);
-        return Ok(Shown::Eta(Eta {
-            median_secs,
-            p90_secs,
-            samples: mine.len(),
-            machine: machine.name.clone(),
-            rough: false,
-        }));
+        return Ok(eta(&mine, 1.0, &machine.name, EtaBasis::Exact));
+    }
+    // relatives: the family's whole-job runs here, and the tool's builds that have a family
+    let fam = key.target.is_none().then(|| family(&key.recipe)).flatten();
+    let (kin, builds): (Vec<Sample>, Vec<Sample>) = match &fam {
+        Some(f) => {
+            let all = history.machine_samples(&machine.name, tool(&key.recipe))?;
+            let with: Vec<(Option<String>, Sample)> =
+                all.into_iter().map(|(r, s)| (family(&r), s)).collect();
+            (
+                with.iter()
+                    .filter(|(g, _)| g.as_ref() == Some(f))
+                    .map(|(_, s)| *s)
+                    .collect(),
+                with.iter()
+                    .filter(|(g, _)| g.is_some())
+                    .map(|(_, s)| *s)
+                    .collect(),
+            )
+        }
+        None => (Vec::new(), Vec::new()),
+    };
+    let similar = window(fitting_here(&kin, want));
+    if !similar.is_empty() {
+        return Ok(eta(&similar, 1.0, &machine.name, EtaBasis::Similar));
     }
     let mut best: Option<(Vec<f64>, &MachineInfo)> = None;
     for o in others
@@ -302,14 +422,32 @@ pub fn shown(
     }
     if let Some((secs, o)) = best {
         let scaled_by = f64::from(o.cores) / f64::from(machine.cores.max(1));
-        let (median_secs, p90_secs) = build(&secs, scaled_by);
-        return Ok(Shown::Eta(Eta {
-            median_secs,
-            p90_secs,
-            samples: secs.len(),
-            machine: o.name.clone(),
-            rough: true,
-        }));
+        return Ok(eta(&secs, scaled_by, &o.name, EtaBasis::Peer));
+    }
+    // the tool's builds here of the wanted warmth only: a range, never a mix of warmths
+    let wanted = if want == Cache::Unknown {
+        Cache::Warm
+    } else {
+        want
+    };
+    let range = window(
+        builds
+            .iter()
+            .filter(|s| s.outcome == Outcome::Passed && finite(s) && s.cache == wanted)
+            .copied()
+            .collect(),
+    );
+    if !range.is_empty() {
+        let tool = tool(&key.recipe).to_string();
+        return Ok(eta(&range, 1.0, &machine.name, EtaBasis::Range { tool }));
+    }
+    let own_or_kin = if here.iter().any(|s| s.outcome == Outcome::Passed) {
+        &here
+    } else {
+        &kin
+    };
+    if let Some(b) = bound(own_or_kin, want, &machine.name) {
+        return Ok(b);
     }
     Ok(Shown::Absent(if passed_here && want != Cache::Cold {
         NoEstimate::NoWarmRunHere
@@ -348,6 +486,23 @@ pub fn planning(
         _ if passed(&e.machine)? => Basis::Passed,
         _ => Basis::Guess,
     };
+    // no passing run of its own anywhere: its family's runs here are measured work of the same
+    // cost, and the tool's builds here a better guess than the kind's (R-823)
+    if basis != Basis::Passed
+        && let Shown::Eta(s) = shown(history, key, machine, &[], Cache::Unknown)?
+        && matches!(s.basis, EtaBasis::Similar | EtaBasis::Range { .. })
+    {
+        return Ok(Planning {
+            median_secs: s.median_secs,
+            p90_secs: s.p90_secs,
+            samples: s.samples,
+            basis: if s.basis == EtaBasis::Similar {
+                Basis::Passed
+            } else {
+                Basis::Guess
+            },
+        });
+    }
     Ok(Planning {
         median_secs: e.median_secs,
         p90_secs: e.p90_secs,
