@@ -1588,3 +1588,99 @@ fn r760_a_build_or_a_test_still_compiling_keeps_its_compile_slot() {
         Some("compile".to_string())
     );
 }
+
+fn within(what: &str, mut cond: impl FnMut() -> bool) {
+    let t0 = std::time::Instant::now();
+    while !cond() {
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(10),
+            "timed out: {what}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+
+fn from_peer(r: &Rig, argv: &[&str]) -> JobId {
+    let mut job = tasks_ledger::NewJob::new(r.spec("o", argv, Kind::Run));
+    job.origin = Some(tasks_ledger::Origin {
+        peer: "laptop".into(),
+        key: format!("laptop:{}", argv.join("-")),
+    });
+    r.store.submit_job(&job).unwrap()
+}
+
+fn confining_home(r: &Rig) -> std::path::PathBuf {
+    let home = r.cfg.state_dir.join("home");
+    std::fs::create_dir_all(home.join("Photos")).unwrap();
+    std::fs::canonicalize(home).unwrap()
+}
+
+// R-821
+#[test]
+fn r821_a_job_from_another_machine_starts_confined_and_a_local_one_does_not() {
+    let r = Rig::new();
+    r.procs.auto_exit(0);
+    let home = confining_home(&r);
+    let sch = r.confining("", &home);
+    let local = r.submit(&r.spec("o", &["make", "local"], Kind::Run));
+    let remote = from_peer(&r, &["make", "remote"]);
+    within("both ran", || {
+        sch.tick();
+        r.phase(local).is_terminal() && r.phase(remote).is_terminal()
+    });
+    let spawned = r.procs.spawned();
+    let of = |w: &str| {
+        spawned
+            .iter()
+            .find(|s| s.argv.last().is_some_and(|a| a == w))
+            .cloned()
+            .unwrap()
+    };
+    assert!(of("local").confine.is_none());
+    let c = of("remote").confine.unwrap();
+    assert_eq!(c.closed[0], home);
+    assert_eq!(c.helper, ["/opt/lt/loadtabled", "confine"]);
+    assert!(
+        !c.write
+            .iter()
+            .chain(&c.read)
+            .any(|p| p.starts_with(home.join("Photos")))
+    );
+    assert!(r.log_text(remote).contains("runs confined"));
+}
+
+// R-821
+#[test]
+fn r821_a_job_from_another_machine_that_cannot_be_confined_does_not_run() {
+    let r = Rig::new();
+    r.procs.auto_exit(0);
+    let sch = r.confining("", std::path::Path::new("/no/such/home"));
+    let remote = from_peer(&r, &["make", "remote"]);
+    within("refused", || {
+        sch.tick();
+        r.phase(remote).is_terminal()
+    });
+    assert!(matches!(r.phase(remote), Phase::NotStarted { .. }));
+    assert!(r.procs.spawned().is_empty(), "nothing was started");
+    assert!(
+        r.record(remote)
+            .summary
+            .unwrap_or_default()
+            .contains("confined")
+    );
+}
+
+// R-821
+#[test]
+fn r821_the_owner_can_switch_confinement_off() {
+    let r = Rig::new();
+    r.procs.auto_exit(0);
+    let home = confining_home(&r);
+    let sch = r.confining("[confine]\npeer_jobs = \"off\"\n", &home);
+    let remote = from_peer(&r, &["make", "remote"]);
+    within("ran", || {
+        sch.tick();
+        r.phase(remote).is_terminal()
+    });
+    assert!(r.procs.spawned()[0].confine.is_none());
+}

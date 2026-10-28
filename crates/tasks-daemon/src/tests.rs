@@ -157,6 +157,7 @@ fn r005_a_transient_ledger_error_on_one_job_does_not_stop_the_others() {
         execution_enabled: true,
         runner_poll: Duration::from_millis(2),
         transfer_gate: None,
+        confine: crate::ConfineMode::Unconfined,
     });
     let bad = r.submit(&r.spec("o", &["make", "bad"], Kind::Run));
     let good = r.submit(&r.spec("o", &["make", "good"], Kind::Run));

@@ -10,7 +10,9 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 use tasks_core::JobId;
-use tasks_platform::{Child, CpuShare, PlatformError, Processes, Signal, SpawnSpec, Usage};
+use tasks_platform::{
+    Child, Confine, CpuShare, PlatformError, Processes, Signal, SpawnSpec, Usage,
+};
 
 /// Largest read from the log per poll; bounds memory per iteration.
 const READ_CHUNK: usize = 64 * 1024;
@@ -32,6 +34,9 @@ pub struct JobStart {
     pub timed_path: Option<PathBuf>,
     /// The CPU share against other jobs on the machine.
     pub cpu: CpuShare,
+    /// The folders the job is confined to (a job from another machine, R-821); `None` runs it
+    /// unconfined.
+    pub confine: Option<Confine>,
 }
 
 /// Builds the spawn request: allowlisted environment only (R-090), never the
@@ -51,6 +56,7 @@ pub fn build_spawn_spec(
         log_path: job.log_path.clone(),
         cgroup_procs: None,
         nice: job.cpu.nice,
+        confine: job.confine.clone(),
     })
 }
 

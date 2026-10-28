@@ -2,6 +2,7 @@
 //! services and disk, with Linux and macOS implementations and test fakes.
 
 mod cgroup;
+pub mod confine;
 mod disk;
 mod error;
 #[cfg(any(test, feature = "fake"))]
@@ -29,6 +30,7 @@ pub use cgroup::{
     RealFs, WANTED_CONTROLLERS, delegated_root, native_cgroups, parse_cpu_usage, parse_io_stat,
     parse_psi_totals, parse_self_cgroup, parse_single_u64,
 };
+pub use confine::Confine;
 pub use error::PlatformError;
 pub use fds::close_on_exec_inherited;
 pub use localtime::local_offset_secs;

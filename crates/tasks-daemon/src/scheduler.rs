@@ -205,6 +205,18 @@ pub struct SchedulerParts {
     pub runner_poll: Duration,
     /// The gate sync work enters; bound to the scheduler by [`Scheduler::new`]. `None` makes one.
     pub transfer_gate: Option<Arc<crate::attrib::TransferGate>>,
+    /// How jobs from other machines are confined (R-821).
+    pub confine: ConfineMode,
+}
+
+/// How a scheduler confines jobs that came from another machine (R-821).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfineMode {
+    /// Confine them, starting the Linux helper with this argv prefix (`loadtabled confine`);
+    /// `None` when it cannot be found, which refuses them (macOS needs no helper).
+    Confine(Option<Vec<String>>),
+    /// Run them unconfined: tests whose fake or real processes are not the job's subject.
+    Unconfined,
 }
 
 /// The scheduler and the state the API reads.
@@ -244,6 +256,7 @@ pub struct Scheduler {
     pub(crate) build_cache: Mutex<Arc<crate::build_cache::BuildCache>>,
     /// Sample histories of running (and just ended) jobs, in memory only.
     pub(crate) metrics: Mutex<crate::metrics::MetricsStore>,
+    pub(crate) confine: ConfineMode,
 }
 
 impl Scheduler {
@@ -288,6 +301,7 @@ impl Scheduler {
             runner_poll: parts.runner_poll,
             build_cache: Mutex::new(build_cache),
             metrics: Mutex::default(),
+            confine: parts.confine,
         });
         if let Some(g) = gate {
             g.bind(&sch);
@@ -920,6 +934,31 @@ impl Scheduler {
             }
         }
 
+        // a job from another machine never runs open on this one: confined, or not at all
+        let confine = match (&self.confine, rec.origin.is_some()) {
+            (ConfineMode::Confine(helper), true) => match crate::confine::for_peer_job(
+                policy,
+                &cache,
+                &self.parent_env,
+                helper.as_deref(),
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    let why = format!(
+                        "refused: jobs from other machines run confined here ([confine] \
+                         peer_jobs in the machine policy), and this one cannot be: {e}"
+                    );
+                    let _ = notes.note(&log_path, "confine", &why);
+                    self.end_unstarted(id, &why);
+                    return false;
+                }
+            },
+            _ => None,
+        };
+        if let Some(c) = &confine {
+            let _ = notes.note(&log_path, "confine", &crate::confine::note(c));
+        }
+
         let slot_kind = tasks_placement::slot_for(rec.spec.kind);
         let rj = Arc::new(RunningJob {
             id,
@@ -969,6 +1008,7 @@ impl Scheduler {
             } else {
                 rec.spec.kind.cpu_class()
             }),
+            confine,
         };
         let meta = JobMeta {
             kind: rec.spec.kind,

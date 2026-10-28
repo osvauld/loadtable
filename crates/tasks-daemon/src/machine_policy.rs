@@ -442,6 +442,14 @@ const FIELDS: &[Field] = &[
         "",
     ),
     f("machine.tools", "LOADTABLE_TOOLS", Ty::List, ""),
+    f(
+        "confine.peer_jobs",
+        "LOADTABLE_CONFINE_PEER_JOBS",
+        Ty::Choice(&["on", "off"]),
+        "on",
+    ),
+    f("confine.read", "LOADTABLE_CONFINE_READ", Ty::List, ""),
+    f("confine.write", "LOADTABLE_CONFINE_WRITE", Ty::List, ""),
 ];
 
 /// A parsed value.
@@ -904,6 +912,19 @@ impl MachinePolicy {
     /// Extra tools this machine declares.
     pub fn tools(&self) -> Vec<String> {
         self.list("machine.tools")
+    }
+    /// Jobs from another machine run confined to the folders LoadTable owns (R-821). On by
+    /// default; `off` lets them read the whole home folder.
+    pub fn confine_peer_jobs(&self) -> bool {
+        !matches!(self.vals.get("confine.peer_jobs"), Some(Val::Choice(w)) if w == "off")
+    }
+    /// Extra folders a confined job may read (`~/` is the home folder).
+    pub fn confine_read(&self) -> Vec<String> {
+        self.list("confine.read")
+    }
+    /// Extra folders a confined job may read and write.
+    pub fn confine_write(&self) -> Vec<String> {
+        self.list("confine.write")
     }
     /// The slot layout admission works on.
     pub fn layout(&self) -> Layout {

@@ -198,6 +198,8 @@ pub struct SpawnSpec {
     /// Niceness added to the whole process group right after the spawn (0 leaves it). Used for
     /// compile jobs where the job cgroup has no `cpu.weight` (macOS, no cpu controller).
     pub nice: i32,
+    /// Run the command confined to the folders LoadTable owns (R-821); `None` runs it as is.
+    pub confine: Option<crate::Confine>,
 }
 
 /// How much CPU a job gets against the others on the machine.

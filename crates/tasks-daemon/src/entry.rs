@@ -47,6 +47,9 @@ pub enum Command {
     Help,
     /// Print the version and build (R-807).
     Version,
+    /// Confine this process to the given folders and become the command (R-821); the daemon
+    /// starts jobs from other machines through it on Linux.
+    Confine(Vec<String>),
 }
 
 /// Parses `args` (without the program name).
@@ -59,6 +62,7 @@ pub fn parse_args(args: &[String]) -> Result<Command, DaemonError> {
         }
         Some("-h" | "--help" | "help") => return Ok(Command::Help),
         Some("-V" | "--version" | "version") => return Ok(Command::Version),
+        Some("confine") => return Ok(Command::Confine(args.get(1..).unwrap_or_default().to_vec())),
         _ => "serve",
     };
     let mut cfg = ConfigArgs::default();
@@ -93,7 +97,7 @@ pub fn parse_args(args: &[String]) -> Result<Command, DaemonError> {
 
 /// True when `exe` is the daemon binary itself (`loadtabled`), which takes `serve` directly. Any
 /// other executable is the CLI (`loadtable`), whose daemon lives under `loadtable daemon`.
-fn is_daemon_binary(exe: &str) -> bool {
+pub(crate) fn is_daemon_binary(exe: &str) -> bool {
     std::path::Path::new(exe)
         .file_name()
         .and_then(|n| n.to_str())
@@ -235,6 +239,7 @@ pub fn run(args: &[String]) -> Result<(), DaemonError> {
             print!("{}", MachinePolicy::sample_text());
             Ok(())
         }
+        Command::Confine(rest) => confine_and_exec(&rest),
         Command::Install { args, dry_run } => {
             let exe = std::env::current_exe()
                 .map_err(|e| DaemonError::io(std::path::Path::new("current_exe"), e))?;
@@ -284,6 +289,35 @@ pub fn run(args: &[String]) -> Result<(), DaemonError> {
             watch_termination(daemon.scheduler().clone(), signals);
             daemon.run()
         }
+    }
+}
+
+/// `loadtabled confine --closed P.. --write P.. --read P.. -- CMD..`: restricts this process with
+/// Landlock and execs the command, which keeps the restriction with everything it starts. It
+/// returns only on failure, and then the command has not run (R-821).
+fn confine_and_exec(rest: &[String]) -> Result<(), DaemonError> {
+    let h = tasks_platform::confine::parse_helper_args(rest).map_err(DaemonError::Usage)?;
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        tasks_platform::confine::restrict(&h).map_err(|e| {
+            DaemonError::Usage(format!(
+                "refused: this job must run confined and cannot be: {e}"
+            ))
+        })?;
+        let (program, args) = h
+            .argv
+            .split_first()
+            .ok_or_else(|| DaemonError::Usage("confine: no command".into()))?;
+        let err = std::process::Command::new(program).args(args).exec();
+        Err(DaemonError::Usage(format!("cannot run {program}: {err}")))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = h;
+        Err(DaemonError::Usage(
+            "confine: the helper is for Linux; macOS confines jobs with sandbox-exec".into(),
+        ))
     }
 }
 

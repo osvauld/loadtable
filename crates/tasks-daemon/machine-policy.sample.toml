@@ -113,6 +113,11 @@
 # denied_devices = []   # env LOADTABLE_DENIED_DEVICES
 # tools = []   # env LOADTABLE_TOOLS
 
+[confine]
+# peer_jobs = "on"   # env LOADTABLE_CONFINE_PEER_JOBS
+# read = []   # env LOADTABLE_CONFINE_READ
+# write = []   # env LOADTABLE_CONFINE_WRITE
+
 # Peers (read at start; restart to change). Remove the leading `#>` to use.
 #> [peers]
 #> bind = "192.168.1.5:7843"
