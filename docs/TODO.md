@@ -19,6 +19,10 @@ What stands between `dev` and LoadTable 0.1.0, the first public alpha.
 - [ ] `feedback/`, `deploy/v2/` and the internal parts of `docs/` (agent feedback, machine notes): keep out of the public repo or move to a private one. (owner)
 - [x] Root `README.md` (what it is, install, link to the site) and a `LICENSE` file (Cargo says MIT; there is no file).
 - [x] MCP tool descriptions mention "the personal phone": reword for any user.
+- [x] Confine jobs that come from a peer to what LoadTable owns there (R-821): Landlock on Linux, Seatbelt on macOS, `[confine]` in the machine policy. A disk survey sent to the friend's Mac walked their photos and documents.
+- [ ] Try R-821 on the Mac once its daemon runs a build with it: a job from the laptop builds the iOS core, and `ls ~/Pictures` from the laptop is refused. The macOS profile is type-checked and unit-tested, not yet run. (friend)
+- [ ] Site security page: say jobs from other machines run confined, and how `[confine]` widens it.
+- [ ] `loadtable cache usage` / `cache clean` (CLI, MCP and over the peer link) that only ever walk LoadTable's own folders, so nobody needs a shell `du` on another machine.
 
 ## 3. GitHub
 
@@ -44,6 +48,8 @@ What stands between `dev` and LoadTable 0.1.0, the first public alpha.
 - [ ] Commit the LoadTable card on the osvauld landing site. (owner approval)
 
 ## Known gaps, for the release notes
+
+- A peer reached only directly shows "asleep or unreachable" when it is this machine that changed networks; the message should say the link was direct-only and whether the peer is on the relay.
 
 - The broad-test rule reads a libtest option's value as a filter: `cargo test -- --test-threads 32` is refused (`--test-threads=32` works).
 
