@@ -285,7 +285,7 @@ pub fn build_receiver_with(sch: &Arc<Scheduler>, store: Arc<SyncStore>) -> Arc<R
         Arc::new(DaemonStatus::new(sch.clone())),
         // the receiving peer applies the same rules as the local API (R-153)
         Arc::new(DaemonRules::new(sch.clone())),
-        crate::build_cache::BuildCache::fetch_policy(),
+        sch.build_cache().fetch_policy(),
     ))
 }
 

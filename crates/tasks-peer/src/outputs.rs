@@ -19,6 +19,10 @@ pub struct FetchPolicy {
     /// Paths from the tree root (`target`, `android/app/build`) that may be
     /// coordinator-made output links pointing outside the tree. Every other symlink is refused.
     pub allowed_links: Vec<String>,
+    /// The build cache the output links point into. An allowed link is followed only when it
+    /// leads there (R-829): a link at `target` that leads anywhere else, whether it came with
+    /// the synced tree or a job put it there, serves nothing. `None` follows no link at all.
+    pub cache_root: Option<PathBuf>,
 }
 
 impl Default for FetchPolicy {
@@ -26,8 +30,22 @@ impl Default for FetchPolicy {
         FetchPolicy {
             max_file_bytes: 2 * 1024 * 1024 * 1024,
             allowed_links: Vec::new(),
+            cache_root: None,
         }
     }
+}
+
+/// True when `real` (already canonical) lies under `root`.
+fn under(real: &Path, root: &Path) -> bool {
+    fs::canonicalize(root).is_ok_and(|r| real.starts_with(r))
+}
+
+/// True when the link at `link` leads, through any further links, into the policy's cache.
+fn leads_into_cache(link: &Path, policy: &FetchPolicy) -> bool {
+    let Some(root) = &policy.cache_root else {
+        return false;
+    };
+    fs::canonicalize(link).is_ok_and(|dest| under(&dest, root))
 }
 
 fn resolve(tree: &Path, rel: &str, policy: &FetchPolicy) -> Result<PathBuf, String> {
@@ -51,9 +69,27 @@ fn resolve(tree: &Path, rel: &str, policy: &FetchPolicy) -> Result<PathBuf, Stri
             if !output_link {
                 return Err(format!("{c} is a symlink"));
             }
+            if !leads_into_cache(&cur, policy) {
+                return Err(format!(
+                    "{prefix} is a link that does not lead into the build cache"
+                ));
+            }
         }
     }
-    Ok(tree.join(rel))
+    let abs = tree.join(rel);
+    // whatever the components said, the file served lies under the tree or the cache
+    if let Ok(real) = fs::canonicalize(&abs)
+        && !under(&real, tree)
+        && !policy
+            .cache_root
+            .as_deref()
+            .is_some_and(|r| under(&real, r))
+    {
+        return Err(format!(
+            "{rel} resolves outside the checkout and the build cache"
+        ));
+    }
+    Ok(abs)
 }
 
 /// Lists what can be fetched for each requested path.
@@ -224,6 +260,9 @@ pub struct FetchReport {
     pub too_large: Vec<(String, u64, u64)>,
     /// Paths refused or failed: `(path, reason)`.
     pub refused: Vec<(String, String)>,
+    /// Paths the peer listed that were not asked for, or listed again: ignored, nothing written
+    /// (R-830).
+    pub unasked: Vec<String>,
 }
 
 /// Fetches `paths` of the peer's copy of `checkout` into `dest`. No symlink below `dest` is
@@ -312,7 +351,19 @@ pub fn fetch_with_progress(
         let Body::FetchListing { entries } = reply else {
             return Err(FetchError::Unexpected("fetch_list"));
         };
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for entry in entries {
+            let listed = match &entry {
+                FetchEntry::Missing { path }
+                | FetchEntry::TooLarge { path, .. }
+                | FetchEntry::Refused { path, .. }
+                | FetchEntry::Found { path, .. } => path.clone(),
+            };
+            // only what was asked for, once: the peer's listing decides nothing else (R-830)
+            if !batch.contains(&listed) || !seen.insert(listed.clone()) {
+                report.unasked.push(listed);
+                continue;
+            }
             match entry {
                 FetchEntry::Missing { path } => report.missing.push(path),
                 FetchEntry::TooLarge { path, size, limit } => {

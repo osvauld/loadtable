@@ -14,13 +14,20 @@
 use super::{Estimate, MachineInfo, Source, build};
 use crate::dur::fmt_eta;
 use crate::error::TimingError;
-use crate::family::{family, tool};
+use crate::family::{family, ranged, tool};
 use crate::history::{Cache, History, Outcome, Sample, SampleKey};
 use std::fmt;
 
 /// The most recent passing runs an estimate shown to a person rests on: few enough to follow
 /// the code as it changes, enough that one odd run does not decide it.
 pub const RECENT: usize = 6;
+/// The runs the p90 looks back over (R-826): six runs cannot see a tail (their "p90" is their
+/// slowest), so the spread comes from more of them than the median does.
+pub const TAIL: usize = 20;
+/// The p90 is never under this times the median (R-826): with few runs the tail is unseen. In
+/// the 852 whole-job runs recorded up to 29 Oct 2026 the real time was past the six-run p90
+/// one time in three; with the floor, one in six.
+pub const P90_FLOOR: f64 = 1.5;
 
 /// Why there is no estimate to show.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,23 +309,39 @@ fn fits_there(s: &Sample, want: Cache) -> bool {
     s.outcome == Outcome::Passed && finite(s) && s.cache == want
 }
 
-fn window(mut v: Vec<Sample>) -> Vec<f64> {
-    v.sort_by_key(|s| std::cmp::Reverse(s.at_ms));
-    v.truncate(RECENT);
-    let mut secs: Vec<f64> = v.iter().map(|s| s.secs).collect();
-    secs.sort_by(f64::total_cmp);
-    secs
+/// The seconds of the most recent runs, each list sorted: the last [`RECENT`], which the
+/// median comes from, and the last [`TAIL`], which the p90 comes from.
+struct Runs {
+    recent: Vec<f64>,
+    tail: Vec<f64>,
 }
 
-fn eta(secs: &[f64], scale: f64, machine: &str, basis: EtaBasis) -> Shown {
-    let (median_secs, p90_secs) = build(secs, scale);
+fn window(mut v: Vec<Sample>) -> Runs {
+    v.sort_by_key(|s| std::cmp::Reverse(s.at_ms));
+    let mut recent: Vec<f64> = v.iter().take(RECENT).map(|s| s.secs).collect();
+    let mut tail: Vec<f64> = v.iter().take(TAIL).map(|s| s.secs).collect();
+    recent.sort_by(f64::total_cmp);
+    tail.sort_by(f64::total_cmp);
+    Runs { recent, tail }
+}
+
+/// The median of the recent runs and the p90 of the tail, never under [`P90_FLOOR`] times the
+/// median, both scaled.
+fn spread(runs: &Runs, scale: f64) -> (f64, f64) {
+    let (median, _) = build(&runs.recent, scale);
+    let (_, tail_p90) = build(&runs.tail, scale);
+    (median, tail_p90.max(median * P90_FLOOR))
+}
+
+fn eta(runs: &Runs, scale: f64, machine: &str, basis: EtaBasis) -> Shown {
+    let (median_secs, p90_secs) = spread(runs, scale);
     let low_secs = matches!(basis, EtaBasis::Range { .. })
-        .then(|| secs.first().copied().unwrap_or(0.0) * scale);
+        .then(|| runs.recent.first().copied().unwrap_or(0.0) * scale);
     Shown::Eta(Eta {
         median_secs,
         p90_secs,
         low_secs,
-        samples: secs.len(),
+        samples: runs.recent.len(),
         machine: machine.to_string(),
         rough: basis != EtaBasis::Exact,
         basis,
@@ -338,7 +361,8 @@ fn bound(here: &[Sample], want: Cache, machine: &str) -> Option<Shown> {
             .filter(|s| s.outcome == Outcome::Passed && finite(s) && s.cache == other)
             .copied()
             .collect(),
-    );
+    )
+    .recent;
     let at = match basis {
         EtaBasis::AtMost => build(&secs, 1.0).0,
         _ => secs.last().copied()?,
@@ -380,10 +404,11 @@ pub fn shown(
     let passed_here = here.iter().any(|s| s.outcome == Outcome::Passed);
     let mut any_passed = passed_here;
     let mine = window(fitting_here(&here, want));
-    if !mine.is_empty() {
+    if !mine.recent.is_empty() {
         return Ok(eta(&mine, 1.0, &machine.name, EtaBasis::Exact));
     }
-    // relatives: the family's whole-job runs here, and the tool's builds that have a family
+    // relatives: the family's whole-job runs here, and (for a tool whose builds make a range,
+    // R-827) the tool's builds that have a family
     let fam = key.target.is_none().then(|| family(&key.recipe)).flatten();
     let (kin, builds): (Vec<Sample>, Vec<Sample>) = match &fam {
         Some(f) => {
@@ -396,7 +421,7 @@ pub fn shown(
                     .map(|(_, s)| *s)
                     .collect(),
                 with.iter()
-                    .filter(|(g, _)| g.is_some())
+                    .filter(|(g, _)| g.is_some() && ranged(tool(&key.recipe)))
                     .map(|(_, s)| *s)
                     .collect(),
             )
@@ -404,10 +429,10 @@ pub fn shown(
         None => (Vec::new(), Vec::new()),
     };
     let similar = window(fitting_here(&kin, want));
-    if !similar.is_empty() {
+    if !similar.recent.is_empty() {
         return Ok(eta(&similar, 1.0, &machine.name, EtaBasis::Similar));
     }
-    let mut best: Option<(Vec<f64>, &MachineInfo)> = None;
+    let mut best: Option<(Runs, &MachineInfo)> = None;
     for o in others
         .iter()
         .filter(|o| o.name != machine.name && o.cores > 0)
@@ -415,14 +440,18 @@ pub fn shown(
         let theirs = history.samples(&at(&o.name))?;
         any_sample |= !theirs.is_empty();
         any_passed |= theirs.iter().any(|s| s.outcome == Outcome::Passed);
-        let secs = window(theirs.into_iter().filter(|s| fits_there(s, want)).collect());
-        if !secs.is_empty() && best.as_ref().is_none_or(|(b, _)| secs.len() > b.len()) {
-            best = Some((secs, o));
+        let runs = window(theirs.into_iter().filter(|s| fits_there(s, want)).collect());
+        if !runs.recent.is_empty()
+            && best
+                .as_ref()
+                .is_none_or(|(b, _)| runs.recent.len() > b.recent.len())
+        {
+            best = Some((runs, o));
         }
     }
-    if let Some((secs, o)) = best {
+    if let Some((runs, o)) = best {
         let scaled_by = f64::from(o.cores) / f64::from(machine.cores.max(1));
-        return Ok(eta(&secs, scaled_by, &o.name, EtaBasis::Peer));
+        return Ok(eta(&runs, scaled_by, &o.name, EtaBasis::Peer));
     }
     // the tool's builds here of the wanted warmth only: a range, never a mix of warmths
     let wanted = if want == Cache::Unknown {
@@ -437,7 +466,7 @@ pub fn shown(
             .copied()
             .collect(),
     );
-    if !range.is_empty() {
+    if !range.recent.is_empty() {
         let tool = tool(&key.recipe).to_string();
         return Ok(eta(&range, 1.0, &machine.name, EtaBasis::Range { tool }));
     }

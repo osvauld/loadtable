@@ -302,13 +302,14 @@ fn r823_with_no_relative_the_tools_builds_here_give_a_range_of_the_same_warmth()
             tool: "gradle".into()
         }
     );
-    assert_eq!((e.low_secs, e.p90_secs), (Some(893.0), 1929.0));
+    // the upper end is the p90 of the builds, floored at 1.5x their median (R-826)
+    assert_eq!((e.low_secs, e.p90_secs), (Some(893.0), 2116.5));
     assert_eq!(
         e.text(),
         format!(
             "~{}–{} (rough: gradle builds here)",
             crate::dur::fmt_eta(893.0),
-            crate::dur::fmt_eta(1929.0)
+            crate::dur::fmt_eta(2116.5)
         )
     );
     let warm = gshow(&h, REL_1631, Cache::Warm);
@@ -335,6 +336,96 @@ fn r823_the_estimate_follows_the_last_six_runs() {
     assert_eq!(
         (e.eta().unwrap().median_secs, e.eta().unwrap().samples),
         (100.0, RECENT)
+    );
+}
+
+#[test]
+fn r826_the_p90_sees_twenty_runs_and_is_never_under_one_and_a_half_times_the_median() {
+    // twenty runs of 100 s; the last six decide the median
+    let mut h = MemHistory::new();
+    for i in 0..20u64 {
+        h.add(k("laptop"), s(100.0, Cache::Warm, Outcome::Passed, i));
+    }
+    let shown = show(&h, Cache::Warm, &[]);
+    let e = shown.eta().unwrap();
+    assert_eq!((e.median_secs, e.samples), (100.0, RECENT));
+    assert_eq!(
+        e.p90_secs, 150.0,
+        "six like runs cannot see a tail: the floor"
+    );
+    assert_eq!(
+        shown.to_string(),
+        "~2m (p90 3m) from 6 passing runs on laptop"
+    );
+    // three slow runs older than the last six: the median stays, the p90 sees them
+    let mut h = MemHistory::new();
+    for i in 0..20u64 {
+        let secs = if (5..8).contains(&i) { 1000.0 } else { 100.0 };
+        h.add(k("laptop"), s(secs, Cache::Warm, Outcome::Passed, i));
+    }
+    let e = show(&h, Cache::Warm, &[]);
+    let e = e.eta().unwrap();
+    assert_eq!((e.median_secs, e.p90_secs), (100.0, 1000.0));
+    // a run older than twenty is forgotten by the p90 too
+    let mut h = MemHistory::new();
+    h.add(k("laptop"), s(1000.0, Cache::Warm, Outcome::Passed, 0));
+    for i in 1..=20u64 {
+        h.add(k("laptop"), s(100.0, Cache::Warm, Outcome::Passed, i));
+    }
+    assert_eq!(show(&h, Cache::Warm, &[]).eta().unwrap().p90_secs, 150.0);
+    // another machine's runs are scaled, floor included
+    let mut h = MemHistory::new();
+    h.add(k("nixos"), s(100.0, Cache::Warm, Outcome::Passed, 1));
+    let e = show(&h, Cache::Warm, &[m("nixos", 16)]);
+    assert_eq!(
+        (e.eta().unwrap().median_secs, e.eta().unwrap().p90_secs),
+        (200.0, 300.0)
+    );
+}
+
+#[test]
+fn r827_a_filtered_test_run_is_estimated_from_its_unfiltered_relatives_here() {
+    let mut h = MemHistory::new();
+    let lib = "cargo test pkg=tasks-daemon profile=dev sel=lib";
+    for (i, secs) in [40.0, 44.0, 48.0].into_iter().enumerate() {
+        h.add(
+            gk(lib, "laptop"),
+            s(secs, Cache::Warm, Outcome::Passed, i as u64),
+        );
+    }
+    h.add(
+        gk(
+            "cargo test pkg=tasks-daemon profile=dev sel=filter:r71,lib",
+            "laptop",
+        ),
+        s(30.0, Cache::Warm, Outcome::Passed, 9),
+    );
+    // a new filter: the unfiltered run and the other filter's runs are its relatives
+    let r72 = "cargo test pkg=tasks-daemon profile=dev sel=filter:r72,lib";
+    let e = gshow(&h, r72, Cache::Warm);
+    let e = e.eta().unwrap();
+    assert_eq!(
+        (&e.basis, e.samples, e.median_secs),
+        (&EtaBasis::Similar, 4, 42.0)
+    );
+    assert!(e.rough);
+    assert_eq!(e.text(), "~42s (like 4 similar builds here)");
+    // planning takes the family's runs as measured
+    let p = planning(&h, &gk(r72, "laptop"), &m("laptop", 8), &[]).unwrap();
+    assert_eq!((p.basis, p.median_secs), (Basis::Passed, 42.0));
+    // another package's runs are no relatives, and cargo's builds here make no range
+    assert_eq!(
+        gshow(
+            &h,
+            "cargo test pkg=tasks-cli profile=dev sel=lib",
+            Cache::Warm
+        ),
+        Shown::Absent(NoEstimate::FirstRun)
+    );
+    // relatives of the other warmth only bound it (R-800)
+    assert_eq!(
+        gshow(&h, r72, Cache::Cold).eta().unwrap().basis,
+        EtaBasis::AtLeast
     );
 }
 

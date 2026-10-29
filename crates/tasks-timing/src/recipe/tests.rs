@@ -184,6 +184,33 @@ fn gradle_properties_that_only_stamp_the_output_are_not_the_work() {
 }
 
 #[test]
+fn r828_a_session_id_in_a_path_is_not_part_of_the_work() {
+    let a = one(
+        "sh /tmp/claude-1000/-home-abe-x/4bf4aba5-6e93-471e-af39-e303d43bfca9/scratchpad/check.sh",
+    );
+    let b = one(
+        "sh /tmp/claude-1000/-home-abe-x/0f3a8fa8-5bf9-4c19-92ca-6849a16f4b4d/scratchpad/check.sh",
+    );
+    assert_eq!(a, b);
+    assert_eq!(
+        a.to_string(),
+        "sh /tmp/claude-1000/-home-abe-x/<id>/scratchpad/check.sh"
+    );
+    // a word that is not a path, and an id that is not a whole component, are left alone
+    let id = "4bf4aba5-6e93-471e-af39-e303d43bfca9";
+    assert_eq!(one(&format!("make {id}")).rest, [id]);
+    assert_eq!(
+        one(&format!("make out/{id}.log")).rest,
+        [format!("out/{id}.log")]
+    );
+    // cargo's and gradle's arguments are parsed, not kept, so they are not touched
+    assert_eq!(
+        one(&format!("cargo run -- /x/{id}/y")).rest,
+        [format!("/x/{id}/y")]
+    );
+}
+
+#[test]
 fn other_tools_keep_args_verbatim() {
     let k = one("/usr/bin/make -j4 all");
     assert_eq!((k.tool.as_str(), k.rest.len()), ("make", 2));

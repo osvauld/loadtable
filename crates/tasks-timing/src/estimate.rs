@@ -258,7 +258,8 @@ pub fn estimate_with_cache(
 
 mod shown;
 pub use shown::{
-    Basis, Eta, EtaBasis, Left, NoEstimate, Planning, RECENT, Shown, planning, shown, wanted_cache,
+    Basis, Eta, EtaBasis, Left, NoEstimate, P90_FLOOR, Planning, RECENT, Shown, TAIL, planning,
+    shown, wanted_cache,
 };
 
 #[cfg(test)]
