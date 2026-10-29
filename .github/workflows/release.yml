@@ -75,10 +75,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-${{ matrix.target }}
-      # The CLI carries the MCP server (agents start it as `loadtable mcp`). The desktop window
-      # (`--features ui`) is left out: it needs graphics libraries a headless worker does not have.
+      # The CLI carries the MCP server (agents start it as `loadtable mcp`) and the desktop window
+      # (`loadtable ui`). The window loads its graphics libraries only when it opens, so the same
+      # binary runs on a headless worker; there `loadtable ui` says there is no display (R-832).
       - name: Build loadtable and loadtabled
-        run: cargo build --release --locked --target "$TARGET" -p tasks-daemon -p tasks-cli --features tasks-cli/mcp
+        run: cargo build --release --locked --target "$TARGET" -p tasks-daemon -p tasks-cli --features tasks-cli/mcp,tasks-cli/ui
       - name: Package
         shell: bash
         run: |
@@ -98,6 +99,8 @@ jobs:
           "$bin/loadtabled" --version | grep -q "($(git rev-parse --short HEAD) "
           "$bin/loadtable" --help >/dev/null
           "$bin/loadtabled" --help >/dev/null
+          # the window is built in: its help is not the "built without ui" stub (R-199)
+          "$bin/loadtable" --help | grep -q "The desktop window (built in)"
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.target }}

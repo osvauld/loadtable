@@ -56,8 +56,6 @@ does not downgrade new installs.
 
 ## What release builds leave out
 
-- The desktop window (`loadtable ui`): it links graphics libraries that headless workers lack. Build
-  from source with `--features ui,mcp` for it.
 - Code signing and notarization on macOS. `curl` does not set the quarantine flag, so the installer's
   binaries run; a browser download of the archive needs `xattr -d com.apple.quarantine` on each
   binary.
