@@ -1544,7 +1544,11 @@ fn r760_a_cargo_test_gives_its_compile_slot_back_once_its_tests_run() {
     });
     let build = r.submit(&r.spec_in("o", &["cargo", "build"], Kind::Compile, "b"));
     r.tick();
+    // The hand-over happens in a tick, once the reader has seen the `Running` line; keep ticking
+    // rather than hoping the one tick above landed after the reader (it did not, on a slow CI
+    // runner).
     r.until("the hand-over", || {
+        r.tick();
         held_slot(&r, test).is_some_and(|s| s.0 == "run")
     });
     r.tick();
