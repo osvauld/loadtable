@@ -36,6 +36,9 @@ jobs:
               raise SystemExit('Only stable X.Y.Z versions are released')
           if os.environ['GITHUB_REF_TYPE'] == 'tag' and os.environ['GITHUB_REF_NAME'] != f'v{version}':
               raise SystemExit(f'Tag {os.environ["GITHUB_REF_NAME"]} does not match the workspace version {version}')
+          notes = f'docs/releases/v{version}.md'
+          if os.environ['GITHUB_REF_TYPE'] == 'tag' and not (os.path.isfile(notes) and os.path.getsize(notes)):
+              raise SystemExit(f'No release notes for v{version}: add {notes}')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               f.write(f'version={version}\n')
           PY
@@ -75,10 +78,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-${{ matrix.target }}
-      # The CLI carries the MCP server (agents start it as `loadtable mcp`). The desktop window
-      # (`--features ui`) is left out: it needs graphics libraries a headless worker does not have.
+      # The CLI carries the MCP server (agents start it as `loadtable mcp`) and the desktop window
+      # (`loadtable ui`). The window loads its graphics libraries only when it opens, so the same
+      # binary runs on a headless worker; there `loadtable ui` says there is no display (R-832).
       - name: Build loadtable and loadtabled
-        run: cargo build --release --locked --target "$TARGET" -p tasks-daemon -p tasks-cli --features tasks-cli/mcp
+        run: cargo build --release --locked --target "$TARGET" -p tasks-daemon -p tasks-cli --features tasks-cli/mcp,tasks-cli/ui
       - name: Package
         shell: bash
         run: |
@@ -98,6 +102,8 @@ jobs:
           "$bin/loadtabled" --version | grep -q "($(git rev-parse --short HEAD) "
           "$bin/loadtable" --help >/dev/null
           "$bin/loadtabled" --help >/dev/null
+          # the window is built in: its help is not the "built without ui" stub (R-199)
+          "$bin/loadtable" --help | grep -q "The desktop window (built in)"
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.target }}
@@ -113,6 +119,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: docs/releases
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -129,7 +138,8 @@ jobs:
               echo 'Refusing to replace the binaries of a published release'; exit 1;
             }
           else
+            # the notes were checked in the version job
             gh release create "$TAG" --verify-tag --draft --title "LoadTable $TAG" \
-              --notes 'Candidate binaries for Linux (x86-64, arm64) and macOS (Apple silicon, Intel). Test before publishing; publishing copies them to dl.loadtable.osvauld.com.'
+              --notes-file "docs/releases/$TAG.md"
           fi
           gh release upload "$TAG" artifacts/* --clobber

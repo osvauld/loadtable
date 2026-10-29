@@ -3,10 +3,12 @@
 Three workflows in `.github/workflows`:
 
 - `ci.yml`: every push to main, dev or v2 and every pull request. Linux: fmt, clippy with warnings as
-  errors, every test (with the MCP server). macOS: clippy, with and without the iroh transport.
-- `release.yml`: a pushed `vX.Y.Z` tag. Builds `loadtable` and `loadtabled` for
-  `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` (both on Ubuntu 22.04, glibc 2.35),
-  `aarch64-apple-darwin` and `x86_64-apple-darwin`, and drafts the GitHub release with them.
+  errors, every test (with the MCP server and the desktop window). macOS: clippy with and without
+  the iroh transport, and the confinement profile run under the real `sandbox-exec`.
+- `release.yml`: a pushed `vX.Y.Z` tag. Builds `loadtable` (with the MCP server and the desktop
+  window) and `loadtabled` for `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` (both on
+  Ubuntu 22.04, glibc 2.35), `aarch64-apple-darwin` and `x86_64-apple-darwin`, and drafts the GitHub
+  release with them and the notes in `docs/releases/vX.Y.Z.md`.
 - `publish-r2.yml`: publishing that release (or a manual run with its tag). Copies the binaries to
   LoadTable's R2 bucket, served at `https://dl.loadtable.osvauld.com`, and moves `latest` forward.
 
@@ -38,8 +40,9 @@ branches and tags allow only tags matching `v*`.
 
 ## Cutting a release
 
-1. Set `[workspace.package] version` in `Cargo.toml` to the new `X.Y.Z` and merge it to main. The
-   tag must match it; the workflow refuses otherwise.
+1. Set `[workspace.package] version` in `Cargo.toml` to the new `X.Y.Z` (and the workspace crates
+   in `Cargo.lock`), write the release notes in `docs/releases/vX.Y.Z.md`, and merge both to main.
+   The tag must match the version and the notes must exist; the workflow refuses otherwise.
 2. `git tag vX.Y.Z && git push origin vX.Y.Z`.
 3. Wait for Release builds; it drafts "LoadTable vX.Y.Z" with four archives, their `.sha256` files
    and `SHA256SUMS`.
@@ -56,8 +59,6 @@ does not downgrade new installs.
 
 ## What release builds leave out
 
-- The desktop window (`loadtable ui`): it links graphics libraries that headless workers lack. Build
-  from source with `--features ui,mcp` for it.
 - Code signing and notarization on macOS. `curl` does not set the quarantine flag, so the installer's
   binaries run; a browser download of the archive needs `xattr -d com.apple.quarantine` on each
   binary.
