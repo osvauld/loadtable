@@ -1,11 +1,11 @@
 name: Publish release to R2
 
-# Copies a published, stable GitHub release to https://repo.osvauld.com/loadtable/, the bucket that
-# also serves Tinline. LoadTable owns only the loadtable/ prefix:
+# Copies a published, stable GitHub release to LoadTable's own R2 bucket, served at
+# https://dl.loadtable.osvauld.com (the bucket's custom domain):
 #
-#   loadtable/releases/vX.Y.Z/loadtable-X.Y.Z-<target>.tar.gz (+ .sha256)
-#   loadtable/releases/vX.Y.Z/SHA256SUMS
-#   loadtable/latest            the newest version number, read by the installer; uploaded last
+#   releases/vX.Y.Z/loadtable-X.Y.Z-<target>.tar.gz (+ .sha256)
+#   releases/vX.Y.Z/SHA256SUMS
+#   latest            the newest version number, read by the installer; uploaded last
 #
 # Versioned objects are immutable: a rerun may upload the same bytes again, never different ones.
 on:
@@ -38,6 +38,7 @@ jobs:
       AWS_DEFAULT_REGION: auto
       R2_BUCKET: ${{ vars.R2_BUCKET }}
       R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+      DL_BASE: https://dl.loadtable.osvauld.com
     steps:
       - name: Validate the release and configuration
         shell: bash
@@ -58,7 +59,7 @@ jobs:
           ls -l "dist/$TAG"
       - name: Refuse to change an object that is already published
         run: |
-          prefix="loadtable/releases/$TAG"
+          prefix="releases/$TAG"
           for path in dist/"$TAG"/*; do
             key="$prefix/$(basename "$path")"
             if aws s3api head-object --bucket "$R2_BUCKET" --key "$key" --endpoint-url "$R2_ENDPOINT" >/dev/null 2>&1; then
@@ -69,22 +70,21 @@ jobs:
       - name: Upload the binaries, then the latest pointer
         run: |
           # Never sync --delete: older releases stay downloadable.
-          aws s3 cp "dist/$TAG/" "s3://$R2_BUCKET/loadtable/releases/$TAG/" --recursive \
+          aws s3 cp "dist/$TAG/" "s3://$R2_BUCKET/releases/$TAG/" --recursive \
             --endpoint-url "$R2_ENDPOINT" --cache-control 'public,max-age=31536000,immutable' --only-show-errors
           # Only move latest forward: republishing an older tag must not downgrade new installs.
-          current=$(curl -fsS "https://repo.osvauld.com/loadtable/latest" 2>/dev/null || true)
+          current=$(curl -fsS "$DL_BASE/latest" 2>/dev/null || true)
           newest=$(printf '%s\n%s\n' "${current:-0.0.0}" "${TAG#v}" | sort -V | tail -n1)
           if [ "$newest" = "${TAG#v}" ]; then
             printf '%s\n' "${TAG#v}" > latest
-            aws s3 cp latest "s3://$R2_BUCKET/loadtable/latest" --endpoint-url "$R2_ENDPOINT" \
+            aws s3 cp latest "s3://$R2_BUCKET/latest" --endpoint-url "$R2_ENDPOINT" \
               --content-type 'text/plain; charset=utf-8' --cache-control 'no-cache,max-age=0,must-revalidate'
-            echo "loadtable/latest -> ${TAG#v}"
+            echo "latest -> ${TAG#v}"
           else
-            echo "loadtable/latest stays at $current"
+            echo "latest stays at $current"
           fi
       - name: Check the public URLs
         run: |
-          base="https://repo.osvauld.com/loadtable"
-          curl -fsSI "$base/releases/$TAG/SHA256SUMS" >/dev/null
-          for f in dist/"$TAG"/*.tar.gz; do curl -fsSI "$base/releases/$TAG/$(basename "$f")" >/dev/null; done
-          echo "latest: $(curl -fsS "$base/latest")"
+          curl -fsSI "$DL_BASE/releases/$TAG/SHA256SUMS" >/dev/null
+          for f in dist/"$TAG"/*.tar.gz; do curl -fsSI "$DL_BASE/releases/$TAG/$(basename "$f")" >/dev/null; done
+          echo "latest: $(curl -fsS "$DL_BASE/latest")"
