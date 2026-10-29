@@ -242,7 +242,7 @@ pub(super) fn setup_native() -> Result<CgroupTree, String> {
     let own = Path::new(ROOT).join(delegated_root(&rel).trim_start_matches('/'));
     CgroupTree::prepare(Box::new(super::RealFs), &own, std::process::id()).map_err(|e| {
         format!(
-            "{e}; run loadtabled as a systemd user service with Delegate=yes (see deploy/v2/worker-unit.md)"
+            "{e}; run loadtabled as a systemd user service with Delegate=yes (`loadtabled install` writes one)"
         )
     })
 }

@@ -133,10 +133,14 @@ pub fn seatbelt_profile(c: &Confine) -> String {
         "(deny file-read* file-write*{})\n",
         list(&c.closed, "subpath")
     ));
-    // a path walk and getcwd stat the closed folder itself; its listing stays closed
+    // a path walk and getcwd stat the closed folder itself and every folder between it and an
+    // opened one (`realpath` of the synced copy stats ~/.local and ~/.local/state); their
+    // listings stay closed
+    let mut stat = c.closed.clone();
+    stat.extend(between(&c.closed, c.read.iter().chain(&c.write)));
     s.push_str(&format!(
         "(allow file-read-metadata{})\n",
-        list(&c.closed, "literal")
+        list(&stat, "literal")
     ));
     if !c.read.is_empty() {
         s.push_str(&format!("(allow file-read*{})\n", list(&c.read, "subpath")));
@@ -148,6 +152,34 @@ pub fn seatbelt_profile(c: &Confine) -> String {
         ));
     }
     s
+}
+
+/// The folders strictly between a closed folder and an opened path inside it, each once, in
+/// order: for `/h` closed and `/h/.local/state/x` opened, `/h/.local` and `/h/.local/state`.
+fn between<'a>(closed: &[PathBuf], opened: impl Iterator<Item = &'a PathBuf>) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for p in opened {
+        let Some(root) = closed
+            .iter()
+            .filter(|c| p.starts_with(c))
+            .max_by_key(|c| c.as_os_str().len())
+        else {
+            continue;
+        };
+        let mut chain: Vec<PathBuf> = p
+            .ancestors()
+            .skip(1)
+            .take_while(|a| *a != root.as_path())
+            .map(Path::to_path_buf)
+            .collect();
+        chain.reverse();
+        for a in chain {
+            if !out.contains(&a) {
+                out.push(a);
+            }
+        }
+    }
+    out
 }
 
 /// The folders under `root` a Linux job may read: everything except the closed folders, found by
@@ -283,6 +315,66 @@ mod tests {
         assert_eq!(w[0], SANDBOX_EXEC);
         assert_eq!(w[1], "-p");
         assert_eq!(w[3], "make");
+    }
+
+    #[test]
+    fn r831_the_folders_above_an_opened_one_can_be_looked_up_but_not_listed() {
+        let mut x = c();
+        x.write = vec![
+            PathBuf::from("/home/u/.local/state/loadtable/peer-store"),
+            PathBuf::from("/home/u/build-cache"),
+        ];
+        x.read = vec![PathBuf::from("/home/u/Library/Caches/swiftpm")];
+        let p = seatbelt_profile(&x);
+        let stat = p
+            .lines()
+            .find(|l| l.starts_with("(allow file-read-metadata"))
+            .unwrap();
+        for dir in [
+            "/home/u",
+            "/home/u/.local",
+            "/home/u/.local/state",
+            "/home/u/.local/state/loadtable",
+            "/home/u/Library",
+            "/home/u/Library/Caches",
+        ] {
+            assert!(
+                stat.contains(&format!("(literal \"{dir}\")")),
+                "{dir} must be looked up for realpath: {stat}"
+            );
+        }
+        assert!(
+            !stat.contains("subpath"),
+            "only the folders themselves, never what is under them: {stat}"
+        );
+        assert_eq!(
+            stat.matches("(literal \"/home/u/.local\")").count(),
+            1,
+            "each folder once"
+        );
+        assert!(
+            !p.contains("(allow file-read* (literal \"/home/u/.local\"))"),
+            "a folder above is not listed: {p}"
+        );
+    }
+
+    #[test]
+    fn r831_paths_outside_the_closed_folders_add_no_lookups() {
+        let x = Confine {
+            helper: vec![],
+            closed: vec![PathBuf::from("/home/u")],
+            write: vec![
+                PathBuf::from("/opt/sdk/tools"),
+                PathBuf::from("/home/u/.cargo"),
+            ],
+            read: vec![],
+        };
+        let stat = seatbelt_profile(&x)
+            .lines()
+            .find(|l| l.starts_with("(allow file-read-metadata"))
+            .unwrap()
+            .to_string();
+        assert_eq!(stat, "(allow file-read-metadata (literal \"/home/u\"))");
     }
 
     #[test]

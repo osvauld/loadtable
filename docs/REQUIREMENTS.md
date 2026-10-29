@@ -1,6 +1,6 @@
 # `tasks` rewrite: requirements distilled from trial feedback
 
-Source: `/home/abe/task-manager/feedback/*.md`. That is 146 trial reports, excluding `TEMPLATE.md` and the directory `README.md`.
+Source: the agent trial reports kept in `feedback/` (not published). That is 146 trial reports, excluding `TEMPLATE.md` and the directory `README.md`.
 Citations use file basenames without `.md`. `n=` is the number of distinct files that raised the point. Positive reports that confirm an existing behaviour are counted too, marked "(+)". This keeps working behaviour from being lost in the rewrite.
 
 Recurring IDs: `nixos` is the LAN worker/peer and `kurukkan` is the laptop. A "forwarded/offload job" has both a local ID and a remote ID.
