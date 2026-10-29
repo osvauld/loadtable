@@ -18,6 +18,9 @@ documentation: <https://loadtable.osvauld.com>.
   audit log, with exact per-job resource figures where cgroups are available.
 - **Rules that agents can't ignore.** Broad `cargo test` runs, multi-command shell scripts and
   denied devices are refused at submit with a message that says what to run instead.
+- **A desktop window.** `loadtable ui` shows every machine and its queue, each job's log, the
+  history, timings, the audit log and pressure stalls. It is in the release binary; on a machine without a display
+  the same binary runs headless.
 - **Jobs from other machines are confined.** A job a peer sends runs under Landlock (Linux) or
   Seatbelt (macOS): it reaches the build cache and toolchains, not the rest of your home folder.
 
@@ -27,13 +30,14 @@ documentation: <https://loadtable.osvauld.com>.
 curl -fsSL https://loadtable.osvauld.com/install.sh | sh   # Linux x86-64/arm64, macOS
 loadtabled install                                          # the daemon as a user service
 loadtable status
+loadtable ui                                                # the desktop window
 ```
 
 Or from source, with a recent stable Rust:
 
 ```sh
 cargo install --locked --path crates/tasks-daemon --root ~/.local
-cargo install --locked --path crates/tasks-cli --features mcp --root ~/.local   # add ui for the window
+cargo install --locked --path crates/tasks-cli --features mcp,ui --root ~/.local
 ```
 
 Then [pair your machines](https://loadtable.osvauld.com/docs/pairing) and
@@ -57,8 +61,8 @@ The crates keep their `tasks-*` names from before the project was named.
 
 ```sh
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --features tasks-cli/mcp -- -D warnings
-cargo test --workspace --features tasks-cli/mcp
+cargo clippy --workspace --all-targets --features tasks-cli/mcp,tasks-cli/ui -- -D warnings
+cargo test --workspace --features tasks-cli/mcp,tasks-cli/ui
 ```
 
 `docs/REGRESSIONS.md` lists every behaviour with the tests that hold it; a change that alters one

@@ -13,9 +13,9 @@ never bare `cargo` in a shell:
 
 ```sh
 loadtable run --who YOUR_AGENT --anywhere -- cargo fmt --all --check
-loadtable run --who YOUR_AGENT --anywhere -- cargo clippy --workspace --all-targets --features tasks-cli/mcp -j 6 -- -D warnings
+loadtable run --who YOUR_AGENT --anywhere -- cargo clippy --workspace --all-targets --features tasks-cli/mcp,tasks-cli/ui -j 6 -- -D warnings
 loadtable run --who YOUR_AGENT --anywhere -- cargo test -p tasks-daemon --lib FILTER -j 6
-loadtable run --who YOUR_AGENT --anywhere -- cargo test --workspace --features tasks-cli/mcp -j 6   # the full suite, before merging
+loadtable run --who YOUR_AGENT --anywhere -- cargo test --workspace --features tasks-cli/mcp,tasks-cli/ui -j 6   # the full suite, before merging
 ```
 
 - Name your test target (`-p X --lib FILTER`, `--test NAME`); a bare filter is refused unless
