@@ -88,7 +88,7 @@ impl RecipeKey {
             "gradle" | "gradlew" => recipe_gradle::parse(args),
             _ => {
                 let mut k = RecipeKey::new(tool);
-                k.rest = args.to_vec();
+                k.rest = args.iter().map(|a| without_ids(a)).collect();
                 k
             }
         }]
@@ -128,6 +128,27 @@ impl RecipeKey {
             _ => Kind::Run,
         }
     }
+}
+
+/// `a` with every path component that is a UUID (`4bf4aba5-6e93-471e-af39-e303d43bfca9`)
+/// replaced by `<id>` (R-828): an agent's scratch folder is named by its session, and a script
+/// run from it would otherwise be a first run in every session.
+fn without_ids(a: &str) -> String {
+    if !a.contains('/') || !a.contains('-') {
+        return a.to_string();
+    }
+    a.split('/')
+        .map(|c| if is_uuid(c) { "<id>" } else { c })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn is_uuid(c: &str) -> bool {
+    c.len() == 36
+        && c.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_hexdigit(),
+        })
 }
 
 fn is_assignment(a: &str) -> bool {

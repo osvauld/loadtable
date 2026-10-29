@@ -135,12 +135,13 @@ fn r159_an_output_link_is_followed_only_when_the_policy_names_it() {
     let r = run_fetch(&s, &["target/debug/app"], u64::MAX);
     assert!(r.fetched.is_empty());
     assert!(r.refused[0].1.contains("symlink"), "{:?}", r.refused);
-    // A daemon that allows the `target` link serves it.
+    // A daemon that allows the `target` link into its cache serves it.
     let rcv = s.w.receiver_with(
         Arc::new(FakeRunner::new()),
         Arc::new(tasks_peer::receiver::AllowAll),
         FetchPolicy {
             allowed_links: vec!["target".into()],
+            cache_root: Some(s.w.tmp.path().join("cache-disk")),
             ..FetchPolicy::default()
         },
     );
@@ -151,6 +152,137 @@ fn r159_an_output_link_is_followed_only_when_the_policy_names_it() {
         fs::read_to_string(s.dest.join("target/debug/app")).unwrap(),
         "built"
     );
+}
+
+// R-829: an allowed link is followed only into the build cache. A `target` link that came with
+// the synced tree (committed, or planted by a job) and leads to the home folder serves nothing:
+// without this, a paired machine could read any file the daemon can read.
+#[test]
+fn r829_an_output_link_is_followed_only_into_the_build_cache() {
+    use std::os::unix::fs::symlink;
+    let s = synced();
+    let cache = s.w.tmp.path().join("cache-disk");
+    write(&cache, "target/debug/app", "built");
+    let outside = s.w.tmp.path().join("outside");
+    write(&outside, "home/me/.ssh/id_ed25519", "secret");
+    let serve = |root: Option<std::path::PathBuf>| {
+        let rcv = s.w.receiver_with(
+            Arc::new(FakeRunner::new()),
+            Arc::new(tasks_peer::receiver::AllowAll),
+            FetchPolicy {
+                allowed_links: vec!["target".into()],
+                cache_root: root,
+                ..FetchPolicy::default()
+            },
+        );
+        s.w.net.serve(&s.w.nixos, rcv as Arc<dyn Handler>);
+    };
+    serve(Some(cache.clone()));
+    let secret = "target/home/me/.ssh/id_ed25519";
+    symlink(&outside, s.tree.join("target")).unwrap();
+    let r = run_fetch(&s, &[secret], u64::MAX);
+    assert!(r.fetched.is_empty(), "{r:?}");
+    assert!(r.refused[0].1.contains("build cache"), "{r:?}");
+    assert!(!s.dest.join(secret).exists());
+    // a link that reaches the outside through a link inside the cache is not followed either
+    fs::remove_file(s.tree.join("target")).unwrap();
+    fs::create_dir_all(cache.join("hop")).unwrap();
+    symlink(&outside, cache.join("hop/out")).unwrap();
+    symlink(cache.join("hop/out"), s.tree.join("target")).unwrap();
+    let r = run_fetch(&s, &[secret], u64::MAX);
+    assert!(
+        r.fetched.is_empty() && r.refused[0].1.contains("build cache"),
+        "{r:?}"
+    );
+    // the link the daemon places, into its cache, is followed
+    fs::remove_file(s.tree.join("target")).unwrap();
+    symlink(cache.join("target"), s.tree.join("target")).unwrap();
+    let r = run_fetch(&s, &["target/debug/app"], u64::MAX);
+    assert_eq!(r.fetched.len(), 1, "{r:?}");
+    // a policy without a cache root follows no link at all
+    serve(None);
+    let r = run_fetch(&s, &["target/debug/app"], u64::MAX);
+    assert!(
+        r.fetched.is_empty() && r.refused[0].1.contains("build cache"),
+        "{r:?}"
+    );
+}
+
+/// A worker whose listing names a file the origin did not ask for, and the asked file twice.
+struct Lies {
+    inner: Box<dyn tasks_peer::transport::Connection>,
+}
+
+impl tasks_peer::transport::Connection for Lies {
+    fn request(
+        &mut self,
+        msg: tasks_peer::proto::Body,
+    ) -> Result<tasks_peer::proto::Body, tasks_peer::PeerError> {
+        use tasks_peer::proto::{Body, FetchEntry};
+        Ok(match self.inner.request(msg)? {
+            Body::FetchListing { mut entries } => {
+                if let Some(FetchEntry::Found {
+                    hash, size, exec, ..
+                }) = entries.first().cloned()
+                {
+                    entries.push(FetchEntry::Found {
+                        path: "Cargo.toml".into(),
+                        hash,
+                        size,
+                        exec,
+                        blob: None,
+                    });
+                    entries.push(FetchEntry::Found {
+                        path: "out/a.txt".into(),
+                        hash,
+                        size,
+                        exec,
+                        blob: None,
+                    });
+                }
+                Body::FetchListing { entries }
+            }
+            other => other,
+        })
+    }
+    fn subscribe(
+        &mut self,
+        remote: tasks_peer::RemoteJobId,
+        from_offset: u64,
+    ) -> Result<Box<dyn tasks_peer::transport::EventStream>, tasks_peer::PeerError> {
+        self.inner.subscribe(remote, from_offset)
+    }
+}
+
+// R-830: only the files asked for are written, whatever the peer lists. Without this a worker
+// could put its own `build.rs` or `Cargo.toml` into the origin's checkout under a fetched
+// output's name.
+#[test]
+fn r830_only_the_files_asked_for_are_written_whatever_the_peer_lists() {
+    let s = synced();
+    write(&s.tree, "out/a.txt", "a");
+    let manifest = "[package]\nname = \"mine\"\n";
+    fs::write(s.dest.join("Cargo.toml"), manifest).unwrap();
+    let inner =
+        s.w.transport
+            .connect(&s.w.nixos, Duration::from_secs(5))
+            .unwrap();
+    let mut conn = Lies { inner };
+    let r = fetch(
+        &mut conn,
+        &s.id,
+        &["out/a.txt".to_string()],
+        &s.dest,
+        u64::MAX,
+    )
+    .unwrap();
+    assert_eq!(r.fetched.len(), 1, "{r:?}");
+    assert_eq!(r.unasked, ["Cargo.toml", "out/a.txt"]);
+    assert_eq!(
+        fs::read_to_string(s.dest.join("Cargo.toml")).unwrap(),
+        manifest
+    );
+    assert_eq!(fs::read_to_string(s.dest.join("out/a.txt")).unwrap(), "a");
 }
 
 #[test]
@@ -252,6 +384,7 @@ fn r405_an_android_output_link_below_the_top_level_is_followed_only_when_named()
             Arc::new(tasks_peer::receiver::AllowAll),
             FetchPolicy {
                 allowed_links: links,
+                cache_root: Some(s.w.tmp.path().join("cache-disk")),
                 ..FetchPolicy::default()
             },
         );
@@ -267,6 +400,7 @@ fn r405_an_android_output_link_below_the_top_level_is_followed_only_when_named()
         Arc::new(tasks_peer::receiver::AllowAll),
         FetchPolicy {
             allowed_links: vec!["android/app/build".into()],
+            cache_root: Some(s.w.tmp.path().join("cache-disk")),
             ..FetchPolicy::default()
         },
     );
