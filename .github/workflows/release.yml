@@ -130,6 +130,6 @@ jobs:
             }
           else
             gh release create "$TAG" --verify-tag --draft --title "LoadTable $TAG" \
-              --notes 'Candidate binaries for Linux (x86-64, arm64) and macOS (Apple silicon, Intel). Test before publishing; publishing copies them to repo.osvauld.com.'
+              --notes 'Candidate binaries for Linux (x86-64, arm64) and macOS (Apple silicon, Intel). Test before publishing; publishing copies them to dl.loadtable.osvauld.com.'
           fi
           gh release upload "$TAG" artifacts/* --clobber
