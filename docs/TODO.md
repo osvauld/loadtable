@@ -16,7 +16,7 @@ What stands between `dev` and LoadTable 0.1.0, the first public alpha.
 - [x] The personal phone's serial is compiled in (`DENIED_DEVICES` in `crates/tasks-core/src/job.rs`): make denied devices a machine-policy setting and drop the serial from code and tests.
 - [ ] LAN addresses and machine names in samples and tests (`192.168.1.7`, `nixos`, `kurukkan`): private-range and generic, left as they are unless you want them gone. (owner)
 - [ ] The git history keeps all of the above. Decide: publish the history as is, or publish a squashed history. (owner)
-- [ ] `feedback/`, `deploy/v2/` and the internal parts of `docs/` (agent feedback, machine notes): keep out of the public repo or move to a private one. (owner)
+- [x] `feedback/` and `deploy/` (agent feedback, machine notes) are untracked and ignored; they stay local. The history is kept as is (owner, 2026-10-29).
 - [x] Root `README.md` (what it is, install, link to the site) and a `LICENSE` file (Cargo says MIT; there is no file).
 - [x] MCP tool descriptions mention "the personal phone": reword for any user.
 - [x] Confine jobs that come from a peer to what LoadTable owns there (R-821): Landlock on Linux, Seatbelt on macOS, `[confine]` in the machine policy. A disk survey sent to the friend's Mac walked their photos and documents.

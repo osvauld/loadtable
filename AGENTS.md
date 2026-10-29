@@ -52,5 +52,5 @@ check `loadtable list --active` first.
 ## Feedback
 
 After meaningful use, add your own new file under `feedback/` from `feedback/TEMPLATE.md`
-(`<agent>-<job-id>-<topic>.md`). Never edit another agent's report, and do not commit
-feedback files.
+(`<agent>-<job-id>-<topic>.md`). The folder is local only (ignored by git, like `deploy/`).
+Never edit another agent's report.

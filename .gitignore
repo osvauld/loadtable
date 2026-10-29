@@ -1,1 +1,4 @@
 /target
+# Agent trial reports and machine deploy notes: kept locally, not published
+/feedback/
+/deploy/
