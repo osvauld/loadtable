@@ -18,6 +18,8 @@ documentation: <https://loadtable.osvauld.com>.
   audit log, with exact per-job resource figures where cgroups are available.
 - **Rules that agents can't ignore.** Broad `cargo test` runs, multi-command shell scripts and
   denied devices are refused at submit with a message that says what to run instead.
+- **Jobs from other machines are confined.** A job a peer sends runs under Landlock (Linux) or
+  Seatbelt (macOS): it reaches the build cache and toolchains, not the rest of your home folder.
 
 ## Install
 

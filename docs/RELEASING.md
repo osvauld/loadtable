@@ -18,13 +18,25 @@ loadtable_landing repository) reads `loadtable/latest` and downloads from that p
 repo.osvauld.com is the R2 bucket that also serves Tinline (see the Tinline repository's
 `docs/r2-publishing.md`). LoadTable writes only under `loadtable/`.
 
-In Settings → Environments → `release`:
+The repository is `osvauld/loadtable` (renamed from `osvauld/task-manager`; GitHub redirects the
+old URL, so existing clones keep pushing). CI needs no secrets. Publishing needs, in Settings →
+Environments → `release`:
 
-- Secrets: `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` (an R2 token for that bucket, write access).
-- Variables: `R2_BUCKET`, `R2_ENDPOINT` (`https://<account-id>.r2.cloudflarestorage.com`).
+| Kind | Name | Value |
+|---|---|---|
+| Secret | `R2_ACCESS_KEY_ID` | access key of an R2 API token with Object Read & Write on the bucket |
+| Secret | `R2_SECRET_ACCESS_KEY` | that token's secret |
+| Variable | `R2_BUCKET` | the bucket behind repo.osvauld.com (the same as Tinline's `R2_BUCKET`) |
+| Variable | `R2_ENDPOINT` | `https://<account-id>.r2.cloudflarestorage.com` (the same as Tinline's) |
 
-Add required reviewers to the environment so a publish waits for approval, and allow only `v*`
-tags to deploy to it.
+GitHub never shows a secret again, so the values come from Cloudflare (R2 → Manage API tokens), not
+from Tinline's settings: reuse Tinline's token or, better, create one for LoadTable so either can be
+revoked alone. R2 tokens are per bucket, not per prefix, so the workflow itself keeps to
+`loadtable/` and refuses to overwrite a published file. Tinline's APT signing secrets are not
+needed: LoadTable publishes archives, not packages.
+
+Add required reviewers to the environment so a publish waits for approval, and under deployment
+branches and tags allow only tags matching `v*`.
 
 ## Cutting a release
 
