@@ -7,6 +7,12 @@
 //! it. So a gradle family is the build type (debug, or release-like: release, bundle,
 //! benchmark) and the `-P`/`-D` properties, whatever the flavour or mix of tasks. Families are
 //! read from stored recipe strings, so runs recorded before families existed count too.
+//!
+//! A cargo test run's time is mostly its build, not the tests its filter picks: `cargo test -p
+//! x -- r72` with no runs of its own is estimated from `cargo test -p x` and `cargo test -p x
+//! -- r71` here (R-827). So a cargo family is the command without its test filters; packages,
+//! features, profile and target still tell work apart. Of the 509 cargo runs recorded up to 29
+//! Oct 2026, 241 of 320 command lines had run once; as families, 127 of 205.
 
 use crate::recipe_gradle::is_stamp;
 
@@ -35,15 +41,47 @@ const RELEASE_WORDS: &[&str] = &["release", "bundle", "benchmark"];
 const DEVICE_WORDS: &[&str] = &["connected", "install"];
 
 /// The family of a whole-job recipe string, or `None` when it has none: tools other than
-/// gradle, chains, dry runs, device runs and tasks that build nothing.
+/// gradle and cargo, chains, dry runs, device runs and tasks that build nothing.
 pub fn family(recipe: &str) -> Option<String> {
     if recipe.contains(" && ") {
         return None;
     }
     let mut words = recipe.split(' ');
-    if words.next() != Some("gradle") {
-        return None;
+    match words.next() {
+        Some("gradle") => gradle_family(words),
+        Some("cargo") => Some(cargo_family(recipe)),
+        _ => None,
     }
+}
+
+/// A cargo recipe without its test filters (`filter:`, `skip:`). A command with none is its own
+/// family, so it and its filtered runs share their runs.
+fn cargo_family(recipe: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for w in recipe.split(' ') {
+        if let Some(sel) = w.strip_prefix("sel=") {
+            let kept: Vec<&str> = sel
+                .split(',')
+                .filter(|s| !s.starts_with("filter:") && !s.starts_with("skip:"))
+                .collect();
+            if !kept.is_empty() {
+                out.push(format!("sel={}", kept.join(",")));
+            }
+        } else {
+            out.push(w.to_string());
+        }
+    }
+    out.join(" ")
+}
+
+/// Whether the tool's builds here, whatever their family, make a range worth showing (R-827):
+/// gradle's do, an Android build being mostly the same work whatever the task; cargo's run from
+/// a one-second check to an hour-long release build and would say nothing.
+pub fn ranged(tool: &str) -> bool {
+    tool == "gradle"
+}
+
+fn gradle_family(words: std::str::Split<'_, char>) -> Option<String> {
     let (mut sel, mut flags) = ("", "");
     for w in words {
         if let Some(v) = w.strip_prefix("sel=") {
@@ -152,10 +190,45 @@ mod tests {
             "gradle sel=:app:connectedDebugAndroidTest",
             "gradle sel=:app:dependencies,liberumDebugRuntimeClasspath flags=configuration",
             "gradle sel=:app:assembleDebug && gradle sel=:app:testDebugUnitTest",
-            "cargo test pkg=a",
+            "cargo build pkg=a profile=dev && cargo test pkg=a profile=dev",
             "make all",
+            "npm run build",
         ] {
             assert_eq!(family(r), None, "{r}");
         }
+    }
+
+    #[test]
+    fn r827_a_cargo_command_without_its_test_filters_is_its_family() {
+        let lib = "cargo test pkg=tasks-daemon profile=dev sel=lib";
+        assert_eq!(
+            family("cargo test pkg=tasks-daemon profile=dev sel=filter:r71,lib").as_deref(),
+            Some(lib)
+        );
+        assert_eq!(family(lib).as_deref(), Some(lib), "its own family");
+        assert_eq!(
+            family("cargo test pkg=a profile=dev sel=filter:x,skip:y flags=no-fail-fast")
+                .as_deref(),
+            Some("cargo test pkg=a profile=dev flags=no-fail-fast"),
+            "only filters: the selection goes"
+        );
+        // packages, features, the profile and the target are the work
+        assert_ne!(
+            family("cargo test pkg=a profile=dev sel=lib"),
+            family("cargo test pkg=b profile=dev sel=lib")
+        );
+        assert_ne!(
+            family("cargo build pkg=a profile=dev"),
+            family("cargo build pkg=a profile=release")
+        );
+        assert_ne!(
+            family("cargo build pkg=a feat=x profile=dev"),
+            family("cargo build pkg=a profile=dev")
+        );
+        assert_ne!(
+            family("cargo check profile=dev target=aarch64-apple-darwin"),
+            family("cargo check profile=dev")
+        );
+        assert!(ranged("gradle") && !ranged("cargo") && !ranged("make"));
     }
 }

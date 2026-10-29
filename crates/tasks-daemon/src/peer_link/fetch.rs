@@ -243,6 +243,12 @@ fn run<T: Transport>(
                         "note: {path} came in chunks, slower than the blob stream ({why})"
                     ));
                 }
+                if !report.unasked.is_empty() {
+                    notes.push(format!(
+                        "note: the peer also listed {} for {path}: not asked for, not written",
+                        report.unasked.join(", ")
+                    ));
+                }
                 out.push(result_of(path, &report));
             }
             Err(e) => {
@@ -284,6 +290,13 @@ fn result_of(path: &str, report: &outputs::FetchReport) -> FetchResult {
     } else if let Some((_, reason)) = report.refused.first() {
         FetchStatus::Failed {
             reason: reason.clone(),
+        }
+    } else if !report.unasked.is_empty() {
+        FetchStatus::Failed {
+            reason: format!(
+                "the peer answered for other files ({}), not this one",
+                report.unasked.join(", ")
+            ),
         }
     } else {
         FetchStatus::Failed {

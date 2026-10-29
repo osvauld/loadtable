@@ -259,13 +259,15 @@ impl BuildCache {
         format!("cache: {}", parts.join(", "))
     }
 
-    /// What a peer may fetch through an output link: the same names the placement creates.
-    pub fn fetch_policy() -> tasks_peer::outputs::FetchPolicy {
+    /// What a peer may fetch through an output link: the same names the placement creates,
+    /// and only when the link leads into this cache (R-829).
+    pub fn fetch_policy(&self) -> tasks_peer::outputs::FetchPolicy {
         tasks_peer::outputs::FetchPolicy {
             allowed_links: outputs::LINK_NAMES
                 .iter()
                 .map(ToString::to_string)
                 .collect(),
+            cache_root: Some(self.root().to_path_buf()),
             ..tasks_peer::outputs::FetchPolicy::default()
         }
     }

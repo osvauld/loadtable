@@ -125,7 +125,10 @@ impl PeerRuntimeFactory for IrohFactory {
         opts.addr_learner = Some(Arc::new(NodePeers(rt.node.clone())));
         // fetched outputs take a transfer slot and may be written through the placed links
         opts.gate = ctx.transfer_gate.clone();
-        opts.fetch_links = crate::build_cache::BuildCache::fetch_policy().allowed_links;
+        opts.fetch_links = crate::build_cache::outputs::LINK_NAMES
+            .iter()
+            .map(ToString::to_string)
+            .collect();
         opts.observer = Some(Arc::new(crate::audited::AuditLinks::new(
             ctx.audit.clone(),
             Arc::new(SystemClock),

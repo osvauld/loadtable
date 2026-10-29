@@ -157,14 +157,18 @@ fn r407_the_header_names_wrapper_links_and_kept_directories() {
     );
 }
 
-// R-405: a peer may fetch through exactly the links the placement creates.
+// R-405, R-829: a peer may fetch through exactly the links the placement creates, and only
+// into this cache.
 #[test]
-fn r405_the_fetch_policy_allows_the_placed_link_names() {
-    let p = BuildCache::fetch_policy();
+fn r405_the_fetch_policy_allows_the_placed_link_names_into_this_cache() {
+    let t = TempDir::new("fetch-policy");
+    let c = BuildCache::discover(&t.path().join("cache"), &t.path().join("ps"), &[]);
+    let p = c.fetch_policy();
     assert_eq!(
         p.allowed_links,
         ["target", "android/build", "android/app/build"]
     );
+    assert_eq!(p.cache_root.as_deref(), Some(c.root()));
 }
 
 // R-401: the cache settings are policy keys with the earlier release's values as defaults.
