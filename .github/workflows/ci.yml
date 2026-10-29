@@ -43,3 +43,5 @@ jobs:
           shared-key: ci-macos
       - run: cargo clippy --workspace --all-targets --locked --features tasks-cli/mcp -- -D warnings
       - run: cargo clippy --workspace --all-targets --locked --no-default-features -- -D warnings
+      # the confinement profile, run for real under sandbox-exec (R-821, R-831)
+      - run: cargo test -p tasks-platform --locked --test confine_macos
