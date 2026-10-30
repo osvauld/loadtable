@@ -673,11 +673,11 @@ fn a_device_job_carries_the_serial_and_the_device_kind() {
         &[
             "enqueue",
             "--device",
-            "9BWAY1LSDC",
+            "PHONE00001",
             "--",
             "adb",
             "-s",
-            "9BWAY1LSDC",
+            "PHONE00001",
             "devices",
         ],
     );
@@ -692,7 +692,7 @@ fn a_device_job_carries_the_serial_and_the_device_kind() {
     assert_eq!(spec.kind, Kind::Device);
     assert_eq!(
         spec.requirements.device,
-        Some(DeviceId("9BWAY1LSDC".into()))
+        Some(DeviceId("PHONE00001".into()))
     );
 }
 
