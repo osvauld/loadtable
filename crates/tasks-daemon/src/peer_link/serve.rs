@@ -395,6 +395,7 @@ impl StatusSource for DaemonStatus {
             power: snap.power.map(|p| tasks_peer::proto::PowerSummary {
                 on_battery: p.on_battery,
                 percent: p.battery_pct,
+                holds_peer_jobs: p.holds_peer_jobs,
             }),
             version: Some(crate::VERSION.to_string()),
         }
@@ -561,7 +562,8 @@ mod tests {
             total_targets: 0,
             current: None,
             eta_secs: None,
-            usual_secs: None,
+            eta_low_secs: None,
+            recent_secs: None,
             over_by_secs: None,
             eta_rough_from: None,
             no_eta_why: None,

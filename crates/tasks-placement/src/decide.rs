@@ -256,8 +256,9 @@ fn score(input: &Input, v: &MachineView, policy: &Policy) -> Score {
             (policy.unknown_wait_secs, WaitBasis::Unknown)
         };
     // a peer reports only its compile gate, so it counts for compile-slot jobs alone
-    let blocked =
-        v.pressure.blocked && (v.is_local || slot_for(input.kind) == Some(SlotKind::Compile));
+    let blocked = (v.pressure.blocked
+        && (v.is_local || slot_for(input.kind) == Some(SlotKind::Compile)))
+        || (!v.is_local && v.pressure.holds_peer_jobs);
     let pressure_secs = if blocked {
         policy.pressure_wait_secs
     } else {
@@ -331,10 +332,21 @@ pub fn decide(input: &Input, policy: &Policy) -> Result<Report, PlacementError> 
     let someone_ready = machines
         .iter()
         .any(|m| matches!(&m.verdict, Verdict::Eligible(s) if s.ready_now()));
+    // A peer holding jobs on low battery has no known end at all: it is used only when no
+    // other machine can take the job (R-836).
+    let holds = |m: &MachineReport| {
+        input
+            .machines
+            .iter()
+            .any(|v| v.machine.name == m.name && !v.is_local && v.pressure.holds_peer_jobs)
+    };
+    let someone_not_holding = machines
+        .iter()
+        .any(|m| matches!(&m.verdict, Verdict::Eligible(_)) && !holds(m));
     let mut best: Option<(&MachineReport, &Score)> = None;
     for m in &machines {
         if let Verdict::Eligible(s) = &m.verdict {
-            if someone_ready && s.blocked {
+            if (someone_ready && s.blocked) || (someone_not_holding && holds(m)) {
                 continue;
             }
             best = match best {

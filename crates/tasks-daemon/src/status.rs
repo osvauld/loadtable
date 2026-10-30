@@ -55,7 +55,15 @@ fn peer_machine_view(s: &tasks_peer::proto::PeerStatus) -> PeerMachineView {
             })
             .collect(),
         cores_in_use_milli: s.cores_in_use_milli,
-        power: s.power.map(|p| power_text(p.on_battery, p.percent)),
+        power: s.power.map(|p| {
+            let mut t = power_text(p.on_battery, p.percent);
+            if p.holds_peer_jobs {
+                t.push_str(", battery low: holds jobs from peers");
+            }
+            t
+        }),
+        battery_pct: s.power.and_then(|p| p.percent),
+        holds_peer_jobs: s.power.is_some_and(|p| p.holds_peer_jobs),
         version: s.version.clone(),
     }
 }
@@ -397,24 +405,32 @@ impl Scheduler {
                 // time left only when passing runs back the job's estimate (R-660..R-665)
                 let (eta, over, rough_from, no_why) = match &rj.shown {
                     tasks_timing::Shown::Eta(e) => {
+                        use tasks_timing::Left;
                         let (eta, over) = match e.left(p.eta_secs, elapsed) {
-                            tasks_timing::Left::Secs(s) => (Some(s), None),
-                            tasks_timing::Left::Over {
-                                usual_secs,
+                            Left::Secs(s) => ((Some(s), None), None),
+                            Left::Between {
+                                low_secs,
+                                high_secs,
+                            } => ((Some(high_secs), Some(low_secs)), None),
+                            Left::Over {
+                                fastest_secs,
+                                slowest_secs,
                                 by_secs,
-                            } => (None, Some((usual_secs, by_secs))),
+                            } => ((None, None), Some(((fastest_secs, slowest_secs), by_secs))),
                         };
                         (eta, over, e.rough.then(|| e.machine.clone()), None)
                     }
-                    tasks_timing::Shown::Absent(w) => (None, None, None, Some(w.to_string())),
+                    tasks_timing::Shown::Absent(w) => {
+                        ((None, None), None, None, Some(w.to_string()))
+                    }
                 };
                 let transfer = records
                     .get(&rj.id)
                     .and_then(|r| r.forward.as_ref())
                     .and_then(|fw| live_transfer(&rj.log_path, &fw.peer.0));
                 // the command is over once its outputs come back: no time left or over to show
-                let (eta, over) = match &transfer {
-                    Some(t) if t.kind == tasks_core::TransferKind::Fetch => (None, None),
+                let ((eta, eta_low), over) = match &transfer {
+                    Some(t) if t.kind == tasks_core::TransferKind::Fetch => ((None, None), None),
                     _ => (eta, over),
                 };
                 RunningView {
@@ -427,7 +443,8 @@ impl Scheduler {
                     total_targets: p.total_targets,
                     current: p.current,
                     eta_secs: eta,
-                    usual_secs: over.map(|o| o.0),
+                    eta_low_secs: eta_low,
+                    recent_secs: over.map(|o| o.0),
                     over_by_secs: over.map(|o| o.1),
                     eta_rough_from: rough_from,
                     no_eta_why: no_why,

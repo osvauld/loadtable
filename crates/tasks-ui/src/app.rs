@@ -601,7 +601,7 @@ impl App {
     fn top_bar(&mut self, ui: &mut egui::Ui, p: &Palette) {
         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
             ui.label(
-                RichText::new("tasks")
+                RichText::new(NAME)
                     .font(theme::sans_semibold(theme::TITLE))
                     .color(p.ink),
             );
@@ -1768,17 +1768,23 @@ fn tab_button(ui: &mut egui::Ui, p: &Palette, label: &str, count: Option<usize>,
     resp.clicked()
 }
 
+/// R-833: the name in the top bar and the window title.
+pub const NAME: &str = "LoadTable";
+/// R-833: the app id the desktop groups the window by (Wayland `app_id`, X11 `WM_CLASS`).
+pub const APP_ID: &str = "loadtable";
+
 /// Starts the window and blocks until it closes.
 pub fn run(link: Arc<dyn DaemonLink>, who: String) -> Result<(), String> {
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("tasks")
+            .with_title(NAME)
+            .with_app_id(APP_ID)
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([MIN_WINDOW_WIDTH, 420.0]),
         ..Default::default()
     };
     eframe::run_native(
-        "tasks",
+        APP_ID,
         opts,
         Box::new(move |cc| {
             theme::install(&cc.egui_ctx);

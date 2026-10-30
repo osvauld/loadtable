@@ -1041,7 +1041,8 @@ fn snapshot() -> tasks_daemon::api::StatusSnapshot {
             total_targets: 4,
             current: None,
             eta_secs: Some(30.0),
-            usual_secs: None,
+            eta_low_secs: None,
+            recent_secs: None,
             over_by_secs: None,
             eta_rough_from: None,
             no_eta_why: None,
@@ -1523,6 +1524,8 @@ fn r695_status_says_the_endpoint_and_marks_an_offline_peers_figures_as_old() {
             jobs: Vec::new(),
             cores_in_use_milli: None,
             power: None,
+            battery_pct: None,
+            holds_peer_jobs: false,
             version: None,
         });
         Ok(Response::Status(Box::new(s)))

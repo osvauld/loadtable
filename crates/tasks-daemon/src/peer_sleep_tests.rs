@@ -249,17 +249,22 @@ fn r613_the_hold_can_be_turned_off_in_the_policy() {
 // ---------------------------------------------------------------- battery
 
 fn peer_job(r: &Rig) -> tasks_core::JobId {
+    peer_job_keyed(r, "k1")
+}
+
+/// A job a peer sent, under its own submission key.
+fn peer_job_keyed(r: &Rig, key: &str) -> tasks_core::JobId {
     let mut job = NewJob::new(r.spec("origin-owner", &["make", "x"], Kind::Run));
     job.origin = Some(Origin {
         peer: "laptop-node".into(),
-        key: "k1".into(),
+        key: key.into(),
     });
     r.ledger.submit_job(&job).unwrap()
 }
 
 #[test]
 fn r614_a_job_from_a_peer_waits_while_this_machine_is_on_battery() {
-    let r = Rig::new();
+    let r = Rig::with_policy("[power]\npeer_jobs_on_battery = false\n");
     r.power.set_power(PowerReading {
         on_battery: true,
         percent: Some(80),
@@ -267,7 +272,7 @@ fn r614_a_job_from_a_peer_waits_while_this_machine_is_on_battery() {
     let id = peer_job(&r);
     let rep = r.tick();
     assert!(rep.started.is_empty());
-    assert_eq!(wait_text(&r, id), "testbox is on battery");
+    assert_eq!(wait_text(&r, id), "testbox is on battery at 80%");
     assert_eq!(r.procs.spawn_count(), 0);
     // not counted as work, so the machine is not held awake for it (R-615)
     assert_eq!(r.power.held(), 0);
@@ -299,7 +304,8 @@ fn r614_local_jobs_are_unaffected_by_battery() {
 
 #[test]
 fn r614_the_policy_can_let_peer_jobs_run_on_battery() {
-    let r = Rig::with_policy("[power]\npeer_jobs_on_battery = true\n");
+    let r =
+        Rig::with_policy("[power]\npeer_jobs_on_battery = true\npeer_jobs_min_battery_pct = 0\n");
     r.power.set_power(PowerReading {
         on_battery: true,
         percent: Some(10),
@@ -322,7 +328,8 @@ fn r611_this_machines_power_reaches_the_peer_status_and_the_peer_line() {
         st.power,
         Some(tasks_peer::proto::PowerSummary {
             on_battery: true,
-            percent: Some(80)
+            percent: Some(80),
+            holds_peer_jobs: false,
         })
     );
     assert_eq!(crate::status::power_text(true, Some(80)), "on battery 80%");
@@ -334,12 +341,80 @@ fn r613_the_new_settings_have_the_documented_defaults() {
     assert_eq!(p.peer_wait_secs(), 600);
     assert!(p.keep_awake());
     assert_eq!(p.keep_awake_linger_secs(), 120);
-    assert!(!p.peer_jobs_on_battery());
+    // R-834: peer jobs run on battery above 30%
+    assert!(p.peer_jobs_on_battery());
+    assert_eq!(p.peer_jobs_min_battery_pct(), 30);
     // a toml boolean is accepted for the battery switch
     let p = crate::machine_policy::MachinePolicy::from_text(
-        Some("[power]\npeer_jobs_on_battery = true\n"),
+        Some("[power]\npeer_jobs_on_battery = false\n"),
         &|_| None,
     );
     assert!(p.problems.is_empty(), "{:?}", p.problems);
-    assert!(p.peer_jobs_on_battery());
+    assert!(!p.peer_jobs_on_battery());
+}
+
+fn on_battery(pct: Option<u8>) -> PowerReading {
+    PowerReading {
+        on_battery: true,
+        percent: pct,
+    }
+}
+
+// R-834
+#[test]
+fn r834_by_default_peer_jobs_run_on_battery_above_thirty_percent_and_wait_at_or_below() {
+    let r = Rig::new();
+    r.power.set_power(on_battery(Some(31)));
+    let a = peer_job(&r);
+    assert_eq!(r.tick().started, vec![a]);
+    r.power.set_power(on_battery(Some(30)));
+    let b = peer_job_keyed(&r, "k2");
+    assert!(r.tick().started.is_empty());
+    assert_eq!(wait_text(&r, b), "testbox is on battery at 30%");
+    let v = r.sch.status().power.unwrap();
+    assert!(v.holds_peer_jobs);
+    assert!(
+        v.source_line()
+            .contains("1 job from peers wait for AC or a charge above 30%"),
+        "{}",
+        v.source_line()
+    );
+    // charged above the line again: it runs
+    r.power.set_power(on_battery(Some(45)));
+    assert_eq!(r.tick().started, vec![b]);
+}
+
+#[test]
+fn r834_an_unknown_charge_counts_as_low_and_zero_turns_the_line_off() {
+    let p = crate::machine_policy::MachinePolicy::defaults();
+    assert!(p.holds_peer_jobs(Some(on_battery(None))));
+    assert!(!p.holds_peer_jobs(Some(PowerReading::AC)));
+    assert!(!p.holds_peer_jobs(None));
+    let p = crate::machine_policy::MachinePolicy::from_text(
+        Some("[power]\npeer_jobs_min_battery_pct = 0\n"),
+        &|_| None,
+    );
+    assert!(p.problems.is_empty(), "{:?}", p.problems);
+    assert!(!p.holds_peer_jobs(Some(on_battery(Some(3)))));
+    assert!(!p.holds_peer_jobs(Some(on_battery(None))));
+}
+
+// R-835
+#[test]
+fn r835_low_battery_is_said_in_the_status_and_reaches_the_peers() {
+    use tasks_peer::StatusSource;
+    let r = Rig::new();
+    r.power.set_power(on_battery(Some(22)));
+    r.tick();
+    // before any job waits on it
+    let v = r.sch.status().power.unwrap();
+    assert!(
+        v.source_line()
+            .contains("battery low: jobs from peers wait for AC or a charge above 30%"),
+        "{}",
+        v.source_line()
+    );
+    let st = crate::peer_link::serve::DaemonStatus::new(r.sch.clone()).status();
+    let p = st.power.unwrap();
+    assert!(p.holds_peer_jobs && p.percent == Some(22));
 }

@@ -88,6 +88,9 @@ pub struct Pressure {
     pub blocked: bool,
     /// Human readable summary, e.g. "memory PSI 12%".
     pub summary: String,
+    /// A peer that holds jobs from peers now (low battery): a closed gate for every kind of
+    /// job, and chosen only when no other machine can take the job (R-836).
+    pub holds_peer_jobs: bool,
 }
 
 /// A run time estimate for this job's recipe on one machine.

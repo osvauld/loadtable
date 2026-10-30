@@ -102,9 +102,17 @@ impl Scheduler {
         }
     }
 
-    /// True while jobs from peers must wait because this machine is on battery.
+    /// True while jobs from peers must wait because this machine is on battery (R-614, R-834).
     pub(crate) fn battery_blocks_peer_jobs(&self, policy: &MachinePolicy) -> bool {
-        !policy.peer_jobs_on_battery() && lock(&self.state).power.is_some_and(|p| p.on_battery)
+        policy.holds_peer_jobs(lock(&self.state).power)
+    }
+
+    /// Why a job from a peer waits here: `mac is on battery at 25%`.
+    pub(crate) fn battery_hold_text(&self) -> String {
+        match lock(&self.state).power.and_then(|p| p.percent) {
+            Some(c) => format!("{} is on battery at {c}%", self.cfg.machine),
+            None => format!("{} is on battery", self.cfg.machine),
+        }
     }
 
     /// Takes or releases the stay-awake hold for the jobs running or about to start.
@@ -149,6 +157,8 @@ impl Scheduler {
             guard_error: hold.error,
             battery_held: u32::try_from(st.battery_held.len()).unwrap_or(u32::MAX),
             peer_jobs_on_battery: policy.peer_jobs_on_battery(),
+            holds_peer_jobs: policy.holds_peer_jobs(power),
+            peer_jobs_min_battery_pct: policy.peer_jobs_min_battery_pct(),
         }
     }
 }

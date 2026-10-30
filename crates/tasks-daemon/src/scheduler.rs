@@ -596,7 +596,7 @@ impl Scheduler {
             if rec.origin.is_some() && battery_hold {
                 // a peer's job does not drain this machine's battery (R-614); it holds no slot
                 // and does not keep the machine awake
-                let text = format!("{} is on battery", self.cfg.machine);
+                let text = self.battery_hold_text();
                 self.set_wait(id, LedgerWait::Placement(text.clone()), &text);
                 lock(&self.state).battery_held.insert(id);
                 rep.waiting += 1;

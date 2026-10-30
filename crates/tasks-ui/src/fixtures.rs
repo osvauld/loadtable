@@ -162,6 +162,8 @@ fn named_peer(name: &str, state: &str, ago: Option<u64>) -> PeerView {
             jobs: Vec::new(),
             cores_in_use_milli: None,
             power: None,
+            battery_pct: None,
+            holds_peer_jobs: false,
             version: None,
         }),
     }
@@ -331,7 +333,8 @@ pub fn busy() -> Dashboard {
             total_targets: 10,
             current: Some("test:lifecycle".into()),
             eta_secs: Some(80.0),
-            usual_secs: None,
+            eta_low_secs: None,
+            recent_secs: None,
             over_by_secs: None,
             eta_rough_from: None,
             no_eta_why: None,
@@ -351,7 +354,8 @@ pub fn busy() -> Dashboard {
             total_targets: 0,
             current: None,
             eta_secs: None,
-            usual_secs: None,
+            eta_low_secs: None,
+            recent_secs: None,
             over_by_secs: None,
             eta_rough_from: None,
             no_eta_why: Some("first run".into()),
@@ -502,6 +506,23 @@ fn mac_peer() -> PeerView {
     p
 }
 
+/// [`mac`] with the Mac on battery at 22%, so jobs from peers wait there (R-835).
+pub fn mac_low_battery() -> Dashboard {
+    let mut d = mac();
+    if let Some(m) = d
+        .status
+        .peers
+        .iter_mut()
+        .find(|p| p.name == "mac")
+        .and_then(|p| p.machine.as_mut())
+    {
+        m.power = Some("on battery 22%, battery low: holds jobs from peers".into());
+        m.battery_pct = Some(22);
+        m.holds_peer_jobs = true;
+    }
+    d
+}
+
 /// [`busy`] with the worker's load, plus an awake Mac running a forwarded job and a finished
 /// forward whose files came back: three machines, all of them up.
 pub fn mac() -> Dashboard {
@@ -645,7 +666,8 @@ pub fn with_plan() -> Dashboard {
         total_targets: 10,
         current: Some("test:lifecycle".into()),
         eta_secs: Some(80.0),
-        usual_secs: None,
+        eta_low_secs: None,
+        recent_secs: None,
         over_by_secs: None,
         eta_rough_from: None,
         no_eta_why: None,
@@ -746,7 +768,8 @@ pub fn with_plan() -> Dashboard {
                 total_targets: 0,
                 current: None,
                 eta_secs: Some(180.0 + 60.0 * (i % 3) as f64),
-                usual_secs: None,
+                eta_low_secs: None,
+                recent_secs: None,
                 over_by_secs: None,
                 eta_rough_from: None,
                 no_eta_why: None,

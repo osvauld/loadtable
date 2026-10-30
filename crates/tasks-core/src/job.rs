@@ -155,7 +155,7 @@ pub struct JobSpec {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub retry_alone: bool,
     /// Opens a window or waits on a person (`--interactive`, R-799): it runs as long as someone
-    /// uses it, so it shows no estimate and no "over the usual" warning, and its runs teach the
+    /// uses it, so it shows no estimate and no "longer than recent runs" warning, and its runs teach the
     /// timing history nothing.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub interactive: bool,
