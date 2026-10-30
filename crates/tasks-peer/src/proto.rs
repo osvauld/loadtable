@@ -183,6 +183,8 @@ impl Capability {
     pub const FETCH: &'static str = "fetch";
     /// Log resume from an offset.
     pub const RESUME: &'static str = "resume";
+    /// Reports and drops what it keeps for the asker's checkouts (R-839).
+    pub const CACHE: &'static str = "cache";
     /// The capabilities of this build.
     pub fn all() -> BTreeSet<Capability> {
         [
@@ -191,6 +193,7 @@ impl Capability {
             Self::SYNC,
             Self::FETCH,
             Self::RESUME,
+            Self::CACHE,
         ]
         .iter()
         .map(|s| Capability((*s).to_string()))
@@ -678,6 +681,35 @@ pub enum FetchEntry {
     },
 }
 
+/// A checkout of the asker that the receiver keeps something of (R-839).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldCheckout {
+    /// The checkout.
+    pub checkout: CheckoutId,
+    /// Bytes of the synced working copy; 0 once retention deleted it.
+    pub copy_bytes: u64,
+    /// Bytes of its build output in the receiver's cache.
+    pub output_bytes: u64,
+    /// When a job last used the copy, ms since the epoch; none without a copy.
+    #[serde(default)]
+    pub last_used_ms: Option<i64>,
+    /// A job of the asker runs or waits in it: a drop keeps it.
+    #[serde(default)]
+    pub busy: bool,
+}
+
+/// The result of dropping one checkout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DroppedCheckout {
+    /// The checkout.
+    pub checkout: CheckoutId,
+    /// Bytes freed.
+    pub freed_bytes: u64,
+    /// Why it was kept, when it was.
+    #[serde(default)]
+    pub kept: Option<String>,
+}
+
 /// Every message. Requests and replies share the enum; a reply to any request
 /// may be [`Body::Refuse`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -832,6 +864,24 @@ pub enum Body {
     },
     /// The metrics of the job.
     JobMetrics(tasks_core::metrics::JobMetricsView),
+    /// What do you keep for my checkouts? Answered with [`Body::CacheHeld`]; an older peer
+    /// refuses it as an unknown message (R-839).
+    CacheRequest,
+    /// The checkouts the receiver keeps for the asker.
+    CacheHeld {
+        /// One per checkout with a copy or build output here.
+        checkouts: Vec<HeldCheckout>,
+    },
+    /// Delete the synced copy and build output of these checkouts of mine (R-839).
+    CacheDrop {
+        /// The checkouts.
+        checkouts: Vec<CheckoutId>,
+    },
+    /// What a drop did, one entry per checkout asked.
+    CacheDropped {
+        /// The results.
+        checkouts: Vec<DroppedCheckout>,
+    },
     /// A named refusal.
     Refuse(Refusal),
 }

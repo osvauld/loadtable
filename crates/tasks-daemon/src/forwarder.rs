@@ -235,6 +235,33 @@ pub trait Forwarder: Send + Sync {
             peer.0
         )))
     }
+    /// What `peer` keeps for this machine's checkouts (R-839). `Err` says why it cannot tell.
+    fn peer_cache(
+        &self,
+        peer: &MachineName,
+    ) -> Result<Vec<tasks_peer::proto::HeldCheckout>, ForwardError> {
+        Err(ForwardError::Unavailable(format!(
+            "no peer support in this daemon, cannot reach {}",
+            peer.0
+        )))
+    }
+    /// Asks `peer` to delete its copies and build output of `checkouts` (R-839).
+    fn peer_cache_drop(
+        &self,
+        peer: &MachineName,
+        checkouts: Vec<tasks_peer::CheckoutId>,
+    ) -> Result<Vec<tasks_peer::proto::DroppedCheckout>, ForwardError> {
+        let _ = checkouts;
+        Err(ForwardError::Unavailable(format!(
+            "no peer support in this daemon, cannot reach {}",
+            peer.0
+        )))
+    }
+    /// The id a peer keeps the checkout holding `cwd` under; none without peer support.
+    fn checkout_id(&self, cwd: &Path) -> Option<tasks_peer::CheckoutId> {
+        let _ = cwd;
+        None
+    }
     /// Drops everything held for the job (its place in the checkout queue).
     fn forget(&self, job: JobId) {
         let _ = job;
