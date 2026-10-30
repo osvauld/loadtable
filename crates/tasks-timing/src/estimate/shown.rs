@@ -90,8 +90,11 @@ pub struct Eta {
     pub median_secs: f64,
     /// 90th percentile seconds.
     pub p90_secs: f64,
-    /// The shortest run, for a [`EtaBasis::Range`].
+    /// The fastest of the recent runs (none for a bound).
     pub low_secs: Option<f64>,
+    /// The slowest of the recent runs, or the last twenty runs' p90 when that is longer (none
+    /// for a bound, R-837).
+    pub high_secs: Option<f64>,
     /// Passing runs behind it.
     pub samples: usize,
     /// The machine whose runs these are.
@@ -102,24 +105,45 @@ pub struct Eta {
     pub basis: EtaBasis,
 }
 
+/// `~4m`, or `~5s–56s` when the fastest and slowest runs round apart (R-837).
+pub fn range_text(low: f64, high: f64) -> String {
+    let (lo, hi) = (fmt_eta(low), fmt_eta(high));
+    if lo == hi {
+        format!("~{hi}")
+    } else {
+        format!("~{lo}–{hi}")
+    }
+}
+
 impl Eta {
-    /// `~4m`, `~27m (like 6 similar builds here)`, `~8m (rough, from nixos's runs)`,
-    /// `~12m–31m (rough: gradle builds here)`, `under ~27m (only cold builds so far)` or
-    /// `over ~30s (first build here)`.
+    /// ` (median 16s)` when the estimate is a range, else nothing.
+    fn median_note(&self) -> String {
+        match (self.low_secs, self.high_secs) {
+            (Some(lo), Some(hi)) if fmt_eta(lo) != fmt_eta(hi) => {
+                format!(" (median {})", fmt_eta(self.median_secs))
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// `~4m`, `~5s–56s`, `~27m (like 6 similar builds here)`, `~8m (rough, from nixos's
+    /// runs)`, `~12m–31m (rough: gradle builds here)`, `under ~27m (only cold builds so far)`
+    /// or `over ~30s (first build here)`. A range runs from the fastest recent run to the
+    /// slowest (R-837): one number would be wrong whenever the amount to rebuild changes.
     pub fn text(&self) -> String {
         let med = fmt_eta(self.median_secs);
+        let range = match (self.low_secs, self.high_secs) {
+            (Some(lo), Some(hi)) => range_text(lo, hi),
+            _ => format!("~{med}"),
+        };
         match &self.basis {
-            EtaBasis::Exact => format!("~{med}"),
+            EtaBasis::Exact => range,
             EtaBasis::Similar => {
                 let builds = if self.samples == 1 { "build" } else { "builds" };
-                format!("~{med} (like {} similar {builds} here)", self.samples)
+                format!("{range} (like {} similar {builds} here)", self.samples)
             }
-            EtaBasis::Peer => format!("~{med} (rough, from {}'s runs)", self.machine),
-            EtaBasis::Range { tool } => format!(
-                "~{}–{} (rough: {tool} builds here)",
-                fmt_eta(self.low_secs.unwrap_or(self.median_secs)),
-                fmt_eta(self.p90_secs)
-            ),
+            EtaBasis::Peer => format!("{range} (rough, from {}'s runs)", self.machine),
+            EtaBasis::Range { tool } => format!("{range} (rough: {tool} builds here)"),
             EtaBasis::AtMost => format!("under ~{med} (only cold builds so far)"),
             EtaBasis::AtLeast => format!("over ~{med} (first build here)"),
         }
@@ -131,10 +155,21 @@ impl Eta {
 pub enum Left {
     /// This many seconds are left.
     Secs(f64),
-    /// The run is past what passing runs took: it is not "0s left", it is slower than usual.
+    /// Between this many seconds (to the fastest recent run, 0 once past it) and that many (to
+    /// the slowest) are left (R-837).
+    Between {
+        /// Seconds to the fastest run; 0 once the run is past it.
+        low_secs: f64,
+        /// Seconds to the slowest run.
+        high_secs: f64,
+    },
+    /// The run is past every recent passing run: it is not "0s left", it is slower than all of
+    /// them (R-675, R-837).
     Over {
-        /// The usual (median) seconds.
-        usual_secs: f64,
+        /// The fastest recent run, in seconds (the bound itself for a bound).
+        fastest_secs: f64,
+        /// The slowest recent run, in seconds: what the run is past.
+        slowest_secs: f64,
         /// How far past it the run is.
         by_secs: f64,
     },
@@ -142,24 +177,38 @@ pub enum Left {
 
 impl Eta {
     /// What is left after `elapsed` seconds. `progress_left` is the per-target sum when the job
-    /// reports targets: while it still sees work ahead it is believed; once it has nothing (or
-    /// nothing positive) left and the run is past the usual time, the answer is [`Left::Over`]
-    /// rather than a zero.
+    /// reports targets: while it still sees work ahead it is believed. Otherwise the run is
+    /// measured against its recent runs: time to the fastest and to the slowest while it is
+    /// under the slowest, and [`Left::Over`] once it is past them all, rather than a zero or
+    /// "over" for a run still inside what the recent runs took (R-837).
     pub fn left(&self, progress_left: Option<f64>, elapsed: f64) -> Left {
         if let Some(p) = progress_left
             && p > 0.5
         {
             return Left::Secs(p);
         }
-        if elapsed >= self.median_secs {
+        let (low, high) = match (self.low_secs, self.high_secs) {
+            (Some(lo), Some(hi)) => (lo, hi.max(lo)),
+            _ => (self.median_secs, self.median_secs),
+        };
+        if elapsed >= high {
             return Left::Over {
-                usual_secs: self.median_secs,
-                by_secs: elapsed - self.median_secs,
+                fastest_secs: low,
+                slowest_secs: high,
+                by_secs: elapsed - high,
             };
         }
-        Left::Secs(progress_left.map_or(self.median_secs - elapsed, |p| {
-            p.max(self.median_secs - elapsed)
-        }))
+        let floor = progress_left.unwrap_or(0.0).max(0.0);
+        let high_left = (high - elapsed).max(floor);
+        let low_left = (low - elapsed).max(floor).min(high_left);
+        if fmt_eta(low_left) == fmt_eta(high_left) {
+            Left::Secs(high_left)
+        } else {
+            Left::Between {
+                low_secs: low_left,
+                high_secs: high_left,
+            }
+        }
     }
 }
 
@@ -198,14 +247,14 @@ impl fmt::Display for Shown {
                 match e.basis {
                     EtaBasis::Exact => write!(
                         f,
-                        "{} (p90 {}) from {} passing {runs} on {}",
+                        "{}{} from {} passing {runs} on {}",
                         e.text(),
-                        fmt_eta(e.p90_secs),
+                        e.median_note(),
                         e.samples,
                         e.machine
                     ),
                     EtaBasis::Similar | EtaBasis::Peer => {
-                        write!(f, "{} (p90 {})", e.text(), fmt_eta(e.p90_secs))
+                        write!(f, "{}{}", e.text(), e.median_note())
                     }
                     EtaBasis::Range { .. } | EtaBasis::AtMost | EtaBasis::AtLeast => write!(
                         f,
@@ -335,12 +384,16 @@ fn spread(runs: &Runs, scale: f64) -> (f64, f64) {
 
 fn eta(runs: &Runs, scale: f64, machine: &str, basis: EtaBasis) -> Shown {
     let (median_secs, p90_secs) = spread(runs, scale);
-    let low_secs = matches!(basis, EtaBasis::Range { .. })
-        .then(|| runs.recent.first().copied().unwrap_or(0.0) * scale);
     Shown::Eta(Eta {
         median_secs,
         p90_secs,
-        low_secs,
+        low_secs: runs.recent.first().map(|s| s * scale),
+        // the slowest recent run, or the tail's measured p90 (not the floor) when it is longer:
+        // six runs alone were beaten one run in three (R-826, R-837)
+        high_secs: runs
+            .recent
+            .last()
+            .map(|s| (s * scale).max(build(&runs.tail, scale).1)),
         samples: runs.recent.len(),
         machine: machine.to_string(),
         rough: basis != EtaBasis::Exact,
@@ -372,6 +425,7 @@ fn bound(here: &[Sample], want: Cache, machine: &str) -> Option<Shown> {
             median_secs: at,
             p90_secs: at,
             low_secs: None,
+            high_secs: None,
             samples: secs.len(),
             machine: machine.to_string(),
             rough: true,

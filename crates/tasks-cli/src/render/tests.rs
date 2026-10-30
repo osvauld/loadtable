@@ -903,7 +903,8 @@ fn running(eta: Option<f64>) -> tasks_daemon::api::RunningView {
         total_targets: 0,
         current: None,
         eta_secs: eta,
-        usual_secs: None,
+        eta_low_secs: None,
+        recent_secs: None,
         over_by_secs: None,
         eta_rough_from: None,
         no_eta_why: None,
@@ -973,11 +974,24 @@ fn r663_a_running_job_says_left_rough_or_why_not_never_a_bare_guess() {
 #[test]
 fn r675_a_job_past_its_usual_time_says_so_instead_of_zero_left() {
     let mut r = running(None);
-    r.usual_secs = Some(57.0);
+    r.recent_secs = Some((5.0, 57.0));
     r.over_by_secs = Some(80.0);
     let t = running_eta_text(&r);
-    assert_eq!(t, ", over the usual by 1m20s (usual 57s)");
+    assert_eq!(t, ", longer than recent runs (5s–57s) by 1m20s");
     assert!(!t.contains("0s left"));
+}
+
+#[test]
+fn r837_time_left_is_a_range_to_the_fastest_and_slowest_recent_run() {
+    let mut r = running(Some(54.0));
+    r.eta_low_secs = Some(3.0);
+    assert_eq!(running_eta_text(&r), ", ~3s–54s left");
+    // past the fastest: only the slowest is ahead
+    r.eta_low_secs = Some(0.0);
+    assert_eq!(running_eta_text(&r), ", up to ~54s left");
+    // ends that round alike are one number
+    r.eta_low_secs = Some(53.8);
+    assert_eq!(running_eta_text(&r), ", ~54s left");
 }
 
 fn offline_mac() -> tasks_daemon::api::PeerView {

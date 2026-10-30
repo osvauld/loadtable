@@ -26,7 +26,7 @@ pub use cargo::CargoParser;
 pub use error::TimingError;
 pub use estimate::{
     Basis, Estimate, Eta, EtaBasis, Left, MachineInfo, NoEstimate, Planning, Shown, Source,
-    estimate, estimate_with_cache, planning, shown, wanted_cache,
+    estimate, estimate_with_cache, planning, range_text, shown, wanted_cache,
 };
 pub use event::{Event, TargetKind, TaskOutcome};
 pub use exe::{ExeKind, TestExe, parse_test_executables};

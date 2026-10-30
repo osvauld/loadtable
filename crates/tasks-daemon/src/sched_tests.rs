@@ -907,7 +907,7 @@ fn r675_a_run_past_its_usual_time_is_over_the_usual_with_no_time_left() {
     seed_run(&r, "make d", 0.0, Outcome::Passed, 1);
     let v = running_view(&r, run_make(&r, "d"));
     assert_eq!(v.eta_secs, None, "never 0s left");
-    assert!(v.usual_secs.is_some() && v.over_by_secs.is_some(), "{v:?}");
+    assert!(v.recent_secs.is_some() && v.over_by_secs.is_some(), "{v:?}");
 }
 
 #[test]
@@ -927,7 +927,7 @@ fn r799_an_interactive_job_shows_no_estimate_and_its_runs_teach_no_timings() {
     r.until_running(id);
     let v = running_view(&r, id);
     assert_eq!(
-        (v.eta_secs, v.usual_secs, v.over_by_secs),
+        (v.eta_secs, v.recent_secs, v.over_by_secs),
         (None, None, None)
     );
     assert_eq!(

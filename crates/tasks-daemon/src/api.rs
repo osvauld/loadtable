@@ -961,12 +961,18 @@ pub struct RunningView {
     pub total_targets: usize,
     /// Running target.
     pub current: Option<String>,
-    /// Estimated seconds left; only when passing runs back it (R-660..R-665).
+    /// Estimated seconds left, to the slowest recent run when the estimate is a range; only
+    /// when passing runs back it (R-660..R-665, R-837).
     pub eta_secs: Option<f64>,
-    /// The usual (median) seconds, when the run has gone past them.
+    /// Seconds left to the fastest recent run, when that differs from `eta_secs`: the time
+    /// left is `eta_low_secs` to `eta_secs` (R-837).
     #[serde(default)]
-    pub usual_secs: Option<f64>,
-    /// Seconds past the usual: shown as "over the usual by", never as "0s left".
+    pub eta_low_secs: Option<f64>,
+    /// The fastest and slowest recent runs in seconds, when the run has gone past them all.
+    #[serde(default)]
+    pub recent_secs: Option<(f64, f64)>,
+    /// Seconds past the slowest recent run: shown as "longer than recent runs", never as
+    /// "0s left" (R-675).
     #[serde(default)]
     pub over_by_secs: Option<f64>,
     /// The machine whose runs the estimate rests on, when it is not this one (a rough ETA).
@@ -992,6 +998,36 @@ pub struct RunningView {
     pub transfer: Option<tasks_core::TransferProgress>,
 }
 
+impl RunningView {
+    /// `~3s–54s left`, `up to ~26s left` once past the fastest recent run, or `~54s left`;
+    /// none without time left. `d` formats seconds the way the surface does (R-837).
+    pub fn left_text(&self, d: impl Fn(f64) -> String) -> Option<String> {
+        let hi = self.eta_secs?;
+        Some(match self.eta_low_secs {
+            Some(lo) if lo < 0.5 => format!("up to ~{} left", d(hi)),
+            Some(lo) if d(lo) != d(hi) => format!("~{}–{} left", d(lo), d(hi)),
+            _ => format!("~{} left", d(hi)),
+        })
+    }
+
+    /// The fastest to the slowest recent run, `5s–56s`, once the run is past them all.
+    pub fn recent_text(&self, d: impl Fn(f64) -> String) -> Option<String> {
+        let (lo, hi) = self.recent_secs?;
+        Some(if d(lo) == d(hi) {
+            d(hi)
+        } else {
+            format!("{}–{}", d(lo), d(hi))
+        })
+    }
+
+    /// `longer than recent runs (5s–56s) by 30s`: past every recent run, never `0s left`
+    /// (R-675, R-837).
+    pub fn over_text(&self, d: impl Fn(f64) -> String) -> Option<String> {
+        let by = self.over_by_secs?;
+        let runs = self.recent_text(&d)?;
+        Some(format!("longer than recent runs ({runs}) by {}", d(by)))
+    }
+}
 /// The words for a memory level, the same on every surface: `normal` is `ok`, `warn` is
 /// `tight`, `critical` stays `critical`. The stall percentage is detail, not the headline.
 pub fn memory_word(level: &str) -> &'static str {
