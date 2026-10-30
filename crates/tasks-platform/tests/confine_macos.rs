@@ -64,8 +64,29 @@ impl Drop for Home {
     }
 }
 
+/// False inside a confined job: macOS refuses a sandbox inside a sandbox, so these tests only
+/// mean something outside one, as on CI, where a refusal fails instead (R-842).
+fn can_confine() -> bool {
+    let ok = Command::new("/usr/bin/sandbox-exec")
+        .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+        .status()
+        .is_ok_and(|s| s.success());
+    // CI runs unconfined: there a failing sandbox is the bug these tests look for
+    assert!(
+        ok || std::env::var_os("CI").is_none(),
+        "sandbox-exec cannot start a plain sandbox"
+    );
+    if !ok {
+        eprintln!("skipped: already confined (a sandbox cannot start inside another)");
+    }
+    ok
+}
+
 #[test]
 fn r831_a_confined_job_resolves_its_own_folder_and_globs_inside_it() {
+    if !can_confine() {
+        return;
+    }
     let h = Home::new("resolve");
     let tree = h.store().join("tree");
     assert!(
@@ -88,6 +109,9 @@ fn r831_a_confined_job_resolves_its_own_folder_and_globs_inside_it() {
 
 #[test]
 fn r831_the_folders_above_stay_unlisted_and_the_rest_of_home_closed() {
+    if !can_confine() {
+        return;
+    }
     let h = Home::new("closed");
     let tree = h.store().join("tree");
     let root = h.root.display();

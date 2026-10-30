@@ -726,19 +726,30 @@ mod tests {
             .collect()
     }
 
+    /// `dirs` and then, on macOS, Homebrew's dirs not among them (R-841).
+    fn plus_mac(dirs: &[&str]) -> Vec<String> {
+        let mut v: Vec<String> = dirs.iter().map(|d| d.to_string()).collect();
+        for d in crate::build_cache::fallback_tool_dirs(&[]) {
+            if !v.contains(&d) {
+                v.push(d);
+            }
+        }
+        v
+    }
+
     // R-732: a daemon under systemd has no ~/.cargo/bin on its PATH, yet jobs get it
     #[test]
     fn r732_the_tool_check_looks_in_the_fallback_dirs_every_job_gets() {
         let daemon = env(&[("PATH", "/usr/bin:/bin"), ("HOME", "/home/u")]);
         let dirs = job_tool_dirs(&[], &daemon);
-        assert_eq!(dirs, ["/usr/bin", "/bin", "/home/u/.cargo/bin"]);
+        assert_eq!(dirs, plus_mac(&["/usr/bin", "/bin", "/home/u/.cargo/bin"]));
         let has = |p: &Path| p == Path::new("/home/u/.cargo/bin/cargo");
         assert!(tool_in_dirs("cargo", &dirs, has));
         assert!(!tool_in_dirs("gradle", &dirs, has));
-        // without a HOME there is nothing to add
+        // without a HOME there is nothing to add but Homebrew's on macOS
         assert_eq!(
             job_tool_dirs(&[], &env(&[("PATH", "/usr/bin")])),
-            ["/usr/bin"]
+            plus_mac(&["/usr/bin"])
         );
     }
 
@@ -748,10 +759,13 @@ mod tests {
         let daemon = env(&[("PATH", "/usr/bin"), ("HOME", "/h")]);
         let spec = env(&[("PATH", "/opt/x/bin::/usr/local/bin")]);
         let dirs = job_tool_dirs(&spec, &daemon);
-        assert_eq!(dirs, ["/opt/x/bin", "/usr/local/bin", "/h/.cargo/bin"]);
+        assert_eq!(
+            dirs,
+            plus_mac(&["/opt/x/bin", "/usr/local/bin", "/h/.cargo/bin"])
+        );
         // a fallback dir already on the path is not repeated
         let spec = env(&[("PATH", "/h/.cargo/bin")]);
-        assert_eq!(job_tool_dirs(&spec, &daemon), ["/h/.cargo/bin"]);
+        assert_eq!(job_tool_dirs(&spec, &daemon), plus_mac(&["/h/.cargo/bin"]));
         assert!(!tool_in_dirs("cargo", &[], |_| true));
     }
 
