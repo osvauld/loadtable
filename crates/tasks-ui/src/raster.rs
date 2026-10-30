@@ -787,9 +787,17 @@ mod tests {
 
     /// Every text one frame of `app` draws.
     fn drawn_text(app: &mut App) -> Vec<String> {
-        fn walk(shape: &egui::Shape, into: &mut Vec<String>) {
+        drawn(app).into_iter().map(|(t, _)| t).collect()
+    }
+
+    /// Each text a frame of `app` draws, with where it lands.
+    fn drawn(app: &mut App) -> Vec<(String, egui::Rect)> {
+        fn walk(shape: &egui::Shape, into: &mut Vec<(String, egui::Rect)>) {
             match shape {
-                egui::Shape::Text(t) => into.push(t.galley.text().to_string()),
+                egui::Shape::Text(t) => into.push((
+                    t.galley.text().to_string(),
+                    t.galley.rect.translate(t.pos.to_vec2()),
+                )),
                 egui::Shape::Vec(v) => {
                     for s in v {
                         walk(s, into);
@@ -823,6 +831,27 @@ mod tests {
         // the other machines keep their role
         let texts = drawn_text(&mut App::fixed(&fixtures::mac(), dead_link()));
         assert!(!texts.iter().any(|t| t.starts_with("battery")), "{texts:?}");
+    }
+
+    // R-838
+    #[test]
+    fn r838_a_long_time_left_is_cut_to_its_cell_and_nothing_is_drawn_under_it() {
+        let mut d = fixtures::busy();
+        for r in d.status.running.iter_mut().filter(|r| r.id.0 == 102) {
+            r.eta_secs = Some(658.0);
+            r.eta_low_secs = None;
+            r.eta_rough_from = Some("nixos".into());
+        }
+        let texts = drawn(&mut App::fixed(&d, dead_link()));
+        let (_, at) = texts
+            .iter()
+            .find(|(t, _)| t.starts_with("~10m58s left"))
+            .unwrap_or_else(|| panic!("the time left is drawn: {texts:?}"));
+        let under: Vec<_> = texts
+            .iter()
+            .filter(|(t, r)| !t.starts_with("~10m58s left") && r.shrink(0.5).intersects(*at))
+            .collect();
+        assert!(under.is_empty(), "drawn over the time left: {under:?}");
     }
 
     // R-833
