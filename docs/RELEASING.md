@@ -5,10 +5,12 @@ Three workflows in `.github/workflows`:
 - `ci.yml`: every push to main, dev or v2 and every pull request. Linux: fmt, clippy with warnings as
   errors, every test (with the MCP server and the desktop window). macOS: clippy with and without
   the iroh transport, and the confinement profile run under the real `sandbox-exec`.
-- `release.yml`: a pushed `vX.Y.Z` tag. Builds `loadtable` (with the MCP server and the desktop
+- `release.yml`: every push to main, and a pushed `vX.Y.Z` tag. On main it stops at once when the
+  workspace version is already tagged; otherwise it builds `loadtable` (with the MCP server and the desktop
   window) and `loadtabled` for `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` (both on
-  Ubuntu 22.04, glibc 2.35), `aarch64-apple-darwin` and `x86_64-apple-darwin`, and drafts the GitHub
-  release with them and the notes in `docs/releases/vX.Y.Z.md`.
+  Ubuntu 22.04, glibc 2.35), `aarch64-apple-darwin` and `x86_64-apple-darwin`, tags the commit it
+  built as `vX.Y.Z` (on main), and drafts the GitHub release with them and the notes in
+  `docs/releases/vX.Y.Z.md`. A manual run on a branch only builds.
 - `publish-r2.yml`: publishing that release (or a manual run with its tag). Copies the binaries to
   LoadTable's R2 bucket, served at `https://dl.loadtable.osvauld.com`, and moves `latest` forward.
 
@@ -40,18 +42,24 @@ branches and tags allow only tags matching `v*`.
 
 ## Cutting a release
 
-1. Set `[workspace.package] version` in `Cargo.toml` to the new `X.Y.Z` (and the workspace crates
-   in `Cargo.lock`), write the release notes in `docs/releases/vX.Y.Z.md`, and merge both to main.
-   The tag must match the version and the notes must exist; the workflow refuses otherwise.
-2. `git tag vX.Y.Z && git push origin vX.Y.Z`.
-3. Wait for Release builds; it drafts "LoadTable vX.Y.Z" with four archives, their `.sha256` files
-   and `SHA256SUMS`.
+1. On dev, set `[workspace.package] version` in `Cargo.toml` to the new `X.Y.Z` (and the workspace
+   crates in `Cargo.lock`) and write the release notes in `docs/releases/vX.Y.Z.md`.
+2. Merge dev to main by pull request. Nobody tags: Release builds sees a version with no tag,
+   builds it, tags that commit `vX.Y.Z` and drafts "LoadTable vX.Y.Z" with four archives, their
+   `.sha256` files and `SHA256SUMS`. Without the notes it fails and says which file to add.
+   Later merges with the same version find the tag and do nothing, so bump the version to release
+   again.
+3. Wait for Release builds to finish.
 4. Download an archive for each machine you have and try it: `loadtable --version`, then
    `loadtabled install` and a job on a spare machine.
 5. Publish the draft. Approve the `release` environment if it asks. The R2 job checks the public
    URLs at the end.
 6. Check the installer: `curl -fsSL https://loadtable.osvauld.com/install.sh | sh` on a clean
    account, then `~/.local/bin/loadtable --version`.
+
+Pushing a tag by hand still works (`git tag vX.Y.Z && git push origin vX.Y.Z`); it must match the
+version and have its notes. A wrong tag stops main from releasing that version: delete it
+(`git push origin :refs/tags/vX.Y.Z`, and its draft release) and rerun Release builds on main.
 
 Published files are never replaced: rerunning the publish for a tag uploads the same bytes or stops.
 To fix a bad release, release a new version. `latest` only moves forward, so republishing an old tag
