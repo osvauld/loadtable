@@ -598,9 +598,25 @@ impl<T: Transport + 'static> Forwarder for PeerLink<T> {
                     queue_depth: s.queue.waiting,
                     expected_wait_secs: None,
                     // open choice: a peer that states a pressure reason is treated as blocked
-                    pressure: Pressure {
-                        blocked: !s.pressure.summary.is_empty(),
-                        summary: s.pressure.summary.clone(),
+                    pressure: {
+                        let holds = s.power.is_some_and(|p| p.holds_peer_jobs);
+                        let mut summary = s.pressure.summary.clone();
+                        if holds {
+                            let low = match s.power.and_then(|p| p.percent) {
+                                Some(c) => format!("on battery at {c}%"),
+                                None => "on battery".to_string(),
+                            };
+                            summary = if summary.is_empty() {
+                                low
+                            } else {
+                                format!("{summary}; {low}")
+                            };
+                        }
+                        Pressure {
+                            blocked: !s.pressure.summary.is_empty(),
+                            summary,
+                            holds_peer_jobs: holds,
+                        }
                     },
                     estimate: None,
                     // open choice: whether the peer already holds this checkout is not known

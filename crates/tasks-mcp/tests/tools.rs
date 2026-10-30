@@ -1523,6 +1523,8 @@ fn r695_status_says_the_endpoint_and_marks_an_offline_peers_figures_as_old() {
             jobs: Vec::new(),
             cores_in_use_milli: None,
             power: None,
+            battery_pct: None,
+            holds_peer_jobs: false,
             version: None,
         });
         Ok(Response::Status(Box::new(s)))

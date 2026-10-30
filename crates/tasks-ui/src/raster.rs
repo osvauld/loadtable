@@ -647,6 +647,12 @@ mod tests {
             ),
             ("refused-long-dark", long_refusal(), [1280, 700], true),
             (
+                "battery-low-dark",
+                App::fixed(&fixtures::mac_low_battery(), dead_link()),
+                [1400, 600],
+                true,
+            ),
+            (
                 "metrics-unavailable-dark",
                 {
                     let mut a = App::fixed(&fixtures::mac(), dead_link());
@@ -807,6 +813,16 @@ mod tests {
             walk(&c.shape, &mut texts);
         }
         texts
+    }
+
+    // R-835
+    #[test]
+    fn r835_a_worker_on_low_battery_says_so_in_place_of_its_role() {
+        let texts = drawn_text(&mut App::fixed(&fixtures::mac_low_battery(), dead_link()));
+        assert!(texts.iter().any(|t| t == "battery 22%"), "{texts:?}");
+        // the other machines keep their role
+        let texts = drawn_text(&mut App::fixed(&fixtures::mac(), dead_link()));
+        assert!(!texts.iter().any(|t| t.starts_with("battery")), "{texts:?}");
     }
 
     // R-833

@@ -162,6 +162,8 @@ fn named_peer(name: &str, state: &str, ago: Option<u64>) -> PeerView {
             jobs: Vec::new(),
             cores_in_use_milli: None,
             power: None,
+            battery_pct: None,
+            holds_peer_jobs: false,
             version: None,
         }),
     }
@@ -500,6 +502,23 @@ fn mac_peer() -> PeerView {
         m.cores_in_use_milli = Some(5000);
     }
     p
+}
+
+/// [`mac`] with the Mac on battery at 22%, so jobs from peers wait there (R-835).
+pub fn mac_low_battery() -> Dashboard {
+    let mut d = mac();
+    if let Some(m) = d
+        .status
+        .peers
+        .iter_mut()
+        .find(|p| p.name == "mac")
+        .and_then(|p| p.machine.as_mut())
+    {
+        m.power = Some("on battery 22%, battery low: holds jobs from peers".into());
+        m.battery_pct = Some(22);
+        m.holds_peer_jobs = true;
+    }
+    d
 }
 
 /// [`busy`] with the worker's load, plus an awake Mac running a forwarded job and a finished

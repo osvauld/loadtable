@@ -220,6 +220,9 @@ pub struct MachineCard {
     pub name: String,
     /// `this machine` or `worker`.
     pub role: &'static str,
+    /// `battery 25%` when the battery is low enough that jobs from peers wait (R-835); drawn
+    /// in place of the role.
+    pub battery_low: Option<String>,
     /// True for the machine this daemon runs on.
     pub local: bool,
     /// Reachability.
@@ -1030,6 +1033,11 @@ fn local_card(
     MachineCard {
         name: st.daemon.machine.clone(),
         role: "this machine",
+        battery_low: st
+            .power
+            .as_ref()
+            .filter(|p| p.holds_peer_jobs)
+            .map(|p| battery_text(p.battery_pct)),
         local: true,
         online: Online::Online,
         status_text: "online (this machine)".into(),
@@ -1243,6 +1251,11 @@ fn peer_cpu_busy(peer: &PeerView) -> Option<f32> {
     })
 }
 
+/// `battery 25%`, or `battery low` when the charge is not known.
+fn battery_text(pct: Option<u8>) -> String {
+    pct.map_or_else(|| "battery low".to_string(), |c| format!("battery {c}%"))
+}
+
 fn peer_card(
     peer: &PeerView,
     rows: &[JobRow],
@@ -1352,6 +1365,11 @@ fn peer_card(
     MachineCard {
         name: peer.name.clone(),
         role: "worker",
+        battery_low: peer
+            .machine
+            .as_ref()
+            .filter(|m| m.holds_peer_jobs)
+            .map(|m| battery_text(m.battery_pct)),
         local: false,
         online,
         status_text,

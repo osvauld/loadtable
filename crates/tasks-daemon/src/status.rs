@@ -55,7 +55,15 @@ fn peer_machine_view(s: &tasks_peer::proto::PeerStatus) -> PeerMachineView {
             })
             .collect(),
         cores_in_use_milli: s.cores_in_use_milli,
-        power: s.power.map(|p| power_text(p.on_battery, p.percent)),
+        power: s.power.map(|p| {
+            let mut t = power_text(p.on_battery, p.percent);
+            if p.holds_peer_jobs {
+                t.push_str(", battery low: holds jobs from peers");
+            }
+            t
+        }),
+        battery_pct: s.power.and_then(|p| p.percent),
+        holds_peer_jobs: s.power.is_some_and(|p| p.holds_peer_jobs),
         version: s.version.clone(),
     }
 }

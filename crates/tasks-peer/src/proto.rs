@@ -342,6 +342,10 @@ pub struct PowerSummary {
     pub on_battery: bool,
     /// Battery charge, when there is a battery.
     pub percent: Option<u8>,
+    /// Jobs from peers wait there now, on battery (R-834); placement passes it over when
+    /// another machine can start the job (R-836). False from older peers.
+    #[serde(default)]
+    pub holds_peer_jobs: bool,
 }
 
 /// Run a command on the receiver, in its synced copy of a checkout.

@@ -557,6 +557,7 @@ fn fast_peer(blocked: bool) -> tasks_placement::MachineView {
         } else {
             String::new()
         },
+        holds_peer_jobs: false,
     };
     p
 }
