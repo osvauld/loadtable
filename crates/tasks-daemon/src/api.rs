@@ -1168,6 +1168,12 @@ pub struct PeerMachineView {
     /// Where its power comes from (`on battery 80%`), when it reports it.
     #[serde(default)]
     pub power: Option<String>,
+    /// Its battery charge, when it reports one.
+    #[serde(default)]
+    pub battery_pct: Option<u8>,
+    /// It holds jobs from peers now: its battery is low (R-834, R-835). False from older peers.
+    #[serde(default)]
+    pub holds_peer_jobs: bool,
     /// The jobs running there and what each uses now; empty from an older peer. Jobs this
     /// machine forwarded are among them (their remote id is `forwarded_to`).
     #[serde(default)]
@@ -1267,6 +1273,13 @@ pub struct PowerView {
     pub battery_held: u32,
     /// Whether peer jobs may run on battery (`power.peer_jobs_on_battery`).
     pub peer_jobs_on_battery: bool,
+    /// Jobs from peers wait now: on battery and at or below the minimum charge, or not allowed
+    /// on battery at all (R-834). Absent from older daemons.
+    #[serde(default)]
+    pub holds_peer_jobs: bool,
+    /// The charge at or below which jobs from peers wait (`power.peer_jobs_min_battery_pct`).
+    #[serde(default)]
+    pub peer_jobs_min_battery_pct: u8,
 }
 
 impl PowerView {
@@ -1299,12 +1312,20 @@ impl PowerView {
         if let Some(p) = self.battery_pct {
             t.push_str(&format!(" {p}%"));
         }
+        let until = if self.peer_jobs_on_battery {
+            format!("AC or a charge above {}%", self.peer_jobs_min_battery_pct)
+        } else {
+            "AC (power.peer_jobs_on_battery is off)".to_string()
+        };
         if self.battery_held > 0 {
             t.push_str(&format!(
-                "; {} job{} from peers wait for AC (power.peer_jobs_on_battery is off)",
+                "; {} job{} from peers wait for {until}",
                 self.battery_held,
                 if self.battery_held == 1 { "" } else { "s" }
             ));
+        } else if self.holds_peer_jobs {
+            // R-835: low battery is said even before a job waits on it
+            t.push_str(&format!("; battery low: jobs from peers wait for {until}"));
         }
         t
     }

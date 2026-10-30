@@ -667,6 +667,8 @@ fn r356_status_lists_each_peer_with_state_path_latencies_roles_and_its_last_repo
                 jobs: Vec::new(),
                 cores_in_use_milli: None,
                 power: Some("on battery 80%".into()),
+                battery_pct: None,
+                holds_peer_jobs: false,
                 version: Some("0.1.0 (41ac455 2026-10-27)".into()),
             }),
         },
@@ -789,6 +791,8 @@ fn r609_status_shows_the_power_source_and_whether_the_machine_is_kept_awake() {
         guard_error: None,
         battery_held: 0,
         peer_jobs_on_battery: false,
+        holds_peer_jobs: false,
+        peer_jobs_min_battery_pct: 30,
     };
     s.power = Some(pw.clone());
     let t = status(&s);
@@ -848,6 +852,8 @@ fn r611_a_peers_power_is_shown_with_its_last_report() {
                 swap_in_per_s: None,
                 swap_out_per_s: None,
                 power: Some("on battery 80%".into()),
+                battery_pct: None,
+                holds_peer_jobs: false,
                 memory_level: None,
                 jobs: vec![],
                 cores_in_use_milli: None,
@@ -1009,6 +1015,8 @@ fn offline_mac() -> tasks_daemon::api::PeerView {
             jobs: Vec::new(),
             cores_in_use_milli: None,
             power: None,
+            battery_pct: None,
+            holds_peer_jobs: false,
             version: None,
         }),
     }

@@ -16,7 +16,7 @@ use std::time::Duration;
 use tasks_admission::{Gate, Layout, Thresholds};
 use tasks_core::{DeviceId, SlotKind};
 use tasks_ledger::RetentionPolicy;
-use tasks_platform::{Level, PressureThresholds};
+use tasks_platform::{Level, PowerReading, PressureThresholds};
 use tasks_policy::submit_rules::BroadTestMode;
 
 const GIB: u64 = 1 << 30;
@@ -432,7 +432,13 @@ const FIELDS: &[Field] = &[
         "power.peer_jobs_on_battery",
         "LOADTABLE_PEER_JOBS_ON_BATTERY",
         Ty::Choice(&["false", "true"]),
-        "false",
+        "true",
+    ),
+    f(
+        "power.peer_jobs_min_battery_pct",
+        "LOADTABLE_PEER_JOBS_MIN_BATTERY_PCT",
+        Ty::Uint(0, 100),
+        "30",
     ),
     f("machine.devices", "LOADTABLE_DEVICES", Ty::List, ""),
     f(
@@ -1065,6 +1071,21 @@ impl MachinePolicy {
     /// Whether jobs received from peers run while this machine is on battery (R-614).
     pub fn peer_jobs_on_battery(&self) -> bool {
         matches!(self.vals.get("power.peer_jobs_on_battery"), Some(Val::Choice(w)) if w == "true")
+    }
+    /// The charge at or below which jobs received from peers wait; 0 never waits for the
+    /// charge (R-834).
+    pub fn peer_jobs_min_battery_pct(&self) -> u8 {
+        u8::try_from(self.u("power.peer_jobs_min_battery_pct")).unwrap_or(100)
+    }
+    /// Whether jobs received from peers wait on this power reading: on battery with
+    /// `peer_jobs_on_battery` off, or at or below `peer_jobs_min_battery_pct`, an unknown charge
+    /// counting as low (R-614, R-834).
+    pub fn holds_peer_jobs(&self, power: Option<PowerReading>) -> bool {
+        let min = self.peer_jobs_min_battery_pct();
+        power.is_some_and(|p| {
+            p.on_battery
+                && (!self.peer_jobs_on_battery() || (min > 0 && p.percent.is_none_or(|c| c <= min)))
+        })
     }
     /// The stuck-job window in seconds (R-095).
     pub fn stuck_window_secs(&self) -> u64 {

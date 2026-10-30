@@ -239,13 +239,18 @@ pub fn machine_strip(ui: &mut Ui, p: &Palette, machines: &[MachineCard]) {
             theme::sans_semibold(theme::BODY),
             fade(p.ink),
         );
+        // R-835: a low battery takes the role's place, in the warning colour
+        let (role, role_color) = match &m.battery_low {
+            Some(b) => (b.as_str(), p.warn),
+            None => (m.role, p.dim),
+        };
         text_at(
             &painter,
             nx + w + 6.0,
             cy,
-            m.role,
+            role,
             theme::sans(LABEL + 0.5),
-            p.dim,
+            role_color,
         );
         if let Some(note) = &m.away_note {
             text_at(

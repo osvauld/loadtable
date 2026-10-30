@@ -106,7 +106,8 @@
 [power]
 # keep_awake = "on"   # env LOADTABLE_KEEP_AWAKE
 # keep_awake_linger_secs = 120   # env LOADTABLE_KEEP_AWAKE_LINGER_SECS
-# peer_jobs_on_battery = "false"   # env LOADTABLE_PEER_JOBS_ON_BATTERY
+# peer_jobs_on_battery = "true"   # env LOADTABLE_PEER_JOBS_ON_BATTERY
+# peer_jobs_min_battery_pct = 30   # env LOADTABLE_PEER_JOBS_MIN_BATTERY_PCT
 
 [machine]
 # devices = []   # env LOADTABLE_DEVICES

@@ -619,7 +619,11 @@ impl Scheduler {
             free_slots: ctx.free.clone(),
             queue_depth: standing.map_or(0, |(ahead, _)| ahead),
             expected_wait_secs: standing.and_then(|(_, start)| start),
-            pressure: Pressure { blocked, summary },
+            pressure: Pressure {
+                blocked,
+                summary,
+                holds_peer_jobs: false,
+            },
             estimate: run_est(self.planning_for(&facts.recipe, &info, &peer_infos)),
             checkout: Checkout {
                 synced: true,

@@ -256,6 +256,7 @@ fn r134_a_blocked_machine_counts_as_extra_wait_not_skipped() {
     l.pressure = Pressure {
         blocked: true,
         summary: "memory PSI".into(),
+        ..Default::default()
     };
     let r = run(&input(Request::Anywhere, vec![l]));
     let s = r.score_of(&n("laptop")).unwrap();
@@ -274,7 +275,47 @@ fn gate_closed(v: &mut MachineView) {
     v.pressure = Pressure {
         blocked: true,
         summary: "CPU contended: pressure 63% > 40% for compile".into(),
+        ..Default::default()
     };
+}
+
+// ---- R-836 ----
+
+fn low_battery(v: &mut MachineView) {
+    v.pressure = Pressure {
+        summary: "on battery at 25%".into(),
+        holds_peer_jobs: true,
+        ..Default::default()
+    };
+}
+
+#[test]
+fn r836_a_peer_holding_jobs_on_low_battery_does_not_win_over_a_busy_machine() {
+    // a run job: the compile gate would not count, the battery hold does. The laptop has no
+    // free run slot and no known wait, and still wins: the battery may hold for hours
+    let mut local = view("laptop", true);
+    faster(&mut local, 200.0);
+    let mut mac = view("mac", false);
+    faster(&mut mac, 30.0);
+    low_battery(&mut mac);
+    let mut i = input(Request::Anywhere, vec![local, mac]);
+    i.kind = Kind::Run;
+    let r = run(&i);
+    assert_eq!(chosen(&r).as_deref(), Some("laptop"));
+    assert!(r.score_of(&n("mac")).unwrap().blocked);
+}
+
+#[test]
+fn r836_a_peer_holding_jobs_is_still_used_when_nothing_else_can_start_it() {
+    // an Apple build: only the Mac can run it, so it goes there and waits for the charge
+    let local = view("laptop", true);
+    let mut mac = view("mac", false);
+    mac.machine.os = Os::Macos;
+    low_battery(&mut mac);
+    let mut i = input(Request::Anywhere, vec![local, mac]);
+    i.requirements.os = Some(Os::Macos);
+    let r = run(&i);
+    assert_eq!(chosen(&r).as_deref(), Some("mac"));
 }
 
 #[test]
