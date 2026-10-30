@@ -1025,7 +1025,10 @@ pub fn button(
     enabled: bool,
 ) -> egui::Response {
     let font = theme::sans_medium(SECONDARY);
-    let color = if primary {
+    // a button that cannot be pressed reads as such: no red or accent text on it
+    let color = if !enabled {
+        p.faint
+    } else if primary {
         p.panel
     } else if danger {
         p.bad

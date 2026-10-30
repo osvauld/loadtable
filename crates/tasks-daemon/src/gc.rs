@@ -469,7 +469,13 @@ impl Scheduler {
             .collect();
         let checkouts = checkouts.as_slice();
         if deleted {
-            self.gc_delete(&mut drafts, delete, checkouts, &cache_root);
+            let freed = self.gc_delete(&mut drafts, delete, checkouts, &cache_root);
+            // the totals are what each machine keeps now, not what it kept before
+            for m in &mut machines {
+                m.held_bytes = m
+                    .held_bytes
+                    .saturating_sub(freed.get(&m.name).copied().unwrap_or(0));
+            }
             for c in checkouts {
                 match drafts.iter_mut().find(|d| d.row.checkout == *c) {
                     Some(d) if d.row.state == GcState::InUse => {
@@ -509,14 +515,15 @@ impl Scheduler {
     }
 
     /// Deletes the output and peer copies of every row in `delete` or named in `checkouts`
-    /// that is not in use.
+    /// that is not in use, and returns the bytes freed on each machine.
     fn gc_delete(
         &self,
         drafts: &mut [Draft],
         delete: &[GcState],
         checkouts: &[String],
         cache_root: &Path,
-    ) {
+    ) -> BTreeMap<String, u64> {
+        let mut freed: BTreeMap<String, u64> = BTreeMap::new();
         let mut per_peer: BTreeMap<String, Vec<CheckoutId>> = BTreeMap::new();
         for d in drafts.iter_mut() {
             let chosen = delete.contains(&d.row.state) || checkouts.contains(&d.row.checkout);
@@ -541,6 +548,7 @@ impl Scheduler {
             }
             if failed.is_empty() {
                 d.row.freed_bytes = d.row.freed_bytes.saturating_add(local);
+                *freed.entry(self.cfg.machine.clone()).or_default() += local;
             } else {
                 d.row.kept = Some(format!("not all deleted: {}", failed.join("; ")));
             }
@@ -560,6 +568,7 @@ impl Scheduler {
             {
                 Ok(dropped) => {
                     for x in dropped {
+                        *freed.entry(peer.clone()).or_default() += x.freed_bytes;
                         if let Some(d) = drafts
                             .iter_mut()
                             .find(|d| d.id.as_ref() == Some(&x.checkout))
@@ -581,6 +590,7 @@ impl Scheduler {
                 }
             }
         }
+        freed
     }
 
     /// Caches every checkout shares, reported and never deleted by `gc`.

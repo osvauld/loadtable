@@ -1034,10 +1034,12 @@ mod tests {
             "v2 (in dev)",
             "in use",
             "Shared by every checkout",
-            "Free 0 B from 0 checkouts",
         ] {
             assert!(text.contains(want), "{want:?} not drawn in:\n{text}");
         }
+        // R-844: with nothing ticked the button names no size
+        assert!(text.lines().any(|l| l == "Free"), "a bare Free in:\n{text}");
+        assert!(!text.contains("Free 0 B"));
         app.tick_disk("~/app-worktrees/v2");
         app.tick_disk("~/task-manager");
         app.set_disk(fixtures::disk());
