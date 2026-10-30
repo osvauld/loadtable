@@ -29,6 +29,7 @@ mod fetch_tests;
 mod follow_tests;
 mod forwarded;
 pub mod forwarder;
+mod gc;
 mod gradle_warmth;
 mod handler;
 mod history;

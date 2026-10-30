@@ -23,6 +23,9 @@ pub const HOME_TOOLS_WRITE: &[&str] = &[
     ".npm",
     ".m2",
     ".konan",
+    // the Kotlin compiler daemon keeps its run files here; without it every Gradle build of
+    // Kotlin falls back to compiling in-process after a failed start (R-843)
+    ".local/share/kotlin",
     "Library/Developer",
     "Library/Android",
     "Library/Caches/org.swift.swiftpm",
@@ -218,6 +221,26 @@ mod tests {
             "a toolchain this machine does not have is not listed"
         );
         assert!(note(&c).contains("cannot open"));
+    }
+
+    #[test]
+    fn r843_a_peer_job_may_write_the_kotlin_daemons_folder_but_not_its_neighbours() {
+        let (t, cache, env) = rig();
+        let home = t.path().join("home");
+        std::fs::create_dir_all(home.join(".local/share/kotlin")).unwrap();
+        std::fs::create_dir_all(home.join(".local/share/keyrings")).unwrap();
+        let helper = vec!["/x/loadtabled".to_string(), "confine".to_string()];
+        let c = for_peer_job(&policy(""), &cache, &env, Some(&helper))
+            .unwrap()
+            .unwrap();
+        let home = real(&home).unwrap();
+        assert!(c.write.contains(&home.join(".local/share/kotlin")));
+        let all: Vec<_> = c.write.iter().chain(&c.read).collect();
+        assert!(
+            !all.iter()
+                .any(|p| p.starts_with(home.join(".local/share/keyrings")))
+        );
+        assert!(!all.contains(&&home.join(".local/share")));
     }
 
     #[test]

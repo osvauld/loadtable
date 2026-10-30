@@ -617,6 +617,25 @@ pub enum Command {
     /// Build caches: the compiler wrapper in use, the cache root and its disk against the
     /// reserve. Reads the machine's files; needs no daemon.
     Cache,
+    /// What each checkout's build output takes here and on the peers, and freeing it. Only
+    /// build output and peers' copies are deleted, never a working tree, and never anything
+    /// a queued or running job uses.
+    Gc {
+        /// Free the checkouts in these states, comma separated: merged, gone, old, idle,
+        /// active. Without it gc only reports.
+        #[arg(long, value_name = "STATES", value_delimiter = ',')]
+        delete: Vec<String>,
+        /// Free these checkouts too, whatever their state: a path, or the name the report
+        /// shows (`(unknown checkout …)` included). Repeat it for more.
+        #[arg(long, value_name = "CHECKOUT")]
+        free: Vec<String>,
+        /// Days without a job after which a checkout counts as idle (default 14).
+        #[arg(long, value_name = "DAYS")]
+        idle_days: Option<u32>,
+        /// The daemon's reply as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// This machine's identity.
     Identity {
         /// What to do.

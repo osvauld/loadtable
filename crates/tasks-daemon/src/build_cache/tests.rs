@@ -183,3 +183,30 @@ fn r401_the_cache_policy_keys_default_to_auto_and_thirty_gib() {
     );
     assert!(!bad.problems.is_empty());
 }
+
+// R-841
+#[test]
+fn r841_on_macos_jobs_and_the_tool_check_also_look_in_homebrews_dirs() {
+    let env = vec![("HOME".to_string(), "/Users/me".to_string())];
+    assert_eq!(
+        fallback_tool_dirs_on(&env, false),
+        vec!["/Users/me/.cargo/bin"]
+    );
+    assert_eq!(
+        fallback_tool_dirs_on(&env, true),
+        vec![
+            "/Users/me/.cargo/bin",
+            "/opt/homebrew/bin",
+            "/usr/local/bin"
+        ]
+    );
+    // without a HOME the Homebrew dirs are still there
+    assert_eq!(
+        fallback_tool_dirs_on(&[], true),
+        vec!["/opt/homebrew/bin", "/usr/local/bin"]
+    );
+    assert_eq!(
+        fallback_tool_dirs(&env),
+        fallback_tool_dirs_on(&env, cfg!(target_os = "macos"))
+    );
+}

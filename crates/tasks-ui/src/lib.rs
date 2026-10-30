@@ -13,6 +13,7 @@ pub mod actions;
 pub mod audit;
 pub mod columns;
 pub mod detail;
+pub mod disk;
 pub mod feed;
 pub mod fixtures;
 pub mod format;

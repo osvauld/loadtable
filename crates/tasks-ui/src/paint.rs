@@ -356,6 +356,9 @@ pub fn group_header(ui: &mut Ui, p: &Palette, title: &str, count: usize, note: &
     }
 }
 
+/// Narrowest room the left part of a state cell is drawn in; with less it is left out.
+const MIN_LEFT: f32 = 40.0;
+
 /// The state cell: a bar or a head line, then the two-part line under it.
 fn state_cell(painter: &Painter, p: &Palette, rect: Rect, s: &StateCell, section: Section) {
     let top = rect.min.y + 9.0;
@@ -391,21 +394,24 @@ fn state_cell(painter: &Painter, p: &Palette, rect: Rect, s: &StateCell, section
             put(painter, rect.min.x, line1, g);
         }
     }
-    // right part first: it keeps its room, the left part gets what is left
+    // right part first (the time left): it is cut to the cell, and the left part gets what is
+    // left, or is not drawn when too little is, never drawn under it (R-838)
     let right_w = if s.right.is_empty() {
         0.0
     } else {
-        text_right(
+        let g = fit(
             painter,
-            rect.max.x,
-            line2,
             &s.right,
             theme::sans_medium(SECONDARY),
             p.ink,
-        )
+            rect.width(),
+        );
+        let w = g.size().x;
+        put(painter, rect.max.x - w, line2, g);
+        w
     };
-    if !s.left.is_empty() {
-        let room = (rect.width() - right_w - 10.0).max(20.0);
+    let room = rect.width() - right_w - 10.0;
+    if !s.left.is_empty() && room >= MIN_LEFT {
         put(
             painter,
             rect.min.x,
@@ -1019,7 +1025,10 @@ pub fn button(
     enabled: bool,
 ) -> egui::Response {
     let font = theme::sans_medium(SECONDARY);
-    let color = if primary {
+    // a button that cannot be pressed reads as such: no red or accent text on it
+    let color = if !enabled {
+        p.faint
+    } else if primary {
         p.panel
     } else if danger {
         p.bad
@@ -1338,6 +1347,26 @@ pub fn table(
     mono: &[usize],
     right: &[usize],
 ) {
+    tick_table(ui, p, id, cols, rows, mono, right, &[], &[]);
+}
+
+/// [`table`] with a tick box in the first column of each row whose `ticks` entry is `Some`
+/// (R-840). A click anywhere on such a row toggles it; the rows clicked are returned. A row
+/// with a `tips` text shows it on hover.
+#[allow(clippy::too_many_arguments)]
+pub fn tick_table(
+    ui: &mut Ui,
+    p: &Palette,
+    id: egui::Id,
+    cols: &[(&str, f32)],
+    rows: &[Vec<String>],
+    mono: &[usize],
+    right: &[usize],
+    ticks: &[Option<bool>],
+    tips: &[String],
+) -> Vec<usize> {
+    let mut clicked = Vec::new();
+    let ticking = !ticks.is_empty();
     let width = ui.available_width();
     let gap = 14.0;
     let fixed: f32 = cols.iter().rev().skip(1).map(|c| c.1 + gap).sum();
@@ -1364,10 +1393,59 @@ pub fn table(
         put(&hp, gx, hr.center().y, g);
     }
     for (r, row) in rows.iter().enumerate() {
-        let (rect, _) = ui.allocate_exact_size(vec2(width, 28.0), Sense::hover());
+        let tick = ticks.get(r).copied().flatten();
+        let sense = if tick.is_some() {
+            Sense::click()
+        } else {
+            Sense::hover()
+        };
+        let (rect, resp) = ui.allocate_exact_size(vec2(width, 28.0), sense);
         let painter = ui.painter_at(rect);
+        if tick == Some(true) {
+            painter.rect_filled(rect, 0.0, p.accent.gamma_multiply(0.12));
+        } else if tick.is_some() && resp.hovered() {
+            painter.rect_filled(rect, 0.0, p.raise);
+        }
         painter.hline(rect.x_range(), rect.min.y, Stroke::new(1.0_f32, p.line));
+        if let Some(on) = tick {
+            let b =
+                Rect::from_center_size(pos2(rect.min.x + 8.0, rect.center().y), vec2(13.0, 13.0));
+            if on {
+                painter.rect_filled(b, round(3.0), p.accent);
+                painter.line_segment(
+                    [
+                        pos2(b.min.x + 3.0, b.center().y),
+                        pos2(b.center().x - 1.0, b.max.y - 3.5),
+                    ],
+                    Stroke::new(1.6_f32, p.panel),
+                );
+                painter.line_segment(
+                    [
+                        pos2(b.center().x - 1.0, b.max.y - 3.5),
+                        pos2(b.max.x - 3.0, b.min.y + 3.5),
+                    ],
+                    Stroke::new(1.6_f32, p.panel),
+                );
+            } else {
+                painter.rect_stroke(
+                    b,
+                    round(3.0),
+                    Stroke::new(1.0_f32, p.dim),
+                    StrokeKind::Inside,
+                );
+            }
+        }
+        if resp.clicked() {
+            clicked.push(r);
+        }
+        if let Some(t) = tips.get(r).filter(|t| !t.is_empty()) {
+            resp.on_hover_text(t);
+        }
         for (i, text) in row.iter().enumerate() {
+            // the first column holds the tick box, drawn above
+            if ticking && i == 0 {
+                continue;
+            }
             let (x, w) = col_x(i);
             let font = if mono.contains(&i) {
                 theme::mono(SECONDARY)
@@ -1390,4 +1468,33 @@ pub fn table(
             }
         }
     }
+    clicked
+}
+
+/// The Disk tab's machine cards: the name over what its build cache keeps (R-840).
+pub fn disk_cards(ui: &mut Ui, p: &Palette, cards: &[crate::disk::DiskCard]) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(10.0, 10.0);
+        for c in cards {
+            egui::Frame::new()
+                .fill(p.panel)
+                .stroke(Stroke::new(1.0_f32, p.line))
+                .corner_radius(round(6.0))
+                .inner_margin(egui::Margin::symmetric(12, 8))
+                .show(ui, |ui| {
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new(&c.name)
+                                .font(theme::sans_semibold(theme::BODY))
+                                .color(p.ink),
+                        );
+                        ui.label(
+                            RichText::new(&c.line)
+                                .font(theme::sans(SECONDARY))
+                                .color(if c.failed { p.warn } else { p.dim }),
+                        );
+                    });
+                });
+        }
+    });
 }

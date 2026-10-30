@@ -67,7 +67,7 @@ impl Role {
 pub enum Need {
     /// Any valid grant (hello, status, events of the peer's own jobs).
     Any,
-    /// `submit`: jobs, sync and fetch.
+    /// `submit`: jobs, sync, fetch and dropping cached checkouts.
     Submit,
 }
 
@@ -87,7 +87,8 @@ pub fn need_of(body: &Body) -> Need {
         Body::Hello(_)
         | Body::StatusRequest
         | Body::Subscribe { .. }
-        | Body::JobMetricsRequest { .. } => Need::Any,
+        | Body::JobMetricsRequest { .. }
+        | Body::CacheRequest => Need::Any,
         _ => Need::Submit,
     }
 }

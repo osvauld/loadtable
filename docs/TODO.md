@@ -22,7 +22,8 @@ What stands between `dev` and LoadTable 0.1.0, the first public alpha.
 - [x] Confine jobs that come from a peer to what LoadTable owns there (R-821): Landlock on Linux, Seatbelt on macOS, `[confine]` in the machine policy. A disk survey sent to the friend's Mac walked their photos and documents.
 - [ ] Try R-821 on the Mac once its daemon runs a build with it: a job from the laptop builds the iOS core, and `ls ~/Pictures` from the laptop is refused. The macOS profile is type-checked and unit-tested, not yet run. (friend)
 - [ ] Site security page: say jobs from other machines run confined, and how `[confine]` widens it.
-- [ ] `loadtable cache usage` / `cache clean` (CLI, MCP and over the peer link) that only ever walk LoadTable's own folders, so nobody needs a shell `du` on another machine.
+- [x] `loadtable gc` (CLI, MCP and over the peer link, R-839) walks only LoadTable's own folders, so nobody needs a shell `du` on another machine.
+- [x] The window's Disk view for gc: machine cards and one row per checkout with Free (R-840).
 
 ## 3. GitHub
 

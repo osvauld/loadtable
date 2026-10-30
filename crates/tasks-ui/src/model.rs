@@ -18,6 +18,8 @@ pub enum Tab {
     History,
     /// Per-recipe and per-target timing.
     Timings,
+    /// What each checkout's build output takes on every machine, and freeing it.
+    Disk,
     /// Pressure trips: what caused each stall.
     Stalls,
     /// The audit log.
@@ -26,10 +28,11 @@ pub enum Tab {
 
 impl Tab {
     /// Tabs with content, in order.
-    pub const SHOWN: [Tab; 5] = [
+    pub const SHOWN: [Tab; 6] = [
         Tab::Queue,
         Tab::History,
         Tab::Timings,
+        Tab::Disk,
         Tab::Stalls,
         Tab::Audit,
     ];
@@ -42,6 +45,7 @@ impl Tab {
             Tab::Queue => "Queue",
             Tab::History => "History",
             Tab::Timings => "Timings",
+            Tab::Disk => "Disk",
             Tab::Stalls => "Stalls",
             Tab::Audit => "Audit",
         }
@@ -2327,7 +2331,7 @@ mod tests {
         let labels: Vec<_> = Tab::SHOWN.iter().map(|t| t.label()).collect();
         assert_eq!(
             labels,
-            vec!["Queue", "History", "Timings", "Stalls", "Audit"]
+            vec!["Queue", "History", "Timings", "Disk", "Stalls", "Audit"]
         );
     }
 

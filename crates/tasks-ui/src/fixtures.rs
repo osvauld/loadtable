@@ -894,3 +894,109 @@ pub fn offline() -> Dashboard {
     d.status.peers = vec![peer("offline", Some(420))];
     d
 }
+
+/// A `gc` report for the Disk tab: three machines, one that cannot report, a row in each
+/// state, and the shared caches (R-840).
+pub fn disk() -> tasks_daemon::api::GcView {
+    use tasks_daemon::api::{GcHeld, GcMachine, GcRow, GcShared, GcState, GcView};
+    const GIB: u64 = 1 << 30;
+    const DAY: i64 = 86_400_000;
+    let held = |pairs: &[(&str, u64)]| {
+        pairs
+            .iter()
+            .map(|(m, b)| GcHeld {
+                machine: (*m).into(),
+                bytes: *b,
+            })
+            .collect()
+    };
+    let row = |checkout: &str, branch: Option<&str>, state, days: i64, h: Vec<GcHeld>| GcRow {
+        checkout: checkout.into(),
+        branch: branch.map(Into::into),
+        state,
+        merged_into: (state == GcState::Merged).then(|| "dev".into()),
+        last_used_ms: Some(NOW_MS - days * DAY),
+        held: h,
+        freed_bytes: 0,
+        kept: None,
+    };
+    let machine = |name: &str, held_bytes, reclaimable_bytes, error: Option<&str>| GcMachine {
+        name: name.into(),
+        held_bytes,
+        reclaimable_bytes,
+        error: error.map(Into::into),
+    };
+    GcView {
+        idle_days: 14,
+        machines: vec![
+            machine("laptop", 134 * GIB, 98 * GIB, None),
+            machine("nixos", 41 * GIB, 22 * GIB, None),
+            machine(
+                "mac",
+                0,
+                0,
+                Some("mac runs an older loadtabled that cannot report its cache; upgrade it"),
+            ),
+        ],
+        rows: vec![
+            row(
+                "(unknown checkout 4ca7e0dc2b4d)",
+                None,
+                GcState::Gone,
+                1,
+                held(&[("laptop", 9 * GIB)]),
+            ),
+            row(
+                "~/app-worktrees/v2",
+                Some("v2"),
+                GcState::Merged,
+                1,
+                held(&[("laptop", 32 * GIB), ("nixos", 14 * GIB)]),
+            ),
+            row(
+                "~/app/.claude/worktrees/group-voice",
+                Some("feature/group-voice"),
+                GcState::Merged,
+                2,
+                held(&[("laptop", 14 * GIB), ("nixos", 8 * GIB)]),
+            ),
+            row(
+                "~/app/.claude/worktrees/old-spike",
+                Some("spike/cache"),
+                GcState::Idle,
+                21,
+                held(&[("laptop", 6 * GIB)]),
+            ),
+            row(
+                "~/app",
+                Some("dev"),
+                GcState::Active,
+                0,
+                held(&[("laptop", 18 * GIB), ("nixos", 11 * GIB)]),
+            ),
+            row(
+                "~/task-manager",
+                Some("dev"),
+                GcState::InUse,
+                0,
+                held(&[("laptop", 9 * GIB), ("nixos", 8 * GIB)]),
+            ),
+        ],
+        shared: vec![
+            GcShared {
+                name: "compiler cache (sccache)".into(),
+                path: "/home/demo/build-cache/sccache".into(),
+                bytes: 30 * GIB,
+                note: "sccache keeps itself under 30G".into(),
+            },
+            GcShared {
+                name: "Gradle home".into(),
+                path: "/home/demo/build-cache/gradle".into(),
+                bytes: 3 * GIB,
+                note: "shared by every Gradle build; not cleaned by gc".into(),
+            },
+        ],
+        notes: vec![],
+        deleted: false,
+    }
+}

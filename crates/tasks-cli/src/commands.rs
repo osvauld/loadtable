@@ -15,8 +15,8 @@ use std::time::Duration;
 use tasks_core::plan::Plan;
 use tasks_core::{DeviceId, JobId, JobSpec, Kind, Owner, Phase, Placement, Priority};
 use tasks_daemon::api::{
-    ErrorCode, HistoryView, JobView, LogSearchQuery, LogView, MAX_CONTEXT, MAX_TAIL_LINES, Request,
-    Response, StatusSnapshot, WaiterView,
+    ErrorCode, GcState, HistoryView, JobView, LogSearchQuery, LogView, MAX_CONTEXT, MAX_TAIL_LINES,
+    Request, Response, StatusSnapshot, WaiterView,
 };
 use tasks_policy::PolicyFs;
 use tasks_policy::submit_rules::{self, PlacementClass};
@@ -96,6 +96,12 @@ fn dispatch(ctx: &mut Ctx<'_>, cmd: &Command) -> Result<i32, CliError> {
         Command::LogSearch(a) => log_search(ctx, a),
         Command::Get { id, json } => get(ctx, *id, *json),
         Command::Metrics { id, json } => metrics(ctx, *id, *json),
+        Command::Gc {
+            delete,
+            free,
+            idle_days,
+            json,
+        } => gc(ctx, delete, free, *idle_days, *json),
         Command::Cancel { id, who, reason } => cancel(ctx, *id, who.as_deref(), reason.as_deref()),
         Command::Prioritize {
             id,
@@ -607,6 +613,58 @@ fn metrics(ctx: &mut Ctx<'_>, id: i64, json: bool) -> Result<i32, CliError> {
         writeln!(ctx.out, "{}", pretty(&m)?)?;
     } else {
         ctx.out.write_all(render::job_metrics(&m).as_bytes())?;
+    }
+    Ok(EXIT_OK)
+}
+
+/// `gc`: what each checkout keeps on every machine's build cache, and with `--delete` frees the
+/// rows in those states (R-839), with `--free` the checkouts named (R-840).
+fn gc(
+    ctx: &mut Ctx<'_>,
+    delete: &[String],
+    free: &[String],
+    idle_days: Option<u32>,
+    json: bool,
+) -> Result<i32, CliError> {
+    let mut states = Vec::new();
+    for word in delete.iter().filter(|w| !w.trim().is_empty()) {
+        match GcState::parse(word) {
+            Some(GcState::InUse) => {
+                return Err(CliError::Usage(
+                    "gc never deletes a checkout a job uses; leave in_use out of --delete".into(),
+                ));
+            }
+            Some(s) => states.push(s),
+            None => {
+                return Err(CliError::Usage(format!(
+                    "--delete takes merged, gone, old, idle or active, not {word:?}"
+                )));
+            }
+        }
+    }
+    // a path on disk goes as its full form; a report name like `(unknown checkout …)` as is
+    let checkouts = free
+        .iter()
+        .map(|c| match std::fs::canonicalize(c) {
+            Ok(p) if !c.starts_with('(') => p.display().to_string(),
+            _ => c.clone(),
+        })
+        .collect();
+    let resp = ctx.client.call(&Request::Gc {
+        delete: states,
+        checkouts,
+        idle_days,
+    })?;
+    let Response::Gc(v) = resp else {
+        return Err(CliError::Failed(format!(
+            "unexpected reply to gc: {resp:?}"
+        )));
+    };
+    if json {
+        writeln!(ctx.out, "{}", pretty(&v)?)?;
+    } else {
+        ctx.out
+            .write_all(render::gc(&v, (ctx.now_ms)()).as_bytes())?;
     }
     Ok(EXIT_OK)
 }

@@ -225,6 +225,20 @@ pub enum Request {
         #[serde(default)]
         who: Option<String>,
     },
+    /// What each checkout keeps on the build caches here and on the peers; with `delete`,
+    /// first frees the rows in those states that no job uses (R-839).
+    Gc {
+        /// The states to free; empty only reports.
+        #[serde(default)]
+        delete: Vec<GcState>,
+        /// Checkouts to free as well, named as the report shows them (`~/…` or
+        /// `(unknown checkout …)`); one a job uses is still kept.
+        #[serde(default)]
+        checkouts: Vec<String>,
+        /// Days without a job after which a checkout is idle (default 14).
+        #[serde(default)]
+        idle_days: Option<u32>,
+    },
     /// Live samples and process groups of one job on this machine.
     JobMetrics {
         /// The job.
@@ -594,6 +608,8 @@ pub enum Response {
     History(HistoryView),
     /// Live samples, process groups and the usual peak of one job.
     JobMetrics(tasks_core::metrics::JobMetricsView),
+    /// Answer to `gc`.
+    Gc(Box<GcView>),
     /// Audit rows, newest first.
     Audit {
         /// The rows.
@@ -1554,6 +1570,155 @@ impl TripDetails {
         };
         format!("{} {}: {}{who}", self.resource, self.source, self.reason)
     }
+}
+
+/// What a checkout's build output is to `gc`, most protected first (R-839).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GcState {
+    /// A job of it is queued, waiting or running: never deleted.
+    InUse,
+    /// Used within the idle days.
+    Active,
+    /// No job for longer than the idle days.
+    Idle,
+    /// Its branch is fully merged into dev, main or master and nothing tracked is changed.
+    Merged,
+    /// Its working tree no longer exists.
+    Gone,
+    /// An output directory of the older layout no working tree links to.
+    Old,
+}
+
+impl GcState {
+    /// Every state, in order.
+    pub const ALL: [GcState; 6] = [
+        GcState::InUse,
+        GcState::Active,
+        GcState::Idle,
+        GcState::Merged,
+        GcState::Gone,
+        GcState::Old,
+    ];
+
+    /// The word the CLI shows and takes.
+    pub fn name(self) -> &'static str {
+        match self {
+            GcState::InUse => "in_use",
+            GcState::Active => "active",
+            GcState::Idle => "idle",
+            GcState::Merged => "merged",
+            GcState::Gone => "gone",
+            GcState::Old => "old",
+        }
+    }
+
+    /// The state named `s` (`in-use` also).
+    pub fn parse(s: &str) -> Option<GcState> {
+        let s = s.trim().replace('-', "_");
+        GcState::ALL.into_iter().find(|g| g.name() == s)
+    }
+
+    /// True for the states `gc` suggests freeing: nothing there is still worked on.
+    pub fn reclaimable(self) -> bool {
+        matches!(self, GcState::Merged | GcState::Gone | GcState::Old)
+    }
+
+    /// Sort order of the report: what can go first.
+    pub fn order(self) -> u8 {
+        match self {
+            GcState::Gone => 0,
+            GcState::Old => 1,
+            GcState::Merged => 2,
+            GcState::Idle => 3,
+            GcState::Active => 4,
+            GcState::InUse => 5,
+        }
+    }
+}
+
+/// The `gc` report (R-839).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GcView {
+    /// Days without a job after which a checkout counted as idle.
+    pub idle_days: u32,
+    /// This machine first, then each peer.
+    pub machines: Vec<GcMachine>,
+    /// One row per checkout holding anything, what can go first.
+    pub rows: Vec<GcRow>,
+    /// Caches every checkout shares: reported, never deleted.
+    #[serde(default)]
+    pub shared: Vec<GcShared>,
+    /// Anything else worth a line.
+    #[serde(default)]
+    pub notes: Vec<String>,
+    /// True when the request deleted.
+    #[serde(default)]
+    pub deleted: bool,
+}
+
+/// One machine's totals in a `gc` report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GcMachine {
+    /// Machine name.
+    pub name: String,
+    /// Bytes of checkouts' build output (and, on a peer, synced copies) it keeps for this machine;
+    /// after a delete, what is left.
+    pub held_bytes: u64,
+    /// Of those, the bytes in merged, gone and old rows still there.
+    pub reclaimable_bytes: u64,
+    /// Why the machine could not report.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// One checkout in a `gc` report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GcRow {
+    /// The working tree (home-relative), or `(unknown checkout …)`.
+    pub checkout: String,
+    /// Its branch; none when detached or gone.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// What it is to `gc`.
+    pub state: GcState,
+    /// The base it is merged into.
+    #[serde(default)]
+    pub merged_into: Option<String>,
+    /// Its last job, ms.
+    #[serde(default)]
+    pub last_used_ms: Option<i64>,
+    /// What each machine keeps of it.
+    #[serde(default)]
+    pub held: Vec<GcHeld>,
+    /// Bytes this request freed.
+    #[serde(default)]
+    pub freed_bytes: u64,
+    /// Why something of it was kept.
+    #[serde(default)]
+    pub kept: Option<String>,
+}
+
+/// What one machine keeps of a checkout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GcHeld {
+    /// Machine name.
+    pub machine: String,
+    /// Bytes.
+    pub bytes: u64,
+}
+
+/// A cache every checkout shares.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GcShared {
+    /// What it is.
+    pub name: String,
+    /// Where.
+    pub path: String,
+    /// Bytes.
+    pub bytes: u64,
+    /// How it is kept in bounds.
+    pub note: String,
 }
 
 /// A duration estimate.

@@ -5,6 +5,7 @@ use crate::actions::{self, Avail};
 use crate::audit::{self, AuditData, AuditFilter};
 use crate::columns::{self, MIN_WINDOW_WIDTH};
 use crate::detail;
+use crate::disk;
 use crate::feed::{self, ActionOutcome, Dashboard, DashboardResult, Feed, Wake};
 use crate::format;
 use crate::link::DaemonLink;
@@ -26,6 +27,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tasks_core::JobId;
 use tasks_core::metrics::JobMetricsView;
+use tasks_daemon::api::GcView;
 use tasks_daemon::api::HistoryView;
 
 const REFRESH: Duration = Duration::from_secs(1);
@@ -124,6 +126,13 @@ pub struct App {
     stalls: Option<Result<StallData, String>>,
     stalls_loading: bool,
     stalls_asked: bool,
+    disk_box: Arc<Mailbox<Result<GcView, String>>>,
+    disk: Option<Result<GcView, String>>,
+    disk_loading: bool,
+    disk_asked: bool,
+    /// Rows ticked for freeing, by the name the report gives them.
+    disk_ticked: BTreeSet<String>,
+    confirm_free: bool,
     metrics_box: Arc<Mailbox<MetricsReply>>,
     metrics: Option<MetricsState>,
     tz: jiff::tz::TimeZone,
@@ -182,6 +191,12 @@ impl App {
             stalls: None,
             stalls_loading: false,
             stalls_asked: false,
+            disk_box: Arc::new(Mailbox::new()),
+            disk: None,
+            disk_loading: false,
+            disk_asked: false,
+            disk_ticked: BTreeSet::new(),
+            confirm_free: false,
             metrics_box: Arc::new(Mailbox::new()),
             metrics: None,
             tz: jiff::tz::TimeZone::system(),
@@ -266,6 +281,23 @@ impl App {
     pub fn set_audit(&mut self, data: AuditData) {
         self.audit = Some(Ok(data));
         self.audit_asked = true;
+    }
+
+    /// Gives the Disk tab its report (for screenshots and tests).
+    pub fn set_disk(&mut self, view: GcView) {
+        disk::prune(&view, &mut self.disk_ticked);
+        self.disk = Some(Ok(view));
+        self.disk_asked = true;
+    }
+
+    /// Ticks a Disk row, as a click on it does.
+    pub fn tick_disk(&mut self, checkout: &str) {
+        self.disk_ticked.insert(checkout.to_string());
+    }
+
+    /// Opens the question before freeing the ticked rows, as the Free button does.
+    pub fn ask_free(&mut self) {
+        self.confirm_free = !self.disk_ticked.is_empty();
     }
 
     /// Gives the Stalls tab its rows (for screenshots).
@@ -374,6 +406,13 @@ impl App {
         if let Some(d) = self.stalls_box.take() {
             self.stalls = Some(d);
             self.stalls_loading = false;
+        }
+        if let Some(d) = self.disk_box.take() {
+            if let Ok(v) = &d {
+                disk::prune(v, &mut self.disk_ticked);
+            }
+            self.disk = Some(d);
+            self.disk_loading = false;
         }
         if let Some(l) = &mut self.log {
             if let Some(s) = l.updates.take() {
@@ -535,9 +574,11 @@ impl App {
                 Tab::Timings => self.stats_tab(ui, p),
                 Tab::Audit => self.audit_tab(ui, p),
                 Tab::Stalls => self.stalls_tab(ui, p),
+                Tab::Disk => self.disk_tab(ui, p),
             });
         self.cancel_dialog(ctx);
         self.drain_dialog(ctx);
+        self.free_dialog(ctx);
         self.log_window(ctx);
     }
 
@@ -547,6 +588,7 @@ impl App {
             || ctx.wants_keyboard_input()
             || self.cancel.is_some()
             || self.confirm_drain
+            || self.confirm_free
         {
             return;
         }
@@ -1575,6 +1617,186 @@ impl App {
                             .collect();
                         paint::table(ui, p, egui::Id::new("stalls"), &cols, &rows, &[0], &[]);
                     });
+            }
+        }
+    }
+
+    /// Sends a `gc` request in the background; its report replaces the one shown.
+    fn ask_disk(&mut self, req: tasks_daemon::api::Request) {
+        self.disk_asked = true;
+        self.disk_loading = true;
+        let link = Arc::clone(&self.link);
+        feed::spawn_once(
+            Arc::clone(&self.disk_box),
+            Arc::clone(&self.wake),
+            move || disk::fetch(link.as_ref(), &req),
+        );
+    }
+
+    /// The Disk tab (R-840): a card per machine, a row per checkout with a tick box, Free for
+    /// the ticked rows, and the shared caches, which are only shown.
+    fn disk_tab(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        if !self.disk_asked {
+            self.ask_disk(disk::report_request());
+        }
+        let view = match &self.disk {
+            Some(Ok(v)) => Some(v.clone()),
+            _ => None,
+        };
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!self.disk_loading, egui::Button::new("Refresh"))
+                .clicked()
+            {
+                self.disk_asked = false;
+            }
+            if let Some(v) = &view {
+                let all = disk::reclaimable(v);
+                if ui
+                    .add_enabled(
+                        !all.is_empty() && !self.disk_loading,
+                        egui::Button::new("Select merged, gone and old"),
+                    )
+                    .clicked()
+                {
+                    self.disk_ticked = all;
+                }
+                if ui
+                    .add_enabled(!self.disk_ticked.is_empty(), egui::Button::new("Clear"))
+                    .clicked()
+                {
+                    self.disk_ticked.clear();
+                }
+                let label = disk::free_label(v, &self.disk_ticked);
+                let can = !self.disk_ticked.is_empty() && !self.disk_loading;
+                if paint::button(ui, p, &label, false, true, can).clicked() && can {
+                    self.confirm_free = true;
+                }
+            }
+            if self.disk_loading {
+                ui.weak("measuring… (a few seconds)");
+            }
+        });
+        ui.add_space(8.0);
+        let v = match (&self.disk, view) {
+            (None, _) => {
+                ui.weak("Measuring build output on every machine…");
+                return;
+            }
+            (Some(Err(e)), _) => {
+                ui.colored_label(p.bad, e);
+                return;
+            }
+            (_, Some(v)) => v,
+            (Some(Ok(_)), None) => return,
+        };
+        paint::disk_cards(ui, p, &disk::cards(&v));
+        ui.add_space(6.0);
+        ui.weak(disk::summary(&v));
+        for n in &v.notes {
+            ui.colored_label(p.warn, n);
+        }
+        ui.add_space(4.0);
+        // the table stretches its last column: an empty one, so the sizes keep their width
+        let mut titles = disk::columns(&v);
+        let right: Vec<usize> = (5..titles.len()).collect();
+        let mut widths = vec![22.0, 64.0, 330.0, 200.0, 70.0];
+        widths.extend(titles.iter().skip(5).map(|_| 80.0));
+        titles.push(String::new());
+        widths.push(0.0);
+        let cols: Vec<(&str, f32)> = titles
+            .iter()
+            .map(String::as_str)
+            .zip(widths.iter().copied())
+            .collect();
+        let now_ms = self.vm.as_ref().map_or(0, |vm| vm.now_ms);
+        let rows: Vec<Vec<String>> = v
+            .rows
+            .iter()
+            .map(|r| {
+                let mut c = vec![String::new()];
+                c.extend(disk::cells(&v, r, now_ms));
+                c
+            })
+            .collect();
+        let ticks: Vec<Option<bool>> = v
+            .rows
+            .iter()
+            .map(|r| {
+                (disk::selectable(r) && r.freed_bytes == 0)
+                    .then(|| self.disk_ticked.contains(&r.checkout))
+            })
+            .collect();
+        let tips: Vec<String> = v
+            .rows
+            .iter()
+            .map(|r| match &r.kept {
+                Some(k) => format!("Kept: {k}"),
+                None => disk::state_help(r.state).to_string(),
+            })
+            .collect();
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let clicked = paint::tick_table(
+                    ui,
+                    p,
+                    egui::Id::new("disk"),
+                    &cols,
+                    &rows,
+                    &[],
+                    &right,
+                    &ticks,
+                    &tips,
+                );
+                for i in clicked {
+                    if let Some(r) = v.rows.get(i)
+                        && !self.disk_ticked.remove(&r.checkout)
+                    {
+                        self.disk_ticked.insert(r.checkout.clone());
+                    }
+                }
+                let shared = disk::shared_lines(&v);
+                if !shared.is_empty() {
+                    ui.add_space(14.0);
+                    paint::section_head(ui, p, "Shared by every checkout", "never freed here");
+                    for line in shared {
+                        ui.weak(line);
+                    }
+                }
+            });
+    }
+
+    fn free_dialog(&mut self, ctx: &egui::Context) {
+        if !self.confirm_free {
+            return;
+        }
+        let Some(Ok(v)) = &self.disk else {
+            self.confirm_free = false;
+            return;
+        };
+        let text = disk::confirm_text(v, &self.disk_ticked);
+        let mut decision: Option<bool> = None;
+        egui::Window::new("Free build output?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.set_max_width(460.0);
+                ui.label(text);
+                ui.horizontal(|ui| {
+                    if ui.button("Free").clicked() {
+                        decision = Some(true);
+                    }
+                    if ui.button("Keep it").clicked() {
+                        decision = Some(false);
+                    }
+                });
+            });
+        if let Some(go) = decision {
+            self.confirm_free = false;
+            if go && !self.disk_ticked.is_empty() {
+                self.ask_disk(disk::free_request(&self.disk_ticked));
             }
         }
     }

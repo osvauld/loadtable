@@ -4,7 +4,7 @@ use std::fmt::Write;
 use std::path::Path;
 use tasks_core::Phase;
 use tasks_daemon::api::{
-    EstimateView, GrepGroup, JobGrep, JobView, Source, StatusSnapshot, WaiterView,
+    EstimateView, GcState, GcView, GrepGroup, JobGrep, JobView, Source, StatusSnapshot, WaiterView,
 };
 use tasks_timing::dur::{fmt_eta, fmt_precise};
 
@@ -640,6 +640,143 @@ pub fn job_metrics(m: &tasks_core::metrics::JobMetricsView) -> String {
             format!("{} x{}", g.name, g.count)
         };
         out.push_str(&format!("  {name}: {cpu}, {}\n", fmt_bytes(g.rss_bytes)));
+    }
+    out
+}
+
+/// How long ago `ms` was, coarsely: `now`, `5h ago`, `3d ago`.
+fn ago(ms: Option<i64>, now_ms: i64) -> String {
+    let Some(t) = ms else {
+        return "-".to_string();
+    };
+    let secs = now_ms.saturating_sub(t).max(0) / 1000;
+    match secs {
+        s if s < 3600 => "now".to_string(),
+        s if s < 86_400 => format!("{}h ago", s / 3600),
+        s => format!("{}d ago", s / 86_400),
+    }
+}
+
+/// The `gc` report: per machine what checkouts keep and what can go, one row per checkout,
+/// the shared caches, and the command that frees the rest (R-839).
+pub fn gc(v: &GcView, now_ms: i64) -> String {
+    let mut out = String::new();
+    out.push_str("Build output kept per machine\n");
+    let width = v.machines.iter().map(|m| m.name.len()).max().unwrap_or(0);
+    for m in &v.machines {
+        match &m.error {
+            Some(e) => out.push_str(&format!("  {:width$}  could not report: {e}\n", m.name)),
+            None => out.push_str(&format!(
+                "  {:width$}  {} kept, {} can be freed\n",
+                m.name,
+                fmt_bytes(m.held_bytes),
+                fmt_bytes(m.reclaimable_bytes)
+            )),
+        }
+    }
+    let machines: Vec<&str> = v
+        .machines
+        .iter()
+        .filter(|m| m.error.is_none())
+        .map(|m| m.name.as_str())
+        .collect();
+    if v.rows.is_empty() {
+        out.push_str("\nNo checkout keeps build output.\n");
+    } else {
+        let mut head = format!(
+            "\n{:<8} {:<44} {:<20} {:<8}",
+            "STATE", "CHECKOUT", "BRANCH", "LAST JOB"
+        );
+        for m in &machines {
+            head.push_str(&format!(" {:>10}", truncate_end(m, 10)));
+        }
+        if v.deleted {
+            head.push_str(&format!(" {:>10}", "FREED"));
+        }
+        out.push_str(head.trim_end());
+        out.push('\n');
+        for r in &v.rows {
+            let mut line = format!(
+                "{:<8} {:<44} {:<20} {:<8}",
+                r.state.name(),
+                truncate_start(&r.checkout, 44),
+                truncate_end(r.branch.as_deref().unwrap_or("-"), 20),
+                ago(r.last_used_ms, now_ms)
+            );
+            for m in &machines {
+                let bytes: u64 = r
+                    .held
+                    .iter()
+                    .filter(|h| h.machine == *m)
+                    .map(|h| h.bytes)
+                    .sum();
+                let cell = if r.held.iter().any(|h| h.machine == *m) {
+                    fmt_bytes(bytes)
+                } else {
+                    "-".to_string()
+                };
+                line.push_str(&format!(" {cell:>10}"));
+            }
+            if v.deleted {
+                let freed = if r.freed_bytes > 0 {
+                    fmt_bytes(r.freed_bytes)
+                } else {
+                    "-".into()
+                };
+                line.push_str(&format!(" {freed:>10}"));
+            }
+            out.push_str(line.trim_end());
+            out.push('\n');
+            if let Some(k) = &r.kept {
+                out.push_str(&format!("         kept: {k}\n"));
+            }
+        }
+    }
+    if !v.shared.is_empty() {
+        out.push_str("\nShared by every checkout (gc leaves these alone)\n");
+        for s in &v.shared {
+            out.push_str(&format!(
+                "  {}: {} in {} ({})\n",
+                s.name,
+                fmt_bytes(s.bytes),
+                s.path,
+                s.note
+            ));
+        }
+    }
+    for n in &v.notes {
+        out.push_str(&format!("\n{n}\n"));
+    }
+    out.push('\n');
+    if v.deleted {
+        let freed: u64 = v.rows.iter().map(|r| r.freed_bytes).sum();
+        let n = v.rows.iter().filter(|r| r.freed_bytes > 0).count();
+        out.push_str(&format!(
+            "Freed {} from {n} checkout{}.\n",
+            fmt_bytes(freed),
+            if n == 1 { "" } else { "s" }
+        ));
+    } else {
+        let free: Vec<String> = v
+            .machines
+            .iter()
+            .filter(|m| m.reclaimable_bytes > 0)
+            .map(|m| format!("{} on {}", fmt_bytes(m.reclaimable_bytes), m.name))
+            .collect();
+        if free.is_empty() {
+            out.push_str("Nothing merged, gone or old to free.\n");
+        } else {
+            out.push_str(&format!(
+                "Free {} with: loadtable gc --delete merged,gone,old\n",
+                free.join(", ")
+            ));
+        }
+        if v.rows.iter().any(|r| r.state == GcState::Idle) {
+            out.push_str(&format!(
+                "Idle checkouts (no job in {} days) are kept; add idle to free them too.\n",
+                v.idle_days
+            ));
+        }
     }
     out
 }

@@ -2197,3 +2197,185 @@ fn r722_wait_gives_up_after_its_timeout_with_124_and_leaves_the_job_alone() {
         .count();
     assert_eq!(gets, 4, "polls at 0, 1, 2 and 3 s, then gives up");
 }
+
+fn gc_view(deleted: bool) -> tasks_daemon::api::GcView {
+    use tasks_daemon::api::{GcHeld, GcMachine, GcRow, GcShared, GcState, GcView};
+    let held = |m: &str, b: u64| GcHeld {
+        machine: m.into(),
+        bytes: b,
+    };
+    GcView {
+        idle_days: 14,
+        machines: vec![
+            GcMachine {
+                name: "laptop".into(),
+                held_bytes: 12 << 30,
+                reclaimable_bytes: 4 << 30,
+                error: None,
+            },
+            GcMachine {
+                name: "nixos".into(),
+                held_bytes: 3 << 30,
+                reclaimable_bytes: 1 << 30,
+                error: None,
+            },
+            GcMachine {
+                name: "mac".into(),
+                held_bytes: 0,
+                reclaimable_bytes: 0,
+                error: Some(
+                    "mac runs an older loadtabled that cannot report its cache; upgrade it".into(),
+                ),
+            },
+        ],
+        rows: vec![
+            GcRow {
+                checkout: "~/w/repo/.worktrees/done".into(),
+                branch: Some("done".into()),
+                state: GcState::Merged,
+                merged_into: Some("dev".into()),
+                last_used_ms: Some(0),
+                held: vec![held("laptop", 4 << 30), held("nixos", 1 << 30)],
+                freed_bytes: if deleted { 5 << 30 } else { 0 },
+                kept: None,
+            },
+            GcRow {
+                checkout: "~/w/repo".into(),
+                branch: Some("dev".into()),
+                state: GcState::Idle,
+                merged_into: None,
+                last_used_ms: Some(0),
+                held: vec![held("laptop", 8 << 30)],
+                freed_bytes: 0,
+                kept: None,
+            },
+        ],
+        shared: vec![GcShared {
+            name: "compiler cache (sccache)".into(),
+            path: "/c/sccache".into(),
+            bytes: 30 << 30,
+            note: "sccache keeps itself under 30G".into(),
+        }],
+        notes: vec![],
+        deleted,
+    }
+}
+
+// R-839
+#[test]
+fn r839_gc_shows_each_machine_and_checkout_and_how_to_free_the_rest() {
+    let c = Arc::new(FakeClient::from_fn(|req| match req {
+        Request::Gc { delete, .. } => Ok(Response::Gc(Box::new(gc_view(!delete.is_empty())))),
+        other => Err(ClientError::BadReply(format!("unexpected {other:?}"))),
+    }));
+    let r = Harness::default().run(&c, &["gc"]);
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(
+        r.out
+            .contains("laptop  12.0 GiB kept, 4.0 GiB can be freed"),
+        "{}",
+        r.out
+    );
+    assert!(
+        r.out
+            .contains("mac     could not report: mac runs an older loadtabled"),
+        "{}",
+        r.out
+    );
+    let done = r
+        .out
+        .lines()
+        .find(|l| l.contains(".worktrees/done"))
+        .unwrap();
+    assert!(
+        done.starts_with("merged") && done.contains("4.0 GiB") && done.contains("1.0 GiB"),
+        "{done}"
+    );
+    assert!(
+        r.out
+            .contains("compiler cache (sccache): 30.0 GiB in /c/sccache"),
+        "{}",
+        r.out
+    );
+    assert!(
+        r.out.contains(
+            "Free 4.0 GiB on laptop, 1.0 GiB on nixos with: loadtable gc --delete merged,gone,old"
+        ),
+        "{}",
+        r.out
+    );
+    assert!(
+        r.out
+            .contains("Idle checkouts (no job in 14 days) are kept"),
+        "{}",
+        r.out
+    );
+
+    let r = Harness::default().run(&c, &["gc", "--delete", "merged,gone", "--idle-days", "30"]);
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(
+        r.out.contains("Freed 5.0 GiB from 1 checkout."),
+        "{}",
+        r.out
+    );
+    assert!(matches!(
+        c.requests().last(),
+        Some(Request::Gc { delete, idle_days: Some(30), .. })
+            if *delete == vec![tasks_daemon::api::GcState::Merged, tasks_daemon::api::GcState::Gone]
+    ));
+    assert!(
+        !is_read_only(&c.requests()[1]),
+        "a gc that deletes is never resent"
+    );
+}
+
+// R-839
+#[test]
+fn r839_gc_refuses_to_delete_in_use_or_an_unknown_state_before_asking_the_daemon() {
+    let c = Arc::new(FakeClient::from_fn(|_| {
+        Err(ClientError::BadReply("asked".into()))
+    }));
+    let r = Harness::default().run(&c, &["gc", "--delete", "in-use"]);
+    assert_ne!(r.code, 0);
+    assert!(
+        r.err.contains("never deletes a checkout a job uses"),
+        "{}",
+        r.err
+    );
+    let r = Harness::default().run(&c, &["gc", "--delete", "stale"]);
+    assert!(
+        r.err
+            .contains("--delete takes merged, gone, old, idle or active"),
+        "{}",
+        r.err
+    );
+    assert!(c.requests().is_empty());
+}
+
+// R-840
+#[test]
+fn r840_gc_free_sends_each_checkout_as_a_full_path_or_the_reports_name() {
+    let c = Arc::new(FakeClient::from_fn(|req| match req {
+        Request::Gc { .. } => Ok(Response::Gc(Box::new(gc_view(true)))),
+        other => Err(ClientError::BadReply(format!("unexpected {other:?}"))),
+    }));
+    let dir = std::env::temp_dir();
+    let full = std::fs::canonicalize(&dir).unwrap().display().to_string();
+    let r = Harness::default().run(
+        &c,
+        &[
+            "gc",
+            "--free",
+            dir.to_str().unwrap(),
+            "--free",
+            "(unknown checkout 4ca7e0dc2b4d)",
+        ],
+    );
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(matches!(
+        c.requests().last(),
+        Some(Request::Gc { delete, checkouts, .. })
+            if delete.is_empty()
+                && *checkouts == vec![full.clone(), "(unknown checkout 4ca7e0dc2b4d)".to_string()]
+    ));
+}
