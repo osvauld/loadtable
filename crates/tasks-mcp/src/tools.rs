@@ -1246,6 +1246,7 @@ impl Tools {
         }
         let resp = self.call_daemon(&Request::Gc {
             delete,
+            checkouts: Vec::new(),
             idle_days: a.idle_days,
         })?;
         let Response::Gc(v) = resp else {

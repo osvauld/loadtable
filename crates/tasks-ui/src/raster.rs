@@ -382,6 +382,27 @@ mod tests {
              updated 3s ago Select a job to see its phases, folder and actions. \
              PROGRAM CPU IN CORES MEMORY usual peak last hour · the rest is in History",
         );
+        // the Disk tab: its buttons, the report's texts and the question before freeing
+        {
+            let v = fixtures::disk();
+            let all = crate::disk::reclaimable(&v);
+            texts.push_str("Select merged, gone and old Clear Free Keep it measuring… (a few seconds) \
+                 Measuring build output on every machine… Shared by every checkout never freed here \
+                 Free build output? Kept: ");
+            texts.push_str(&crate::disk::summary(&v));
+            texts.push_str(&crate::disk::confirm_text(&v, &all));
+            for c in crate::disk::cards(&v) {
+                texts.push_str(&c.line);
+            }
+            for t in crate::disk::columns(&v) {
+                texts.push_str(&t);
+            }
+            for r in &v.rows {
+                texts.push_str(&crate::disk::cells(&v, r, fixtures::NOW_MS).join(" "));
+                texts.push_str(crate::disk::state_help(r.state));
+            }
+            texts.push_str(&crate::disk::shared_lines(&v).join(" "));
+        }
         // the Audit tab: filters, column titles and the rows' own symbols
         texts.push_str("Action Peer Job Apply all name or DID id #101 did:key:z6Mk…EGta");
         for t in crate::audit::COLUMNS.iter().chain(&crate::audit::FAMILIES) {
@@ -707,6 +728,30 @@ mod tests {
                 true,
             ),
             (
+                "disk-dark",
+                {
+                    let mut a = App::fixed(&fixtures::idle(), dead_link());
+                    a.show_tab(Tab::Disk);
+                    a.set_disk(fixtures::disk());
+                    a.tick_disk("~/app-worktrees/v2");
+                    a.tick_disk("(unknown checkout 4ca7e0dc2b4d)");
+                    a
+                },
+                [1280, 560],
+                true,
+            ),
+            (
+                "disk-light",
+                {
+                    let mut a = App::fixed(&fixtures::idle(), dead_link());
+                    a.show_tab(Tab::Disk);
+                    a.set_disk(fixtures::disk());
+                    a
+                },
+                [1280, 560],
+                false,
+            ),
+            (
                 "stalls-dark",
                 {
                     let mut a = App::fixed(&fixtures::idle(), dead_link());
@@ -792,6 +837,13 @@ mod tests {
 
     /// Each text a frame of `app` draws, with where it lands.
     fn drawn(app: &mut App) -> Vec<(String, egui::Rect)> {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        drawn_in(app, &ctx)
+    }
+
+    /// [`drawn`] in a context earlier frames ran in, so a window opened then is laid out.
+    fn drawn_in(app: &mut App, ctx: &egui::Context) -> Vec<(String, egui::Rect)> {
         fn walk(shape: &egui::Shape, into: &mut Vec<(String, egui::Rect)>) {
             match shape {
                 egui::Shape::Text(t) => into.push((
@@ -806,8 +858,6 @@ mod tests {
                 _ => {}
             }
         }
-        let ctx = egui::Context::default();
-        crate::theme::install(&ctx);
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -964,6 +1014,52 @@ mod tests {
         // while the question is open the arrow keys do not move the list behind it
         frame(&mut app, &ctx, vec![key(egui::Key::ArrowDown)]);
         assert_eq!(app.selected_id(), None);
+    }
+
+    // R-840
+    #[test]
+    fn r840_the_disk_tab_frees_only_after_asking_and_only_the_ticked_rows() {
+        use tasks_daemon::api::Request;
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let link = dead_link();
+        let mut app = App::fixed(&fixtures::idle(), link.clone());
+        app.show_tab(Tab::Disk);
+        app.set_disk(fixtures::disk());
+        let text = drawn_text(&mut app).join("\n");
+        for want in [
+            "build cache 134 GiB · 98 GiB can be freed",
+            "could not report: mac runs an older loadtabled",
+            "~/app-worktrees/v2",
+            "v2 (in dev)",
+            "in use",
+            "Shared by every checkout",
+            "Free 0 B from 0 checkouts",
+        ] {
+            assert!(text.contains(want), "{want:?} not drawn in:\n{text}");
+        }
+        app.tick_disk("~/app-worktrees/v2");
+        app.tick_disk("~/task-manager");
+        app.set_disk(fixtures::disk());
+        app.ask_free();
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![]);
+        assert!(
+            link.requests().iter().all(|r| !matches!(
+                r,
+                Request::Gc { checkouts, .. } if !checkouts.is_empty()
+            )),
+            "nothing was freed by opening the question"
+        );
+        let text = drawn_in(&mut app, &ctx)
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("Free 46 GiB from 1 checkout?"),
+            "the in-use row is never ticked: {text}"
+        );
     }
 
     fn stall_rows() -> crate::stalls::StallData {

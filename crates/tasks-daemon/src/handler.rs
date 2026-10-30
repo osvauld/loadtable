@@ -226,9 +226,13 @@ impl Scheduler {
                 reason,
             } => self.prioritize(id, &who, priority, reason.as_deref()),
             Request::Status => Ok(Response::Status(Box::new(self.status()))),
-            Request::Gc { delete, idle_days } => {
-                Ok(Response::Gc(Box::new(self.gc(&delete, idle_days)?)))
-            }
+            Request::Gc {
+                delete,
+                checkouts,
+                idle_days,
+            } => Ok(Response::Gc(Box::new(
+                self.gc(&delete, &checkouts, idle_days)?,
+            ))),
             Request::JobMetrics { id } => {
                 let rec = self.record(id)?;
                 Ok(Response::JobMetrics(self.api_job_metrics(&rec)))

@@ -2320,7 +2320,7 @@ fn r839_gc_shows_each_machine_and_checkout_and_how_to_free_the_rest() {
     );
     assert!(matches!(
         c.requests().last(),
-        Some(Request::Gc { delete, idle_days: Some(30) })
+        Some(Request::Gc { delete, idle_days: Some(30), .. })
             if *delete == vec![tasks_daemon::api::GcState::Merged, tasks_daemon::api::GcState::Gone]
     ));
     assert!(
@@ -2350,4 +2350,32 @@ fn r839_gc_refuses_to_delete_in_use_or_an_unknown_state_before_asking_the_daemon
         r.err
     );
     assert!(c.requests().is_empty());
+}
+
+// R-840
+#[test]
+fn r840_gc_free_sends_each_checkout_as_a_full_path_or_the_reports_name() {
+    let c = Arc::new(FakeClient::from_fn(|req| match req {
+        Request::Gc { .. } => Ok(Response::Gc(Box::new(gc_view(true)))),
+        other => Err(ClientError::BadReply(format!("unexpected {other:?}"))),
+    }));
+    let dir = std::env::temp_dir();
+    let full = std::fs::canonicalize(&dir).unwrap().display().to_string();
+    let r = Harness::default().run(
+        &c,
+        &[
+            "gc",
+            "--free",
+            dir.to_str().unwrap(),
+            "--free",
+            "(unknown checkout 4ca7e0dc2b4d)",
+        ],
+    );
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(matches!(
+        c.requests().last(),
+        Some(Request::Gc { delete, checkouts, .. })
+            if delete.is_empty()
+                && *checkouts == vec![full.clone(), "(unknown checkout 4ca7e0dc2b4d)".to_string()]
+    ));
 }

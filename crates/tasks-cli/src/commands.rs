@@ -98,9 +98,10 @@ fn dispatch(ctx: &mut Ctx<'_>, cmd: &Command) -> Result<i32, CliError> {
         Command::Metrics { id, json } => metrics(ctx, *id, *json),
         Command::Gc {
             delete,
+            free,
             idle_days,
             json,
-        } => gc(ctx, delete, *idle_days, *json),
+        } => gc(ctx, delete, free, *idle_days, *json),
         Command::Cancel { id, who, reason } => cancel(ctx, *id, who.as_deref(), reason.as_deref()),
         Command::Prioritize {
             id,
@@ -617,10 +618,11 @@ fn metrics(ctx: &mut Ctx<'_>, id: i64, json: bool) -> Result<i32, CliError> {
 }
 
 /// `gc`: what each checkout keeps on every machine's build cache, and with `--delete` frees the
-/// rows in those states (R-839).
+/// rows in those states (R-839), with `--free` the checkouts named (R-840).
 fn gc(
     ctx: &mut Ctx<'_>,
     delete: &[String],
+    free: &[String],
     idle_days: Option<u32>,
     json: bool,
 ) -> Result<i32, CliError> {
@@ -640,8 +642,17 @@ fn gc(
             }
         }
     }
+    // a path on disk goes as its full form; a report name like `(unknown checkout …)` as is
+    let checkouts = free
+        .iter()
+        .map(|c| match std::fs::canonicalize(c) {
+            Ok(p) if !c.starts_with('(') => p.display().to_string(),
+            _ => c.clone(),
+        })
+        .collect();
     let resp = ctx.client.call(&Request::Gc {
         delete: states,
+        checkouts,
         idle_days,
     })?;
     let Response::Gc(v) = resp else {

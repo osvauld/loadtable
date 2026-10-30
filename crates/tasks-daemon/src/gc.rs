@@ -257,10 +257,12 @@ fn shown(p: &Path, home: Option<&Path>) -> String {
 }
 
 impl Scheduler {
-    /// The `gc` report, deleting the rows whose state is in `delete` first (R-839).
+    /// The `gc` report, deleting first the rows whose state is in `delete` and the rows named
+    /// in `checkouts` (R-839, R-840).
     pub(crate) fn gc(
         &self,
         delete: &[GcState],
+        checkouts: &[String],
         idle_days: Option<u32>,
     ) -> Result<GcView, ApiError> {
         let idle_days = idle_days.unwrap_or(DEFAULT_IDLE_DAYS);
@@ -455,9 +457,30 @@ impl Scheduler {
         // rows holding nothing anywhere are not worth a line
         drafts.retain(|d| d.row.held.iter().any(|h| h.bytes > 0) || d.row.state == GcState::InUse);
 
-        let deleted = !delete.is_empty();
+        let deleted = !delete.is_empty() || !checkouts.is_empty();
+        let mut notes = Vec::new();
+        // a full path names the same row as its `~/…` form
+        let checkouts: Vec<String> = checkouts
+            .iter()
+            .map(|c| match c.starts_with('/') {
+                true => shown(Path::new(c.trim_end_matches('/')), home.as_deref()),
+                false => c.clone(),
+            })
+            .collect();
+        let checkouts = checkouts.as_slice();
         if deleted {
-            self.gc_delete(&mut drafts, delete, &cache_root);
+            self.gc_delete(&mut drafts, delete, checkouts, &cache_root);
+            for c in checkouts {
+                match drafts.iter_mut().find(|d| d.row.checkout == *c) {
+                    Some(d) if d.row.state == GcState::InUse => {
+                        d.row.kept = Some("a job uses it; free it once the job ends".into());
+                    }
+                    Some(_) => {}
+                    None => notes.push(format!(
+                        "{c} holds no build output here; run loadtable gc to see what does"
+                    )),
+                }
+            }
         }
         for m in &mut machines {
             m.reclaimable_bytes = drafts
@@ -480,16 +503,24 @@ impl Scheduler {
             machines,
             rows,
             shared: self.gc_shared(),
-            notes: Vec::new(),
+            notes,
             deleted,
         })
     }
 
-    /// Deletes the output and peer copies of every row in `delete` that is not in use.
-    fn gc_delete(&self, drafts: &mut [Draft], delete: &[GcState], cache_root: &Path) {
+    /// Deletes the output and peer copies of every row in `delete` or named in `checkouts`
+    /// that is not in use.
+    fn gc_delete(
+        &self,
+        drafts: &mut [Draft],
+        delete: &[GcState],
+        checkouts: &[String],
+        cache_root: &Path,
+    ) {
         let mut per_peer: BTreeMap<String, Vec<CheckoutId>> = BTreeMap::new();
         for d in drafts.iter_mut() {
-            if d.row.state == GcState::InUse || !delete.contains(&d.row.state) {
+            let chosen = delete.contains(&d.row.state) || checkouts.contains(&d.row.checkout);
+            if d.row.state == GcState::InUse || !chosen {
                 continue;
             }
             let local = d
