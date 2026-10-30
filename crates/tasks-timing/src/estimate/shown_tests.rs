@@ -209,6 +209,7 @@ fn eta(median: f64) -> Eta {
         median_secs: median,
         p90_secs: median * 2.0,
         low_secs: None,
+        high_secs: None,
         samples: 3,
         machine: "laptop".into(),
         rough: false,
@@ -223,7 +224,8 @@ fn r675_past_the_usual_time_is_over_the_usual_never_zero_left() {
     assert_eq!(
         e.left(None, 137.0),
         Left::Over {
-            usual_secs: 57.0,
+            fastest_secs: 57.0,
+            slowest_secs: 57.0,
             by_secs: 80.0
         }
     );
@@ -231,6 +233,69 @@ fn r675_past_the_usual_time_is_over_the_usual_never_zero_left() {
     assert!(matches!(e.left(Some(0.0), 137.0), Left::Over { .. }));
     // while targets still see work ahead they are believed
     assert_eq!(e.left(Some(30.0), 137.0), Left::Secs(30.0));
+}
+
+#[test]
+fn r837_an_estimate_is_the_fastest_to_the_slowest_recent_run() {
+    // the same warm build: nothing to rebuild takes seconds, a changed crate a minute
+    let mut h = MemHistory::new();
+    for (i, secs) in [5.0, 9.0, 12.0, 20.0, 31.0, 56.0].into_iter().enumerate() {
+        h.add(k("laptop"), s(secs, Cache::Warm, Outcome::Passed, i as u64));
+    }
+    let shown = show(&h, Cache::Warm, &[]);
+    let e = shown.eta().unwrap();
+    assert_eq!((e.low_secs, e.high_secs), (Some(5.0), Some(56.0)));
+    assert_eq!(e.text(), "~5s–56s");
+    assert_eq!(
+        shown.to_string(),
+        "~5s–56s (median 16s) from 6 passing runs on laptop"
+    );
+    // runs that round alike are one number
+    let mut h = MemHistory::new();
+    for i in 0..6u64 {
+        h.add(
+            k("laptop"),
+            s(240.0 + i as f64, Cache::Warm, Outcome::Passed, i),
+        );
+    }
+    assert_eq!(show(&h, Cache::Warm, &[]).eta().unwrap().text(), "~4m");
+}
+
+#[test]
+fn r837_a_running_job_has_time_left_to_the_fastest_and_slowest_and_is_over_only_past_both() {
+    let e = Eta {
+        median_secs: 16.0,
+        p90_secs: 56.0,
+        low_secs: Some(5.0),
+        high_secs: Some(56.0),
+        samples: 6,
+        machine: "laptop".into(),
+        rough: false,
+        basis: EtaBasis::Exact,
+    };
+    assert_eq!(
+        e.left(None, 2.0),
+        Left::Between {
+            low_secs: 3.0,
+            high_secs: 54.0
+        }
+    );
+    // past the median and the fastest: still inside what recent runs took, not "over"
+    assert_eq!(
+        e.left(None, 30.0),
+        Left::Between {
+            low_secs: 0.0,
+            high_secs: 26.0
+        }
+    );
+    assert_eq!(
+        e.left(None, 86.0),
+        Left::Over {
+            fastest_secs: 5.0,
+            slowest_secs: 56.0,
+            by_secs: 30.0
+        }
+    );
 }
 
 fn gk(recipe: &str, machine: &str) -> SampleKey {
@@ -264,7 +329,7 @@ fn r824_a_command_with_no_runs_is_estimated_from_its_familys_runs_here() {
         (&EtaBasis::Similar, 1627.0, 3)
     );
     assert!(e.rough);
-    assert_eq!(e.text(), "~27m (like 3 similar builds here)");
+    assert_eq!(e.text(), "~13m–31m (like 3 similar builds here)");
     // a family's runs of the other warmth do not make a plain estimate
     assert_ne!(
         gshow(&h, REL_LIB, Cache::Warm).eta().unwrap().basis,
@@ -302,16 +367,11 @@ fn r823_with_no_relative_the_tools_builds_here_give_a_range_of_the_same_warmth()
             tool: "gradle".into()
         }
     );
-    // the upper end is the p90 of the builds, floored at 1.5x their median (R-826)
+    // the range is the fastest build to the slowest (R-837); the p90 is floored at 1.5x the
+    // median (R-826)
     assert_eq!((e.low_secs, e.p90_secs), (Some(893.0), 2116.5));
-    assert_eq!(
-        e.text(),
-        format!(
-            "~{}–{} (rough: gradle builds here)",
-            crate::dur::fmt_eta(893.0),
-            crate::dur::fmt_eta(2116.5)
-        )
-    );
+    assert_eq!(e.high_secs, Some(1929.0));
+    assert_eq!(e.text(), "~15m–32m (rough: gradle builds here)");
     let warm = gshow(&h, REL_1631, Cache::Warm);
     assert_eq!(warm.eta().unwrap().median_secs, 22.0, "warm builds only");
 }
@@ -353,10 +413,7 @@ fn r826_the_p90_sees_twenty_runs_and_is_never_under_one_and_a_half_times_the_med
         e.p90_secs, 150.0,
         "six like runs cannot see a tail: the floor"
     );
-    assert_eq!(
-        shown.to_string(),
-        "~2m (p90 3m) from 6 passing runs on laptop"
-    );
+    assert_eq!(shown.to_string(), "~2m from 6 passing runs on laptop");
     // three slow runs older than the last six: the median stays, the p90 sees them
     let mut h = MemHistory::new();
     for i in 0..20u64 {
@@ -409,7 +466,7 @@ fn r827_a_filtered_test_run_is_estimated_from_its_unfiltered_relatives_here() {
         (&EtaBasis::Similar, 4, 42.0)
     );
     assert!(e.rough);
-    assert_eq!(e.text(), "~42s (like 4 similar builds here)");
+    assert_eq!(e.text(), "~30s–48s (like 4 similar builds here)");
     // planning takes the family's runs as measured
     let p = planning(&h, &gk(r72, "laptop"), &m("laptop", 8), &[]).unwrap();
     assert_eq!((p.basis, p.median_secs), (Basis::Passed, 42.0));

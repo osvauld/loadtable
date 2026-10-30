@@ -578,25 +578,20 @@ pub fn transfer_text(t: &tasks_core::TransferProgress) -> String {
     }
 }
 
-/// What a running job says about its time: time left (with `rough` when it rests on another
-/// machine's runs), "over the usual", or why there is no estimate. Never a bare `0s left`.
+/// What a running job says about its time: time left, a range when recent runs differ (with
+/// `rough` when it rests on another machine's runs), "longer than recent runs", or why there
+/// is no estimate. Never a bare `0s left`.
 pub fn running_eta_text(r: &tasks_daemon::api::RunningView) -> String {
     // the checkout going out or the outputs coming back says more than the command's time
     if let Some(t) = &r.transfer {
         return format!(", {}", transfer_text(t));
     }
-    if let (Some(usual), Some(by)) = (r.usual_secs, r.over_by_secs) {
-        return format!(
-            ", over the usual by {} (usual {})",
-            fmt_precise(by),
-            fmt_precise(usual)
-        );
+    if let Some(over) = r.over_text(fmt_precise) {
+        return format!(", {over}");
     }
-    match (r.eta_secs, &r.eta_rough_from, &r.no_eta_why) {
-        (Some(e), Some(from), _) => {
-            format!(", ~{} left (rough, from {from}'s runs)", fmt_eta(e))
-        }
-        (Some(e), None, _) => format!(", ~{} left", fmt_eta(e)),
+    match (r.left_text(fmt_eta), &r.eta_rough_from, &r.no_eta_why) {
+        (Some(left), Some(from), _) => format!(", {left} (rough, from {from}'s runs)"),
+        (Some(left), None, _) => format!(", {left}"),
         (None, _, Some(why)) => format!(", no estimate: {why}"),
         (None, _, None) => String::new(),
     }

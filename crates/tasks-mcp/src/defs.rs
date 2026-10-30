@@ -104,7 +104,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     "allow_script": {"type": "boolean", "description": "Run a `sh -c`/`bash -c` script of several commands as one job. Without it such a script is refused: it gets no timing history or estimate. Prefer submit_steps, run_suite, or a script file in the repo."},
                     "after": {"type": "array", "items": {"type": "integer", "minimum": 1}, "description": "Job ids that must pass before this job may start."},
                     "fetch": {"type": "array", "items": {"type": "string"}, "maxItems": 256, "description": "Output files to bring back to this checkout after the job ran on a peer, as paths relative to the checkout root (e.g. android/app/build/outputs/apk/debug/app-debug.apk). Absolute paths and .. are refused. The result of each is reported by wait/get; a job that ran here already has its files."},
-                    "interactive": {"type": "boolean", "description": "The job opens a window or waits on a person (a GUI, a REPL): it runs as long as it is used, so it gets no estimate or \"over the usual\" warning and its runs teach no timings."},
+                    "interactive": {"type": "boolean", "description": "The job opens a window or waits on a person (a GUI, a REPL): it runs as long as it is used, so it gets no estimate or \"longer than recent runs\" warning and its runs teach no timings."},
                     "priority": priority.clone(),
                     "reason": reason.clone()
                 }),

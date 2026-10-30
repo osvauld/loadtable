@@ -1328,17 +1328,16 @@ fn status_text(s: &StatusSnapshot) -> String {
             r.owner,
             r.command,
             dur(r.elapsed_secs),
-            match (r.usual_secs, r.over_by_secs, r.eta_secs, &r.no_eta_why) {
-                (Some(u), Some(by), _, _) =>
-                    format!(", over the usual by {} (usual {})", dur(by), dur(u)),
-                (_, _, Some(e), _) => {
+            match (r.over_text(dur), r.left_text(dur), &r.no_eta_why) {
+                (Some(over), _, _) => format!(", {over}"),
+                (None, Some(left), _) => {
                     let rough = r
                         .eta_rough_from
                         .as_ref()
                         .map_or(String::new(), |m| format!(" (rough, from {m}'s runs)"));
-                    format!(", about {} left{rough}", dur(e))
+                    format!(", {left}{rough}")
                 }
-                (_, _, None, Some(why)) => format!(", no estimate: {why}"),
+                (None, None, Some(why)) => format!(", no estimate: {why}"),
                 _ => String::new(),
             }
         ));

@@ -658,10 +658,13 @@ fn state_cell(i: &StateInput) -> StateCell {
                 .unwrap_or(0.0);
             // a bar is drawn only when something backs it: targets done of expected, or time
             // against an estimate from passing runs. Otherwise the elapsed time and the reason
-            // (R-671); past the usual time it says so, never "0s left" (R-675).
-            let left_text = |r: &RunningView, e: f64| match &r.eta_rough_from {
-                Some(m) => format!("~{} left (rough, from {m}'s runs)", format::duration(e)),
-                None => format!("~{} left", format::duration(e)),
+            // (R-671); past every recent run it says so, never "0s left" (R-675, R-837).
+            let left_text = |r: &RunningView| {
+                let left = r.left_text(format::duration).unwrap_or_default();
+                match &r.eta_rough_from {
+                    Some(m) => format!("{left} (rough, from {m}'s runs)"),
+                    None => left,
+                }
             };
             // the checkout going out, or the outputs coming back once the command is over: that
             // transfer is what the job is doing, so it takes the cell (R-801)
@@ -676,23 +679,26 @@ fn state_cell(i: &StateInput) -> StateCell {
                 Some(r) if r.over_by_secs.is_some() => (
                     None,
                     format!(
-                        "over the usual by {}",
+                        "longer than recent runs by {}",
                         format::duration(r.over_by_secs.unwrap_or(0.0))
                     ),
-                    format!("usual {}", format::duration(r.usual_secs.unwrap_or(0.0))),
+                    format!(
+                        "recent runs {}",
+                        r.recent_text(format::duration).unwrap_or_default()
+                    ),
                 ),
                 Some(r) if r.total_targets > 0 => (
                     Some(r.done_targets as f32 / r.total_targets as f32),
                     format!("{} of {} targets", r.done_targets, r.total_targets),
                     r.eta_secs
-                        .map_or_else(|| i.age.to_string(), |e| left_text(r, e)),
+                        .map_or_else(|| i.age.to_string(), |_| left_text(r)),
                 ),
                 Some(r) if r.eta_secs.is_some() => {
                     let e = r.eta_secs.unwrap_or(0.0);
                     (
                         Some((elapsed / (elapsed + e).max(1.0)) as f32),
                         "estimated from passing runs".to_string(),
-                        left_text(r, e),
+                        left_text(r),
                     )
                 }
                 Some(r) => (
@@ -859,8 +865,11 @@ fn job_row(
                 format!("~{}", format::duration(e)),
                 format!("targets {}/{}", r.done_targets, r.total_targets),
             ),
-            Some(e) => (
-                format!("~{}", format::duration(e)),
+            Some(_) => (
+                r.left_text(format::duration)
+                    .unwrap_or_default()
+                    .trim_end_matches(" left")
+                    .to_string(),
                 r.eta_rough_from
                     .as_ref()
                     .map_or("passing runs".to_string(), |m| {
@@ -872,7 +881,10 @@ fn job_row(
                     "over by {}",
                     format::duration(r.over_by_secs.unwrap_or(0.0))
                 ),
-                format!("usual {}", format::duration(r.usual_secs.unwrap_or(0.0))),
+                format!(
+                    "recent runs {}",
+                    r.recent_text(format::duration).unwrap_or_default()
+                ),
             ),
             None => (
                 UNKNOWN.to_string(),
@@ -2029,8 +2041,7 @@ mod tests {
     }
 
     #[test]
-    fn r671_r672_r675_the_state_cell_draws_a_bar_only_for_a_real_estimate_and_never_says_zero_left()
-    {
+    fn r671_r672_r675_r837_the_state_cell_bar_and_time_left_rest_on_real_runs() {
         let cell = |f: &dyn Fn(&mut RunningView)| {
             let mut d = fixtures::busy();
             for r in d.status.running.iter_mut().filter(|r| r.id.0 == 102) {
@@ -2057,16 +2068,22 @@ mod tests {
         });
         assert!(c.bar.is_some());
         assert_eq!(c.right, "~4m00s left (rough, from nixos's runs)");
-        // past the usual time: said plainly, no bar implying it is nearly done
+        // recent runs that differ: the time left is a range (R-837)
+        let c = cell(&|r| {
+            r.eta_secs = Some(54.0);
+            r.eta_low_secs = Some(3.0);
+        });
+        assert_eq!(c.right, "~3s–54s left");
+        // past every recent run: said plainly, no bar implying it is nearly done
         let c = cell(&|r| {
             r.eta_secs = None;
-            r.usual_secs = Some(57.0);
+            r.recent_secs = Some((5.0, 57.0));
             r.over_by_secs = Some(80.0);
         });
         assert_eq!(c.bar, None);
         assert_eq!(
             (c.left.as_str(), c.right.as_str()),
-            ("over the usual by 1m20s", "usual 57s")
+            ("longer than recent runs by 1m20s", "recent runs 5s–57s")
         );
     }
 
