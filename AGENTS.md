@@ -8,7 +8,7 @@ are gone from the machines: never run `tasks2`, `tasks2d` or the retired v1 `tas
 ## Builds and tests go through LoadTable itself
 
 Run every cargo build, test and clippy through the installed `loadtable`
-(`~/.local/bin/loadtable`; Claude sessions can use the LoadTable MCP tools, server `tasks2`),
+(`~/.local/bin/loadtable`; Claude sessions can use the LoadTable MCP tools, server `loadtable`, tools `mcp__loadtable__*`),
 never bare `cargo` in a shell:
 
 ```sh
