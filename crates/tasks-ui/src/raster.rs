@@ -750,6 +750,75 @@ mod tests {
         }
     }
 
+    /// The shots on loadtable.osvauld.com, at twice the scale for sharp screens: the queue as
+    /// the front page's preview, and the whole window with a job open. Written with the others
+    /// when `TASKS_UI_SCREENSHOT_DIR` is set.
+    #[test]
+    fn site_screenshots() {
+        let dir = std::env::var_os("TASKS_UI_SCREENSHOT_DIR").map(std::path::PathBuf::from);
+        for dark in [true, false] {
+            let theme = if dark { "dark" } else { "light" };
+            let hero = App::fixed(&fixtures::mac(), dead_link());
+            let mut window = App::fixed(&fixtures::mac(), dead_link());
+            window.select(101);
+            window.set_metrics(101, fixtures::metrics_running());
+            for (name, mut app, size) in [
+                (format!("site-hero-{theme}"), hero, [1520, 1400]),
+                (format!("site-window-{theme}"), window, [2360, 1520]),
+            ] {
+                let rgb = render(&mut app, size, 2.0, dark);
+                assert!(lit_pixels(&rgb) > 20_000, "{name}");
+                if let Some(dir) = &dir {
+                    let _ = std::fs::create_dir_all(dir);
+                    assert_eq!(
+                        write_png(&dir.join(format!("{name}.png")), &rgb, size),
+                        Ok(())
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every text one frame of `app` draws.
+    fn drawn_text(app: &mut App) -> Vec<String> {
+        fn walk(shape: &egui::Shape, into: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(t) => into.push(t.galley.text().to_string()),
+                egui::Shape::Vec(v) => {
+                    for s in v {
+                        walk(s, into);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1400.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        let out = ctx.run(input, |ctx| app.draw(ctx));
+        let mut texts = Vec::new();
+        for c in &out.shapes {
+            walk(&c.shape, &mut texts);
+        }
+        texts
+    }
+
+    // R-833
+    #[test]
+    fn r833_the_window_says_loadtable_not_its_old_name() {
+        assert_eq!(crate::app::NAME, "LoadTable");
+        assert_eq!(crate::app::APP_ID, "loadtable");
+        let texts = drawn_text(&mut App::fixed(&fixtures::busy(), dead_link()));
+        assert!(texts.iter().any(|t| t == "LoadTable"), "{texts:?}");
+        assert!(!texts.iter().any(|t| t == "tasks"), "{texts:?}");
+    }
+
     /// Runs one frame of `app` with `events` as input.
     fn frame(app: &mut App, ctx: &egui::Context, events: Vec<egui::Event>) {
         let input = egui::RawInput {
