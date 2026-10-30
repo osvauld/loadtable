@@ -419,7 +419,7 @@ impl Scheduler {
                                     row: GcRow {
                                         checkout: format!(
                                             "(unknown checkout {})",
-                                            &h.checkout
+                                            h.checkout
                                                 .as_str()
                                                 .chars()
                                                 .take(12)
