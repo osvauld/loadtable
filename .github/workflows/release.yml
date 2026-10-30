@@ -1,9 +1,12 @@
 name: Release builds
 
-# Pushing a vX.Y.Z tag builds the binaries for every published target and drafts the GitHub release
-# with them. Publishing that draft (by hand, after testing) triggers publish-r2.yml.
+# A merge to main whose workspace version has no vX.Y.Z tag yet builds the binaries for every
+# published target, tags that commit and drafts the GitHub release with them; when the tag exists
+# the run stops after the version check. Pushing a vX.Y.Z tag by hand does the same for that tag.
+# Publishing the draft (by hand, after testing) triggers publish-r2.yml.
 on:
   push:
+    branches: [main]
     tags: ['v*']
   workflow_dispatch:
 
@@ -22,29 +25,50 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
+      # true when this run builds and drafts a release
+      release: ${{ steps.version.outputs.release }}
     steps:
       - uses: actions/checkout@v4
       - id: version
         name: Validate release version
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          python3 - <<'PY'
+          # on main, a version already tagged is already released (or being released): stop here
+          tagged=false
+          if [ "$GITHUB_REF_TYPE" = branch ]; then
+            version=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['workspace']['package']['version'])")
+            if gh api "repos/$GH_REPO/git/ref/tags/v$version" >/dev/null 2>&1; then
+              tagged=true
+              echo "v$version is already tagged; nothing to release."
+            fi
+          fi
+          TAGGED=$tagged python3 - <<'PY'
           import os, re, tomllib
           with open('Cargo.toml', 'rb') as f:
               version = tomllib.load(f)['workspace']['package']['version']
-          if not re.fullmatch(r'\d+\.\d+\.\d+', version):
-              raise SystemExit('Only stable X.Y.Z versions are released')
-          if os.environ['GITHUB_REF_TYPE'] == 'tag' and os.environ['GITHUB_REF_NAME'] != f'v{version}':
-              raise SystemExit(f'Tag {os.environ["GITHUB_REF_NAME"]} does not match the workspace version {version}')
-          notes = f'docs/releases/v{version}.md'
-          if os.environ['GITHUB_REF_TYPE'] == 'tag' and not (os.path.isfile(notes) and os.path.getsize(notes)):
-              raise SystemExit(f'No release notes for v{version}: add {notes}')
+          ref_type, ref_name = os.environ['GITHUB_REF_TYPE'], os.environ['GITHUB_REF_NAME']
+          pushed_main = os.environ['GITHUB_EVENT_NAME'] == 'push' and ref_type == 'branch' and ref_name == 'main'
+          release = ref_type == 'tag' or (pushed_main and os.environ['TAGGED'] != 'true')
+          if release:
+              if not re.fullmatch(r'\d+\.\d+\.\d+', version):
+                  raise SystemExit('Only stable X.Y.Z versions are released')
+              if ref_type == 'tag' and ref_name != f'v{version}':
+                  raise SystemExit(f'Tag {ref_name} does not match the workspace version {version}')
+              notes = f'docs/releases/v{version}.md'
+              if not (os.path.isfile(notes) and os.path.getsize(notes)):
+                  raise SystemExit(f'No release notes for v{version}: add {notes} and merge it to main')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               f.write(f'version={version}\n')
+              f.write(f'release={str(release).lower()}\n')
           PY
 
   build:
     needs: version
+    # a manual run on a branch builds without tagging or drafting, to try the build
+    if: needs.version.outputs.release == 'true' || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
@@ -113,7 +137,7 @@ jobs:
           if-no-files-found: error
 
   draft-release:
-    if: github.ref_type == 'tag'
+    if: needs.version.outputs.release == 'true'
     needs: [version, build]
     runs-on: ubuntu-24.04
     permissions:
@@ -133,6 +157,11 @@ jobs:
           TAG: v${{ needs.version.outputs.version }}
         run: |
           (cd artifacts && sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS)
+          # a merge to main tags the commit it built; a pushed tag is already there
+          if [ "$GITHUB_REF_TYPE" = branch ]; then
+            gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA" >/dev/null
+            echo "Tagged $GITHUB_SHA as $TAG"
+          fi
           if gh release view "$TAG" >/dev/null 2>&1; then
             test "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = true || {
               echo 'Refusing to replace the binaries of a published release'; exit 1;
