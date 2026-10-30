@@ -371,3 +371,66 @@ fn r840_gc_frees_the_checkouts_named_whatever_their_state_but_never_one_a_job_us
     );
     assert!(mine.join("Cargo.toml").exists());
 }
+
+#[test]
+fn r844_after_freeing_each_machines_total_is_what_it_keeps_now() {
+    let fw = Arc::new(FakeForwarder::new(vec![crate::tests::peer_view()]));
+    let r = Rig::with_forwarder(fw.clone());
+    let cache_root = r.cfg.cache_dir.clone();
+    fs::create_dir_all(&cache_root).unwrap();
+    r.sch.set_build_cache(BuildCache::discover(
+        &cache_root,
+        &r.cfg.state_dir.join("peer-store"),
+        &[],
+    ));
+    let new = fs::canonicalize(&cache_root)
+        .unwrap()
+        .join(crate::build_cache::CHECKOUTS_SUBDIR);
+    let main = repo(&r.dir.path().join("work/main"));
+    let done = worktree(&main, "done", false);
+    let mine = worktree(&main, "mine", true);
+    output(&new.join(key_of(&done)), 1000);
+    output(&new.join(key_of(&mine)), 3000);
+    // a queued job makes the repository known; it keeps `busy` in use
+    let busy = worktree(&main, "busy", true);
+    let mut spec = r.spec("o", &["cargo", "build"], Kind::Compile);
+    spec.cwd = busy;
+    r.submit(&spec);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let held = |c: CheckoutId, bytes: u64| HeldCheckout {
+        checkout: c,
+        copy_bytes: bytes,
+        output_bytes: 0,
+        last_used_ms: Some(now),
+        busy: false,
+    };
+    fw.cache.lock().unwrap().insert(
+        "nixos".into(),
+        vec![
+            held(fw.checkout_id(&done).unwrap(), 150),
+            held(fw.checkout_id(&mine).unwrap(), 400),
+        ],
+    );
+    let machine = |v: &GcView, n: &str| {
+        let m = v.machines.iter().find(|m| m.name == n).unwrap();
+        (m.held_bytes, m.reclaimable_bytes)
+    };
+
+    let before = gc(&r, vec![]);
+    let (here, _) = machine(&before, "testbox");
+    assert_eq!(machine(&before, "nixos"), (550, 150));
+
+    let after = gc(&r, vec![GcState::Merged]);
+    let freed_here = on(row(&before, "/done"), "testbox");
+    assert!(freed_here >= 1000);
+    assert_eq!(machine(&after, "testbox"), (here - freed_here, 0));
+    assert_eq!(
+        machine(&after, "nixos"),
+        (400, 0),
+        "a peer's total drops too"
+    );
+    assert_eq!(row(&after, "/done").freed_bytes, freed_here + 150);
+}

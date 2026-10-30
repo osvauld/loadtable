@@ -182,9 +182,12 @@ pub fn ticked_bytes(v: &GcView, ticked: &BTreeSet<String>) -> u64 {
         .sum()
 }
 
-/// The Free button's label: `Free 12.3 GiB from 3 checkouts`.
+/// The Free button's label: `Free 12.3 GiB from 3 checkouts`, or just `Free` with none ticked.
 pub fn free_label(v: &GcView, ticked: &BTreeSet<String>) -> String {
     let n = ticked.len();
+    if n == 0 {
+        return "Free".into();
+    }
     format!(
         "Free {} from {n} checkout{}",
         human_bytes(ticked_bytes(v, ticked)),
@@ -425,5 +428,14 @@ mod tests {
         assert_eq!(ago(None, NOW), "-");
         assert_eq!(ago(Some(NOW - 30_000), NOW), "just now");
         assert_eq!(ago(Some(NOW - 3 * 3_600_000), NOW), "3h ago");
+    }
+
+    // R-844
+    #[test]
+    fn r844_with_nothing_ticked_the_free_button_names_no_size() {
+        let v = view();
+        assert_eq!(free_label(&v, &BTreeSet::new()), "Free");
+        let one: BTreeSet<String> = ["~/wt/done".to_string()].into();
+        assert!(free_label(&v, &one).ends_with("from 1 checkout"));
     }
 }

@@ -1662,7 +1662,8 @@ pub struct GcView {
 pub struct GcMachine {
     /// Machine name.
     pub name: String,
-    /// Bytes of checkouts' build output (and, on a peer, synced copies) it keeps for this machine.
+    /// Bytes of checkouts' build output (and, on a peer, synced copies) it keeps for this machine;
+    /// after a delete, what is left.
     pub held_bytes: u64,
     /// Of those, the bytes in merged, gone and old rows still there.
     pub reclaimable_bytes: u64,
