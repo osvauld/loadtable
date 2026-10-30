@@ -220,7 +220,7 @@ fn devices_are_exclusive_and_skip_pressure_r035() {
     let mut i = input(1, vec![]);
     i.pressure.cpu = Some(100.0);
     i.available_memory = 0;
-    let id = DeviceId("9BWAY1LSDC".into());
+    let id = DeviceId("PHONE00001".into());
     i.devices.insert(
         id.clone(),
         DeviceState {
@@ -243,11 +243,11 @@ fn devices_are_exclusive_and_skip_pressure_r035() {
             lane: Lane::Normal
         }
     );
-    assert_eq!(text(&v[&2]), "device 9BWAY1LSDC held by #1");
+    assert_eq!(text(&v[&2]), "device PHONE00001 held by #1");
     i.devices.get_mut(&id).unwrap().free = false;
     i.devices.get_mut(&id).unwrap().holder = Some(JobId(77));
     i.waiters = vec![dev(3, 1)];
-    assert_eq!(text(&verdicts(&i)[&3]), "device 9BWAY1LSDC held by #77");
+    assert_eq!(text(&verdicts(&i)[&3]), "device PHONE00001 held by #77");
     i.waiters = vec![waiter(4, SlotKind::Device, 1)];
     assert_eq!(text(&verdicts(&i)[&4]), "device job names no device");
 }
