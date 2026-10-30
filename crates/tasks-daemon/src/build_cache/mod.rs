@@ -92,10 +92,19 @@ const WRAPPER_VARS: &[&str] = &[
 const SCCACHE_PREFIX: &str = "SCCACHE_";
 /// Where sccache lives besides `PATH`, under `$HOME`.
 const SCCACHE_FALLBACK_DIRS: &[&str] = &[".cargo/bin"];
-/// The directories under `$HOME` the daemon looks in for tools besides its own `PATH`, as
-/// absolute paths, for the job's `PATH` too (R-543). Empty without a `HOME`.
+/// Where Homebrew puts tools on Apple silicon and on Intel Macs. A launchd agent's `PATH` has
+/// neither, so `pkg-config` and the libraries' tools installed there went unfound (R-841).
+const MACOS_TOOL_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin"];
+/// The directories the daemon looks in for tools besides its own `PATH`, as absolute paths,
+/// for the job's `PATH` too (R-543): `$HOME/.cargo/bin`, then on macOS Homebrew's (R-841).
 pub fn fallback_tool_dirs(env: &[(String, String)]) -> Vec<String> {
-    env.iter()
+    fallback_tool_dirs_on(env, cfg!(target_os = "macos"))
+}
+
+/// [`fallback_tool_dirs`] for a macOS machine or not.
+pub(crate) fn fallback_tool_dirs_on(env: &[(String, String)], macos: bool) -> Vec<String> {
+    let mut dirs: Vec<String> = env
+        .iter()
         .find(|(k, _)| k == "HOME")
         .map(|(_, h)| h.as_str())
         .filter(|h| !h.is_empty())
@@ -105,7 +114,11 @@ pub fn fallback_tool_dirs(env: &[(String, String)]) -> Vec<String> {
                 .map(|d| Path::new(home).join(d).to_string_lossy().into_owned())
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if macos {
+        dirs.extend(MACOS_TOOL_DIRS.iter().map(|d| d.to_string()));
+    }
+    dirs
 }
 
 /// The sccache directory and the Gradle home under the cache root.
