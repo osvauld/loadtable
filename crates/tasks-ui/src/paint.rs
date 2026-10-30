@@ -356,6 +356,9 @@ pub fn group_header(ui: &mut Ui, p: &Palette, title: &str, count: usize, note: &
     }
 }
 
+/// Narrowest room the left part of a state cell is drawn in; with less it is left out.
+const MIN_LEFT: f32 = 40.0;
+
 /// The state cell: a bar or a head line, then the two-part line under it.
 fn state_cell(painter: &Painter, p: &Palette, rect: Rect, s: &StateCell, section: Section) {
     let top = rect.min.y + 9.0;
@@ -391,21 +394,24 @@ fn state_cell(painter: &Painter, p: &Palette, rect: Rect, s: &StateCell, section
             put(painter, rect.min.x, line1, g);
         }
     }
-    // right part first: it keeps its room, the left part gets what is left
+    // right part first (the time left): it is cut to the cell, and the left part gets what is
+    // left, or is not drawn when too little is, never drawn under it (R-838)
     let right_w = if s.right.is_empty() {
         0.0
     } else {
-        text_right(
+        let g = fit(
             painter,
-            rect.max.x,
-            line2,
             &s.right,
             theme::sans_medium(SECONDARY),
             p.ink,
-        )
+            rect.width(),
+        );
+        let w = g.size().x;
+        put(painter, rect.max.x - w, line2, g);
+        w
     };
-    if !s.left.is_empty() {
-        let room = (rect.width() - right_w - 10.0).max(20.0);
+    let room = rect.width() - right_w - 10.0;
+    if !s.left.is_empty() && room >= MIN_LEFT {
         put(
             painter,
             rect.min.x,
