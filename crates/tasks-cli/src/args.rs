@@ -625,6 +625,10 @@ pub enum Command {
         /// active. Without it gc only reports.
         #[arg(long, value_name = "STATES", value_delimiter = ',')]
         delete: Vec<String>,
+        /// Free these checkouts too, whatever their state: a path, or the name the report
+        /// shows (`(unknown checkout …)` included). Repeat it for more.
+        #[arg(long, value_name = "CHECKOUT")]
+        free: Vec<String>,
         /// Days without a job after which a checkout counts as idle (default 14).
         #[arg(long, value_name = "DAYS")]
         idle_days: Option<u32>,

@@ -153,8 +153,13 @@ fn r839_a_busy_checkout_is_in_use_whatever_else_holds() {
 }
 
 fn gc(r: &Rig, delete: Vec<GcState>) -> GcView {
+    gc_named(r, delete, vec![])
+}
+
+fn gc_named(r: &Rig, delete: Vec<GcState>, checkouts: Vec<String>) -> GcView {
     match r.sch.handle(Request::Gc {
         delete,
+        checkouts,
         idle_days: None,
     }) {
         Reply::Ok(Response::Gc(v)) => *v,
@@ -314,4 +319,55 @@ fn r839_peer_outputs_are_listed_per_checkout_and_dropped_with_it() {
     assert!(!dir.join(peer.as_str()).join(a.as_str()).exists());
     assert_eq!(keep.outputs(&peer), vec![(b, 700)]);
     assert!(keep.outputs(&PeerId::new("other-node").unwrap()).is_empty());
+}
+
+#[test]
+fn r840_gc_frees_the_checkouts_named_whatever_their_state_but_never_one_a_job_uses() {
+    let r = Rig::with_forwarder(Arc::new(FakeForwarder::new(vec![])));
+    let cache_root = r.cfg.cache_dir.clone();
+    fs::create_dir_all(&cache_root).unwrap();
+    r.sch.set_build_cache(BuildCache::discover(
+        &cache_root,
+        &r.cfg.state_dir.join("peer-store"),
+        &[],
+    ));
+    let new = fs::canonicalize(&cache_root)
+        .unwrap()
+        .join(crate::build_cache::CHECKOUTS_SUBDIR);
+    let main = repo(&r.dir.path().join("work/main"));
+    let done = worktree(&main, "done", false);
+    let busy = worktree(&main, "busy", true);
+    let mine = worktree(&main, "mine", true);
+    let done_out = output(&new.join(key_of(&done)), 1000);
+    let busy_out = output(&new.join(key_of(&busy)), 2000);
+    let mine_out = output(&new.join(key_of(&mine)), 3000);
+    let mut spec = r.spec("o", &["cargo", "build"], Kind::Compile);
+    spec.cwd = busy.clone();
+    r.submit(&spec);
+
+    let v = gc(&r, vec![]);
+    let name = |c: &str| row(&v, c).checkout.clone();
+    let v = gc_named(
+        &r,
+        vec![],
+        vec![
+            mine.display().to_string(),
+            name("/busy"),
+            "~/nowhere".into(),
+        ],
+    );
+    assert!(v.deleted);
+    assert!(!mine_out.exists(), "an active checkout named is freed");
+    assert!(done_out.exists(), "a merged one not named stays");
+    assert!(busy_out.exists(), "one a job uses stays");
+    assert!(row(&v, "/mine").freed_bytes >= 3000);
+    assert_eq!(
+        row(&v, "/busy").kept.as_deref(),
+        Some("a job uses it; free it once the job ends")
+    );
+    assert_eq!(
+        v.notes,
+        vec!["~/nowhere holds no build output here; run loadtable gc to see what does".to_string()]
+    );
+    assert!(mine.join("Cargo.toml").exists());
 }

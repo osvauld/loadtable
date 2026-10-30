@@ -231,6 +231,10 @@ pub enum Request {
         /// The states to free; empty only reports.
         #[serde(default)]
         delete: Vec<GcState>,
+        /// Checkouts to free as well, named as the report shows them (`~/…` or
+        /// `(unknown checkout …)`); one a job uses is still kept.
+        #[serde(default)]
+        checkouts: Vec<String>,
         /// Days without a job after which a checkout is idle (default 14).
         #[serde(default)]
         idle_days: Option<u32>,
