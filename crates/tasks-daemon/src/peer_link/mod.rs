@@ -15,6 +15,7 @@
 //!
 //! The receiving half (a daemon hosting `tasks_peer::Receiver`) is in [`serve`].
 
+pub mod cache;
 mod drive;
 pub mod fetch;
 pub mod metrics;
@@ -907,6 +908,25 @@ impl<T: Transport + 'static> Forwarder for PeerLink<T> {
         remote_job: i64,
     ) -> Result<tasks_core::metrics::JobMetricsView, ForwardError> {
         self.remote_metrics_of(peer, remote_job)
+    }
+
+    fn peer_cache(
+        &self,
+        peer: &MachineName,
+    ) -> Result<Vec<tasks_peer::proto::HeldCheckout>, ForwardError> {
+        self.peer_cache_of(peer)
+    }
+
+    fn peer_cache_drop(
+        &self,
+        peer: &MachineName,
+        checkouts: Vec<CheckoutId>,
+    ) -> Result<Vec<tasks_peer::proto::DroppedCheckout>, ForwardError> {
+        self.peer_cache_drop_of(peer, checkouts)
+    }
+
+    fn checkout_id(&self, cwd: &Path) -> Option<CheckoutId> {
+        Some(checkout_of(&self.inner.opts.local_name, cwd))
     }
 
     fn forget(&self, job: JobId) {

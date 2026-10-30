@@ -4,11 +4,11 @@
 //! The daemon wires the traits below to its ledger, admission and runner; this
 //! module owns the protocol rules and nothing else.
 
-use crate::ids::{PeerId, RemoteJobId, SubmitKey};
+use crate::ids::{CheckoutId, PeerId, RemoteJobId, SubmitKey};
 use crate::outputs::{self, BlobShelf, FetchPolicy};
 use crate::proto::{
-    Body, CancelState, Hello, JobEvent, MAX_CHUNK_BYTES, PeerStatus, Refusal, SubmitJob, Submitted,
-    SyncApply, WireEnd, WireOutcome, WireSample,
+    Body, CancelState, DroppedCheckout, HeldCheckout, Hello, JobEvent, MAX_CHUNK_BYTES, PeerStatus,
+    Refusal, SubmitJob, Submitted, SyncApply, WireEnd, WireOutcome, WireSample,
 };
 use crate::sync::{SyncStore, check_rel_path};
 use crate::transport::{EventStream, Handler, PeerError, StreamPoll};
@@ -103,6 +103,16 @@ pub trait JobRunner: Send + Sync {
     }
 }
 
+/// The build output this machine keeps for peers' checkouts, outside their synced copies
+/// (R-839).
+pub trait OutputKeeper: Send + Sync {
+    /// Bytes of build output kept for each checkout of `peer`, including checkouts whose
+    /// copy retention already deleted.
+    fn outputs(&self, peer: &PeerId) -> Vec<(CheckoutId, u64)>;
+    /// Deletes the build output of `checkout` of `peer`; returns the bytes freed.
+    fn drop_outputs(&self, peer: &PeerId, checkout: &CheckoutId) -> u64;
+}
+
 /// The daemon's status, for the status request.
 pub trait StatusSource: Send + Sync {
     /// Current status.
@@ -141,6 +151,8 @@ pub struct Receiver {
     fetch: FetchPolicy,
     /// Where listed outputs are also offered as blobs, once the transport has one (R-795).
     blobs: OnceLock<Arc<dyn BlobShelf>>,
+    /// The build output kept outside the copies, when the daemon has a cache (R-839).
+    outputs: OnceLock<Arc<dyn OutputKeeper>>,
 }
 
 impl Receiver {
@@ -163,7 +175,78 @@ impl Receiver {
             policy,
             fetch,
             blobs: OnceLock::new(),
+            outputs: OnceLock::new(),
         }
+    }
+
+    /// Reports and drops the build output `keeper` holds along with the copies. Set once.
+    pub fn set_outputs(&self, keeper: Arc<dyn OutputKeeper>) {
+        let _ = self.outputs.set(keeper);
+    }
+
+    /// What this machine keeps for `from`: each checkout's copy and build output (R-839).
+    fn held(&self, from: &PeerId) -> Vec<HeldCheckout> {
+        let mut by: std::collections::BTreeMap<String, HeldCheckout> = Default::default();
+        for c in self.store.held(from) {
+            by.insert(
+                c.checkout.to_string(),
+                HeldCheckout {
+                    busy: self
+                        .runner
+                        .checkout_busy(from, &self.store.tree_root(from, &c.checkout)),
+                    checkout: c.checkout,
+                    copy_bytes: c.bytes,
+                    output_bytes: 0,
+                    last_used_ms: Some(c.last_used_ms),
+                },
+            );
+        }
+        if let Some(k) = self.outputs.get() {
+            for (checkout, bytes) in k.outputs(from) {
+                by.entry(checkout.to_string())
+                    .or_insert_with(|| HeldCheckout {
+                        busy: self
+                            .runner
+                            .checkout_busy(from, &self.store.tree_root(from, &checkout)),
+                        checkout,
+                        copy_bytes: 0,
+                        output_bytes: 0,
+                        last_used_ms: None,
+                    })
+                    .output_bytes = bytes;
+            }
+        }
+        by.into_values().collect()
+    }
+
+    /// Deletes the copies and build output of `checkouts` of `from`, keeping any a job of
+    /// `from` runs or waits in (R-839).
+    fn drop_checkouts(&self, from: &PeerId, checkouts: Vec<CheckoutId>) -> Vec<DroppedCheckout> {
+        checkouts
+            .into_iter()
+            .map(|checkout| {
+                if self
+                    .runner
+                    .checkout_busy(from, &self.store.tree_root(from, &checkout))
+                {
+                    return DroppedCheckout {
+                        checkout,
+                        freed_bytes: 0,
+                        kept: Some("a job runs or waits in it".to_string()),
+                    };
+                }
+                let copy = self.store.drop_copy(from, &checkout).unwrap_or(0);
+                let out = self
+                    .outputs
+                    .get()
+                    .map_or(0, |k| k.drop_outputs(from, &checkout));
+                DroppedCheckout {
+                    checkout,
+                    freed_bytes: copy + out,
+                    kept: None,
+                }
+            })
+            .collect()
     }
 
     /// Offers every file a fetch listing finds on `shelf` too. Set once, when serving starts.
@@ -249,6 +332,12 @@ impl Receiver {
             Body::Cancel { remote } => match self.runner.cancel(from, remote) {
                 Some(state) => Body::CancelAck { remote, state },
                 None => Body::Refuse(Refusal::UnknownJob { remote }),
+            },
+            Body::CacheRequest => Body::CacheHeld {
+                checkouts: self.held(from),
+            },
+            Body::CacheDrop { checkouts } => Body::CacheDropped {
+                checkouts: self.drop_checkouts(from, checkouts),
             },
             Body::JobMetricsRequest { remote } => match self.runner.metrics(from, remote) {
                 Some(v) => Body::JobMetrics(crate::proto::fit_metrics(v)),

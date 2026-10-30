@@ -21,7 +21,7 @@ use tasks_peer::receiver::{
     Allowlist, FinishedJob, JobRunner, JobView, Receiver, StatusSource, SubmitPolicy,
 };
 use tasks_peer::sync::{GixTransfer, SyncLimits, SyncStore};
-use tasks_peer::{PeerId, RemoteJobId, SubmitKey};
+use tasks_peer::{OutputKeeper, PeerId, RemoteJobId, SubmitKey};
 use tasks_platform::CgroupName;
 use tasks_timing::{Cache, History, Outcome as TimingOutcome, RecipeKey, Sample, SampleKey};
 
@@ -267,17 +267,75 @@ pub fn sweep_hook(
     store: Arc<SyncStore>,
 ) -> crate::trust_runtime::MaintenanceHook {
     let runner = DaemonRunner::new(sch.clone());
+    let outputs = PeerOutputs::of(sch);
     Box::new(move |policy| {
         let busy = |peer: &PeerId, tree: &Path| runner.checkout_busy(peer, tree);
-        store.sweep(&policy.sync_retention(), &busy);
+        // a deleted copy's build output goes with it (R-839)
+        for e in store.sweep(&policy.sync_retention(), &busy) {
+            if let tasks_peer::sync::SyncEvent::Deleted {
+                kind: tasks_peer::sync::Deleted::WorkingCopy,
+                peer: Some(peer),
+                target,
+                ..
+            } = e
+                && let Ok(checkout) = tasks_peer::CheckoutId::parse(&target)
+            {
+                outputs.drop_outputs(&peer, &checkout);
+            }
+        }
     })
+}
+
+/// The build output of peers' checkouts, kept outside their synced copies under
+/// `<cache root>/loadtable/checkouts/peer/<peer>/<checkout>` (R-839).
+pub struct PeerOutputs {
+    dir: std::path::PathBuf,
+}
+
+impl PeerOutputs {
+    /// The peers' output directory of `sch`'s build cache.
+    pub fn of(sch: &Arc<Scheduler>) -> PeerOutputs {
+        PeerOutputs::at(sch.build_cache().checkouts_dir().join("peer"))
+    }
+
+    /// The peers' output directory `dir`.
+    pub fn at(dir: std::path::PathBuf) -> PeerOutputs {
+        PeerOutputs { dir }
+    }
+}
+
+impl tasks_peer::OutputKeeper for PeerOutputs {
+    fn outputs(&self, peer: &PeerId) -> Vec<(tasks_peer::CheckoutId, u64)> {
+        let Ok(rd) = std::fs::read_dir(self.dir.join(peer.as_str())) else {
+            return Vec::new();
+        };
+        rd.flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .filter_map(|e| tasks_peer::CheckoutId::parse(&e.file_name().to_string_lossy()).ok())
+            .map(|c| {
+                let bytes =
+                    tasks_peer::sync::dir_size(&self.dir.join(peer.as_str()).join(c.as_str()));
+                (c, bytes)
+            })
+            .collect()
+    }
+
+    fn drop_outputs(&self, peer: &PeerId, checkout: &tasks_peer::CheckoutId) -> u64 {
+        let d = self.dir.join(peer.as_str()).join(checkout.as_str());
+        let bytes = tasks_peer::sync::dir_size(&d);
+        if std::fs::remove_dir_all(&d).is_ok() {
+            bytes
+        } else {
+            0
+        }
+    }
 }
 
 /// The receiver this daemon hosts: jobs into the ledger, synced copies in `store`. Who may
 /// call it is decided in front of it by the trust gate (`tasks_peer::trust::TrustedHandler`), on
 /// grants; the receiver itself admits every caller it is handed.
 pub fn build_receiver_with(sch: &Arc<Scheduler>, store: Arc<SyncStore>) -> Arc<Receiver> {
-    Arc::new(Receiver::new(
+    let r = Arc::new(Receiver::new(
         &sch.cfg.machine,
         Allowlist::open(),
         store,
@@ -286,7 +344,9 @@ pub fn build_receiver_with(sch: &Arc<Scheduler>, store: Arc<SyncStore>) -> Arc<R
         // the receiving peer applies the same rules as the local API (R-153)
         Arc::new(DaemonRules::new(sch.clone())),
         sch.build_cache().fetch_policy(),
-    ))
+    ));
+    r.set_outputs(Arc::new(PeerOutputs::of(sch)));
+    r
 }
 
 /// [`build_receiver_with`] over a fresh store at `store_dir`.

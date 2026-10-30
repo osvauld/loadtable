@@ -3,7 +3,7 @@
 use serde_json::{Value, json};
 
 /// The tool names, in the order `tools/list` returns them.
-pub const TOOL_NAMES: [&str; 12] = [
+pub const TOOL_NAMES: [&str; 13] = [
     "submit",
     "submit_steps",
     "run_suite",
@@ -16,6 +16,7 @@ pub const TOOL_NAMES: [&str; 12] = [
     "status",
     "estimate",
     "audit",
+    "gc",
 ];
 
 fn object(properties: Value, required: &[&str]) -> Value {
@@ -240,6 +241,17 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     "job": {"type": "integer", "minimum": 1, "description": "Only rows about this job."},
                     "action": {"type": "string", "description": "Only this action (job.cancelled) or a family (job, pair, grant, conn, queue)."},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "Most rows (default 50)."}
+                }),
+                &[],
+            ),
+        },
+        ToolDef {
+            name: "gc",
+            description: "What each checkout's build output takes on this machine and its peers, and freeing it: a checkout is in_use (a job queued or running), active, idle (no job in idle_days), merged (its branch is in dev/main/master, nothing tracked changed), gone (its working tree is deleted) or old (an older layout's output). Without delete it only reports. delete frees only build output and peers' synced copies, never a working tree and never an in_use checkout; the next build there starts cold.",
+            input_schema: object(
+                json!({
+                    "delete": {"type": "array", "items": {"type": "string", "enum": ["merged", "gone", "old", "idle", "active"]}, "description": "Free the checkouts in these states. Usually [\"merged\", \"gone\", \"old\"]."},
+                    "idle_days": {"type": "integer", "minimum": 1, "description": "Days without a job after which a checkout is idle (default 14)."}
                 }),
                 &[],
             ),

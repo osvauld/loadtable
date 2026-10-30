@@ -75,7 +75,8 @@ fn r195_tools_list_matches_the_schemas() {
             "prioritize",
             "status",
             "estimate",
-            "audit"
+            "audit",
+            "gc"
         ]
     );
     assert_eq!(names, TOOL_NAMES);

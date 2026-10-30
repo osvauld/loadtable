@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 use tasks_core::plan::{Plan, Step};
 use tasks_core::{DeviceId, JobId, JobSpec, Kind, MachineName, Owner, Placement};
 use tasks_daemon::api::{
-    ErrorCode, JobView, LogView, MAX_CONTEXT, MAX_LOG_CHUNK, MAX_TAIL_LINES, Request, Response,
-    StatusSnapshot,
+    ErrorCode, GcState, JobView, LogView, MAX_CONTEXT, MAX_LOG_CHUNK, MAX_TAIL_LINES, Request,
+    Response, StatusSnapshot,
 };
 use tasks_timing::RecipeKey;
 
@@ -337,6 +337,14 @@ struct EstimateArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct GcArgs {
+    #[serde(default)]
+    delete: Vec<String>,
+    idle_days: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AuditArgs {
     since: Option<String>,
     peer: Option<String>,
@@ -445,6 +453,7 @@ impl Tools {
             "status" => parse::<EmptyArgs>(args).and_then(|_| self.status()),
             "estimate" => parse(args).and_then(|a| self.estimate(a)),
             "audit" => parse(args).and_then(|a| self.audit(a)),
+            "gc" => parse(args).and_then(|a| self.gc(a)),
             _ => return None,
         };
         Some(match r {
@@ -1218,6 +1227,73 @@ impl Tools {
                 "rows": serde_json::to_value(&rows).unwrap_or(Value::Null),
                 "truncated": cut || truncated,
             }),
+            is_error: false,
+        })
+    }
+
+    /// `gc` (R-839): per machine what checkouts keep and what can go; with `delete`, frees it.
+    fn gc(&self, a: GcArgs) -> ToolOk {
+        let mut delete = Vec::new();
+        for word in &a.delete {
+            match GcState::parse(word) {
+                Some(GcState::InUse) | None => {
+                    return Err(ToolError::Args(format!(
+                        "delete takes merged, gone, old, idle or active, not {word:?}; a checkout a job uses is never deleted"
+                    )));
+                }
+                Some(s) => delete.push(s),
+            }
+        }
+        let resp = self.call_daemon(&Request::Gc {
+            delete,
+            idle_days: a.idle_days,
+        })?;
+        let Response::Gc(v) = resp else {
+            return Err(unexpected("gc", &resp));
+        };
+        let gib = |b: u64| format!("{:.1} GiB", b as f64 / (1u64 << 30) as f64);
+        let mut text = String::new();
+        for m in &v.machines {
+            match &m.error {
+                Some(e) => text.push_str(&format!("{}: could not report: {e}\n", m.name)),
+                None => text.push_str(&format!(
+                    "{}: {} kept, {} can be freed\n",
+                    m.name,
+                    gib(m.held_bytes),
+                    gib(m.reclaimable_bytes)
+                )),
+            }
+        }
+        for r in &v.rows {
+            let held: Vec<String> = r
+                .held
+                .iter()
+                .map(|h| format!("{} {}", h.machine, gib(h.bytes)))
+                .collect();
+            text.push_str(&format!(
+                "{} {} ({}): {}",
+                r.state.name(),
+                r.checkout,
+                r.branch.as_deref().unwrap_or("no branch"),
+                held.join(", ")
+            ));
+            if r.freed_bytes > 0 {
+                text.push_str(&format!(", freed {}", gib(r.freed_bytes)));
+            }
+            if let Some(k) = &r.kept {
+                text.push_str(&format!(", kept: {k}"));
+            }
+            text.push('\n');
+        }
+        if v.deleted {
+            let freed: u64 = v.rows.iter().map(|r| r.freed_bytes).sum();
+            text.push_str(&format!("freed {}\n", gib(freed)));
+        } else if v.machines.iter().any(|m| m.reclaimable_bytes > 0) {
+            text.push_str("free it with delete: [\"merged\", \"gone\", \"old\"]\n");
+        }
+        Ok(ToolResult {
+            text,
+            structured: serde_json::to_value(&*v).unwrap_or(Value::Null),
             is_error: false,
         })
     }

@@ -34,7 +34,7 @@ pub use limits::SyncLimits;
 pub use origin::{ExtrasProvider, NoExtras, OriginSync, SyncDriver, SyncJob, SyncReport};
 pub use paths::{check_rel_path, dir_size, hash_file, join};
 pub use refuse::{Refusals, RefuseReason, Refused};
-pub use retention::{OriginRetention, WorkerRetention};
+pub use retention::{HeldCopy, OriginRetention, WorkerRetention};
 pub use secrets::{secret_content, secret_name};
 pub use snapshot::{
     PruneStats, Snapshot, SnapshotError, SnapshotIo, SnapshotRequest, TreeSnapshot,

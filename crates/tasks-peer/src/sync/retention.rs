@@ -75,7 +75,87 @@ fn names(dir: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// A working copy this machine holds for a peer (R-839).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldCopy {
+    /// The checkout.
+    pub checkout: CheckoutId,
+    /// Bytes of the copy (its output links are not followed).
+    pub bytes: u64,
+    /// When a job last used it, ms since the epoch; the directory's age for a copy never
+    /// applied.
+    pub last_used_ms: i64,
+}
+
 impl SyncStore {
+    /// The working copies held for `peer`.
+    pub fn held(&self, peer: &PeerId) -> Vec<HeldCopy> {
+        names(&self.peer_dir(peer))
+            .into_iter()
+            .filter_map(|c| CheckoutId::parse(&c).ok())
+            .map(|checkout| {
+                let dir = self.checkout_dir(peer, &checkout);
+                let last_used_ms = self.read_state(&dir).map_or_else(
+                    || {
+                        fs::metadata(&dir)
+                            .and_then(|m| m.modified())
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(0))
+                    },
+                    |st| st.last_used_ms,
+                );
+                HeldCopy {
+                    bytes: dir_size(&dir),
+                    checkout,
+                    last_used_ms,
+                }
+            })
+            .collect()
+    }
+
+    /// Deletes the working copy of `checkout` held for `peer`, as its owner asked (R-839), and
+    /// reports it to the observer; returns the bytes freed. The caller checks that no job uses
+    /// it. `None` when there was no copy or it could not be removed.
+    pub fn drop_copy(&self, peer: &PeerId, checkout: &CheckoutId) -> Option<u64> {
+        let e = self.remove_copy(peer, checkout)?;
+        self.observer.event(&e);
+        match e {
+            SyncEvent::Deleted { bytes, .. } => Some(bytes),
+            _ => Some(0),
+        }
+    }
+
+    /// Deletes the working copy of `checkout` held for `peer` and its refs in the mirror. The
+    /// mirror itself goes at the next sweep once no copy uses it.
+    fn remove_copy(&self, peer: &PeerId, checkout: &CheckoutId) -> Option<SyncEvent> {
+        let dir = self.checkout_dir(peer, checkout);
+        if !dir.is_dir() {
+            return None;
+        }
+        let st = self.read_state(&dir);
+        let bytes = dir_size(&dir);
+        fs::remove_dir_all(&dir).ok()?;
+        if let Some(st) = &st
+            && let Ok(repo) = CheckoutId::parse(&st.repo)
+        {
+            let mirror = self.mirror_dir(peer, &repo);
+            if let Ok(refs) = self
+                .transfer
+                .list_refs(&mirror, &format!("refs/tasks/{checkout}/"))
+            {
+                let del: Vec<String> = refs.into_iter().map(|(n, _)| n).collect();
+                let _ = self.transfer.update_refs(&mirror, &[], &del);
+            }
+        }
+        Some(SyncEvent::Deleted {
+            kind: Deleted::WorkingCopy,
+            peer: Some(peer.clone()),
+            target: checkout.to_string(),
+            bytes,
+        })
+    }
+
     /// Deletes working copies idle past `policy.idle` (never one `busy` says has a live job),
     /// mirrors nothing refers to, and garbage collects mirrors that are due. Returns what it
     /// did; each item was also reported to the observer.
@@ -113,28 +193,9 @@ impl SyncStore {
                 if now.saturating_sub(used) < idle_ms {
                     continue;
                 }
-                let bytes = dir_size(&dir);
-                if fs::remove_dir_all(&dir).is_err() {
-                    continue;
+                if let Some(e) = self.remove_copy(&peer, &checkout) {
+                    events.push(e);
                 }
-                if let Some(st) = &st
-                    && let Ok(repo) = CheckoutId::parse(&st.repo)
-                {
-                    let mirror = self.mirror_dir(&peer, &repo);
-                    if let Ok(refs) = self
-                        .transfer
-                        .list_refs(&mirror, &format!("refs/tasks/{checkout}/"))
-                    {
-                        let del: Vec<String> = refs.into_iter().map(|(n, _)| n).collect();
-                        let _ = self.transfer.update_refs(&mirror, &[], &del);
-                    }
-                }
-                events.push(SyncEvent::Deleted {
-                    kind: Deleted::WorkingCopy,
-                    peer: Some(peer.clone()),
-                    target: checkout.to_string(),
-                    bytes,
-                });
             }
             // which repos do the remaining copies use?
             let mut live_repos: HashSet<String> = HashSet::new();

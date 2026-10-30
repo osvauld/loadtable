@@ -347,6 +347,10 @@ pub struct FakeForwarder {
     /// What `remote_metrics` answers, and what it was asked.
     pub metrics: Mutex<Option<tasks_core::metrics::JobMetricsView>>,
     pub metrics_asked: Mutex<Vec<(String, i64)>>,
+    /// What each peer reports it keeps for `gc`, by peer name; a missing peer cannot be reached.
+    pub cache: Mutex<BTreeMap<String, Vec<tasks_peer::proto::HeldCheckout>>>,
+    /// The drops `gc` asked for, per peer.
+    pub dropped: Mutex<Vec<(String, Vec<tasks_peer::CheckoutId>)>>,
 }
 
 impl FakeForwarder {
@@ -368,6 +372,8 @@ impl FakeForwarder {
             classes: Mutex::new(Vec::new()),
             metrics: Mutex::new(None),
             metrics_asked: Mutex::new(Vec::new()),
+            cache: Mutex::new(BTreeMap::new()),
+            dropped: Mutex::new(Vec::new()),
         }
     }
     pub fn script(&self, id: JobId, p: ForwardPoll) {
@@ -453,6 +459,44 @@ impl Forwarder for FakeForwarder {
         lock(&self.metrics)
             .clone()
             .ok_or_else(|| ForwardError::Unavailable("no metrics scripted".into()))
+    }
+    fn peer_cache(
+        &self,
+        peer: &MachineName,
+    ) -> Result<Vec<tasks_peer::proto::HeldCheckout>, ForwardError> {
+        lock(&self.cache)
+            .get(&peer.0)
+            .cloned()
+            .ok_or_else(|| ForwardError::Unavailable(format!("{} unreachable", peer.0)))
+    }
+    fn peer_cache_drop(
+        &self,
+        peer: &MachineName,
+        checkouts: Vec<tasks_peer::CheckoutId>,
+    ) -> Result<Vec<tasks_peer::proto::DroppedCheckout>, ForwardError> {
+        lock(&self.dropped).push((peer.0.clone(), checkouts.clone()));
+        let mut cache = lock(&self.cache);
+        let held = cache.entry(peer.0.clone()).or_default();
+        let out = checkouts
+            .iter()
+            .map(|c| tasks_peer::proto::DroppedCheckout {
+                checkout: c.clone(),
+                freed_bytes: held
+                    .iter()
+                    .filter(|h| &h.checkout == c)
+                    .map(|h| h.copy_bytes + h.output_bytes)
+                    .sum(),
+                kept: None,
+            })
+            .collect();
+        held.retain(|h| !checkouts.contains(&h.checkout));
+        Ok(out)
+    }
+    fn checkout_id(&self, cwd: &std::path::Path) -> Option<tasks_peer::CheckoutId> {
+        Some(tasks_peer::CheckoutId::derive(
+            "testbox",
+            std::path::Path::new(&crate::place::checkout_key(cwd)),
+        ))
     }
     fn forget(&self, job: JobId) {
         lock(&self.registered).remove(&job);

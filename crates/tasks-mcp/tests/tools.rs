@@ -1664,3 +1664,64 @@ fn r796_logs_and_get_carry_their_text_and_requested_fetches_in_the_structured_re
         r.text
     );
 }
+
+// R-839
+#[test]
+fn r839_gc_reports_each_machine_and_frees_only_what_was_asked() {
+    use tasks_daemon::api::{GcHeld, GcMachine, GcRow, GcState, GcView};
+    let d = fake(|r| match r {
+        Request::Gc { delete, .. } => Ok(Response::Gc(Box::new(GcView {
+            idle_days: 14,
+            machines: vec![GcMachine {
+                name: "laptop".into(),
+                held_bytes: 3 << 30,
+                reclaimable_bytes: if delete.is_empty() { 2 << 30 } else { 0 },
+                error: None,
+            }],
+            rows: vec![GcRow {
+                checkout: "~/w/done".into(),
+                branch: Some("done".into()),
+                state: GcState::Merged,
+                merged_into: Some("dev".into()),
+                last_used_ms: None,
+                held: vec![GcHeld {
+                    machine: "laptop".into(),
+                    bytes: 2 << 30,
+                }],
+                freed_bytes: if delete.is_empty() { 0 } else { 2 << 30 },
+                kept: None,
+            }],
+            shared: vec![],
+            notes: vec![],
+            deleted: !delete.is_empty(),
+        }))),
+        _ => Err(DaemonError::Failed("unexpected".into())),
+    });
+    let r = call(&tools_with(&d), "gc", json!({}));
+    assert!(!r.is_error, "{}", r.text);
+    assert!(
+        r.text
+            .contains("laptop: 3.0 GiB kept, 2.0 GiB can be freed"),
+        "{}",
+        r.text
+    );
+    assert!(
+        r.text.contains("merged ~/w/done (done): laptop 2.0 GiB"),
+        "{}",
+        r.text
+    );
+    assert!(r.text.contains("free it with delete"), "{}", r.text);
+    let r = call(&tools_with(&d), "gc", json!({"delete": ["merged", "gone"]}));
+    assert!(r.text.contains("freed 2.0 GiB"), "{}", r.text);
+    assert!(matches!(
+        d.requests().last(),
+        Some(Request::Gc { delete, .. }) if *delete == vec![GcState::Merged, GcState::Gone]
+    ));
+    let before = d.requests().len();
+    assert!(call(&tools_with(&d), "gc", json!({"delete": ["in_use"]})).is_error);
+    assert_eq!(
+        d.requests().len(),
+        before,
+        "refused before asking the daemon"
+    );
+}

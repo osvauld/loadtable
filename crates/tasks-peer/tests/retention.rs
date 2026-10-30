@@ -312,3 +312,108 @@ fn r310_the_origin_keeps_only_the_newest_snapshot_per_checkout_and_reports_what_
     let id = CheckoutId::derive("laptop", &w.root);
     assert!(!sync_dir.join(format!("{id}.index")).exists());
 }
+
+/// Build output kept per checkout, as the daemon's cache would.
+#[derive(Default)]
+struct Outputs(Mutex<std::collections::BTreeMap<String, u64>>);
+impl tasks_peer::OutputKeeper for Outputs {
+    fn outputs(&self, _peer: &PeerId) -> Vec<(CheckoutId, u64)> {
+        let m = self.0.lock().unwrap();
+        m.iter()
+            .map(|(k, v)| (CheckoutId::parse(k).unwrap(), *v))
+            .collect()
+    }
+    fn drop_outputs(&self, _peer: &PeerId, checkout: &CheckoutId) -> u64 {
+        self.0
+            .lock()
+            .unwrap()
+            .remove(checkout.as_str())
+            .unwrap_or(0)
+    }
+}
+
+#[test]
+fn r839_a_peer_reports_each_copy_with_its_output_and_drops_all_but_one_a_job_uses() {
+    use tasks_peer::Handler;
+    use tasks_peer::fake::{FakeRunner, FakeStatus};
+    use tasks_peer::outputs::FetchPolicy;
+    use tasks_peer::proto::Body;
+    use tasks_peer::receiver::{AllowAll, Allowlist, JobRunner, Receiver};
+    let r = rig();
+    let w = &r.w;
+    let other = w.tmp.path().join("origin/second");
+    make_repo(&other);
+    push(w, &w.origin_sync, &w.root, 1);
+    push(w, &w.origin_sync, &other, 2);
+    let a = CheckoutId::derive("laptop", &w.root);
+    let b = CheckoutId::derive("laptop", &other);
+    // build output left after retention deleted its copy
+    let c = CheckoutId::parse(&"c".repeat(32)).unwrap();
+    let runner = Arc::new(FakeRunner::new());
+    let mut spec = w.spec("");
+    spec.cwd = r.store.tree_root(&w.origin, &a);
+    runner
+        .submit(
+            &w.origin,
+            &tasks_peer::SubmitKey::new("laptop:1").unwrap(),
+            spec,
+        )
+        .unwrap();
+    let outputs = Arc::new(Outputs::default());
+    for (id, n) in [(&a, 7), (&b, 9), (&c, 11)] {
+        outputs.0.lock().unwrap().insert(id.to_string(), n);
+    }
+    let recv = Receiver::new(
+        "nixos",
+        Allowlist::new([w.origin.clone()]),
+        r.store.clone(),
+        runner,
+        Arc::new(FakeStatus::nixos()),
+        Arc::new(AllowAll),
+        FetchPolicy::default(),
+    );
+    recv.set_outputs(outputs.clone());
+    w.net.serve(&w.nixos, Arc::new(recv) as Arc<dyn Handler>);
+    let mut conn = w
+        .transport
+        .connect(&w.nixos, Duration::from_secs(5))
+        .unwrap();
+
+    let Body::CacheHeld { checkouts: held } = conn.request(Body::CacheRequest).unwrap() else {
+        panic!("not a cache report");
+    };
+    let of = |id: &CheckoutId| held.iter().find(|h| &h.checkout == id).unwrap().clone();
+    assert!(of(&a).busy && of(&a).copy_bytes > 0 && of(&a).output_bytes == 7);
+    assert!(!of(&b).busy && of(&b).copy_bytes > 0 && of(&b).output_bytes == 9);
+    assert_eq!(
+        (of(&c).copy_bytes, of(&c).output_bytes, of(&c).last_used_ms),
+        (0, 11, None)
+    );
+    let b_copy = of(&b).copy_bytes;
+
+    let Body::CacheDropped { checkouts: dropped } = conn
+        .request(Body::CacheDrop {
+            checkouts: vec![a.clone(), b.clone(), c.clone()],
+        })
+        .unwrap()
+    else {
+        panic!("not a drop answer");
+    };
+    let of = |id: &CheckoutId| dropped.iter().find(|d| &d.checkout == id).unwrap().clone();
+    assert_eq!(of(&a).freed_bytes, 0);
+    assert_eq!(of(&a).kept.as_deref(), Some("a job runs or waits in it"));
+    assert_eq!((of(&b).freed_bytes, of(&b).kept), (b_copy + 9, None));
+    assert_eq!(of(&c).freed_bytes, 11);
+    assert!(r.store.tree_root(&w.origin, &a).exists());
+    assert!(!r.store.tree_root(&w.origin, &b).exists());
+    assert_eq!(
+        outputs
+            .0
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![a.to_string()]
+    );
+}

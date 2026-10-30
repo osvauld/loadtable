@@ -101,6 +101,7 @@ pub fn kind_of(r: &Response) -> &'static str {
         Response::Estimate(_) => "estimate",
         Response::History(_) => "history",
         Response::JobMetrics(_) => "job_metrics",
+        Response::Gc(_) => "gc",
         Response::Audit { .. } => "audit",
         Response::AuditVerify(_) => "audit_verify",
         Response::AuditCheckpoint { .. } => "audit_checkpoint",

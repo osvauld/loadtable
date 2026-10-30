@@ -56,6 +56,8 @@ pub fn kind(b: &Body) -> &'static str {
         Body::FetchList { .. } => "fetch_list",
         Body::FetchChunk { .. } => "fetch_chunk",
         Body::JobMetricsRequest { .. } => "job_metrics",
+        Body::CacheRequest => "cache_request",
+        Body::CacheDrop { .. } => "cache_drop",
         _ => "other",
     }
 }
