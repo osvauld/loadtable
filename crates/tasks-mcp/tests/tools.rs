@@ -187,14 +187,14 @@ fn a_device_job_holds_a_device_slot() {
     let r = call(
         &tools_with(&d),
         "submit",
-        json!({"argv": ["adb", "-s", "9BWAY1LSDC", "shell"], "device": "9BWAY1LSDC"}),
+        json!({"argv": ["adb", "-s", "PHONE00001", "shell"], "device": "PHONE00001"}),
     );
     assert!(!r.is_error, "{}", r.text);
     let s = &submits(&d)[0];
     assert_eq!(s.kind, Kind::Device);
     assert_eq!(
         s.requirements.device.as_ref().map(|d| d.0.as_str()),
-        Some("9BWAY1LSDC")
+        Some("PHONE00001")
     );
 }
 

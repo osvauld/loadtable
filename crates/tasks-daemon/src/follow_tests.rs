@@ -494,7 +494,7 @@ fn r210_a_denied_serial_is_refused_in_argv_in_any_case_and_as_a_device_resource(
     by_resource.requirements.device = Some(tasks_core::DeviceId("PHONE01X".into()));
     assert_eq!(err(submit(&r, by_resource)).code, ErrorCode::Refused);
     let mut fine = r.spec("o", &["adb", "devices"], Kind::Device);
-    fine.requirements.device = Some(tasks_core::DeviceId("9BWAY1LSDC".into()));
+    fine.requirements.device = Some(tasks_core::DeviceId("PHONE00001".into()));
     assert!(matches!(ok(submit(&r, fine)), Response::Submitted { .. }));
 }
 

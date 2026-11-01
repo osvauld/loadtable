@@ -112,11 +112,11 @@ fn r190_a_device_with_a_remote_placement_names_the_conflict_and_the_fix() {
         peer: Some("nixos".into()),
         ..PlaceArgs::default()
     };
-    let CliError::Usage(m) = p.placement(Some("9BWAY1LSDC")).unwrap_err() else {
+    let CliError::Usage(m) = p.placement(Some("PHONE00001")).unwrap_err() else {
         panic!("usage expected")
     };
     assert!(
-        m.contains("--device 9BWAY1LSDC and --peer NAME conflict"),
+        m.contains("--device PHONE00001 and --peer NAME conflict"),
         "{m}"
     );
     assert!(
